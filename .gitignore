@@ -149,3 +149,8 @@ docs/tmp.py
 video_dumping
 *data_dumping*
 ready*
+carla_launch.log
+
+
+.codex/
+opencda/planning_module/checkpoints/

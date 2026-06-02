@@ -294,14 +294,14 @@ def _get_sumo_net(cfg_file):
     cfg_file = os.path.join(os.getcwd(), cfg_file)
 
     tree = ET.parse(cfg_file)
-    tag = tree.find('//net-file')
+    tag = tree.find('.//net-file')
     if tag is None:
         return None
 
     net_file = os.path.join(os.path.dirname(cfg_file), tag.get('value'))
     logging.debug('Reading net file: %s', net_file)
 
-    sumo_net = traci.sumolib.net.readNet(net_file)
+    sumo_net = sumolib.net.readNet(net_file)
     return sumo_net
 
 class SumoSimulation(object):
@@ -309,6 +309,8 @@ class SumoSimulation(object):
     SumoSimulation is responsible for the management of the sumo simulation.
     """
     def __init__(self, cfg_file, step_length, host=None, port=None, sumo_gui=False, client_order=1):
+
+        #print('==============================================sumo init==============================================')
         if sumo_gui is True:
             sumo_binary = sumolib.checkBinary('sumo-gui')
         else:
@@ -328,15 +330,15 @@ class SumoSimulation(object):
         else:
             logging.info('Connection to sumo server. Host: %s Port: %s', host, port)
             traci.init(host=host, port=port)
-
+        #print('==============================================sumo 1==============================================')
         traci.setOrder(client_order)
-
+        #print('==============================================sumo 2==============================================')
         # Retrieving net from configuration file.
         self.net = _get_sumo_net(cfg_file)
-
+        #print('==============================================sumo 3==============================================')
         # Creating a random route to be able to spawn carla actors.
         traci.route.add("carla_route", [traci.edge.getIDList()[0]])
-
+        #print('==============================================sumo 4==============================================')
         # Variable to asign an id to new added actors.
         self._sequential_id = 0
 
@@ -346,6 +348,7 @@ class SumoSimulation(object):
 
         # Traffic light manager.
         self.traffic_light_manager = SumoTLManager()
+        #print('==============================================sumo 5==============================================')
 
     @property
     def traffic_light_ids(self):

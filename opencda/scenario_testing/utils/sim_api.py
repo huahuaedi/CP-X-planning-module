@@ -192,6 +192,7 @@ class ScenarioManager:
             try:
                 self.world = self.client.load_world(town)
             except RuntimeError:
+                self.world = None
                 print(
                     f"{bcolors.FAIL} %s is not found in your CARLA repo! "
                     f"Please download all town maps to your CARLA "
@@ -288,7 +289,7 @@ class ScenarioManager:
         single_cav_list : list
             A list contains all single CAVs' vehicle manager.
         """
-        print('Creating single CAVs.')
+        #print('===========================================Creating single CAVs.=====================================================================')
         # By default, we use lincoln as our cav model.
         default_model = 'vehicle.lincoln.mkz2017' \
             if self.carla_version == '0.9.11' else 'vehicle.lincoln.mkz_2017'
@@ -391,6 +392,70 @@ class ScenarioManager:
             clean=True)
 
         return [vehicle_manager]
+
+    def create_vehicle_manager_openscenario(self, application, vehicles):
+        """
+        Create CAV managers for vehicles spawned by ScenarioRunner/OpenScenario.
+
+        Parameters
+        ----------
+        application : list
+            Application list to pass into the vehicle manager.
+
+        vehicles : list
+            List of CARLA vehicles created by ScenarioRunner.
+
+        Returns
+        -------
+        single_cav_list : list
+            A list contains all CAVs' vehicle manager.
+        """
+        single_cav_list = []
+        single_cav_params = self.scenario_params['scenario']['single_cav_list']
+        config_by_name = {}
+        for cav_config in single_cav_params:
+            if 'name' in cav_config:
+                config_by_name[cav_config['name']] = cav_config
+
+        for idx, vehicle in enumerate(vehicles):
+            role_name = vehicle.attributes.get('role_name', '')
+            cav_config = None
+            if role_name == 'hero':
+                cav_config = config_by_name.get('ego')
+            if cav_config is None and role_name in config_by_name:
+                cav_config = config_by_name[role_name]
+            if cav_config is None and idx < len(single_cav_params):
+                cav_config = single_cav_params[idx]
+            if cav_config is None:
+                raise ValueError(
+                    "No cav config found for vehicle role_name '%s'" % role_name
+                )
+
+            platoon_base = OmegaConf.create(
+                {'platoon': self.scenario_params.get('platoon_base', {})})
+            cav_config = OmegaConf.merge(self.scenario_params['vehicle_base'],
+                                         platoon_base,
+                                         cav_config)
+            vehicle_manager = VehicleManager(
+                vehicle, cav_config, application,
+                self.carla_map, self.cav_world)
+
+            self.world.tick()
+
+            vehicle_manager.v2x_manager.set_platoon(None)
+
+            destination = carla.Location(x=cav_config['destination'][0],
+                                         y=cav_config['destination'][1],
+                                         z=cav_config['destination'][2])
+            vehicle_manager.update_info()
+            vehicle_manager.set_destination(
+                vehicle_manager.vehicle.get_location(),
+                destination,
+                clean=True)
+
+            single_cav_list.append(vehicle_manager)
+
+        return single_cav_list
 
     def create_platoon_manager(self, map_helper=None, data_dump=False):
         """

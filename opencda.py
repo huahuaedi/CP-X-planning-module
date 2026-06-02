@@ -7,6 +7,7 @@ Script to run different scenarios.
 # License: TDG-Attribution-NonCommercial-NoDistrib
 
 import argparse
+import inspect
 import importlib
 import os
 import sys
@@ -41,6 +42,7 @@ def arg_parse():
 def main():
     # parse the arguments
     opt = arg_parse()
+    #print(f'opt {opt}')
     # print the version of OpenCDA
     print("OpenCDA Version: %s" % __version__)
     # set the default yaml file
@@ -59,17 +61,26 @@ def main():
     # import the testing script
     testing_scenario = importlib.import_module(
         "opencda.scenario_testing.%s" % opt.test_scenario)
+    
+    #print(f'testing_scenario  {testing_scenario }')
     # check if the yaml file for the specific testing scenario exists
     if not os.path.isfile(config_yaml):
+        print('Exited')
         sys.exit(
             "opencda/scenario_testing/config_yaml/%s.yaml not found!" % opt.test_cenario)
 
     # get the function for running the scenario from the testing script
     scenario_runner = getattr(testing_scenario, 'run_scenario')
+
+    #print(f"============================scene_dict: {scene_dict}==============================")
+
+    
     # run the scenario testing
-    scenario_runner(opt, scene_dict)
-
-
+    if "experiment_params" in inspect.signature(scenario_runner).parameters:
+        scenario_runner(opt, scene_dict, experiment_params={})
+    else:
+        scenario_runner(opt, scene_dict)
+    
 if __name__ == '__main__':
     try:
         main()

@@ -18,6 +18,7 @@ from opencda.scenario_testing.utils.yaml_utils import \
 
 
 def run_scenario(opt, scenario_params):
+    
     try:
         # first define the path of the yaml file and 2lanefreemap file
         scenario_params = add_current_time(scenario_params)

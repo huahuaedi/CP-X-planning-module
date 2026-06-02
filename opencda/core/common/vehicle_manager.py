@@ -210,15 +210,22 @@ class VehicleManager(object):
         Execute one step of navigation.
         """
         # visualize the bev map if needed
+        #print('=============================================running steps==========================================================')
         self.map_manager.run_step()
+        #print('=============================================running steps1==========================================================')
         target_speed, target_pos = self.agent.run_step(target_speed)
+        #print('=============================================running steps2==========================================================')
         control = self.controller.run_step(target_speed, target_pos)
+        #print('=============================================running steps3==========================================================')
 
         # dump data
         if self.data_dumper:
+            #print('=============================================running steps4==========================================================')
             self.data_dumper.run_step(self.perception_manager,
                                       self.localizer,
                                       self.agent)
+            
+        #print('=============================================running steps5==========================================================')
 
         return control
 

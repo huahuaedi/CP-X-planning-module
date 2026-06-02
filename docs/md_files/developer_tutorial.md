@@ -282,7 +282,7 @@ class PerceptionManager:
         self.lidar = LidarSensor(vehicle, config_yaml['lidar'])
         if data_dump:
             self.semantic_lidar = SemanticLidarSensor(vehicle,
-                                                      config_yaml['lidar'])
+                                                      config_lidar_data.pcd['lidar'])
         # count how many steps have been passed
         self.count = 0
         # ego position

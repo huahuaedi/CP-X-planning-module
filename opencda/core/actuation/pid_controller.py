@@ -121,18 +121,18 @@ class Controller:
 
         """
         error = target_speed - self.current_speed
-        self._lat_ebuffer.append(error)
+        self._lon_ebuffer.append(error)
 
-        if len(self._lat_ebuffer) >= 2:
-            _de = (self._lat_ebuffer[-1] - self._lat_ebuffer[-2]) / self.dt
-            _ie = sum(self._lat_ebuffer) * self.dt
+        if len(self._lon_ebuffer) >= 2:
+            _de = (self._lon_ebuffer[-1] - self._lon_ebuffer[-2]) / self.dt
+            _ie = sum(self._lon_ebuffer) * self.dt
         else:
             _de = 0.0
             _ie = 0.0
 
-        return np.clip((self._lat_k_p * error) +
-                       (self._lat_k_d * _de) +
-                       (self._lat_k_i * _ie),
+        return np.clip((self._lon_k_p * error) +
+                       (self._lon_k_d * _de) +
+                       (self._lon_k_i * _ie),
                        -1.0, 1.0)
 
     def lat_run_step(self, target_location):
@@ -162,18 +162,23 @@ class Controller:
         w_vec = np.array([target_location.x -
                           v_begin.x, target_location.y -
                           v_begin.y, 0.0])
-        _dot = math.acos(np.clip(np.dot(
-            w_vec, v_vec) / (np.linalg.norm(w_vec) * np.linalg.norm(v_vec)),
-                                 -1.0, 1.0))
-        _cross = np.cross(v_vec, w_vec)
+        w_norm = np.linalg.norm(w_vec)
+        v_norm = np.linalg.norm(v_vec)
+        if w_norm < 1.0e-6 or v_norm < 1.0e-6:
+            _dot = 0.0
+        else:
+            _dot = math.acos(np.clip(np.dot(
+                w_vec, v_vec) / (w_norm * v_norm),
+                                     -1.0, 1.0))
+            _cross = np.cross(v_vec, w_vec)
 
-        if _cross[2] < 0:
-            _dot *= -1.0
+            if _cross[2] < 0:
+                _dot *= -1.0
 
-        self._lon_ebuffer.append(_dot)
-        if len(self._lon_ebuffer) >= 2:
-            _de = (self._lon_ebuffer[-1] - self._lon_ebuffer[-2]) / self.dt
-            _ie = sum(self._lon_ebuffer) * self.dt
+        self._lat_ebuffer.append(_dot)
+        if len(self._lat_ebuffer) >= 2:
+            _de = (self._lat_ebuffer[-1] - self._lat_ebuffer[-2]) / self.dt
+            _ie = sum(self._lat_ebuffer) * self.dt
         else:
             _de = 0.0
             _ie = 0.0
@@ -203,18 +208,27 @@ class Controller:
         # control class for carla vehicle
         control = carla.VehicleControl()
 
-        # emergency stop
-        if target_speed == 0 or waypoint is None:
+        # emergency stop when no waypoint is available. A zero target speed
+        # with a valid waypoint is handled by the longitudinal PID so MPC can
+        # produce smooth stopping trajectories instead of forcing full brake.
+        if waypoint is None:
             control.steer = 0.0
             control.throttle = 0.0
             control.brake = 1.0
             control.hand_brake = False
             return control
 
+        if target_speed <= 0.0 and self.current_speed <= 0.05:
+            control.steer = 0.0
+            control.throttle = 0.0
+            control.brake = min(0.3, self.max_brake)
+            control.hand_brake = False
+            return control
+
         acceleration = self.lon_run_step(target_speed)
         current_steering = self.lat_run_step(waypoint)
 
-        if acceleration >= 0.0:
+        if acceleration >= 0.0 and target_speed > 0.0:
             control.throttle = min(acceleration, self.max_throttle)
             control.brake = 0.0
         else:

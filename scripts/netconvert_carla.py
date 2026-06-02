@@ -31,8 +31,14 @@ if 'SUMO_HOME' in os.environ:
 else:
     sys.exit("please declare environment variable 'SUMO_HOME'")
 
-import carla
 import sumolib
+
+try:
+    import carla
+    _CARLA_IMPORT_ERROR = None
+except Exception as exc:
+    carla = None
+    _CARLA_IMPORT_ERROR = exc
 
 
 class SumoTopology(object):
@@ -369,6 +375,16 @@ def _netconvert_carla_impl(xodr_file, output, tmpdir, guess_tls=False):
     else:
         if result != 0:
             raise RuntimeError('There was an error when executing netconvert.')
+
+    if carla is None:
+        logging.warning(
+            'CARLA Python API is unavailable; generating SUMO net without '
+            'traffic-light landmark augmentation. Import error: %s',
+            _CARLA_IMPORT_ERROR,
+        )
+        if os.path.realpath(tmp_sumo_net) != os.path.realpath(output):
+            shutil.copyfile(tmp_sumo_net, output)
+        return
 
     # --------
     # Sumo net

@@ -19,6 +19,7 @@ from opencda.scenario_testing.utils.yaml_utils import add_current_time
 
 
 def run_scenario(opt, scenario_params):
+    print('platoon joining 2 lanefree cosim is running ----------------------------------')
     try:
         scenario_params = add_current_time(scenario_params)
 

@@ -93,6 +93,7 @@ class MapManager(object):
 
         self.actvate = config['activate']
         self.visualize = config['visualize']
+        
         self.pixels_per_meter = config['pixels_per_meter']
         self.meter_per_pixel = 1 / self.pixels_per_meter
         self.raster_size = np.array([config['raster_size'][0],
@@ -142,14 +143,21 @@ class MapManager(object):
         """
         Rasterization + Visualize the bev map if needed.
         """
+        #print('=======================================map manager run_step==============================================')
         if not self.actvate:
+            #print('=======================================map manager run_step1==============================================')
             return
+        # print('=======================================map manager run_step1.5==============================================')
         self.rasterize_static()
+        # print('=======================================map manager run_step2==============================================')
         self.rasterize_dynamic()
+        # print('=======================================map manager run_step3==============================================')
         if self.visualize:
-            cv2.imshow('the bev map of agent %s' % self.agent_id,
-                       self.vis_bev)
+            #print('=======================================map manager run_step4==============================================')
+            cv2.imshow('the bev map of agent %s' % self.agent_id,self.vis_bev)
+            #print('=======================================map manager run_step5==============================================')
             cv2.waitKey(1)
+            #print('=======================================map manager run_step6==============================================')
 
     @staticmethod
     def get_bounds(left_lane, right_lane):
@@ -256,7 +264,8 @@ class MapManager(object):
         for tl_id, tl_content in self.traffic_light_info.items():
             trigger_poly = tl_content['corners']
             # use Path to do fast computation
-            trigger_path = Path(trigger_poly.boundary)
+            #trigger_path = Path(trigger_poly.boundary)
+            trigger_path = Path(np.array(trigger_poly.boundary.coords))
             # check if any point in the middle line inside the trigger area
             check_array = trigger_path.contains_points(mid_lane[:, :2])
 
@@ -274,8 +283,8 @@ class MapManager(object):
         crosswalks_ids = []
 
         # boundary of each lane for later filtering
-        lanes_bounds = np.empty((0, 2, 2), dtype=np.float)
-        crosswalks_bounds = np.empty((0, 2, 2), dtype=np.float)
+        lanes_bounds = np.empty((0, 2, 2), dtype=float)
+        crosswalks_bounds = np.empty((0, 2, 2), dtype=float)
 
         # loop all waypoints to get lane information
         for (i, waypoint) in enumerate(self.topology):
@@ -388,18 +397,19 @@ class MapManager(object):
         lane_area : np.ndarray
             Combine left and right lane together to form a polygon.
         """
+
+        #print('=======================================generate_lane_area1============================================')
         lane_area = np.zeros((2, xyz_left.shape[0], 2))
         # convert coordinates to center's coordinate frame
         xyz_left = xyz_left.T
-        xyz_left = np.r_[
-            xyz_left, [np.ones(xyz_left.shape[1])]]
+        xyz_left = np.r_[xyz_left, [np.ones(xyz_left.shape[1])]]
         xyz_right = xyz_right.T
-        xyz_right = np.r_[
-            xyz_right, [np.ones(xyz_right.shape[1])]]
-
+        xyz_right = np.r_[xyz_right, [np.ones(xyz_right.shape[1])]]
+        #print('=======================================generate_lane_area2============================================')
         # ego's coordinate frame
         xyz_left = world_to_sensor(xyz_left, self.center).T
         xyz_right = world_to_sensor(xyz_right, self.center).T
+       # print('=======================================generate_lane_area3============================================')
 
         # to image coordinate frame
         lane_area[0] = xyz_left[:, :2]
@@ -409,13 +419,12 @@ class MapManager(object):
         # y revert
         lane_area[:, :, 1] = -lane_area[:, :, 1]
 
-        lane_area[:, :, 0] = lane_area[:, :, 0] * self.pixels_per_meter + \
-            self.raster_size[0] // 2
-        lane_area[:, :, 1] = lane_area[:, :, 1] * self.pixels_per_meter + \
-            self.raster_size[1] // 2
-
+        lane_area[:, :, 0] = lane_area[:, :, 0] * self.pixels_per_meter + self.raster_size[0] // 2
+        lane_area[:, :, 1] = lane_area[:, :, 1] * self.pixels_per_meter + self.raster_size[1] // 2
+       # print('=======================================generate_lane_area4============================================')
         # to make more precise polygon
         lane_area = cv2_subpixel(lane_area)
+       # print('=======================================generate_lane_area5============================================')
 
         return lane_area
 
@@ -556,30 +565,30 @@ class MapManager(object):
             lane_info = self.lane_info[lane_idx]
             xyz_left, xyz_right = \
                 lane_info['xyz_left'], lane_info['xyz_right']
-
+            #print('======================================static rasterize 1 ==============================================')
             # generate lane area
             lane_area = self.generate_lane_area(xyz_left, xyz_right)
             lanes_area_list.append(lane_area)
-
+           # print('======================================static rasterize 2 ==============================================')
             # check the associated traffic light
             associated_tl_id = lane_info['tl_id']
             if associated_tl_id:
                 tl_actor = self.traffic_light_info[associated_tl_id]['actor']
                 status = convert_tl_status(tl_actor.get_state())
                 lane_type_list.append(status)
+             #   print('======================================static rasterize 3 ==============================================')
             else:
                 lane_type_list.append('normal')
+            #    print('======================================static rasterize 4 ==============================================')
 
-        self.static_bev = draw_road(lanes_area_list,
-                                    self.static_bev)
-        self.static_bev = draw_lane(lanes_area_list, lane_type_list,
-                                    self.static_bev)
+        self.static_bev = draw_road(lanes_area_list,self.static_bev)
+      #  print('======================================static rasterize 5 ==============================================')
+        self.static_bev = draw_lane(lanes_area_list, lane_type_list,self.static_bev)
 
-        self.vis_bev = draw_road(lanes_area_list,
-                                 self.vis_bev)
-        self.vis_bev = draw_lane(lanes_area_list, lane_type_list,
-                                 self.vis_bev)
+        self.vis_bev = draw_road(lanes_area_list,self.vis_bev)
+        self.vis_bev = draw_lane(lanes_area_list, lane_type_list,self.vis_bev)
         self.vis_bev = cv2.cvtColor(self.vis_bev, cv2.COLOR_RGB2BGR)
+      #  print('======================================static rasterize 6 ==============================================')
 
     def destroy(self):
         cv2.destroyAllWindows()

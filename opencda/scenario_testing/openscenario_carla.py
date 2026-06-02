@@ -3,6 +3,7 @@
 
 import carla
 import opencda.scenario_testing.utils.sim_api as sim_api
+from opencda.scenario_testing.utils.scenario_runner_patch import patch_scenario_runner_imports
 from opencda.core.common.cav_world import CavWorld
 
 import time
@@ -22,6 +23,7 @@ def exec_scenario_runner(scenario_params):
     Returns
     -------
     """
+    patch_scenario_runner_imports(sr)
     scenario_runner = sr.ScenarioRunner(scenario_params.scenario_runner)
     scenario_runner.run()
     scenario_runner.destroy()

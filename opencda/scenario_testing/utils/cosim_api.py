@@ -66,6 +66,7 @@ class CoScenarioManager(ScenarioManager):
 
         # these following sets are used to track the vehicles controlled
         # by sumo side
+        #print('==============================================1==============================================')
         self._active_actors = set()
         self.spawned_actors = set()
         self.destroyed_actors = set()
@@ -82,6 +83,7 @@ class CoScenarioManager(ScenarioManager):
                                     'traffic light', landmark.id)
 
         # sumo side initialization
+        #print('==============================================2==============================================')
         base_name = \
             os.path.basename(sumo_file_parent_path)
         sumo_cfg = \
@@ -92,20 +94,25 @@ class CoScenarioManager(ScenarioManager):
                                          'same basename as the directory' \
                                          'and use .sumocfg as extension' \
                                          % sumo_cfg
+        
+        #print('==============================================3==============================================')
 
         sumo_port = scenario_params['sumo']['port']
         sumo_host = scenario_params['sumo']['host']
         sumo_gui = scenario_params['sumo']['gui']
         sumo_client_order = scenario_params['sumo']['client_order']
         # tick freq, the same as carla
+        #print('==============================================3.5==============================================')
         sumo_step_length = scenario_params['sumo']['step_length']
-
+        #print('==============================================4==============================================')
         self.sumo = SumoSimulation(sumo_cfg, sumo_step_length,
                                    sumo_host, sumo_port, sumo_gui,
                                    sumo_client_order)
+        
+        print('==============================================5==============================================')
         # the sumo traffic light should be synchronized with carla
         self.sumo.switch_off_traffic_lights()
-
+        print('==============================================6==============================================')
         # Mapped actor ids. All vehicles controlled by sumo is
         # in sumo2carla_ids, all vehicles controlled by carla
         # is saved in carla2sumo_ids
@@ -114,6 +121,7 @@ class CoScenarioManager(ScenarioManager):
 
         BridgeHelper.blueprint_library = self.world.get_blueprint_library()
         BridgeHelper.offset = self.sumo.get_net_offset()
+        print('==============================================7==============================================')
 
     def tick(self):
         """
