@@ -31,7 +31,7 @@ sumo:
   map_basename: Town10HD_Opt
   asset_root: opencda_scenario/assets
   auto_generate_assets: true
-  xodr_path: /home/umd-user/carla_source/carla/Unreal/CarlaUE4/Content/Carla/Maps/OpenDrive/Town10HD_Opt.xodr
+  xodr_path: /home/umd-user/Downloads/MDrive/carla912/CarlaUE4/Content/Carla/Maps/OpenDrive/Town10HD_Opt.xodr
   route_generation:
     seed: 42
     period_s: 0.75

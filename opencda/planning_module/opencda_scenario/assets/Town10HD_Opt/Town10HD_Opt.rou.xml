@@ -1,30 +1,29 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
-<!-- generated on 2026-05-29 09:45:45.808760 by randomTrips.py UNKNOWN
+<!-- generated on 2026-06-25 09:48:06.047674 by Eclipse SUMO randomTrips.py UNKNOWN
 <configuration>
-    <net-file value="/home/umd-user/Desktop/OpenCDA/opencda/planning_module/opencda_scenario/assets/Town10HD_Opt/Town10HD_Opt.net.xml"/>
-    <output-trip-file value="/home/umd-user/Desktop/OpenCDA/opencda/planning_module/opencda_scenario/assets/Town10HD_Opt/Town10HD_Opt.trips.xml"/>
-    <route-file value="/home/umd-user/Desktop/OpenCDA/opencda/planning_module/opencda_scenario/assets/Town10HD_Opt/Town10HD_Opt.rou.xml"/>
+    <net-file value="/home/umd-user/Downloads/Planning module/opencda/planning_module/opencda_scenario/assets/Town10HD_Opt/Town10HD_Opt.net.xml"/>
+    <output-trip-file value="/home/umd-user/Downloads/Planning module/opencda/planning_module/opencda_scenario/assets/Town10HD_Opt/Town10HD_Opt.trips.xml"/>
+    <route-file value="/home/umd-user/Downloads/Planning module/opencda/planning_module/opencda_scenario/assets/Town10HD_Opt/Town10HD_Opt.rou.xml"/>
     <trip-attributes value="departLane=&quot;random&quot; departSpeed=&quot;max&quot;"/>
     <vehicle-class value="passenger"/>
     <random-departpos value="True"/>
     <fringe-factor value="8.0"/>
-    <validate value="True"/>
     <period value="0.75"/>
     <random-depart value="True"/>
 </configuration>
 -->
 
-<!-- generated on 2026-05-29 09:45:45 by Eclipse SUMO duarouter Version 1.18.0
-<configuration xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/duarouterConfiguration.xsd">
+<!-- generated on 2026-06-25T09:48:05.987666-05:00 by Eclipse SUMO duarouter 1.25.0
+<duarouterConfiguration xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/duarouterConfiguration.xsd">
 
     <input>
-        <net-file value="/home/umd-user/Desktop/OpenCDA/opencda/planning_module/opencda_scenario/assets/Town10HD_Opt/Town10HD_Opt.net.xml"/>
-        <route-files value="/home/umd-user/Desktop/OpenCDA/opencda/planning_module/opencda_scenario/assets/Town10HD_Opt/Town10HD_Opt.trips.xml"/>
+        <net-file value="/home/umd-user/Downloads/Planning module/opencda/planning_module/opencda_scenario/assets/Town10HD_Opt/Town10HD_Opt.net.xml"/>
+        <route-files value="/home/umd-user/Downloads/Planning module/opencda/planning_module/opencda_scenario/assets/Town10HD_Opt/Town10HD_Opt.trips.xml"/>
     </input>
 
     <output>
-        <output-file value="/home/umd-user/Desktop/OpenCDA/opencda/planning_module/opencda_scenario/assets/Town10HD_Opt/Town10HD_Opt.rou.xml"/>
+        <output-file value="/home/umd-user/Downloads/Planning module/opencda/planning_module/opencda_scenario/assets/Town10HD_Opt/Town10HD_Opt.rou.xml"/>
         <alternatives-output value="NUL"/>
     </output>
 
@@ -39,7 +38,7 @@
         <no-step-log value="true"/>
     </report>
 
-</configuration>
+</duarouterConfiguration>
 -->
 
 <routes xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/routes_file.xsd">
@@ -789,7 +788,7 @@
         <route edges="11 1 -13 -14 -20 -21 2"/>
     </vehicle>
     <vehicle id="248" type="passenger" depart="208.00" departLane="random" departPos="64.69" departSpeed="max">
-        <route edges="6 -18 -20 -21 -3 -22"/>
+        <route edges="6 -18 14 13 -5 -6 -22"/>
     </vehicle>
     <vehicle id="249" type="passenger" depart="210.50" departLane="random" departPos="49.63" departSpeed="max">
         <route edges="6 -18 -20 9"/>
@@ -2502,7 +2501,7 @@
         <route edges="11 1 -13 -14 -20 -21"/>
     </vehicle>
     <vehicle id="819" type="passenger" depart="636.75" departLane="random" departPos="6.77" departSpeed="max">
-        <route edges="9 11 1 -5 -18"/>
+        <route edges="9 -12 -14 -15 6 -18"/>
     </vehicle>
     <vehicle id="820" type="passenger" depart="636.75" departLane="random" departPos="58.08" departSpeed="max">
         <route edges="-7 21 20 -15 6"/>
@@ -3738,7 +3737,7 @@
         <route edges="-12 -14 -15 -7 21 20"/>
     </vehicle>
     <vehicle id="1231" type="passenger" depart="969.75" departLane="random" departPos="1.66" departSpeed="max">
-        <route edges="9 11 1 -5 -18"/>
+        <route edges="9 -12 -14 -15 6 -18"/>
     </vehicle>
     <vehicle id="1232" type="passenger" depart="970.00" departLane="random" departPos="10.79" departSpeed="max">
         <route edges="-11 -9 -21 2"/>
@@ -4011,7 +4010,7 @@
         <route edges="-21 2 -11 -12 -14"/>
     </vehicle>
     <vehicle id="1322" type="passenger" depart="1035.25" departLane="random" departPos="19.62" departSpeed="max">
-        <route edges="-18 -20 -21 -3 -22"/>
+        <route edges="-18 14 13 -5 -6 -22"/>
     </vehicle>
     <vehicle id="1323" type="passenger" depart="1037.25" departLane="random" departPos="46.95" departSpeed="max">
         <route edges="20 19 -6"/>
@@ -5289,7 +5288,7 @@
         <route edges="-3 -22 -20 9 11"/>
     </vehicle>
     <vehicle id="1748" type="passenger" depart="1353.25" departLane="random" departPos="16.32" departSpeed="max">
-        <route edges="-18 -20 -21 -3 -22"/>
+        <route edges="-18 14 13 -5 -6 -22"/>
     </vehicle>
     <vehicle id="1749" type="passenger" depart="1353.50" departLane="random" departPos="1.29" departSpeed="max">
         <route edges="9 -12 -14 19 5"/>
@@ -5391,7 +5390,7 @@
         <route edges="-18 -20 -21 -3"/>
     </vehicle>
     <vehicle id="1782" type="passenger" depart="1372.50" departLane="random" departPos="2.83" departSpeed="max">
-        <route edges="9 11 1 -5 -18"/>
+        <route edges="9 -12 -14 -15 6 -18"/>
     </vehicle>
     <vehicle id="1783" type="passenger" depart="1372.75" departLane="random" departPos="7.18" departSpeed="max">
         <route edges="-18 -20 9 11"/>
@@ -6456,7 +6455,7 @@
         <route edges="13 -5 -18 -20 -21 2 -11 -9"/>
     </vehicle>
     <vehicle id="2137" type="passenger" depart="1640.00" departLane="random" departPos="2.68" departSpeed="max">
-        <route edges="9 11 1 -5 -18"/>
+        <route edges="9 -12 -14 -15 6 -18"/>
     </vehicle>
     <vehicle id="2138" type="passenger" depart="1640.75" departLane="random" departPos="80.38" departSpeed="max">
         <route edges="4 -2 21 20 -15 -7 2"/>
@@ -7776,7 +7775,7 @@
         <route edges="1 -13 -14 -15"/>
     </vehicle>
     <vehicle id="2577" type="passenger" depart="1975.00" departLane="random" departPos="16.67" departSpeed="max">
-        <route edges="-22 -20 9 -12 -14 -15"/>
+        <route edges="-22 14 13 -5 -18 -15"/>
     </vehicle>
     <vehicle id="2578" type="passenger" depart="1976.50" departLane="random" departPos="47.23" departSpeed="max">
         <route edges="-7 21 20 19 -6 -22"/>
@@ -8085,7 +8084,7 @@
         <route edges="-2 -3 6 -18"/>
     </vehicle>
     <vehicle id="2680" type="passenger" depart="2050.25" departLane="random" departPos="14.77" departSpeed="max">
-        <route edges="-18 -20 -21 -3 -22"/>
+        <route edges="-18 14 13 -5 -6 -22"/>
     </vehicle>
     <vehicle id="2681" type="passenger" depart="2051.75" departLane="random" departPos="35.35" departSpeed="max">
         <route edges="-20 9 11"/>
@@ -8295,7 +8294,7 @@
         <route edges="-9 -21 2 1 -5 -18"/>
     </vehicle>
     <vehicle id="2750" type="passenger" depart="2105.25" departLane="random" departPos="11.30" departSpeed="max">
-        <route edges="-22 -20 9 -12 -14 -15"/>
+        <route edges="-22 14 13 -5 -18 -15"/>
     </vehicle>
     <vehicle id="2751" type="passenger" depart="2105.50" departLane="random" departPos="47.23" departSpeed="max">
         <route edges="20 -15 -7 2 -11 -9"/>
@@ -8433,7 +8432,7 @@
         <route edges="4 -2 21 20 14 13 -5"/>
     </vehicle>
     <vehicle id="2796" type="passenger" depart="2146.25" departLane="random" departPos="7.78" departSpeed="max">
-        <route edges="9 11 1 -5 -18"/>
+        <route edges="9 -12 -14 -15 6 -18"/>
     </vehicle>
     <vehicle id="2797" type="passenger" depart="2146.50" departLane="random" departPos="30.07" departSpeed="max">
         <route edges="-15 -7 2 -11 -12"/>
@@ -8457,7 +8456,7 @@
         <route edges="5 4 -2 21 20 19"/>
     </vehicle>
     <vehicle id="2804" type="passenger" depart="2147.75" departLane="random" departPos="28.30" departSpeed="max">
-        <route edges="-22 -20 9 -12 -14 -15"/>
+        <route edges="-22 14 13 -5 -18 -15"/>
     </vehicle>
     <vehicle id="2805" type="passenger" depart="2147.75" departLane="random" departPos="6.10" departSpeed="max">
         <route edges="19 -6 -7 2 -11 -9"/>
@@ -8643,7 +8642,7 @@
         <route edges="-22 -20 -21 2 1 -13"/>
     </vehicle>
     <vehicle id="2866" type="passenger" depart="2196.75" departLane="random" departPos="1.16" departSpeed="max">
-        <route edges="9 11 1 -5 -18"/>
+        <route edges="9 -12 -14 -15 6 -18"/>
     </vehicle>
     <vehicle id="2867" type="passenger" depart="2197.50" departLane="random" departPos="6.21" departSpeed="max">
         <route edges="14 13 -5 -6 -22 19 5 4"/>
@@ -9600,7 +9599,7 @@
         <route edges="-9 -21"/>
     </vehicle>
     <vehicle id="3185" type="passenger" depart="2410.50" departLane="random" departPos="1.37" departSpeed="max">
-        <route edges="9 11 1 -5 -18"/>
+        <route edges="9 -12 -14 -15 6 -18"/>
     </vehicle>
     <vehicle id="3186" type="passenger" depart="2410.50" departLane="random" departPos="17.05" departSpeed="max">
         <route edges="-18"/>
@@ -9930,7 +9929,7 @@
         <route edges="-6 -7"/>
     </vehicle>
     <vehicle id="3295" type="passenger" depart="2494.50" departLane="random" departPos="7.33" departSpeed="max">
-        <route edges="9 11 1 -5 -18"/>
+        <route edges="9 -12 -14 -15 6 -18"/>
     </vehicle>
     <vehicle id="3296" type="passenger" depart="2494.75" departLane="random" departPos="5.76" departSpeed="max">
         <route edges="-6 -22 -20 -21 -3"/>
@@ -9999,7 +9998,7 @@
         <route edges="6 5"/>
     </vehicle>
     <vehicle id="3318" type="passenger" depart="2509.50" departLane="random" departPos="3.30" departSpeed="max">
-        <route edges="-22 -20 9 -12 -14 -15"/>
+        <route edges="-22 14 13 -5 -18 -15"/>
     </vehicle>
     <vehicle id="3319" type="passenger" depart="2509.75" departLane="random" departPos="4.45" departSpeed="max">
         <route edges="14 13 -5 -6 -22"/>
@@ -10212,7 +10211,7 @@
         <route edges="14 13"/>
     </vehicle>
     <vehicle id="3389" type="passenger" depart="2560.75" departLane="random" departPos="10.14" departSpeed="max">
-        <route edges="-18 -20 -21 -3 -22"/>
+        <route edges="-18 14 13 -5 -6 -22"/>
     </vehicle>
     <vehicle id="3390" type="passenger" depart="2561.25" departLane="random" departPos="29.66" departSpeed="max">
         <route edges="-20 9"/>
@@ -11511,7 +11510,7 @@
         <route edges="2"/>
     </vehicle>
     <vehicle id="3822" type="passenger" depart="2872.00" departLane="random" departPos="32.15" departSpeed="max">
-        <route edges="-22 -20 9 -12 -14 -15"/>
+        <route edges="-22 14 13 -5 -18 -15"/>
     </vehicle>
     <vehicle id="3823" type="passenger" depart="2872.00" departLane="random" departPos="20.76" departSpeed="max">
         <route edges="13 -5"/>
@@ -12390,7 +12389,7 @@
         <route edges="5 4 -2"/>
     </vehicle>
     <vehicle id="4115" type="passenger" depart="3092.50" departLane="random" departPos="3.44" departSpeed="max">
-        <route edges="9 11 1 -5 -18"/>
+        <route edges="9 -12 -14 -15 6 -18"/>
     </vehicle>
     <vehicle id="4116" type="passenger" depart="3092.50" departLane="random" departPos="85.02" departSpeed="max">
         <route edges="-3 -22 -20 -21 2"/>
@@ -13392,7 +13391,7 @@
         <route edges="4 -2 21 20"/>
     </vehicle>
     <vehicle id="4449" type="passenger" depart="3323.00" departLane="random" departPos="22.55" departSpeed="max">
-        <route edges="-22 -20 9 -12 -14 -15"/>
+        <route edges="-22 14 13 -5 -18 -15"/>
     </vehicle>
     <vehicle id="4450" type="passenger" depart="3325.00" departLane="random" departPos="12.12" departSpeed="max">
         <route edges="-18 -20"/>
@@ -14310,7 +14309,7 @@
         <route edges="-12"/>
     </vehicle>
     <vehicle id="4755" type="passenger" depart="3563.00" departLane="random" departPos="4.67" departSpeed="max">
-        <route edges="9 11 1 -5 -18"/>
+        <route edges="9 -12 -14 -15 6 -18"/>
     </vehicle>
     <vehicle id="4756" type="passenger" depart="3564.00" departLane="random" departPos="92.44" departSpeed="max">
         <route edges="1 -13 12 11"/>
@@ -14355,7 +14354,7 @@
         <route edges="-13 -14 -15 6"/>
     </vehicle>
     <vehicle id="4770" type="passenger" depart="3575.00" departLane="random" departPos="4.95" departSpeed="max">
-        <route edges="-22 -20 9 -12 -14 -15"/>
+        <route edges="-22 14 13 -5 -18 -15"/>
     </vehicle>
     <vehicle id="4771" type="passenger" depart="3576.25" departLane="random" departPos="85.36" departSpeed="max">
         <route edges="-7 21 20 -15"/>
