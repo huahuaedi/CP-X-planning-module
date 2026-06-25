@@ -1,5 +1,5 @@
 name: high_level_route_planning
-runner_module: carla_scenario.runner
+runner_module: planning_runner
 
 carla:
   host: 127.0.0.1
