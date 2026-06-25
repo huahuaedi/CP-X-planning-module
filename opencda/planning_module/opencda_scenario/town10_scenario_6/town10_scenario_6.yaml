@@ -1,0 +1,117 @@
+name: town10_scenario_6
+runner_module: opencda_scenario.town10_scenario_6.runner
+
+carla:
+  host: 127.0.0.1
+  port: 2000
+  timeout_s: 30.0
+  synchronous_mode: true
+  launch_if_needed: true
+  launch_timeout_s: 120.0
+  carla_root: /home/umd-user/carla_source/carla
+  launch_mode: ue4editor_map
+  rhi: -vulkan
+  launch_extra_args:
+    - "-quality-level=Low"
+    - "-ResX=800"
+    - "-ResY=600"
+  map: /Game/Carla/Maps/Town10HD_Opt
+
+sumo:
+  enabled: false
+  connect_existing_server: false
+  host: 127.0.0.1
+  port: 8813
+  gui: true
+  client_order: 1
+  step_length: 0.05
+  carla_sync_radius_m: 120.0
+  carla_despawn_radius_m: 140.0
+  carla_sync_max_actors: 80
+  map_basename: Town10HD_Opt
+  asset_root: opencda_scenario/assets
+  auto_generate_assets: true
+  xodr_path: /home/umd-user/carla_source/carla/Unreal/CarlaUE4/Content/Carla/Maps/OpenDrive/Town10HD_Opt.xodr
+  route_generation:
+    seed: 42
+    period_s: 0.75
+    end_time_s: 3600.0
+    fringe_factor: 8.0
+    random_depart_lane: true
+    random_depart_speed: true
+    validate: true
+    force_regenerate: true
+
+anchors:
+  ego_spawn: town10_scenario_6_ego
+  final_destination: town10_scenario_6_final_destination
+
+traffic_manager:
+  enabled: true
+  port: 8000
+  synchronous_mode: true
+
+runtime:
+  module: opencda_scenario.town10_scenario_6.scenario
+  cp_message_schema_version: 1
+  cp_message_prefix: town10_scenario_6
+  reset_cp_message_file: true
+  vehicle_marker_prefix: vehicle_
+  vru_marker_prefix: vru_
+  hazard_marker_prefix: hazard_
+  stop_marker_prefix: stop_
+  intersection_marker_prefix: intersection_
+  control_trigger_distance_m: 20.0
+  delayed_autopilot_trigger_distance_m: 20.0
+  vru_trigger_distance_m: 20.0
+  hazard_trigger_distance_m: 60.0 #30
+  traffic_light_stop_waypoint_match_distance_m: 12.0
+  traffic_light_actor_position_match_distance_m: 40.0
+  stop_state: stop
+  vehicle_blueprint: vehicle.tesla.model3
+  vehicle_color_rgb: "90,90,90"
+  vehicle_spawn_z_offset_m: 0.05
+  hazard_vehicle_blueprint: vehicle.tesla.model3
+  hazard_vehicle_color_rgb: "40,40,40"
+  vru_blueprint_filter: walker.pedestrian.*
+  vru_speed_mps: 1.2
+  vru_spawn_z_offset_m: 0.0
+  vru_arrival_threshold_m: 0.5
+  vru_role_prefix: town10_scenario_6_vru_
+
+ego:
+  blueprint: vehicle.tesla.model3
+  role_name: ego
+  color_rgb: "255,0,0"
+  spawn_z_offset_m: 1.0
+
+constraints:
+  min_velocity_mps: 0.0
+  max_velocity_mps: 10.0
+  min_acceleration_mps2: -10.0
+  max_acceleration_mps2: 3.0
+  max_jerk_mps3: 10.0
+  min_steer_rad: -0.6
+  max_steer_rad: 0.6
+  min_steer_rate_rps: -0.2
+  max_steer_rate_rps: 0.2
+  enforce_terminal_velocity_constraint: true
+  terminal_velocity_mps: 0.0
+
+planning:
+  waypoint_sample_distance_m: 3.0
+  prompt_period_s: 1.0
+
+camera:
+  enabled: true
+  image_size_x: 840
+  image_size_y: 680
+  fov: 90.0
+  topdown:
+    world_fixed: false
+    height: 65.0
+    padding_m: 20.0
+  chase:
+    back: 8.0
+    height: 2.8
+    pitch: -10.0

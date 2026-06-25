@@ -1,0 +1,185 @@
+\documentclass[aspectratio=169]{beamer}
+
+\usetheme{Madrid}
+\usecolortheme{default}
+\usefonttheme{serif}
+\setbeamertemplate{navigation symbols}{}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{iftex}
+
+\ifPDFTeX
+  \usepackage{newtxtext}
+  \usepackage{newtxmath}
+\else
+  \usepackage{fontspec}
+  \setmainfont{Times New Roman}
+  \setsansfont{Times New Roman}
+  \setmonofont{Times New Roman}
+\fi
+
+\setbeamerfont{normal text}{family=\rmfamily,series=\mdseries}
+\setbeamerfont{structure}{family=\rmfamily,series=\mdseries}
+\setbeamerfont{frametitle}{family=\rmfamily,series=\mdseries}
+\setbeamerfont{title}{family=\rmfamily,series=\mdseries}
+\setbeamerfont{itemize/enumerate body}{family=\rmfamily,series=\mdseries}
+\setbeamerfont{itemize/enumerate subbody}{family=\rmfamily,series=\mdseries}
+\linespread{0.94}
+\setlength{\jot}{2pt}
+
+\begin{document}
+
+\begin{frame}{Potential Field for Road Boundary}
+\small
+\begin{columns}[T,onlytextwidth]
+\begin{column}{0.62\textwidth}
+\begin{flushleft}
+Road reference at horizon step $k$
+\[
+r_k =
+\left(
+x_{\mathrm{road},k},
+y_{\mathrm{road},k},
+\theta_{\mathrm{road},k},
+W_{\mathrm{road},k}
+\right)
+\]
+
+Ego lateral offset from road center
+\[
+d_{\mathrm{road},k}
+=
+-\sin(\theta_{\mathrm{road},k})(x_k-x_{\mathrm{road},k})
++
+\cos(\theta_{\mathrm{road},k})(y_k-y_{\mathrm{road},k})
+\]
+
+Maximum allowed lateral distance
+\[
+d_{\max,k}
+=
+\frac{W_{\mathrm{road},k}}{2}
+\]
+\end{flushleft}
+\end{column}
+
+\begin{column}{0.35\textwidth}
+Variables
+\begin{itemize}
+\setlength\itemsep{0.3em}
+\item $k$: horizon step
+\item $x_k,y_k$: ego position
+\item $x_{\mathrm{road},k},y_{\mathrm{road},k}$: road center point
+\item $\theta_{\mathrm{road},k}$: road heading
+\item $W_{\mathrm{road},k}$: drivable road width
+\item $d_{\mathrm{road},k}$: signed distance from road center
+\item $d_{\max,k}$: half road width
+\end{itemize}
+\end{column}
+\end{columns}
+\end{frame}
+
+\begin{frame}{Boundary Excess}
+\small
+\begin{columns}[T,onlytextwidth]
+\begin{column}{0.62\textwidth}
+\begin{flushleft}
+Boundary margin
+\[
+m_b > 0
+\]
+
+Safe road region
+\[
+d_{\mathrm{safe},k}
+=
+d_{\max,k}-m_b
+\]
+
+Boundary excess
+\[
+e_{b,k}
+=
+\max\left(|d_{\mathrm{road},k}|-d_{\mathrm{safe},k},\,0\right)
+\]
+
+Equivalent meaning
+\[
+e_{b,k}
+=
+\begin{cases}
+0,
+& |d_{\mathrm{road},k}| \le d_{\mathrm{safe},k}
+\\[0.4em]
+|d_{\mathrm{road},k}|-d_{\mathrm{safe},k},
+& |d_{\mathrm{road},k}| > d_{\mathrm{safe},k}
+\end{cases}
+\]
+\end{flushleft}
+\end{column}
+
+\begin{column}{0.35\textwidth}
+Variables
+\begin{itemize}
+\setlength\itemsep{0.3em}
+\item $m_b$: road-boundary margin
+\item $d_{\mathrm{safe},k}$: zero-cost safe distance from road center
+\item $e_{b,k}$: boundary excess
+\item $e_{b,k}=0$: ego is safely inside the road
+\item $e_{b,k}>0$: ego is too close to the road edge or outside the road
+\end{itemize}
+\end{column}
+\end{columns}
+\end{frame}
+
+\begin{frame}{Road-Boundary Potential Cost}
+\small
+\begin{columns}[T,onlytextwidth]
+\begin{column}{0.62\textwidth}
+\begin{flushleft}
+Stage boundary cost
+\[
+J_{b,k}
+=
+w_{\mathrm{boundary}} e_{b,k}^{2}
+\]
+
+Horizon boundary cost
+\[
+J_{\mathrm{road\mbox{-}boundary}}
+=
+\sum_{k=1}^{N} J_{b,k}
+=
+\sum_{k=1}^{N}
+w_{\mathrm{boundary}} e_{b,k}^{2}
+\]
+
+Total MPC objective
+\[
+J =
+J_{\mathrm{ref}}
++J_{\mathrm{lane\mbox{-}center}}
++J_{\mathrm{road\mbox{-}boundary}}
++J_{\mathrm{repulsive}}
++J_{\mathrm{control}}
+\]
+\end{flushleft}
+\end{column}
+
+\begin{column}{0.35\textwidth}
+Interpretation
+\begin{itemize}
+\setlength\itemsep{0.3em}
+\item Inside the safe road region: $J_{b,k}=0$.
+\item Near the road edge: cost grows smoothly.
+\item Outside the road: cost becomes large.
+\item Lane changes are allowed because this is a road-edge penalty, not a lane-edge penalty.
+\item Larger $w_{\mathrm{boundary}}$: stronger road-edge avoidance.
+\item Larger $m_b$: the cost starts earlier.
+\end{itemize}
+\end{column}
+\end{columns}
+\end{frame}
+
+\end{document}

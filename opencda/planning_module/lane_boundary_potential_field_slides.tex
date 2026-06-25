@@ -1,0 +1,160 @@
+\documentclass[aspectratio=169]{beamer}
+
+\usetheme{Madrid}
+\usecolortheme{default}
+\setbeamertemplate{navigation symbols}{}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+
+\begin{document}
+
+\begin{frame}{Step 1: Current MPC Cost Function}
+\small
+\begin{columns}[T,onlytextwidth]
+\begin{column}{0.64\textwidth}
+\begin{flushleft}
+\textbf{Total cost}\\[0.3em]
+$\displaystyle
+J_{\mathrm{total}}
+=
+J_{\mathrm{ref}}
++
+J_{\mathrm{lane\mbox{-}center}}
++
+J_{\mathrm{lane\mbox{-}boundary}}
++
+J_{\mathrm{repulsive}}
++
+J_{\mathrm{control}}
+$\\[0.8em]
+
+\textbf{Reference term}\\[0.3em]
+$\displaystyle
+J_{\mathrm{ref}}
+=
+\sum_{k=1}^{N}
+\Big[
+w_x(x_k-x_{\mathrm{ref}})^2
++
+w_y(y_k-y_{\mathrm{ref}})^2
++
+w_v(v_k-v_{\mathrm{ref}})^2
++
+w_\psi(\psi_k-\psi_{\mathrm{ref}})^2
+\Big]
+$\\[0.8em]
+
+\textbf{Repulsive term}\\[0.3em]
+$\displaystyle
+J_{\mathrm{repulsive}}
+=
+\sum_{k=1}^{N}\sum_{j=1}^{M}
+U_{\mathrm{rep}}^{(j)}(x_k,y_k,v_k,\psi_k)
+$\\[0.8em]
+
+\textbf{Control term}\\[0.3em]
+$\displaystyle
+J_{\mathrm{control}}
+=
+\sum_{k=0}^{N-1}
+\left[
+w_a\!\left(\frac{a_k-a_{k-1}}{\Delta t}\right)^2
++
+w_\delta\!\left(\frac{\delta_k-\delta_{k-1}}{\Delta t}\right)^2
+\right]
+$\\
+\end{flushleft}
+\end{column}
+
+\begin{column}{0.34\textwidth}
+\textbf{Variables}
+\begin{itemize}
+\item $N$: horizon length
+\item $M$: number of obstacles
+\item $x_k,y_k$: ego position
+\item $v_k$: ego speed
+\item $\psi_k$: ego heading
+\item $a_k$: acceleration input
+\item $\delta_k$: steering input
+\item $\Delta t$: MPC time step
+\item $x_{\mathrm{ref}},y_{\mathrm{ref}}$: target position
+\item $v_{\mathrm{ref}}$: target speed
+\item $\psi_{\mathrm{ref}}$: target heading
+\item $w_x,w_y,w_v,w_\psi$: reference weights
+\item $w_a,w_\delta$: control weights
+\item $U_{\mathrm{rep}}^{(j)}$: obstacle potential
+\end{itemize}
+\end{column}
+\end{columns}
+\end{frame}
+
+\begin{frame}{Step 2: Lane-Center and Lane-Boundary Terms}
+\small
+\begin{columns}[T,onlytextwidth]
+\begin{column}{0.64\textwidth}
+\begin{flushleft}
+\textbf{Signed lateral offset}\\[0.3em]
+$\displaystyle
+d_{\perp,k}
+=
+-\sin(\theta_{\mathrm{ref},k})(x_k-x_{\mathrm{ref},k})
++
+\cos(\theta_{\mathrm{ref},k})(y_k-y_{\mathrm{ref},k})
+$\\[0.8em]
+
+\textbf{Lane-center term}\\[0.3em]
+$\displaystyle
+J_{\mathrm{lane\mbox{-}center}}
+=
+\sum_{k=1}^{N}
+\left[
+w_c\,d_{\perp,k}^2
++
+w_{\psi,\mathrm{lane}}(\psi_k-\theta_{\mathrm{ref},k})^2
+\right]
+$\\[0.8em]
+
+\textbf{Safe region}\\[0.3em]
+$\displaystyle
+d_{\mathrm{safe},k}
+=
+\alpha \frac{w_{\mathrm{lane},k}}{2}
+$\\[0.8em]
+
+\textbf{Boundary excess}\\[0.3em]
+$\displaystyle
+e_{b,k}
+=
+\max\!\left(|d_{\perp,k}|-d_{\mathrm{safe},k},\,0\right)
+$\\[0.8em]
+
+\textbf{Lane-boundary term}\\[0.3em]
+$\displaystyle
+J_{\mathrm{lane\mbox{-}boundary}}
+=
+\sum_{k=1}^{N}
+w_b\,e_{b,k}^{2}
+$\\
+\end{flushleft}
+\end{column}
+
+\begin{column}{0.34\textwidth}
+\textbf{Variables}
+\begin{itemize}
+\item $x_{\mathrm{ref},k},y_{\mathrm{ref},k}$: lane center
+\item $\theta_{\mathrm{ref},k}$: lane heading
+\item $w_{\mathrm{lane},k}$: lane width
+\item $d_{\perp,k}$: lateral offset
+\item $d_{\mathrm{safe},k}$: safe half-width
+\item $e_{b,k}$: boundary excess
+\item $\alpha$: safe-region factor
+\item $w_c$: lane-center weight
+\item $w_{\psi,\mathrm{lane}}$: heading weight
+\item $w_b$: boundary weight
+\end{itemize}
+\end{column}
+\end{columns}
+\end{frame}
+
+\end{document}

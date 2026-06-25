@@ -1,0 +1,39 @@
+name: reroute_test
+runner_module: opencda_scenario.reroute_test.runner
+
+carla:
+  host: 127.0.0.1
+  port: 2000
+  timeout_s: 30.0
+  synchronous_mode: false
+  launch_if_needed: true
+  launch_timeout_s: 120.0
+  carla_root: /home/umd-user/carla_source/carla
+  launch_mode: ue4editor_map
+  rhi: -vulkan
+  launch_extra_args:
+    - "-quality-level=Low"
+    - "-ResX=800"
+    - "-ResY=600"
+  map: /Game/Carla/Maps/Town10HD_Opt
+
+runtime:
+  start_marker: start
+  end_marker: end
+  close_marker: close
+  sample_distance_m: 2.0
+  poll_interval_s: 0.5
+  draw_life_s: 1.25
+  route_debug_life_s: 3600.0
+
+planning:
+  waypoint_sample_distance_m: 2.0
+
+camera:
+  enabled: true
+  image_size_x: 840
+  image_size_y: 680
+  fov: 90.0
+  topdown:
+    height: 55.0
+    padding_m: 20.0
