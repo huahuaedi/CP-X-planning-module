@@ -1,6 +1,6 @@
 # CP-X Planning Module
 
-This repository is a cleaned OpenCDA-based CARLA planning stack focused on behavior planning, global routing, MPC trajectory planning, and evaluation metrics.
+This repository is a OpenCDA-based CARLA planning stack focused on behavior planning, global routing, MPC trajectory planning, and evaluation metrics.
 
 The main development target is CARLA 0.9.12 with Python 3.7 so that it can be aligned with the OpenCDA 0.9.12 ecosystem and later integrated with the MDrive planner interface.
 
@@ -55,7 +55,7 @@ Install or prepare:
 - Conda or Miniforge.
 - Python 3.7 environment.
 - A working CARLA PythonAPI egg matching Python 3.7.
-- Optional for CARLA-only scenarios, but required for SUMO-backed scenarios: SUMO, `netconvert`, and `traci`.
+- Optional: SUMO and `traci` for SUMO-based scenarios.
 
 This project was developed against a local CARLA path like:
 
@@ -80,22 +80,6 @@ Install dependencies:
 pip install -r requirements.txt
 pip install -r opencda/planning_module/requirements.txt
 pip install traci
-```
-
-For SUMO-backed `opencda_scenario` runs, install SUMO and set `SUMO_HOME`:
-
-```bash
-sudo apt update
-sudo apt install -y sumo sumo-tools
-export SUMO_HOME=/usr/share/sumo
-```
-
-Check that the SUMO tools are visible:
-
-```bash
-which sumo
-which sumo-gui
-which netconvert
 ```
 
 Set CARLA paths for CARLA 0.9.12:
@@ -132,7 +116,6 @@ conda activate opencda_planning
 export CARLA_ROOT="$HOME/Downloads/MDrive/carla912"
 export PYTHONPATH="$CARLA_ROOT/PythonAPI:$CARLA_ROOT/PythonAPI/carla:$CARLA_ROOT/PythonAPI/carla/dist/carla-0.9.12-py3.7-linux-x86_64.egg:$PYTHONPATH"
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
-export SUMO_HOME=/usr/share/sumo
 
 cd opencda/planning_module
 python main.py town10
@@ -157,14 +140,6 @@ python main.py town10_scenario_6
 ```
 
 The plain `town10` scenario can fall back to CARLA map spawn points if custom route anchors are missing from the loaded map.
-
-For a SUMO-backed scenario, run:
-
-```bash
-python main.py town10_sumo
-```
-
-SUMO-backed scenarios use `scripts/netconvert_carla.py` and `scripts/data/opendrive_netconvert.typ.xml` to generate SUMO network assets from CARLA OpenDRIVE files when `auto_generate_assets: true` is enabled in the scenario YAML. Keep those files in the repository.
 
 ## Tests
 
