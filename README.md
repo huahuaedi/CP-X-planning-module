@@ -15,7 +15,6 @@ The module has been tested locally with:
 - behavior-planner tests for future trajectory risk and finite-state lane-change behavior
 - evaluation-metrics tests
 
-The repository has been cleaned for GitHub upload. Runtime logs, checkpoints, cached Python files, cost plots, metrics outputs, and large unrelated OpenCDA assets are not committed.
 
 ## What This Repo Contains
 
@@ -29,11 +28,9 @@ The repository has been cleaned for GitHub upload. Runtime logs, checkpoints, ca
 - `opencda/planning_module/tests/`: unit tests for planner logic and scenario configuration.
 - `opencda/co_simulation/`: minimal SUMO bridge dependency used by `opencda_scenario`.
 
-Runtime artifacts such as logs, checkpoints, `__pycache__`, MPC cost CSV/PNG files, and metric outputs are intentionally excluded from the repository.
 
 ## Main Planning Changes
-
-The behavior planner was upgraded from a simple lane-change/no-lane-change decision into a finite-state-machine planner. The current lane-change states include:
+ The current lane-change states include:
 
 - `LANE_KEEP`
 - `PREPARE_LANE_CHANGE_LEFT`
