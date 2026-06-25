@@ -55,7 +55,7 @@ Install or prepare:
 - Conda or Miniforge.
 - Python 3.7 environment.
 - A working CARLA PythonAPI egg matching Python 3.7.
-- Optional: SUMO and `traci` for SUMO-based scenarios.
+- Optional for CARLA-only scenarios, but required for SUMO-backed scenarios: SUMO, `netconvert`, and `traci`.
 
 This project was developed against a local CARLA path like:
 
@@ -80,6 +80,22 @@ Install dependencies:
 pip install -r requirements.txt
 pip install -r opencda/planning_module/requirements.txt
 pip install traci
+```
+
+For SUMO-backed `opencda_scenario` runs, install SUMO and set `SUMO_HOME`:
+
+```bash
+sudo apt update
+sudo apt install -y sumo sumo-tools
+export SUMO_HOME=/usr/share/sumo
+```
+
+Check that the SUMO tools are visible:
+
+```bash
+which sumo
+which sumo-gui
+which netconvert
 ```
 
 Set CARLA paths for CARLA 0.9.12:
@@ -116,6 +132,7 @@ conda activate opencda_planning
 export CARLA_ROOT="$HOME/Downloads/MDrive/carla912"
 export PYTHONPATH="$CARLA_ROOT/PythonAPI:$CARLA_ROOT/PythonAPI/carla:$CARLA_ROOT/PythonAPI/carla/dist/carla-0.9.12-py3.7-linux-x86_64.egg:$PYTHONPATH"
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+export SUMO_HOME=/usr/share/sumo
 
 cd opencda/planning_module
 python main.py town10
@@ -140,6 +157,14 @@ python main.py town10_scenario_6
 ```
 
 The plain `town10` scenario can fall back to CARLA map spawn points if custom route anchors are missing from the loaded map.
+
+For a SUMO-backed scenario, run:
+
+```bash
+python main.py town10_sumo
+```
+
+SUMO-backed scenarios use `scripts/netconvert_carla.py` and `scripts/data/opendrive_netconvert.typ.xml` to generate SUMO network assets from CARLA OpenDRIVE files when `auto_generate_assets: true` is enabled in the scenario YAML.
 
 ## Tests
 
@@ -175,6 +200,58 @@ Scenario runs can generate:
 - `planning_metrics_timeseries.csv`
 - `behavior_planner/cp_message.json`
 - `carla_launch.log`
+
+These are runtime artifacts and should not be committed.
+
+## Common Issues
+
+### `ImportError: libtiff.so.5`
+
+Install an older libtiff runtime inside the conda environment:
+
+```bash
+conda install -c conda-forge "libtiff=4.4.0" -y
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+```
+
+### `libomp.so.5: cannot open shared object file`
+
+Install OpenMP runtime and add a compatibility symlink if needed:
+
+```bash
+conda install -c conda-forge llvm-openmp -y
+ln -s "$CONDA_PREFIX/lib/libomp.so" "$CONDA_PREFIX/lib/libomp.so.5"
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+```
+
+### `Anchor 'cav_spawn' was not found`
+
+The plain CARLA `Town10HD_Opt` map does not contain custom route anchor cubes. The runner includes a fallback that selects CARLA map spawn points when these anchors are missing.
+
+### `OpenCDA netconvert helper was not found`
+
+SUMO-backed scenarios need:
+
+```text
+scripts/netconvert_carla.py
+scripts/data/opendrive_netconvert.typ.xml
+```
+
+Keep these files in the repository. They are required for automatic SUMO asset generation.
+
+### `please declare environment variable 'SUMO_HOME'`
+
+Set:
+
+```bash
+export SUMO_HOME=/usr/share/sumo
+```
+
+## Known Limitations
+
+- CARLA 0.9.12 + Python 3.7 is the recommended setup. CARLA 0.9.16 + Python 3.10 is not the current target for this cleaned repo.
+- SUMO scenarios may require extra local SUMO/netconvert setup and valid `.xodr` paths.
+- The MDrive planner is not integrated yet; this repository keeps the current rule-based behavior planner plus MPC stack and documents the intended adapter path.
 
 
 ## License
