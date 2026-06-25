@@ -164,7 +164,7 @@ For a SUMO-backed scenario, run:
 python main.py town10_sumo
 ```
 
-SUMO-backed scenarios use `scripts/netconvert_carla.py` and `scripts/data/opendrive_netconvert.typ.xml` to generate SUMO network assets from CARLA OpenDRIVE files when `auto_generate_assets: true` is enabled in the scenario YAML.
+SUMO-backed scenarios use `scripts/netconvert_carla.py` and `scripts/data/opendrive_netconvert.typ.xml` to generate SUMO network assets from CARLA OpenDRIVE files when `auto_generate_assets: true` is enabled in the scenario YAML. Keep those files in the repository.
 
 ## Tests
 
@@ -200,58 +200,6 @@ Scenario runs can generate:
 - `planning_metrics_timeseries.csv`
 - `behavior_planner/cp_message.json`
 - `carla_launch.log`
-
-These are runtime artifacts and should not be committed.
-
-## Common Issues
-
-### `ImportError: libtiff.so.5`
-
-Install an older libtiff runtime inside the conda environment:
-
-```bash
-conda install -c conda-forge "libtiff=4.4.0" -y
-export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
-```
-
-### `libomp.so.5: cannot open shared object file`
-
-Install OpenMP runtime and add a compatibility symlink if needed:
-
-```bash
-conda install -c conda-forge llvm-openmp -y
-ln -s "$CONDA_PREFIX/lib/libomp.so" "$CONDA_PREFIX/lib/libomp.so.5"
-export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
-```
-
-### `Anchor 'cav_spawn' was not found`
-
-The plain CARLA `Town10HD_Opt` map does not contain custom route anchor cubes. The runner includes a fallback that selects CARLA map spawn points when these anchors are missing.
-
-### `OpenCDA netconvert helper was not found`
-
-SUMO-backed scenarios need:
-
-```text
-scripts/netconvert_carla.py
-scripts/data/opendrive_netconvert.typ.xml
-```
-
-Keep these files in the repository. They are required for automatic SUMO asset generation.
-
-### `please declare environment variable 'SUMO_HOME'`
-
-Set:
-
-```bash
-export SUMO_HOME=/usr/share/sumo
-```
-
-## Known Limitations
-
-- CARLA 0.9.12 + Python 3.7 is the recommended setup. CARLA 0.9.16 + Python 3.10 is not the current target for this cleaned repo.
-- SUMO scenarios may require extra local SUMO/netconvert setup and valid `.xodr` paths.
-- The MDrive planner is not integrated yet; this repository keeps the current rule-based behavior planner plus MPC stack and documents the intended adapter path.
 
 
 ## License
