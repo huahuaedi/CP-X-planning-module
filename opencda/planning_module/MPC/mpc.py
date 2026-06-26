@@ -372,9 +372,22 @@ class MPC:
                 )
             ),
         )
-        self.road_boundary_margin_m = max(
+        configured_road_boundary_margin_m = max(
             0.0,
             float(road_boundary_cfg.get("margin_m", road_boundary_cfg.get("margin", 0.5))),
+        )
+        footprint_extra_margin_m = max(
+            0.0,
+            float(road_boundary_cfg.get("footprint_extra_margin_m", 0.2)),
+        )
+        footprint_margin_m = 0.5 * float(self.ego_width_m) + float(footprint_extra_margin_m)
+        self.road_boundary_margin_m = max(
+            float(configured_road_boundary_margin_m),
+            float(footprint_margin_m),
+        )
+        self.road_boundary_max_slack_m = max(
+            0.0,
+            float(road_boundary_cfg.get("max_slack_m", 0.25)),
         )
         self.lane_keep_boundary_weight = float(self.road_boundary_weight)
         self.lane_keep_safe_region_alpha = min(
@@ -1947,8 +1960,14 @@ class MPC:
                         float(road_margin_m) - float(road_right_width_m) - float(c_coef) + float(road_center_offset_m),
                         np.inf,
                     )
-                    add_constraint({left_slack_idx: 1.0}, 0.0, np.inf)
-                    add_constraint({right_slack_idx: 1.0}, 0.0, np.inf)
+                    road_max_slack_m = float(getattr(self, "road_boundary_max_slack_m", np.inf))
+                    road_slack_upper = (
+                        float(road_max_slack_m)
+                        if math.isfinite(float(road_max_slack_m)) and float(road_max_slack_m) > 0.0
+                        else np.inf
+                    )
+                    add_constraint({left_slack_idx: 1.0}, 0.0, road_slack_upper)
+                    add_constraint({right_slack_idx: 1.0}, 0.0, road_slack_upper)
 
         # --- Objective: repulsive potential field Cost_Repulsive ---
         # Super-ellipsoid obstacle cost from `super_ellipsoid.py`, approximated

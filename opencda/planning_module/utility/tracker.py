@@ -324,28 +324,78 @@ class Tracker:
         latest_sample: Mapping[str, float],
         future_time_s: float,
     ) -> Dict[str, float]:
-        """
-        Intent:
-            Predict one future sample with constant velocity + heading fallback.
-
-        Inputs:
-            latest_sample:
-                mapping with x, y, v, psi values at current time.
-            future_time_s:
-                float [s], prediction time from current sample.
-
-        Output:
-            dict[str, float] with fields t_s, x, y, v, psi.
-        """
-
+        """Predict one future sample with constant velocity + heading (CV)."""
         x0 = float(latest_sample["x"])
         y0 = float(latest_sample["y"])
         v0 = float(latest_sample["v"])
         psi0 = float(latest_sample["psi"])
-
         x_pred = x0 + v0 * math.cos(psi0) * future_time_s
         y_pred = y0 + v0 * math.sin(psi0) * future_time_s
-        return {"t_s": future_time_s, "x": x_pred, "y": y_pred, "v": v0, "psi": psi0}
+        return {
+            "t_s": future_time_s,
+            "x": x_pred,
+            "y": y_pred,
+            "v": v0,
+            "psi": psi0,
+            "yaw_rate_rad_s": 0.0,
+        }
+
+    @staticmethod
+    def _estimate_yaw_rate(history: List[Dict[str, float]]) -> float:
+        """Estimate yaw rate [rad/s] from history using finite differences.
+
+        Uses the two most recent samples so the estimate reflects current
+        turning state.  Wraps the angle delta to (-pi, pi] before dividing
+        by the time interval to handle heading wrap-around correctly.
+        """
+        if len(history) < 2:
+            return 0.0
+        s0 = history[-2]
+        s1 = history[-1]
+        dt = float(s1["timestamp_s"]) - float(s0["timestamp_s"])
+        if dt < 1.0e-6:
+            return 0.0
+        dpsi = float(s1["psi"]) - float(s0["psi"])
+        dpsi = math.atan2(math.sin(dpsi), math.cos(dpsi))
+        return float(dpsi / dt)
+
+    @staticmethod
+    def _ctrv_predict(
+        latest_sample: Mapping[str, float],
+        future_time_s: float,
+        *,
+        yaw_rate_rad_s: float = 0.0,
+    ) -> Dict[str, float]:
+        """Predict one future sample with CTRV (Constant Turn Rate & Velocity).
+
+        Degenerates to straight-line CV when |yaw_rate| < 1e-4 rad/s to avoid
+        divide-by-zero.  This is the standard model used in production tracking
+        systems (Apollo, Autoware, SUMO) for short-horizon obstacle prediction.
+        """
+        x0 = float(latest_sample["x"])
+        y0 = float(latest_sample["y"])
+        v0 = float(latest_sample["v"])
+        psi0 = float(latest_sample["psi"])
+        omega = float(yaw_rate_rad_s)
+        t = float(future_time_s)
+
+        if abs(omega) < 1.0e-4:
+            x_pred = x0 + v0 * math.cos(psi0) * t
+            y_pred = y0 + v0 * math.sin(psi0) * t
+            psi_pred = psi0
+        else:
+            x_pred = x0 + (v0 / omega) * (math.sin(psi0 + omega * t) - math.sin(psi0))
+            y_pred = y0 + (v0 / omega) * (-math.cos(psi0 + omega * t) + math.cos(psi0))
+            psi_pred = psi0 + omega * t
+
+        return {
+            "t_s": t,
+            "x": x_pred,
+            "y": y_pred,
+            "v": v0,
+            "psi": float(psi_pred),
+            "yaw_rate_rad_s": float(omega),
+        }
 
     def predict(
         self,
@@ -390,9 +440,15 @@ class Tracker:
             prediction: List[Dict[str, float]] = []
 
             if len(history) < self.config.min_points_for_polyfit:
-                for step_idx in range(steps):
-                    t_future_s = (step_idx + 1) * step_dt_s
-                    prediction.append(self._fallback_predict(latest, t_future_s))
+                if len(history) >= 2:
+                    yaw_rate = self._estimate_yaw_rate(history)
+                    for step_idx in range(steps):
+                        t_future_s = (step_idx + 1) * step_dt_s
+                        prediction.append(self._ctrv_predict(latest, t_future_s, yaw_rate_rad_s=yaw_rate))
+                else:
+                    for step_idx in range(steps):
+                        t_future_s = (step_idx + 1) * step_dt_s
+                        prediction.append(self._fallback_predict(latest, t_future_s))
                 prediction_by_obstacle_id[obstacle_id] = prediction
                 continue
 
@@ -443,9 +499,10 @@ class Tracker:
                     )
             except Exception:
                 prediction = []
+                yaw_rate_fallback = self._estimate_yaw_rate(history) if len(history) >= 2 else 0.0
                 for step_idx in range(steps):
                     t_future_s = (step_idx + 1) * step_dt_s
-                    prediction.append(self._fallback_predict(latest, t_future_s))
+                    prediction.append(self._ctrv_predict(latest, t_future_s, yaw_rate_rad_s=yaw_rate_fallback))
 
             prediction_by_obstacle_id[obstacle_id] = prediction
 

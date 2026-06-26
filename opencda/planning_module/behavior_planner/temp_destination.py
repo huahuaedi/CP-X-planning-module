@@ -370,7 +370,10 @@ def _walk_forward(
         )
     cumulative = 0.0
     while cumulative < distance_m:
-        candidates = wp.next(step_m)
+        next_fn = getattr(wp, "next", None)
+        if next_fn is None:
+            break
+        candidates = next_fn(step_m)
         if not candidates:
             break
         if len(candidates) == 1:
@@ -1136,10 +1139,22 @@ def _build_route_reference_samples_from_anchor(
                 float(next_x_ref_m) - float(x_ref_m),
             )
             use_exact_route_xy = bool(follow_route_lane)
+            # Blend CARLA waypoint tangent (accurate road direction) with the
+            # route chord (stable, noise-free).  Pure chord biases heading
+            # toward the outside of curves causing the vehicle to run wide;
+            # pure waypoint rotation.yaw can have CARLA discretization jumps
+            # that amplify into steering oscillation at high q_psi.
+            # 65 % waypoint tangent + 35 % chord is a good compromise.
+            _wp_heading_raw = float(math.radians(sample_wp.transform.rotation.yaw))
+            _d_heading = math.atan2(
+                math.sin(_wp_heading_raw - route_heading_rad),
+                math.cos(_wp_heading_raw - route_heading_rad),
+            )
+            blended_heading_rad = route_heading_rad + 0.65 * _d_heading
             samples.append({
                 "x_ref_m": float(x_ref_m) if use_exact_route_xy else float(sample_wp.transform.location.x),
                 "y_ref_m": float(y_ref_m) if use_exact_route_xy else float(sample_wp.transform.location.y),
-                "heading_rad": float(route_heading_rad) if use_exact_route_xy else float(math.radians(sample_wp.transform.rotation.yaw)),
+                "heading_rad": float(blended_heading_rad),
                 "lane_id": (
                     int(target_lane_id)
                     if not bool(follow_route_lane) and target_lane_id is not None

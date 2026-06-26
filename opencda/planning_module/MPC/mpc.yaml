@@ -98,6 +98,12 @@ mpc:
     lane_change_completion_lateral_threshold_m: 0.75
     lane_change_completion_heading_threshold_rad: 0.20
 
+    # Curvature-aware speed cap used by the runner before MPC solve.
+    # Lower -> more conservative cornering and less boundary pressure.
+    curve_lateral_accel_limit_mps2: 1.3
+    curve_speed_cap_min_curvature: 0.015
+    curve_speed_cap_sample_count: 8
+
     # Legacy internal CARLA traffic-light stopping logic.
     #
     # Keep this disabled for the CP-message flow: the planner should not search
@@ -383,7 +389,7 @@ mpc:
       #   w0 * q_psi * wrap(psi - psi_lane)^2
       # Increase -> stronger lane-heading alignment.
       # Decrease -> lane-center cost behaves more like pure lateral position.
-      q_psi: 1.5 #10  #2
+      q_psi: 2.0 #10  #2  (1.5 caused running-wide; 3.0 caused oscillation; 2.0 is the stable midpoint)
 
     road_boundary:
       # Road = all same-direction CARLA Driving lanes around the reference lane.
@@ -393,7 +399,11 @@ mpc:
       w_boundary: 10000.0 #10000
 
       # Zero cost while both road-edge clearances are above this margin [m].
-      margin_m: 0.5
+      margin_m: 0.6  # 0.5 was too permissive; 0.8 squeezed the feasible band causing oscillation; 0.6 is the balance
+
+      # Hard-ish cap on boundary slack [m]. Keeps severe boundary violations
+      # from being accepted as merely high-cost soft-constraint solutions.
+      max_slack_m: 0.25
 
     control:
       # Global weight on control smoothness.

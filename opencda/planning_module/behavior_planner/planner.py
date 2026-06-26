@@ -472,6 +472,7 @@ class RuleBasedBehaviorPlanner:
         global_route_points: Sequence[Sequence[float]] | None = None,
         nearest_front_obstacles_by_lane: Mapping[int, Mapping[str, object]] | None = None,
         lane_prediction_risks: Mapping[int, Mapping[str, object]] | None = None,
+        preferred_target_lane_id: int | None = None,
     ) -> Dict[str, Any]:
         """
         Run one planning cycle.
@@ -506,6 +507,10 @@ class RuleBasedBehaviorPlanner:
                                  strongest comfortable/allowed braking used
                                  for stop feasibility
         ego_in_junction      : whether ego is physically inside a junction
+        preferred_target_lane_id : optional lane-level candidate selected by
+                                 the strategy layer. The FSM still validates
+                                 safety and prediction risk before preparing
+                                 or executing a lane change.
 
         Returns
         -------
@@ -749,8 +754,8 @@ class RuleBasedBehaviorPlanner:
             )
 
         # -------------------------------------------------------------- #
-        # NORMAL mode: follow the route lane unless a front blockage      #
-        # forces a temporary adjacent-lane detour.                        #
+        # NORMAL mode: candidate selector can request a preferred target  #
+        # lane, but the FSM still gates it through safety and prediction. #
         # -------------------------------------------------------------- #
         route_lane_id = self._preferred_route_lane_id(
             route_optimal_lane_id=route_optimal_lane_id,
@@ -758,6 +763,34 @@ class RuleBasedBehaviorPlanner:
             fallback_lane_id=int(ego_lane_id),
         )
         current_selected_lane_id = int(self._selected_lane_id or ego_lane_id)
+        candidate_target_lane_id = None
+        if preferred_target_lane_id is not None:
+            try:
+                candidate_target_lane_id = int(preferred_target_lane_id)
+            except Exception:
+                candidate_target_lane_id = None
+        if (
+            candidate_target_lane_id is not None
+            and int(candidate_target_lane_id) in available
+            and int(candidate_target_lane_id) != int(current_selected_lane_id)
+        ):
+            candidate_debug = dict(traffic_light_debug or {})
+            candidate_debug["candidate_target_lane_id"] = int(candidate_target_lane_id)
+            candidate_debug["candidate_selector_active"] = True
+            return self._start_one_step_lane_change(
+                ego_lane_id=int(ego_lane_id),
+                desired_lane_id=int(candidate_target_lane_id),
+                available_lane_ids=available,
+                lane_safety_scores=lane_safety_scores,
+                min_target_lane_safety=self._target_lane_safety_threshold,
+                lane_prediction_risks=lane_prediction_risks,
+                traffic_light_debug=candidate_debug,
+            )
+
+        # -------------------------------------------------------------- #
+        # NORMAL mode fallback: follow the route lane unless a front      #
+        # blockage forces a temporary adjacent-lane detour.               #
+        # -------------------------------------------------------------- #
         route_lane_score = float(lane_safety_scores.get(int(route_lane_id), 0.0))
         route_lane_is_unsafe = (
             float(route_lane_score) < float(self._optimal_lane_unsafe_threshold)

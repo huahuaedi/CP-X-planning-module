@@ -141,6 +141,81 @@ python main.py town10_scenario_6
 
 The plain `town10` scenario can fall back to CARLA map spawn points if custom route anchors are missing from the loaded map.
 
+## Scenarios
+
+There are two families of scenarios. Both are launched with `python main.py <name>` from `opencda/planning_module/`.
+
+### `carla_scenario/` — Pure CARLA (no SUMO, no dynamic traffic)
+
+These scenarios use only CARLA actors. Traffic is either static or scripted. They are good for validating a single planning feature in isolation.
+
+| Scenario | Difficulty | What it tests | Map |
+|----------|-----------|---------------|-----|
+| `town10` | ⭐ Easy | Baseline lane-keeping and MPC trajectory tracking with static obstacle cubes on Town10. Start here. | Town10HD_Opt |
+| `traffic_light_stop` | ⭐⭐ Medium | Stop-line detection, red-light compliance, and smooth deceleration profile at a signalised intersection. | Town10HD_Opt |
+| `roadway_hazard` | ⭐⭐ Medium | Obstacle avoidance when a parked vehicle partially blocks the lane. Tests lane-change trigger and re-merge. | Town10HD_Opt |
+| `high_level_route_planning` | ⭐⭐⭐ Hard | Multi-waypoint route with a scripted workzone marker. Validates global re-routing and CP-message handoff. | Town10HD_Opt |
+| `workzone` | ⭐⭐⭐ Hard | Narrow construction-zone passage on a custom map. Tests tight boundary constraints in the MPC. | Custom (workzone) |
+| `custom_map2` | ⭐⭐⭐ Hard | Free-drive on a custom map with no pre-configured route anchors. Requires the custom map to be loaded in CARLA. | Custom (custom_map2) |
+
+> `workzone` and `custom_map2` require their custom `.umap` files to be imported into the CARLA UE4 content folder. They will fail to launch if the map asset is missing.
+
+### `opencda_scenario/` — CARLA + SUMO (dynamic NPC traffic and pedestrians)
+
+These scenarios use the SUMO co-simulation bridge to spawn realistic background traffic. SUMO must be running (the runner starts it automatically if `sumo.enabled: true`).
+
+| Scenario | Difficulty | What it tests |
+|----------|-----------|---------------|
+| `town10_scenario_1` | ⭐⭐ Medium | Town10 with NPC vehicles and pedestrians. NPCs activate immediately at scenario start. |
+| `town10_scenario_2` | ⭐⭐ Medium | Same as scenario_1 but NPCs activate only when ego is within 20 m — tests late-appearing actors. |
+| `town10_scenario_3` | ⭐⭐⭐ Hard | NPCs activate at 50 m range. Tests longer-horizon prediction and earlier lane-change decisions. |
+| `town10_scenario_4` | ⭐⭐⭐ Hard | Intersection-focused route with triggered NPC vehicles. Tests gap-acceptance and yield behaviour. |
+| `town10_scenario_5` | ⭐⭐⭐⭐ Very Hard | Adds scripted hazard vehicles (dark Tesla Model 3) that cut into the ego lane at 60 m trigger range, on top of SUMO traffic and pedestrians. |
+| `town10_scenario_6` | ⭐⭐⭐⭐ Very Hard | Same hazard-vehicle setup as scenario_5 on a different Town10 route with more turns. |
+
+**Recommended test order:**
+1. `town10` — confirm the MPC loop works
+2. `traffic_light_stop` — confirm stop-line logic
+3. `roadway_hazard` — confirm obstacle avoidance
+4. `town10_scenario_1` — add live traffic
+5. `town10_scenario_5` or `6` — full stress test
+
+### Analysing results
+
+After any run, output files are written to the scenario directory. Use the bundled analysis script:
+
+```bash
+cd opencda/planning_module
+
+# analyse the most recent run
+python analyze_run.py
+
+# analyse a specific run
+python analyze_run.py opencda_scenario/town10_scenario_5
+
+# compare multiple runs side by side
+python analyze_run.py --compare \
+  opencda_scenario/town10_scenario_1 \
+  opencda_scenario/town10_scenario_5 \
+  opencda_scenario/town10_scenario_6
+
+# list all runs that have result files
+python analyze_run.py --list
+```
+
+The script produces `analysis_report.txt` (pass/warn/fail for each metric) and `analysis_plots.png` (speed, TTC, DRAC, MPC cost terms, solver status, ego trajectory). The `--compare` flag produces an additional `comparison_plots.png` bar chart across all selected scenarios.
+
+Key metrics to watch:
+
+| Metric | Target | Warning |
+|--------|--------|---------|
+| Collisions | 0 | > 0 |
+| Min TTC (s) | > 3 s | < 2 s |
+| Max DRAC (m/s²) | < 3 | > 4 |
+| Boundary breach % | < 5 % | > 10 % |
+| MPC success rate | > 97 % | < 90 % |
+| Max solve time (ms) | < 30 ms | > 50 ms |
+
 ## Tests
 
 Run the lightweight tests used for the current cleanup:
