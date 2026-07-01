@@ -19,6 +19,12 @@ def normalize_signal_state(signal_state: object) -> str:
     raw_name = (str(signal_state) if signal_state is not None else "").strip().upper()
     if "." in raw_name:
         raw_name = raw_name.rsplit(".", 1)[-1]
+    if raw_name == "2":
+        return "green"
+    if raw_name == "1":
+        return "yellow"
+    if raw_name == "0":
+        return "red"
     if raw_name in {"GREEN", "GO"}:
         return "green"
     if raw_name in {"YELLOW", "AMBER"}:
@@ -129,6 +135,40 @@ def _signal_distance_from_actor(
             float(ego_location.y) - float(actor_location.y),
         )
     )
+
+
+def _signal_forward_from_actor(
+    *,
+    ego_transform,
+    actor: Any,
+) -> float | None:
+    ego_location = getattr(ego_transform, "location", None)
+    ego_rotation = getattr(ego_transform, "rotation", None)
+    actor_transform = _actor_transform(actor)
+    actor_location = getattr(actor_transform, "location", None)
+    if ego_location is None or ego_rotation is None or actor_location is None:
+        return None
+    ego_yaw_rad = math.radians(float(getattr(ego_rotation, "yaw", 0.0)))
+    dx_m = float(actor_location.x) - float(ego_location.x)
+    dy_m = float(actor_location.y) - float(ego_location.y)
+    return float(math.cos(ego_yaw_rad) * dx_m + math.sin(ego_yaw_rad) * dy_m)
+
+
+def _signal_lateral_from_actor(
+    *,
+    ego_transform,
+    actor: Any,
+) -> float | None:
+    ego_location = getattr(ego_transform, "location", None)
+    ego_rotation = getattr(ego_transform, "rotation", None)
+    actor_transform = _actor_transform(actor)
+    actor_location = getattr(actor_transform, "location", None)
+    if ego_location is None or ego_rotation is None or actor_location is None:
+        return None
+    ego_yaw_rad = math.radians(float(getattr(ego_rotation, "yaw", 0.0)))
+    dx_m = float(actor_location.x) - float(ego_location.x)
+    dy_m = float(actor_location.y) - float(ego_location.y)
+    return float(-math.sin(ego_yaw_rad) * dx_m + math.cos(ego_yaw_rad) * dy_m)
 
 
 def _route_sample_hint_m(cum_dists: Sequence[float]) -> float:
@@ -355,6 +395,14 @@ def find_relevant_signal_context(
             ego_transform=ego_transform,
             actor=candidate_actor,
         )
+        signal_forward_m = _signal_forward_from_actor(
+            ego_transform=ego_transform,
+            actor=candidate_actor,
+        )
+        signal_lateral_m = _signal_lateral_from_actor(
+            ego_transform=ego_transform,
+            actor=candidate_actor,
+        )
         match_distance_m = float("inf")
         signal_source = "actor_position_match"
         stop_waypoint_match_rank = None
@@ -420,6 +468,10 @@ def find_relevant_signal_context(
         elif signal_source == "actor_position_match":
             if float(match_distance_m) > float(max_actor_position_match_distance_m):
                 continue
+            if signal_forward_m is not None and float(signal_forward_m) < -2.0:
+                continue
+            if signal_lateral_m is not None and abs(float(signal_lateral_m)) > 8.0:
+                continue
 
         candidate_context = {
             "signal_found": True,
@@ -435,6 +487,8 @@ def find_relevant_signal_context(
             "signal_match_distance_m": (
                 None if not math.isfinite(match_distance_m) else float(match_distance_m)
             ),
+            "signal_forward_m": signal_forward_m,
+            "signal_lateral_m": signal_lateral_m,
             "signal_match_rank": stop_waypoint_match_rank,
             "signal_actor": candidate_actor,
         }
@@ -442,9 +496,13 @@ def find_relevant_signal_context(
             best_candidate = candidate_context
             continue
 
+        # CARLA's vehicle association is the most reliable answer once the ego
+        # is in a traffic-light trigger volume.  Stop-waypoint matching can
+        # accidentally choose a sibling light at dense intersections, which
+        # leaves a stale red visible after the ego-associated light turns green.
         source_priority = {
-            "stop_waypoint_match": 0,
-            "ego_vehicle_association": 1,
+            "ego_vehicle_association": 0,
+            "stop_waypoint_match": 1,
             "actor_position_match": 2,
         }
         current_priority = (

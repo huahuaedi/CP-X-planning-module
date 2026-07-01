@@ -126,6 +126,65 @@ class RuleBasedBehaviorPlannerIntersectionTests(unittest.TestCase):
         self.assertEqual(result["decision"], "lane_follow")
         self.assertEqual(int(result["target_lane_id"]), 1)
 
+    def test_candidate_evaluation_reports_selected_detour_and_rejections(self):
+        planner = RuleBasedBehaviorPlanner(
+            hysteresis_delta=0.05,
+            lane_change_target_safety_threshold=0.10,
+        )
+
+        result = planner.update(
+            lane_safety_scores={1: 0.0, 2: 0.9, 3: 0.05},
+            ego_lane_id=1,
+            ego_lateral_offset_m=0.0,
+            ego_heading_error_rad=0.0,
+            mode="NORMAL",
+            route_optimal_lane_id=1,
+        )
+
+        self.assertEqual(result["decision"], "lane_change_left")
+        self.assertEqual(result["selected_candidate"], "lane_change_left_to_2")
+        self.assertIn("candidate_scores", result)
+        self.assertTrue(
+            any(
+                candidate["name"] == "lane_change_left_to_2"
+                and candidate["status"] == "selected"
+                for candidate in result["candidate_scores"]
+            )
+        )
+        self.assertTrue(
+            any(
+                candidate["name"] == "lane_change_left_to_3"
+                and candidate["reason"] in {"not_adjacent", "target_lane_safety"}
+                for candidate in result["rejected_candidates"]
+            )
+        )
+
+    def test_candidate_evaluation_rejects_prediction_risky_lane_change(self):
+        planner = RuleBasedBehaviorPlanner(
+            hysteresis_delta=0.05,
+            lane_change_target_safety_threshold=0.10,
+        )
+
+        result = planner.update(
+            lane_safety_scores={1: 0.0, 2: 0.9},
+            ego_lane_id=1,
+            ego_lateral_offset_m=0.0,
+            ego_heading_error_rad=0.0,
+            mode="NORMAL",
+            route_optimal_lane_id=1,
+            lane_prediction_risks={2: {"risk": True, "min_ttc_s": 1.1}},
+        )
+
+        self.assertEqual(result["decision"], "lane_follow")
+        self.assertEqual(result["selected_candidate"], "lane_keep")
+        self.assertTrue(
+            any(
+                candidate["name"] == "lane_change_left_to_2"
+                and candidate["reason"] == "prediction_risk"
+                for candidate in result["rejected_candidates"]
+            )
+        )
+
     def test_normal_mode_does_not_leave_optimal_lane_until_it_drops_below_unsafe_threshold(self):
         planner = RuleBasedBehaviorPlanner(
             hysteresis_delta=0.05,

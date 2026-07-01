@@ -348,6 +348,104 @@ class TempDestinationModeTests(unittest.TestCase):
 
         self.assertIs(route_wp_result, route_wp)
 
+    def test_lane_follow_never_snaps_to_target_lane_without_lane_change_decision(self):
+        right_wp_0 = _DummyWaypoint(road_id=200, is_junction=False, x_m=0.0, y_m=0.0, yaw_deg=90.0, lane_id=1)
+        right_wp_1 = _DummyWaypoint(road_id=200, is_junction=False, x_m=0.0, y_m=4.0, yaw_deg=90.0, lane_id=1)
+        left_wp_0 = _DummyWaypoint(road_id=200, is_junction=False, x_m=-3.5, y_m=0.0, yaw_deg=90.0, lane_id=2)
+        left_wp_1 = _DummyWaypoint(road_id=200, is_junction=False, x_m=-3.5, y_m=4.0, yaw_deg=90.0, lane_id=2)
+        right_wp_0.set_next(right_wp_1)
+        right_wp_1.set_next()
+        left_wp_0.set_next(left_wp_1)
+        left_wp_1.set_next()
+        right_wp_0.set_lateral(left=left_wp_0)
+        left_wp_0.set_lateral(right=right_wp_0)
+        world_map = _DummyMap(left_wp=left_wp_0, straight_wp=right_wp_1, ego_wp=right_wp_0)
+        ego_transform = types.SimpleNamespace(location=right_wp_0.transform.location, rotation=right_wp_0.transform.rotation)
+
+        destination = compute_temp_destination(
+            world_map=world_map,
+            carla=_DummyCarla,
+            ego_transform=ego_transform,
+            target_lane_id=2,
+            decision="lane_follow",
+            lookahead_m=4.0,
+            target_v_mps=5.0,
+            global_route_points=[[0.0, 0.0], [-3.5, 4.0]],
+            next_macro_maneuver="left",
+            mode_override="INTERSECTION",
+            follow_global_route_lane=False,
+        )
+
+        self.assertAlmostEqual(float(destination[0]), 0.0, places=3)
+        self.assertAlmostEqual(float(destination[1]), 4.0, places=3)
+        self.assertEqual(int(destination[4]), 1)
+
+    def test_lane_follow_temp_destination_ignores_global_route_when_route_follow_is_false(self):
+        ego_wp = _DummyWaypoint(road_id=201, is_junction=False, x_m=0.0, y_m=0.0, yaw_deg=90.0, lane_id=1)
+        straight_wp = _DummyWaypoint(road_id=201, is_junction=False, x_m=0.0, y_m=4.0, yaw_deg=90.0, lane_id=1)
+        route_left_wp = _DummyWaypoint(road_id=202, is_junction=False, x_m=-3.5, y_m=4.0, yaw_deg=135.0, lane_id=2)
+        ego_wp.set_next(straight_wp)
+        straight_wp.set_next()
+        route_left_wp.set_next()
+        world_map = _DummyMap(left_wp=route_left_wp, straight_wp=straight_wp, ego_wp=ego_wp)
+        ego_transform = types.SimpleNamespace(location=ego_wp.transform.location, rotation=ego_wp.transform.rotation)
+
+        destination = compute_temp_destination(
+            world_map=world_map,
+            carla=_DummyCarla,
+            ego_transform=ego_transform,
+            target_lane_id=1,
+            decision="lane_follow",
+            lookahead_m=4.0,
+            target_v_mps=5.0,
+            global_route_points=[[0.0, 0.0], [-3.5, 2.0], [-3.5, 4.0]],
+            next_macro_maneuver="left",
+            mode_override="INTERSECTION",
+            follow_global_route_lane=False,
+        )
+
+        self.assertAlmostEqual(float(destination[0]), 0.0, places=3)
+        self.assertAlmostEqual(float(destination[1]), 4.0, places=3)
+        self.assertEqual(int(destination[4]), 1)
+        self.assertGreater(float(destination[5]), 0.5)
+
+    def test_intersection_temp_destination_uses_route_geometry_when_projection_prefers_wrong_waypoint(self):
+        ego_wp = _DummyWaypoint(road_id=133, is_junction=False, x_m=0.0, y_m=0.0, yaw_deg=90.0, lane_id=1)
+        junction_wp = _DummyWaypoint(road_id=133, is_junction=True, x_m=0.0, y_m=2.0, yaw_deg=90.0, lane_id=1)
+        route_wp = _DummyWaypoint(road_id=134, is_junction=False, x_m=0.0, y_m=4.0, yaw_deg=90.0, lane_id=1)
+        wrong_wp = _DummyWaypoint(road_id=135, is_junction=True, x_m=-2.0, y_m=4.0, yaw_deg=135.0, lane_id=9)
+        ego_wp.set_next(junction_wp)
+        junction_wp.set_next(route_wp, wrong_wp)
+        route_wp.set_next()
+        wrong_wp.set_next()
+        world_map = _BadJunctionProjectionMap(
+            ego_wp=ego_wp,
+            junction_wp=junction_wp,
+            route_wp=route_wp,
+            wrong_wp=wrong_wp,
+        )
+        ego_transform = types.SimpleNamespace(location=ego_wp.transform.location, rotation=ego_wp.transform.rotation)
+
+        destination = compute_temp_destination(
+            world_map=world_map,
+            carla=_DummyCarla,
+            ego_transform=ego_transform,
+            target_lane_id=1,
+            decision="lane_follow",
+            lookahead_m=4.0,
+            target_v_mps=5.0,
+            global_route_points=[[0.0, 0.0], [0.0, 2.0], [0.0, 4.0]],
+            next_macro_maneuver="straight",
+            mode_override="INTERSECTION",
+            follow_global_route_lane=True,
+        )
+
+        self.assertAlmostEqual(float(destination[0]), 0.0, places=3)
+        self.assertAlmostEqual(float(destination[1]), 4.0, places=3)
+        self.assertAlmostEqual(float(destination[2]), 5.0, places=3)
+        self.assertAlmostEqual(float(destination[3]), math.pi / 2.0, places=3)
+        self.assertGreater(float(destination[5]), 0.5)
+
     def test_route_reference_samples_keep_route_branch_when_projection_prefers_wrong_junction_branch(self):
         ego_wp = _DummyWaypoint(road_id=35, is_junction=False, x_m=0.0, y_m=0.0, yaw_deg=90.0)
         junction_wp = _DummyWaypoint(road_id=35, is_junction=True, x_m=0.0, y_m=2.0, yaw_deg=90.0)
@@ -456,10 +554,10 @@ class TempDestinationModeTests(unittest.TestCase):
             next_macro_maneuver="straight",
         )
 
-        self.assertAlmostEqual(float(destination[0]), -3.5, places=3)
+        self.assertAlmostEqual(float(destination[0]), 0.0, places=3)
         self.assertAlmostEqual(float(destination[1]), 4.0, places=3)
-        self.assertAlmostEqual(float(destination[2]), 0.0, places=3)
-        self.assertEqual(int(destination[4]), 2)
+        self.assertAlmostEqual(float(destination[2]), 5.0, places=3)
+        self.assertEqual(int(destination[4]), 1)
 
     def test_repeated_calls_keep_blue_dot_lookahead_from_ego_instead_of_accumulating(self):
         wp0 = _DummyWaypoint(road_id=60, section_id=0, is_junction=False, x_m=0.0, y_m=0.0, yaw_deg=90.0, lane_id=1)
@@ -499,7 +597,7 @@ class TempDestinationModeTests(unittest.TestCase):
         self.assertAlmostEqual(float(first_destination[1]), 4.0, places=3)
         self.assertAlmostEqual(float(second_destination[1]), 4.0, places=3)
 
-    def test_intersection_mode_blue_dot_keeps_selected_lane_without_lane_change_decision(self):
+    def test_intersection_mode_lane_follow_keeps_current_lane_without_lane_change_decision(self):
         right_wp_0 = _DummyWaypoint(road_id=61, section_id=0, is_junction=False, x_m=0.0, y_m=0.0, yaw_deg=90.0, lane_id=1)
         right_wp_1 = _DummyWaypoint(road_id=61, section_id=0, is_junction=False, x_m=0.0, y_m=2.0, yaw_deg=90.0, lane_id=1)
         right_wp_2 = _DummyWaypoint(road_id=61, section_id=0, is_junction=False, x_m=0.0, y_m=4.0, yaw_deg=90.0, lane_id=1)
@@ -546,9 +644,9 @@ class TempDestinationModeTests(unittest.TestCase):
             follow_global_route_lane=True,
         )
 
-        self.assertAlmostEqual(float(destination[0]), -3.5, places=3)
+        self.assertAlmostEqual(float(destination[0]), 0.0, places=3)
         self.assertAlmostEqual(float(destination[1]), 4.0, places=3)
-        self.assertEqual(int(destination[4]), 2)
+        self.assertEqual(int(destination[4]), 1)
         self.assertGreater(float(destination[5]), 0.5)
 
     def test_intersection_mode_blue_dot_changes_lane_after_lane_change_decision(self):
@@ -1214,7 +1312,7 @@ class TempDestinationModeTests(unittest.TestCase):
         self.assertAlmostEqual(float(samples[-1]["y_ref_m"]), 6.0, places=3)
         self.assertAlmostEqual(float(samples[-2]["y_ref_m"]), 6.0, places=3)
 
-    def test_lane_follow_keeps_blue_dot_on_selected_lane_even_when_route_is_elsewhere(self):
+    def test_lane_follow_keeps_blue_dot_on_current_lane_until_lane_change_is_explicit(self):
         right_wp_0 = _DummyWaypoint(road_id=72, section_id=0, is_junction=False, x_m=0.0, y_m=0.0, yaw_deg=90.0, lane_id=1)
         right_wp_1 = _DummyWaypoint(road_id=72, section_id=0, is_junction=False, x_m=0.0, y_m=2.0, yaw_deg=90.0, lane_id=1)
         right_wp_2 = _DummyWaypoint(road_id=72, section_id=0, is_junction=False, x_m=0.0, y_m=4.0, yaw_deg=90.0, lane_id=1)
@@ -1259,11 +1357,11 @@ class TempDestinationModeTests(unittest.TestCase):
             next_macro_maneuver="straight",
         )
 
-        self.assertAlmostEqual(float(destination[0]), -3.5, places=3)
+        self.assertAlmostEqual(float(destination[0]), 0.0, places=3)
         self.assertAlmostEqual(float(destination[1]), 4.0, places=3)
-        self.assertEqual(int(destination[4]), 2)
+        self.assertEqual(int(destination[4]), 1)
 
-    def test_first_blue_dot_is_projected_onto_global_route_before_lane_change(self):
+    def test_first_blue_dot_moves_to_global_route_after_lane_change_decision(self):
         right_wp_0 = _DummyWaypoint(road_id=74, section_id=0, is_junction=False, x_m=0.0, y_m=0.0, yaw_deg=90.0, lane_id=1)
         right_wp_1 = _DummyWaypoint(road_id=74, section_id=0, is_junction=False, x_m=0.0, y_m=2.0, yaw_deg=90.0, lane_id=1)
         right_wp_2 = _DummyWaypoint(road_id=74, section_id=0, is_junction=False, x_m=0.0, y_m=4.0, yaw_deg=90.0, lane_id=1)

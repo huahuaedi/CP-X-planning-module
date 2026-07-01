@@ -1832,11 +1832,14 @@ def _apply_final_destination_snap(
         return list(temporary_destination_state), float(original_max_velocity_mps)
 
     snap_distance_threshold_m = max(0.0, float(lock_to_final_distance_m))
-    distance_temp_to_final_m = math.hypot(
-        float(temporary_destination_state[0]) - float(final_destination_state[0]),
-        float(temporary_destination_state[1]) - float(final_destination_state[1]),
+    if len(ego_state) < 2:
+        return list(temporary_destination_state), float(original_max_velocity_mps)
+
+    distance_ego_to_final_m = math.hypot(
+        float(ego_state[0]) - float(final_destination_state[0]),
+        float(ego_state[1]) - float(final_destination_state[1]),
     )
-    if distance_temp_to_final_m > float(snap_distance_threshold_m):
+    if distance_ego_to_final_m > float(snap_distance_threshold_m):
         return list(temporary_destination_state), float(original_max_velocity_mps)
 
     snapped_destination_state = list(temporary_destination_state)
@@ -1850,13 +1853,9 @@ def _apply_final_destination_snap(
         else max(0.0, float(speed_taper_distance_m))
     )
 
-    if len(ego_state) < 2 or float(taper_distance_threshold_m) <= 1e-6:
+    if float(taper_distance_threshold_m) <= 1e-6:
         active_max_velocity_mps = 0.0
     else:
-        distance_ego_to_final_m = math.hypot(
-            float(ego_state[0]) - float(final_destination_state[0]),
-            float(ego_state[1]) - float(final_destination_state[1]),
-        )
         stop_speed_scale = max(
             0.0,
             min(1.0, float(distance_ego_to_final_m) / float(taper_distance_threshold_m)),

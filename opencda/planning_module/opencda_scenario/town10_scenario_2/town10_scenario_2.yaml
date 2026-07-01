@@ -31,7 +31,7 @@ sumo:
   map_basename: Town10HD_Opt
   asset_root: opencda_scenario/assets
   auto_generate_assets: true
-  xodr_path: /home/umd-user/Downloads/MDrive/carla912/CarlaUE4/Content/Carla/Maps/OpenDrive/Town10HD_Opt.xodr
+  xodr_path: /home/umd-user/carlaCache/Carla/Maps/OpenDrive/Town10HD_Opt.xodr
   route_generation:
     seed: 42
     period_s: 0.75
@@ -40,7 +40,7 @@ sumo:
     random_depart_lane: true
     random_depart_speed: true
     validate: true
-    force_regenerate: true
+    force_regenerate: false
 
 anchors:
   ego_spawn: town10_scenario_2_ego
@@ -63,6 +63,11 @@ runtime:
   control_trigger_distance_m: 20.0
   delayed_autopilot_trigger_distance_m: 20.0
   vru_trigger_distance_m: 20.0
+  traffic_light_stop:
+    enabled: true
+    search_distance_m: 80.0
+    stop_buffer_m: 2.0
+  marker_vehicle_mode: autopilot
   traffic_light_stop_waypoint_match_distance_m: 12.0
   traffic_light_actor_position_match_distance_m: 40.0
   stop_state: stop

@@ -1,5 +1,5 @@
 """
-Scenario-local logic for town10_scenario_1.
+Scenario-local logic for town10_scenario_4.
 """
 
 from __future__ import annotations
@@ -11,28 +11,43 @@ from opencda_scenario import world_messages
 from opencda_scenario.all_usecase_scenario import scenario as base
 
 
-SCENARIO_NAME = "town10_scenario_1"
+SCENARIO_NAME = "town10_scenario_4"
 DEFAULT_CP_MESSAGE_PATH = base.DEFAULT_CP_MESSAGE_PATH
 
 
 def _info(message: str) -> None:
-    print(f"[TOWN10 SCENARIO 1] {message}")
+    print(f"[TOWN10 SCENARIO 4] {message}")
 
 
 def _warning(message: str) -> None:
-    print(f"[TOWN10 SCENARIO 1] Warning: {message}")
+    print(f"[TOWN10 SCENARIO 4] Warning: {message}")
 
 
 def _copy_vru_state_entries(vru_states: Sequence[Mapping[str, object]] | None) -> List[Dict[str, object]]:
     return [dict(entry) for entry in list(vru_states or [])]
 
 
-def _vehicle_mode(marker_index: object) -> str:
+def _vehicle_mode(runtime_state: Mapping[str, object], marker_index: object) -> str:
+    marker_vehicle_mode = str(
+        runtime_state.get("marker_vehicle_mode", "autopilot")
+    ).strip().lower()
     try:
         normalized_index = int(marker_index)
     except Exception:
         return "static"
     if int(normalized_index) <= 0:
+        return "static"
+    if marker_vehicle_mode in {"autopilot", "autopilot_all", "moving"}:
+        return "autopilot"
+    if marker_vehicle_mode in {"legacy", "mixed"}:
+        if int(normalized_index) % 2 == 1:
+            return "autopilot"
+        if int(normalized_index) > 50:
+            return "delayed_autopilot"
+        return "static"
+    if marker_vehicle_mode in {"delayed", "delayed_autopilot"}:
+        return "delayed_autopilot"
+    if marker_vehicle_mode in {"static", "parked"}:
         return "static"
     if int(normalized_index) % 2 == 1:
         return "autopilot"
@@ -132,7 +147,7 @@ def _spawn_configured_vrus(
             start_transform=vru_state.get("start_marker", {}).get("transform", None),
             goal_transform=vru_state.get("goal_marker", {}).get("transform", None),
             blueprint_filter=str(runtime_state.get("vru_blueprint_filter", "walker.pedestrian.*")),
-            role_name=str(vru_state.get("role_name", "town10_scenario_1_vru")),
+            role_name=str(vru_state.get("role_name", "town10_scenario_4_vru")),
             speed_mps=float(runtime_state.get("vru_speed_mps", 1.2)),
             spawn_z_offset_m=float(runtime_state.get("vru_spawn_z_offset_m", 0.0)),
         )
@@ -199,7 +214,7 @@ def _maybe_spawn_marker_vehicles(
     for marker in list(runtime_state.get("vehicle_markers", []) or []):
         marker_name = str(marker.get("name", "")).strip()
         marker_index = marker.get("index", None)
-        vehicle_mode = _vehicle_mode(marker_index)
+        vehicle_mode = _vehicle_mode(runtime_state, marker_index)
         spawned_actor = base._spawn_vehicle_at_marker(
             world=world,
             carla=carla,
@@ -326,6 +341,7 @@ def initialize_runtime(
     world,
     world_map=None,
     carla,
+    traffic_manager_port: int | None = None,
     **extras,
 ) -> Dict[str, object]:
     runtime_cfg = dict(scenario_cfg.get("runtime", {}))
@@ -381,6 +397,14 @@ def initialize_runtime(
     )
 
     traffic_manager_cfg = dict(scenario_cfg.get("traffic_manager", {}))
+    try:
+        resolved_traffic_manager_port = int(
+            traffic_manager_port
+            if traffic_manager_port is not None
+            else traffic_manager_cfg.get("port", 8000)
+        )
+    except Exception:
+        resolved_traffic_manager_port = int(traffic_manager_cfg.get("port", 8000))
     runtime_state = {
         "message_prefix": message_prefix,
         "cp_message_path": cp_message_path,
@@ -401,10 +425,11 @@ def initialize_runtime(
         ),
         "vru_trigger_distance_m": float(runtime_cfg.get("vru_trigger_distance_m", 20.0)),
         "stop_state": str(runtime_cfg.get("stop_state", "stop")).strip() or "stop",
+        "marker_vehicle_mode": str(runtime_cfg.get("marker_vehicle_mode", "autopilot")).strip() or "autopilot",
         "vehicle_blueprint": str(runtime_cfg.get("vehicle_blueprint", "vehicle.tesla.model3")).strip(),
         "vehicle_color_rgb": str(runtime_cfg.get("vehicle_color_rgb", "90,90,90")).strip(),
         "vehicle_spawn_z_offset_m": float(runtime_cfg.get("vehicle_spawn_z_offset_m", 0.05)),
-        "traffic_manager_port": int(traffic_manager_cfg.get("port", 8000)),
+        "traffic_manager_port": int(resolved_traffic_manager_port),
         "vru_blueprint_filter": str(runtime_cfg.get("vru_blueprint_filter", "walker.pedestrian.*")).strip(),
         "vru_speed_mps": float(runtime_cfg.get("vru_speed_mps", 1.2)),
         "vru_spawn_z_offset_m": float(runtime_cfg.get("vru_spawn_z_offset_m", 0.0)),

@@ -1,1 +1,1 @@
-"""Scenario package for town10_scenario_1."""
+"""Scenario package for town10_scenario_2."""

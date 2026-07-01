@@ -50,6 +50,19 @@ class RunnerFinalDestinationSnapTests(unittest.TestCase):
         self.assertAlmostEqual(float(temporary_destination_state[3]), 1.2)
         self.assertAlmostEqual(active_v_max, 7.0 * (2.0 / 5.0))
 
+    def test_does_not_snap_when_only_temporary_destination_is_near_final(self):
+        temporary_destination_state, active_v_max = _apply_final_destination_snap(
+            temporary_destination_state=[9.5, 0.2, 5.0, 0.0, 2, 0.0],
+            final_destination_state=[10.0, 0.0, 0.0, 1.2],
+            ego_state=[-30.0, 0.0, 4.0, 0.0],
+            lock_to_final_distance_m=20.0,
+            original_max_velocity_mps=7.0,
+            speed_taper_distance_m=5.0,
+        )
+
+        self.assertEqual(temporary_destination_state, [9.5, 0.2, 5.0, 0.0, 2, 0.0])
+        self.assertAlmostEqual(active_v_max, 7.0)
+
     def test_final_destination_snap_can_taper_speed_over_shorter_distance_than_snap_window(self):
         temporary_destination_state, active_v_max = _apply_final_destination_snap(
             temporary_destination_state=[9.5, 0.2, 5.0, 0.0, 2, 0.0],

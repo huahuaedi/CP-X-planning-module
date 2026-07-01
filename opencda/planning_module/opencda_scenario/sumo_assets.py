@@ -120,6 +120,37 @@ def resolve_xodr_path(
     if map_basename.endswith("_Opt"):
         candidates.append(os.path.join(open_drive_dir, f"{map_basename[:-4]}.xodr"))
 
+    home_dir = os.path.expanduser("~")
+    cache_open_drive_dir = os.path.join(
+        home_dir,
+        "carlaCache",
+        "Carla",
+        "Maps",
+        "OpenDrive",
+    )
+    candidates.append(os.path.join(cache_open_drive_dir, f"{map_basename}.xodr"))
+    if map_basename.endswith("_Opt"):
+        candidates.append(os.path.join(cache_open_drive_dir, f"{map_basename[:-4]}.xodr"))
+
+    for fallback_root in (
+        os.environ.get("CARLA_ROOT", "").strip(),
+        "/home/umd-user/Downloads/MDrive/carla912",
+        "/opt/carla-simulator",
+    ):
+        if not fallback_root:
+            continue
+        fallback_open_drive_dir = os.path.join(
+            fallback_root,
+            "CarlaUE4",
+            "Content",
+            "Carla",
+            "Maps",
+            "OpenDrive",
+        )
+        candidates.append(os.path.join(fallback_open_drive_dir, f"{map_basename}.xodr"))
+        if map_basename.endswith("_Opt"):
+            candidates.append(os.path.join(fallback_open_drive_dir, f"{map_basename[:-4]}.xodr"))
+
     for candidate in candidates:
         if candidate and os.path.isfile(candidate):
             return candidate

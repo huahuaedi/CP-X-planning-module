@@ -1,30 +1,35 @@
 ============================================================
-  Planning Run Analysis: town10_scenario_5
+  Planning Run Analysis: town10_scenario_6
 ============================================================
 
 ── SAFETY ─────────────────────────────────────────────────
-  Collisions          : 4  [FAIL]
-  Collision / km      : 12.643  [FAIL]
-  Min TTC (s)         : nan  [N/A ]
-  Max DRAC (m/s²)     : 0.00  [PASS]
+  Collisions          : 0  [PASS]
+  Collision / km      : 0.000  [PASS]
+  Min TTC (s)         : 1.69  [FAIL]
+  Max DRAC (m/s²)     : 1.50  [WARN]
   Min PET (s)         : N/A
-  Boundary breaches   : 163/393 ticks (41.5%)  [FAIL]
+  Boundary breaches   : 5/67 ticks (7.5%)  [FAIL]
 
 ── EFFICIENCY ──────────────────────────────────────────────
-  Distance traveled   : 316.4 m
-  Avg speed           : 5.61 m/s  (20.2 km/h)
-  Max speed           : 8.10 m/s  (29.1 km/h)
+  Distance traveled   : 327.5 m
+  Avg speed           : 1.10 m/s  (3.9 km/h)
+  Max speed           : 8.74 m/s  (31.5 km/h)
 
 ── MPC PLANNER HEALTH ──────────────────────────────────────
-  Plan attempts       : 393
-  Plan success rate   : 100.0%  [PASS]
+  Plan attempts       : 4705
+  Plan success rate   : 5.0%  [FAIL]
   Solver failures     : 0
-  Avg solve time      : 2.2 ms
-  P95 solve time      : 3.22 ms
-  Max solve time      : 4.4 ms  [WARN]
+  Avg solve time      : 2.9 ms
+  P95 solve time      : 4.89 ms
+  Max solve time      : 5.4 ms  [WARN]
 
 ── LEGEND ──────────────────────────────────────────────────
   PASS  within target range
   WARN  marginal — monitor closely
   FAIL  outside acceptable range
+============================================================
+
+── COLLISION DETAILS ───────────────────────────────────────
+  No collision events recorded.
+
 ============================================================

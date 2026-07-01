@@ -722,11 +722,12 @@ def _start_wp_for_decision(
 ) -> Any:
     """Return the waypoint to walk forward from.
 
-    The behavior planner owns lane choice. For every non-reroute motion
-    decision, align the rolling target to the planner-selected lane.
+    The behavior planner owns lane choice, but ``lane_follow`` is a strict
+    current-lane command.  Only an explicit lane-change decision may laterally
+    shift the rolling target to another lane.
     """
     normalized_decision = normalize_behavior_decision(decision)
-    if normalized_decision != "reroute":
+    if normalized_decision in {"lane_change_left", "lane_change_right"}:
         return move_to_lane(
             carla,
             ego_wp,
@@ -1753,10 +1754,28 @@ def compute_temp_destination(
         str(normalized_decision),
         explicit_follow_global_route_lane=follow_global_route_lane,
     )
+    blue_dot_target_lane_id = int(route_alignment_lane_id)
+    blue_dot_follow_route_lane = bool(follow_route_lane)
+    if (
+        str(normalized_decision) == "lane_follow"
+        and int(route_alignment_lane_id) != int(current_lane_id)
+    ):
+        # In normal road segments the global route may already be on the
+        # adjacent lane while the ego is still in the current lane. Do not place
+        # the rolling target laterally across lanes until the FSM explicitly
+        # enters a lane-change state; otherwise MPC cuts directly toward the
+        # route lane and can collide at scenario start.
+        blue_dot_target_lane_id = int(current_lane_id)
+        blue_dot_follow_route_lane = False
 
     # ---- Start wp (lane shift only on lane-change decision) ---- #
+    # Allow junction lane snapping for explicit lane-change decisions: the
+    # behavior planner has already committed to the lateral move, so preventing
+    # the snap inside junctions would leave the blue dot on the old lane and
+    # give the MPC a wrong reference during EXECUTE_LC near an intersection.
     start_wp = _start_wp_for_decision(
-        carla, ego_wp, str(decision), int(target_lane_id),
+        carla, ego_wp, str(decision), int(blue_dot_target_lane_id),
+        allow_junction_lane_snap=str(normalized_decision) in {"lane_change_left", "lane_change_right"},
     )
     if route_points_valid is not None:
         route_cum_dists = _route_cum_dists(route_points_valid)
@@ -1772,23 +1791,99 @@ def compute_temp_destination(
         # ego pose projected onto the global route, not from the previous
         # blue-dot position. ``mode_reference_xy`` is only for mode latching.
         anchor_wp = ego_wp
-        route_wp = _route_waypoint_from_anchor(
+        anchor_loc = getattr(getattr(anchor_wp, "transform", None), "location", None)
+        anchor_arc = project_ego_to_route(
+            ego_x=float(getattr(anchor_loc, "x", ego_x)),
+            ego_y=float(getattr(anchor_loc, "y", ego_y)),
+            route_points=route_points_valid,
+            cum_dists=route_cum_dists,
+        )
+        route_x_m, route_y_m = get_lookahead_route_point(
+            route_points=route_points_valid,
+            cum_dists=route_cum_dists,
+            ego_arc=float(anchor_arc),
+            lookahead_m=float(lookahead_m),
+        )
+        next_route_x_m, next_route_y_m = get_lookahead_route_point(
+            route_points=route_points_valid,
+            cum_dists=route_cum_dists,
+            ego_arc=float(anchor_arc),
+            lookahead_m=float(lookahead_m) + max(0.5, float(step_m)),
+        )
+        route_heading_rad = math.atan2(
+            float(next_route_y_m) - float(route_y_m),
+            float(next_route_x_m) - float(route_x_m),
+        )
+        if not math.isfinite(float(route_heading_rad)) or (
+            abs(float(next_route_x_m) - float(route_x_m)) < 1.0e-6
+            and abs(float(next_route_y_m) - float(route_y_m)) < 1.0e-6
+        ):
+            route_heading_rad = float(ego_psi)
+
+        route_candidate_wp = _route_waypoint_from_anchor(
             world_map=world_map,
             carla=carla,
             anchor_wp=anchor_wp,
             route_points=route_points_valid,
             lookahead_m=float(lookahead_m),
             fallback_wp=fallback_wp,
-            target_lane_id=int(route_alignment_lane_id),
-            follow_route_lane=bool(follow_route_lane),
+            target_lane_id=int(blue_dot_target_lane_id),
+            follow_route_lane=bool(blue_dot_follow_route_lane),
         )
+        if bool(blue_dot_follow_route_lane):
+            route_wp = route_candidate_wp
+        else:
+            # When the behavior layer says to hold the current/selected lane,
+            # the temporary destination must come from walking CARLA waypoints
+            # on that lane. Projecting the global route first can snap the blue
+            # dot to an adjacent road or turn connector before a lane-change
+            # decision exists. If the forward walk cannot move, allow a route
+            # projection only when it remains on the requested lane.
+            fallback_loc = getattr(getattr(fallback_wp, "transform", None), "location", None)
+            fallback_progress_m = math.hypot(
+                float(getattr(fallback_loc, "x", ego_x)) - float(ego_x),
+                float(getattr(fallback_loc, "y", ego_y)) - float(ego_y),
+            )
+            candidate_lane_id = _internal_lane_id(carla, route_candidate_wp)
+            if (
+                float(fallback_progress_m) < 0.25
+                and int(candidate_lane_id) == int(blue_dot_target_lane_id)
+            ):
+                route_wp = route_candidate_wp
+            else:
+                route_wp = fallback_wp
         mode = MODE_INTERSECTION if bool(is_intersection) else MODE_NORMAL
+        if (
+            str(normalized_decision) == "lane_follow"
+            and not bool(blue_dot_follow_route_lane)
+            and not bool(is_intersection)
+        ):
+            ego_road_id = int(getattr(ego_wp, "road_id", road_id))
+            route_road_id = int(getattr(route_wp, "road_id", ego_road_id))
+            if int(route_road_id) != int(ego_road_id):
+                lane_hold_wp = _walk_forward(
+                    start_wp,
+                    float(lookahead_m),
+                    step_m,
+                )
+                lane_hold_road_id = int(getattr(lane_hold_wp, "road_id", ego_road_id))
+                if int(lane_hold_road_id) == int(ego_road_id):
+                    route_wp = lane_hold_wp
+
+        # Do not use raw global-route geometry merely because the upcoming
+        # point is in INTERSECTION mode.  On approaches to a junction the route
+        # can already lie on a different lane/connector, which makes the blue
+        # dot jump sideways and creates a false lane-change/turn intention.
+        # Only follow route x/y when the caller explicitly says the route lane
+        # should be followed. Otherwise keep the rolling target on the selected
+        # CARLA lane waypoint.
+        use_route_geometry = bool(blue_dot_follow_route_lane)
         return [
-            float(route_wp.transform.location.x),
-            float(route_wp.transform.location.y),
-            0.0,
-            float(math.radians(route_wp.transform.rotation.yaw)),
-            int(route_alignment_lane_id) if not bool(follow_route_lane) else _internal_lane_id(carla, route_wp),
+            float(route_x_m) if bool(use_route_geometry) else float(route_wp.transform.location.x),
+            float(route_y_m) if bool(use_route_geometry) else float(route_wp.transform.location.y),
+            float(target_v_mps),
+            float(route_heading_rad) if bool(use_route_geometry) else float(math.radians(route_wp.transform.rotation.yaw)),
+            int(blue_dot_target_lane_id) if not bool(blue_dot_follow_route_lane) else _internal_lane_id(carla, route_wp),
             mode,
             int(getattr(route_wp, "road_id", road_id)),
             1.0 if bool(entered_intersection) and float(mode) > 0.5 else 0.0,
@@ -1813,7 +1908,7 @@ def compute_temp_destination(
     return [
         float(wp.transform.location.x),
         float(wp.transform.location.y),
-        0.0,
+        float(target_v_mps),
         float(math.radians(wp.transform.rotation.yaw)),
         _internal_lane_id(carla, wp),
         mode,
@@ -1937,7 +2032,11 @@ def build_reference_samples(
         if global_route_points is not None and len(global_route_points) >= 2
         else None
     )
-    if route_points_valid is not None:
+    use_route_reference = (
+        bool(follow_route_lane)
+        or str(normalized_decision) in {"lane_change_left", "lane_change_right", "reroute"}
+    )
+    if route_points_valid is not None and bool(use_route_reference):
         # Reference samples should originate from the ego's current route
         # progress; the previous blue-dot position is only used to decide mode.
         anchor_wp = ego_wp
@@ -1990,6 +2089,7 @@ def build_reference_samples(
 
     start_wp = _start_wp_for_decision(
         carla, ego_wp, str(normalized_decision), int(target_lane_id),
+        allow_junction_lane_snap=str(normalized_decision) in {"lane_change_left", "lane_change_right"},
     )
     walk_maneuver = str(next_macro_maneuver or "") if bool(is_intersection) else None
     source_samples = _build_forward_reference_samples(

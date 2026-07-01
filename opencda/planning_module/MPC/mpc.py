@@ -1376,6 +1376,21 @@ class MPC:
 
         return self._last_lane_keeping_profile.as_dict()
 
+    def get_current_lateral_offset_m(self) -> float | None:
+        """Perpendicular distance from lane center at the ego's current position (stage-0 of last plan)."""
+        profile = self._last_lane_keeping_profile
+        if profile is None or len(profile.stage_metrics) == 0:
+            return None
+        return float(profile.stage_metrics[0].d_perp_m)
+
+    def get_current_heading_error_rad(self) -> float | None:
+        """Heading error (ego yaw minus lane reference heading) at the ego's current position."""
+        profile = self._last_lane_keeping_profile
+        x = self._last_x_solution
+        if profile is None or len(profile.stage_metrics) == 0 or x is None or x.shape[0] == 0:
+            return None
+        return float(self._wrap_angle(float(x[0, 3]) - float(profile.stage_metrics[0].lane_heading_rad)))
+
     def get_last_control_sequence(self, max_steps: int | None = None) -> List[Dict[str, float]]:
         """
         Return the most recent MPC-planned control sequence.

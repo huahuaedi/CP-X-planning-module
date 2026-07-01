@@ -301,6 +301,44 @@ class TrafficLightStopTests(unittest.TestCase):
         )
         self.assertEqual(third_result["decision"], "lane_follow")
 
+    def test_red_light_stop_holds_current_lane_even_if_stop_marker_is_adjacent(self):
+        planner = RuleBasedBehaviorPlanner()
+        adjacent_lane_stop_target = {
+            "x_m": -3.5,
+            "y_m": 12.0,
+            "heading_rad": math.pi / 2.0,
+            "lane_id": 2,
+            "road_id": 10,
+            "distance_m": 12.0,
+        }
+
+        result = planner.update(
+            lane_safety_scores={1: 1.0, 2: 1.0},
+            ego_lane_id=1,
+            mode="NORMAL",
+            route_optimal_lane_id=2,
+            traffic_signal_state="red",
+            traffic_stop_target=adjacent_lane_stop_target,
+            ego_speed_mps=4.0,
+            ego_max_deceleration_mps2=2.0,
+            ego_in_junction=False,
+        )
+
+        self.assertEqual(result["decision"], "stop_at_intersection")
+        self.assertEqual(int(result["target_lane_id"]), 1)
+        self.assertEqual(int(result["selected_lane_id"]), 1)
+        self.assertEqual(int(result["stop_target"]["lane_id"]), 1)
+        self.assertFalse(bool(result["blue_dot_rolling"]))
+        self.assertEqual(result["selected_candidate"], "lane_keep_stop")
+        self.assertTrue(
+            any(
+                candidate["name"] == "lane_change_left"
+                and candidate["reason"] == "traffic_control_active"
+                for candidate in result["rejected_candidates"]
+            )
+        )
+
+
     def test_behavior_planner_releases_red_latch_for_green_signal_even_if_actor_changes(self):
         planner = RuleBasedBehaviorPlanner()
         stop_target = {

@@ -58,13 +58,13 @@ mpc:
     # change if the immediate target lane safety score is strictly greater
     # than this. Otherwise the planner keeps following the current lane until
     # that target lane becomes safe enough.
-    lane_change_target_safety_threshold: 0.50 #0.1, 0.5
+    lane_change_target_safety_threshold: 0.65 # enter lane-change threshold
 
     # During an ongoing lane change, if the target-lane safety score drops
     # below this threshold and the previous lane becomes meaningfully safer,
     # the behavior planner cancels the current lane change and returns to the
     # previous lane.
-    lane_change_abort_safety_threshold: 0.50
+    lane_change_abort_safety_threshold: 0.35
 
     # In NORMAL mode, leave the route-optimal lane only when that optimal
     # lane drops below this safety score and there is an obstacle ahead on
@@ -94,25 +94,55 @@ mpc:
     # Hysteresis margin required before the planner leaves the current lane.
     decision_hysteresis_delta: 0.10
 
+    # Candidate-evaluation cost weights used when scoring lane-change options.
+    # route_deviation_weight penalises lanes that are further from the global
+    # route's optimal lane; lane_change_weight adds a small friction cost per
+    # step away from the current ego lane, discouraging unnecessary changes.
+    candidate_route_deviation_weight: 0.15
+    candidate_lane_change_weight: 0.20
+
+    # Minimum FSM state hold times [s]. Safety overrides such as emergency
+    # braking, traffic-light stops, and cooperative reroutes can still preempt.
+    # lane_keep_min_hold_s also acts as a cooldown after a lane-change is
+    # cancelled/completed before a new one can start, to avoid flickering
+    # between PREPARE_LC and LANE_KEEP when TTC-based lane safety scores are
+    # noisy near intersections with crossing traffic.
+    prepare_lane_change_min_hold_s: 0.5
+    execute_lane_change_min_hold_s: 1.0
+    lane_keep_min_hold_s: 0.5
+
     # Lane change completion thresholds.
     lane_change_completion_lateral_threshold_m: 0.75
     lane_change_completion_heading_threshold_rad: 0.20
 
     # Curvature-aware speed cap used by the runner before MPC solve.
     # Lower -> more conservative cornering and less boundary pressure.
-    curve_lateral_accel_limit_mps2: 1.3
-    curve_speed_cap_min_curvature: 0.015
-    curve_speed_cap_sample_count: 8
+    # 0.8 m/s² lateral-accel limit: at kappa=0.019 (the observed tight curve)
+    # caps speed at sqrt(0.8/0.019)=6.5 m/s (23 km/h) vs the previous 8.3 m/s
+    # (30 km/h) that caused the boundary breach in town10_scenario_6.
+    curve_lateral_accel_limit_mps2: 0.5
+    # Lowered from 0.015 so the cap also activates on gentler bends.
+    curve_speed_cap_min_curvature: 0.010
+    # More forward samples catch the curvature peak earlier on approach.
+    curve_speed_cap_sample_count: 12
 
-    # Legacy internal CARLA traffic-light stopping logic.
+    # Involuntary-standstill recovery timeout [s].
+    # If the ego has been stationary this long while NOT in a voluntary stop
+    # (stop_sign / traffic-light), the runner forces an MPC seed reset and a
+    # full behavior replan.  A separate longer timeout applies when the planner
+    # is in emergency_brake (the obstacle may still be present).
+    standstill_recovery_timeout_s: 15.0
+    standstill_emergency_brake_recovery_timeout_s: 30.0
+
+    # CARLA-native traffic-light stopping logic.
     #
-    # Keep this disabled for the CP-message flow: the planner should not search
-    # CARLA traffic lights/intersections by itself, because a red/yellow signal
-    # found on the route can latch `stop` from the first tick and keep ego at
-    # zero speed. Stop/intersection information should come from cp_message.json.
+    # Enabled: the runner calls find_stop_target_from_ego + find_relevant_signal_context
+    # each tick to detect red/yellow signals within search_distance_m and build a
+    # stop target at the stop line.  The planner latches `stop` on red and releases
+    # it when the signal turns green or the ego enters the junction.
     traffic_light_stop:
       enabled: true
-      search_distance_m: 100.0
+      search_distance_m: 60.0
       stop_buffer_m: 2.0
 
   # Rolling temporary-destination settings shared by the integration layer and
@@ -192,7 +222,7 @@ mpc:
     # temporary goal is this close [m] to the final stop/goal point.
     # Increase -> switch to final-goal behavior earlier.
     # Decrease -> keep rolling temporary goals active longer.
-    lock_to_final_distance_m: 20.0 #5
+    lock_to_final_distance_m: 5.0
 
     # Once the temporary destination has snapped to the final destination,
     # taper the attached target speed over this shorter distance [m].
@@ -399,11 +429,11 @@ mpc:
       w_boundary: 10000.0 #10000
 
       # Zero cost while both road-edge clearances are above this margin [m].
-      margin_m: 0.6  # 0.5 was too permissive; 0.8 squeezed the feasible band causing oscillation; 0.6 is the balance
+      margin_m: 0.50
 
       # Hard-ish cap on boundary slack [m]. Keeps severe boundary violations
       # from being accepted as merely high-cost soft-constraint solutions.
-      max_slack_m: 0.25
+      max_slack_m: 0.10
 
     control:
       # Global weight on control smoothness.
@@ -462,7 +492,7 @@ mpc:
       # Increase -> the same collision cost level is moved farther away from
       # the obstacle (larger r_c).
       # Decrease -> the collision cost peak is pulled closer to the obstacle.
-      collision_distance_shift: 1.5 #1.5
+      collision_distance_shift: 1.0 # tuned down from 1.5 to reduce early obstacle push
 
       # Retained for backward-compatible config loading; collision-zone
       # geometry is fixed from obstacle dimensions and static padding below.
@@ -477,7 +507,7 @@ mpc:
       # Full longitudinal padding [m] added to obstacle length for the
       # collision potential field:
       #   field_length = obstacle_length + static_longitudinal_buffer_m
-      static_longitudinal_buffer_m: 5 #0.5
+      static_longitudinal_buffer_m: 2.0 # tuned down from 5.0 to reduce over-conservative obstacle field
 
       # Full lateral padding [m] added to obstacle width for the collision
       # potential field:

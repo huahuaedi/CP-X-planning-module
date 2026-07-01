@@ -18,20 +18,20 @@ carla:
   map: /Game/Carla/Maps/Town10HD_Opt
 
 sumo:
-  enabled: false
+  enabled: true
   connect_existing_server: false
   host: 127.0.0.1
   port: 8813
-  gui: true
+  gui: false
   client_order: 1
   step_length: 0.05
-  carla_sync_radius_m: 120.0
-  carla_despawn_radius_m: 140.0
-  carla_sync_max_actors: 80
+  carla_sync_radius_m: 80.0
+  carla_despawn_radius_m: 100.0
+  carla_sync_max_actors: 24
   map_basename: Town10HD_Opt
   asset_root: opencda_scenario/assets
   auto_generate_assets: true
-  xodr_path: /home/umd-user/Downloads/MDrive/carla912/CarlaUE4/Content/Carla/Maps/OpenDrive/Town10HD_Opt.xodr
+  xodr_path: /home/umd-user/carlaCache/Carla/Maps/OpenDrive/Town10HD_Opt.xodr
   route_generation:
     seed: 42
     period_s: 0.75
@@ -40,7 +40,7 @@ sumo:
     random_depart_lane: true
     random_depart_speed: true
     validate: true
-    force_regenerate: true
+    force_regenerate: false
 
 anchors:
   ego_spawn: town10_scenario_6_ego
@@ -65,6 +65,12 @@ runtime:
   delayed_autopilot_trigger_distance_m: 20.0
   vru_trigger_distance_m: 20.0
   hazard_trigger_distance_m: 60.0 #30
+  traffic_light_stop:
+    enabled: true
+    search_distance_m: 80.0
+    stop_buffer_m: 2.0
+  marker_vehicle_mode: autopilot
+  spawn_fallback_npc_when_no_markers: true
   traffic_light_stop_waypoint_match_distance_m: 12.0
   traffic_light_actor_position_match_distance_m: 40.0
   stop_state: stop
