@@ -26,8 +26,10 @@ def trapezoidal_stop_profile(
     """Return per-step speed caps [m/s] for decelerating to a stop line.
 
     Element i is the maximum allowable speed at time (i+1)*dt_s from now.
-    The profile uses the kinematic constraint v <= sqrt(2 * a_decel * d)
-    iterated step-by-step so that gap is consumed accurately.
+    The profile uses the kinematic constraint v <= sqrt(2 * a_decel * d).
+    This is a speed cap, not a target speed: it must not be clamped by the
+    current ego speed, otherwise a vehicle that has already slowed too early
+    can get stuck with a near-zero cap while the stop line is still far ahead.
 
     Args:
         current_v: current ego speed [m/s]
@@ -38,11 +40,14 @@ def trapezoidal_stop_profile(
         dt_s: time step duration [s]
 
     Returns:
-        List of n_steps speed caps in m/s.  First element is the tightest
-        (most immediate) constraint; subsequent elements relax as distance
+        List of n_steps speed caps in m/s.  First element is the immediate
+        constraint; subsequent elements tighten as the projected distance
         shrinks.
     """
-    v = max(0.0, float(current_v))
+    # Keep the argument for API compatibility and documentation of the caller's
+    # intent, but do not use it as a cap.  The cap is determined by remaining
+    # distance and comfortable deceleration only.
+    _ = max(0.0, float(current_v))
     d = max(0.0, float(distance_to_stop_m) - float(stop_buffer_m))
     a_decel = max(0.1, float(a_decel))
     dt = max(1e-3, float(dt_s))
@@ -50,9 +55,7 @@ def trapezoidal_stop_profile(
     profile: list[float] = []
     for _ in range(int(n_steps)):
         v_brake_cap = math.sqrt(max(0.0, 2.0 * a_decel * d))
-        v = min(v, v_brake_cap)
-        v = max(0.0, v)
-        profile.append(float(v))
-        d = max(0.0, d - v * dt)
+        profile.append(float(v_brake_cap))
+        d = max(0.0, d - float(v_brake_cap) * dt)
 
     return profile

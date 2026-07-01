@@ -441,7 +441,24 @@ def find_relevant_signal_context(
         elif signal_distance_m is not None:
             match_distance_m = float(signal_distance_m)
 
-        if candidate_actor is ego_associated_actor:
+        ego_association_plausible = True
+        if (
+            candidate_actor is ego_associated_actor
+            and stop_target_xy is not None
+            and stop_waypoint_match_rank is None
+            and math.isfinite(match_distance_m)
+        ):
+            association_match_limit_m = float(max_actor_position_match_distance_m)
+            if stop_target_distance_m is not None:
+                association_match_limit_m = max(
+                    association_match_limit_m,
+                    float(stop_target_distance_m) + 20.0,
+                )
+            ego_association_plausible = (
+                float(match_distance_m) <= float(association_match_limit_m)
+            )
+
+        if candidate_actor is ego_associated_actor and bool(ego_association_plausible):
             signal_source = "ego_vehicle_association"
             if stop_target_distance_m is not None and (
                 not math.isfinite(match_distance_m) or float(match_distance_m) > float(stop_target_distance_m) + 20.0
@@ -527,7 +544,6 @@ def find_relevant_signal_context(
     if best_candidate is None:
         return dict(default_context)
     best_candidate.pop("signal_actor", None)
-    best_candidate.pop("signal_match_rank", None)
     return best_candidate
 
 

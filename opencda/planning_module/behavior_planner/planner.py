@@ -32,6 +32,7 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, Mapping, Sequence
 
+from .contract import BehaviorCommand
 from .reroute import (
     CP_MESSAGE_PATH,
     load_control_messages,
@@ -164,6 +165,47 @@ def is_emergency_brake_decision(decision: str | None) -> bool:
 
 def is_emergence_stop_decision(decision: str | None) -> bool:
     return bool(is_emergency_brake_decision(decision))
+
+
+def _behavior_command_invariant_violations(
+    command: Mapping[str, object],
+    *,
+    ego_lane_id: int,
+) -> list[str]:
+    """Check the "Required invariant" rules from the architecture proposal's
+    Behavior Layer section: stop and emergency-brake decisions must keep the
+    ego lane as target, and a lane-change decision must target a different
+    lane than the ego lane.
+    """
+    violations: list[str] = []
+    decision = str(command.get("decision", ""))
+    raw_target_lane_id = command.get("target_lane_id", None)
+    try:
+        target_lane_id = None if raw_target_lane_id is None else int(raw_target_lane_id)
+    except Exception:
+        target_lane_id = None
+    if target_lane_id is None:
+        return violations
+
+    if is_fixed_stop_decision(decision) and int(target_lane_id) != int(ego_lane_id):
+        violations.append(
+            f"decision={decision!r} (stop) must target ego lane {int(ego_lane_id)}, "
+            f"got target_lane_id={int(target_lane_id)}"
+        )
+    if is_emergency_brake_decision(decision) and int(target_lane_id) != int(ego_lane_id):
+        violations.append(
+            f"decision={decision!r} (emergency_brake) must target ego lane "
+            f"{int(ego_lane_id)}, got target_lane_id={int(target_lane_id)}"
+        )
+    if (
+        decision in {_DECISION_CHANGE_LEFT, _DECISION_CHANGE_RIGHT}
+        and int(target_lane_id) == int(ego_lane_id)
+    ):
+        violations.append(
+            f"decision={decision!r} must target a lane different from ego lane "
+            f"{int(ego_lane_id)}, got target_lane_id={int(target_lane_id)}"
+        )
+    return violations
 
 
 def normalize_macro_maneuver(next_macro_maneuver: str | None) -> str:
@@ -461,6 +503,7 @@ class RuleBasedBehaviorPlanner:
         self._state_enter_time_s: float | None = None
         self._last_logged_lc_state: str = str(self._lc_state)
         self._current_update_time_s: float | None = None
+        self._current_ego_lane_id: int = 0
         self._pending_transition_reason: str = "init"
         self._transition_events: list[dict] = []
         self._current_candidate_evaluation: Dict[str, Any] | None = None
@@ -492,7 +535,7 @@ class RuleBasedBehaviorPlanner:
         nearest_front_obstacles_by_lane: Mapping[int, Mapping[str, object]] | None = None,
         lane_prediction_risks: Mapping[int, Mapping[str, object]] | None = None,
         preferred_target_lane_id: int | None = None,
-    ) -> Dict[str, Any]:
+    ) -> BehaviorCommand:
         """
         Run one planning cycle.
 
@@ -559,6 +602,7 @@ class RuleBasedBehaviorPlanner:
             )
             if int(ego_lane_id) not in available and len(available) > 0:
                 ego_lane_id = min(available, key=lambda lane_id: abs(int(lane_id) - int(ego_lane_id)))
+        self._current_ego_lane_id = int(ego_lane_id)
 
         if selected_lane_id is not None and int(selected_lane_id) != 0:
             self._selected_lane_id = int(selected_lane_id)
@@ -2708,7 +2752,7 @@ class RuleBasedBehaviorPlanner:
         blue_dot_rolling: bool = True,
         mode_override: str | None = None,
         stop: bool | None = None,
-    ) -> Dict[str, Any]:
+    ) -> BehaviorCommand:
         normalized_mode_override = (
             str(mode_override).strip().upper() if mode_override is not None else ""
         )
@@ -2761,6 +2805,13 @@ class RuleBasedBehaviorPlanner:
         )
         result["decision_reason"] = str(self._pending_transition_reason or "")
         self._record_transition_if_needed(result=result, traffic_light_debug=traffic_light_debug)
+        violations = _behavior_command_invariant_violations(
+            result, ego_lane_id=self._current_ego_lane_id
+        )
+        if violations:
+            result["invariant_violations"] = violations
+            for violation in violations:
+                print(f"[BEHAVIOR][INVARIANT_VIOLATION] {violation}")
         return result
 
     def _record_transition_if_needed(
@@ -2821,6 +2872,8 @@ class RuleBasedBehaviorPlanner:
         signal_source = "none"
         signal_forward_m = None
         signal_lateral_m = None
+        signal_match_distance_m = None
+        signal_match_rank = None
         if isinstance(traffic_signal_context, Mapping):
             signal_found = bool(traffic_signal_context.get("signal_found", False))
             signal_actor_id = traffic_signal_context.get("signal_actor_id", None)
@@ -2841,6 +2894,16 @@ class RuleBasedBehaviorPlanner:
                 signal_lateral_m = None if raw_signal_lateral_m is None else float(raw_signal_lateral_m)
             except Exception:
                 signal_lateral_m = None
+            try:
+                raw_signal_match_distance_m = traffic_signal_context.get("signal_match_distance_m", None)
+                signal_match_distance_m = None if raw_signal_match_distance_m is None else float(raw_signal_match_distance_m)
+            except Exception:
+                signal_match_distance_m = None
+            try:
+                raw_signal_match_rank = traffic_signal_context.get("signal_match_rank", None)
+                signal_match_rank = None if raw_signal_match_rank is None else int(raw_signal_match_rank)
+            except Exception:
+                signal_match_rank = None
 
         # A green signal must always release the stop latch. Signal matching
         # can be unstable across ticks near/inside junctions, and keeping a
@@ -2900,6 +2963,8 @@ class RuleBasedBehaviorPlanner:
             "signal_source": str(signal_source),
             "signal_forward_m": signal_forward_m,
             "signal_lateral_m": signal_lateral_m,
+            "signal_match_distance_m": signal_match_distance_m,
+            "signal_match_rank": signal_match_rank,
             "stop_target_distance_m": stop_target_distance_m,
             "should_stop_now": bool(should_stop_now),
             "stop_latched": bool(self._stop),
