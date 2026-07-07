@@ -45,6 +45,8 @@ sumo:
 anchors:
   ego_spawn: town10_scenario_5_ego
   final_destination: town10_scenario_5_final_destination
+  ego_spawn_xyz_yaw: [-45.0, 28.099998474121094, 0.8999999761581421, 0.0]
+  final_destination_xyz_yaw: [98.29999542236328, 98.79999542236328, 0.699999988079071, 0.0]
 
 traffic_manager:
   enabled: true
@@ -109,9 +111,13 @@ planning:
 
 camera:
   enabled: true
-  image_size_x: 840
-  image_size_y: 680
+  image_size_x: 640
+  image_size_y: 480
   fov: 90.0
+  # Keep the status/FSM panel below the two views so it does not cover the
+  # driving cameras.
+  hud_position: bottom
+  hud_panel_height_px: 220
   topdown:
     world_fixed: false
     height: 65.0

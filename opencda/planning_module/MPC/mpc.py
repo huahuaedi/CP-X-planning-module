@@ -427,6 +427,23 @@ class MPC:
                 )
             ),
         )
+        self.fail_safe_gentle_brake_deceleration_mps2 = max(
+            1e-6,
+            float(
+                self.reference_cfg.get(
+                    "fail_safe_gentle_brake_deceleration_mps2", 2.0
+                )
+            ),
+        )
+        self.fail_safe_emergency_stop_failure_threshold = max(
+            1,
+            int(
+                self.reference_cfg.get(
+                    "fail_safe_emergency_stop_failure_threshold",
+                    max(1, int(self.reference_consecutive_solver_failure_reset_threshold)) * 2,
+                )
+            ),
+        )
         self.reference_previous_solution_search_steps = max(
             0,
             int(self.reference_cfg.get("previous_solution_search_steps", 15)),
@@ -475,6 +492,15 @@ class MPC:
                 )
             ),
         )
+        self.mode_cost_profiles = dict(
+            mpc_cfg.get("mode_cost_profiles", mpc_cfg.get("mpc_profiles", {}))
+        )
+        self.mode_cost_profile_blend_alpha = min(
+            1.0,
+            max(0.0, float(mpc_cfg.get("mode_cost_profile_blend_alpha", 0.35))),
+        )
+        self._base_mode_cost_state = self._capture_mode_cost_state()
+        self.active_cost_profile_name = "base"
 
         self.solver_cfg = dict(mpc_cfg.get("solver", {}))
         self.qp_max_iter = int(self.solver_cfg.get("max_iter", 4000))
@@ -515,6 +541,103 @@ class MPC:
 
         # --- Internal replan rate-limiting ---
         self._last_replan_sim_time_s: float = -1.0
+
+    def _capture_mode_cost_state(self) -> Dict[str, float]:
+        return {
+            "w_attractive": float(self.safety_cost.w_safe),
+            "q_x": float(self.comfort_cost.qx),
+            "q_y": float(self.comfort_cost.qy),
+            "q_v": float(self.comfort_cost.qv),
+            "q_psi": float(self.comfort_cost.qpsi),
+            "w_control": float(self.comfort_cost.w_comf),
+            "q_a": float(self.comfort_cost.qa),
+            "q_delta": float(self.comfort_cost.qdelta),
+            "lane_center_w0": float(self.lane_center_follow_weight),
+            "lane_center_q_psi": float(self.lane_center_follow_qpsi),
+            "road_boundary_w": float(self.road_boundary_weight),
+            "road_boundary_margin_m": float(self.road_boundary_margin_m),
+            "road_boundary_max_slack_m": float(self.road_boundary_max_slack_m),
+        }
+
+    @staticmethod
+    def _profile_value(profile: Mapping[str, object], *keys: str) -> float | None:
+        for key in keys:
+            if key in profile:
+                try:
+                    value = float(profile.get(key, 0.0))
+                except Exception:
+                    return None
+                if math.isfinite(value):
+                    return float(value)
+        return None
+
+    def _target_mode_cost_state(self, profile_name: str) -> Dict[str, float]:
+        target = dict(self._base_mode_cost_state)
+        raw_profile = self.mode_cost_profiles.get(str(profile_name), {})
+        if not isinstance(raw_profile, Mapping):
+            return target
+        aliases = {
+            "w_attractive": ("w_attractive", "w_safe"),
+            "q_x": ("q_x", "qx"),
+            "q_y": ("q_y", "qy"),
+            "q_v": ("q_v", "qv"),
+            "q_psi": ("q_psi", "qpsi"),
+            "w_control": ("w_control", "w_comf"),
+            "q_a": ("q_a", "qa"),
+            "q_delta": ("q_delta", "qdelta"),
+            "lane_center_w0": ("lane_center_w0", "lane_center_weight", "w_lane_center", "w0"),
+            "lane_center_q_psi": ("lane_center_q_psi", "lane_center_heading_weight"),
+            "road_boundary_w": ("road_boundary_w", "road_boundary_weight", "w_boundary"),
+            "road_boundary_margin_m": ("road_boundary_margin_m", "road_boundary_margin"),
+            "road_boundary_max_slack_m": ("road_boundary_max_slack_m", "road_boundary_max_slack"),
+        }
+        for canonical_key, key_aliases in aliases.items():
+            value = self._profile_value(raw_profile, *key_aliases)
+            if value is not None:
+                target[canonical_key] = max(0.0, float(value))
+        return target
+
+    def apply_mode_cost_profile(self, profile_name: str, blend_alpha: float | None = None) -> str:
+        """Apply behavior-mode-specific MPC cost weights.
+
+        Only objective weights are changed here; hard constraints stay under
+        the existing speed-cap/constraint layer so mode switching does not
+        suddenly alter feasibility.
+        """
+        normalized_profile = str(profile_name or "base").strip()
+        if not normalized_profile:
+            normalized_profile = "base"
+        if normalized_profile != "base" and normalized_profile not in self.mode_cost_profiles:
+            normalized_profile = "lane_follow" if "lane_follow" in self.mode_cost_profiles else "base"
+
+        target = self._target_mode_cost_state(normalized_profile)
+        alpha = (
+            float(self.mode_cost_profile_blend_alpha)
+            if blend_alpha is None
+            else float(blend_alpha)
+        )
+        alpha = min(1.0, max(0.0, float(alpha)))
+        current = self._capture_mode_cost_state()
+        blended = {
+            key: float(current.get(key, 0.0)) * (1.0 - alpha) + float(target[key]) * alpha
+            for key in target.keys()
+        }
+        self.safety_cost.w_safe = float(blended["w_attractive"])
+        self.comfort_cost.qx = float(blended["q_x"])
+        self.comfort_cost.qy = float(blended["q_y"])
+        self.comfort_cost.qv = float(blended["q_v"])
+        self.comfort_cost.qpsi = float(blended["q_psi"])
+        self.comfort_cost.w_comf = float(blended["w_control"])
+        self.comfort_cost.qa = float(blended["q_a"])
+        self.comfort_cost.qdelta = float(blended["q_delta"])
+        self.lane_center_follow_weight = float(blended["lane_center_w0"])
+        self.lane_center_follow_qpsi = float(blended["lane_center_q_psi"])
+        self.road_boundary_weight = float(blended["road_boundary_w"])
+        self.lane_keep_boundary_weight = float(self.road_boundary_weight)
+        self.road_boundary_margin_m = float(blended["road_boundary_margin_m"])
+        self.road_boundary_max_slack_m = float(blended["road_boundary_max_slack_m"])
+        self.active_cost_profile_name = str(normalized_profile)
+        return str(normalized_profile)
 
     def should_replan(self, sim_time_s: float) -> bool:
         """Return True when enough simulation time has elapsed for a new plan.
@@ -1499,25 +1622,92 @@ class MPC:
         self,
         current_speed_mps: float,
         current_acceleration_mps2: float,
+        braking_deceleration_mps2: float | None = None,
     ) -> List[float]:
         """
-        Compute the minimum reachable speed profile under bounded jerk and
-        acceleration when applying the strongest allowed braking sequence.
+        Compute the minimum reachable speed profile under bounded jerk when
+        applying a sustained braking deceleration.
+
+        Defaults to the strongest allowed braking (``min_acceleration_mps2``)
+        when ``braking_deceleration_mps2`` is not given; callers that need a
+        milder, comfort-braking profile (e.g. the MPC fail-safe fallback) can
+        pass a smaller magnitude instead.
         """
 
         profile = [max(float(self.constraints.min_velocity_mps), float(current_speed_mps))]
         min_velocity_mps = float(self.constraints.min_velocity_mps)
-        min_acceleration_mps2 = float(self.constraints.min_acceleration_mps2)
+        target_a_mps2 = (
+            float(self.constraints.min_acceleration_mps2)
+            if braking_deceleration_mps2 is None
+            else -abs(float(braking_deceleration_mps2))
+        )
         jerk_delta_limit = float(self.constraints.max_jerk_mps3) * float(self.dt_s)
 
         v_k_mps = float(profile[0])
         a_prev_mps2 = float(current_acceleration_mps2)
         for _ in range(self.horizon_steps):
-            a_k_mps2 = max(min_acceleration_mps2, a_prev_mps2 - jerk_delta_limit)
+            a_k_mps2 = max(target_a_mps2, a_prev_mps2 - jerk_delta_limit)
             v_k_mps = max(min_velocity_mps, float(v_k_mps) + float(self.dt_s) * float(a_k_mps2))
             profile.append(float(v_k_mps))
             a_prev_mps2 = float(a_k_mps2)
         return profile
+
+    def _fail_safe_fallback_trajectory(
+        self,
+        *,
+        x0: np.ndarray,
+        rollout_x: np.ndarray,
+        rollout_u: np.ndarray,
+        current_acceleration_mps2: float,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Deterministic fallback trajectory for a cycle where every QP solve
+        attempt failed.
+
+        The plain rollout returned before this method existed is only an
+        open-loop kinematic guess toward the destination -- it is not
+        guaranteed to decelerate, so handing it straight to the controller on
+        solver failure could keep the vehicle moving at an unvalidated speed.
+        This escalates with consecutive failure count instead, per the
+        architecture proposal's Phase 4 fail-safe requirement:
+          - below ``fail_safe_emergency_stop_failure_threshold``: keep the
+            rollout's path (x, y, heading) but override its speed with a
+            comfortable braking profile ("brake gently, hold last safe
+            path").
+          - at/above that threshold: switch to the strongest allowed braking
+            (``min_acceleration_mps2``), i.e. a true emergency stop.
+        """
+        emergency = (
+            int(self._consecutive_solver_failure_count)
+            >= int(self.fail_safe_emergency_stop_failure_threshold)
+        )
+        speed_profile_mps = self._minimum_reachable_speed_profile_mps(
+            current_speed_mps=float(x0[2]),
+            current_acceleration_mps2=float(current_acceleration_mps2),
+            braking_deceleration_mps2=(
+                None if emergency else float(self.fail_safe_gentle_brake_deceleration_mps2)
+            ),
+        )
+
+        x_solution = np.array(rollout_x, dtype=float)
+        u_solution = np.array(rollout_u, dtype=float)
+        min_velocity_mps = float(self.constraints.min_velocity_mps)
+        for k in range(self.horizon_steps + 1):
+            x_solution[k, 2] = max(min_velocity_mps, float(speed_profile_mps[k]))
+        for k in range(int(u_solution.shape[0])):
+            v_before_mps = float(x_solution[k, 2])
+            v_after_mps = float(x_solution[k + 1, 2])
+            u_solution[k, 0] = self._clamp(
+                (v_after_mps - v_before_mps) / float(self.dt_s),
+                float(self.constraints.min_acceleration_mps2),
+                float(self.constraints.max_acceleration_mps2),
+            )
+        print(
+            "[MPC] "
+            + ("EMERGENCY STOP" if emergency else "brake-gently")
+            + " fail-safe fallback trajectory "
+            + f"(consecutive_failures={int(self._consecutive_solver_failure_count)})"
+        )
+        return x_solution, u_solution
 
     def _future_speed_upper_bound_mps(
         self,
@@ -2592,9 +2782,12 @@ class MPC:
         self._last_solve_time_ms = float(total_solve_time_ms)
 
         if best_x_solution is None or best_u_solution is None:
-            # Deterministic fallback: return the current rollout if all QP solves fail.
-            x_solution = current_x_ref_rollout
-            u_solution = current_u_ref_rollout
+            x_solution, u_solution = self._fail_safe_fallback_trajectory(
+                x0=x0,
+                rollout_x=current_x_ref_rollout,
+                rollout_u=current_u_ref_rollout,
+                current_acceleration_mps2=float(planning_current_acceleration_mps2),
+            )
         else:
             x_solution = np.asarray(best_x_solution, dtype=float)
             u_solution = np.asarray(best_u_solution, dtype=float)

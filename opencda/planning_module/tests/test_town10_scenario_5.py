@@ -6,6 +6,7 @@ import unittest
 from unittest import mock
 
 from main import list_available_scenarios, load_any_scenario
+from planning_runner import _resolve_route_anchor_transforms
 from opencda_scenario.town10_scenario_5 import scenario as town10_scenario_5
 
 
@@ -91,6 +92,44 @@ class Town10Scenario5Tests(unittest.TestCase):
             str(scenario_cfg.get("runtime", {}).get("hazard_marker_prefix", "")),
             "hazard_",
         )
+
+    def test_town10_scenario_5_and_6_have_distinct_explicit_route_anchors(self):
+        scenario_5 = load_any_scenario("town10_scenario_5")
+        scenario_6 = load_any_scenario("town10_scenario_6")
+
+        anchors_5 = dict(scenario_5.get("anchors", {}))
+        anchors_6 = dict(scenario_6.get("anchors", {}))
+
+        self.assertNotEqual(
+            list(anchors_5.get("ego_spawn_xyz_yaw", [])),
+            list(anchors_6.get("ego_spawn_xyz_yaw", [])),
+        )
+        self.assertNotEqual(
+            list(anchors_5.get("final_destination_xyz_yaw", [])),
+            list(anchors_6.get("final_destination_xyz_yaw", [])),
+        )
+
+    def test_explicit_route_anchor_coordinates_override_missing_world_markers(self):
+        spawn_anchor, destination_anchor, ego_name, destination_name = _resolve_route_anchor_transforms(
+            world=_FakeWorld(),
+            carla=_FakeCarla,
+            world_map=types.SimpleNamespace(),
+            anchors_cfg={
+                "ego_spawn": "missing_ego",
+                "final_destination": "missing_goal",
+                "ego_spawn_xyz_yaw": [1.0, 2.0, 0.6, 15.0],
+                "final_destination_xyz_yaw": [10.0, 20.0, 0.6, 90.0],
+            },
+        )
+
+        self.assertEqual(ego_name, "missing_ego")
+        self.assertEqual(destination_name, "missing_goal")
+        self.assertAlmostEqual(float(spawn_anchor.location.x), 1.0)
+        self.assertAlmostEqual(float(spawn_anchor.location.y), 2.0)
+        self.assertAlmostEqual(float(spawn_anchor.rotation.yaw), 15.0)
+        self.assertAlmostEqual(float(destination_anchor.location.x), 10.0)
+        self.assertAlmostEqual(float(destination_anchor.location.y), 20.0)
+        self.assertAlmostEqual(float(destination_anchor.rotation.yaw), 90.0)
 
     def test_hazard_markers_register_lane_closures_once_each(self):
         world = _FakeWorld(

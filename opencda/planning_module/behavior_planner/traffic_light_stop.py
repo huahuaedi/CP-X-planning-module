@@ -297,6 +297,7 @@ def find_relevant_signal_context(
         "signal_actor_name": "",
         "signal_source": "none",
         "signal_match_distance_m": None,
+        "signal_actor_raw_state": "",
     }
 
     ego_associated_actor = None
@@ -379,14 +380,18 @@ def find_relevant_signal_context(
     for candidate_actor in candidate_actors:
         # When this is the ego-associated actor, prefer the state read directly
         # via get_traffic_light_state() (more reliable) over get_state().
+        candidate_raw_state = ""
         if candidate_actor is ego_associated_actor and ego_associated_state is not None:
+            candidate_raw_state = str(ego_associated_state)
             candidate_state = str(ego_associated_state)
         else:
             candidate_state = "unknown"
             get_state_fn = getattr(candidate_actor, "get_state", None)
             if callable(get_state_fn):
                 try:
-                    candidate_state = normalize_signal_state(get_state_fn())
+                    raw_state = get_state_fn()
+                    candidate_raw_state = str(raw_state)
+                    candidate_state = normalize_signal_state(raw_state)
                 except Exception:
                     candidate_state = "unknown"
 
@@ -501,6 +506,7 @@ def find_relevant_signal_context(
             "signal_actor_id": getattr(candidate_actor, "id", None),
             "signal_actor_name": str(actor_name),
             "signal_source": str(signal_source),
+            "signal_actor_raw_state": str(candidate_raw_state),
             "signal_match_distance_m": (
                 None if not math.isfinite(match_distance_m) else float(match_distance_m)
             ),
@@ -513,17 +519,24 @@ def find_relevant_signal_context(
             best_candidate = candidate_context
             continue
 
-        # CARLA's vehicle association is the most reliable answer once the ego
-        # is in a traffic-light trigger volume.  Stop-waypoint matching can
-        # accidentally choose a sibling light at dense intersections, which
-        # leaves a stale red visible after the ego-associated light turns green.
-        source_priority = {
-            "ego_vehicle_association": 0,
-            "stop_waypoint_match": 1,
-            "actor_position_match": 2,
-        }
+        # Prefer a stop-waypoint match when the ego-associated actor has no
+        # stop-line/lane evidence.  CARLA trigger volumes can be large around
+        # dense junctions; blindly prioritising ego association lets a sibling
+        # light keep a stale red after the route stop line has moved on.
+        def source_priority(candidate: Mapping[str, object]) -> int:
+            source = str(candidate.get("signal_source", ""))
+            if source == "ego_vehicle_association":
+                if stop_target_xy is not None and candidate.get("signal_match_rank", None) is None:
+                    return 2
+                return 0
+            if source == "stop_waypoint_match":
+                return 1
+            if source == "actor_position_match":
+                return 3
+            return 9
+
         current_priority = (
-            int(source_priority.get(str(candidate_context["signal_source"]), 9)),
+            int(source_priority(candidate_context)),
             9
             if candidate_context.get("signal_match_rank", None) is None
             else int(candidate_context.get("signal_match_rank", 9)),
@@ -531,7 +544,7 @@ def find_relevant_signal_context(
             float(candidate_context.get("signal_distance_m") or float("inf")),
         )
         best_priority = (
-            int(source_priority.get(str(best_candidate["signal_source"]), 9)),
+            int(source_priority(best_candidate)),
             9
             if best_candidate.get("signal_match_rank", None) is None
             else int(best_candidate.get("signal_match_rank", 9)),

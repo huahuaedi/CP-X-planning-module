@@ -45,6 +45,8 @@ sumo:
 anchors:
   ego_spawn: town10_scenario_6_ego
   final_destination: town10_scenario_6_final_destination
+  ego_spawn_xyz_yaw: [-113.404, -35.0, 0.6, 90.0]
+  final_destination_xyz_yaw: [109.523, 89.837, 0.6, 0.0]
 
 traffic_manager:
   enabled: true
@@ -110,9 +112,13 @@ planning:
 
 camera:
   enabled: true
-  image_size_x: 840
-  image_size_y: 680
+  image_size_x: 640
+  image_size_y: 480
   fov: 90.0
+  # Put the FSM/status panel below the camera views instead of to their
+  # right, so the window is 1280x700 (smaller than the previous 2000x680).
+  hud_position: bottom
+  hud_panel_height_px: 220
   topdown:
     world_fixed: false
     height: 65.0

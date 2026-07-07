@@ -839,6 +839,12 @@ def _build_stop_reference_samples(
         project_to_road=True,
         lane_type=carla.LaneType.Driving,
     )
+    stop_wp = move_to_lane(
+        carla,
+        stop_wp,
+        int(stop_lane_id),
+        allow_junction_lane_snap=True,
+    )
     stop_lane_width_m = _lane_width_m(stop_wp, 0.0)
 
     route_points_valid = (
@@ -925,6 +931,12 @@ def _build_stop_reference_samples(
             project_to_road=True,
             lane_type=carla.LaneType.Driving,
         )
+        sample_wp = move_to_lane(
+            carla,
+            sample_wp,
+            int(stop_lane_id),
+            allow_junction_lane_snap=False,
+        )
         if sample_wp is None:
             next_x_m, next_y_m = get_lookahead_route_point(
                 route_points=route_points_valid,
@@ -956,7 +968,7 @@ def _build_stop_reference_samples(
                 "x_ref_m": float(sample_wp.transform.location.x),
                 "y_ref_m": float(sample_wp.transform.location.y),
                 "heading_rad": float(math.radians(sample_wp.transform.rotation.yaw)),
-                "lane_id": _internal_lane_id(carla, sample_wp),
+                "lane_id": int(stop_lane_id),
                 "lane_width_m": _lane_width_m(sample_wp, float(stop_lane_width_m)),
                 **_road_boundary_fields_for_waypoint(sample_wp, float(stop_lane_width_m)),
             }
@@ -1769,13 +1781,15 @@ def compute_temp_destination(
         blue_dot_follow_route_lane = False
 
     # ---- Start wp (lane shift only on lane-change decision) ---- #
-    # Allow junction lane snapping for explicit lane-change decisions: the
-    # behavior planner has already committed to the lateral move, so preventing
-    # the snap inside junctions would leave the blue dot on the old lane and
-    # give the MPC a wrong reference during EXECUTE_LC near an intersection.
+    # Do not snap laterally inside junctions. Junction lane topology is often
+    # connector-like, so a lateral snap can move the blue dot off the intended
+    # route branch and make MPC cut across the intersection.
     start_wp = _start_wp_for_decision(
         carla, ego_wp, str(decision), int(blue_dot_target_lane_id),
-        allow_junction_lane_snap=str(normalized_decision) in {"lane_change_left", "lane_change_right"},
+        allow_junction_lane_snap=(
+            str(normalized_decision) in {"lane_change_left", "lane_change_right"}
+            and not bool(is_intersection)
+        ),
     )
     if route_points_valid is not None:
         route_cum_dists = _route_cum_dists(route_points_valid)

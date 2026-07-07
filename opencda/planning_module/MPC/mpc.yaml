@@ -101,6 +101,12 @@ mpc:
     candidate_route_deviation_weight: 0.15
     candidate_lane_change_weight: 0.20
 
+    # Future-trajectory model used by behavior candidate risk checks when CP
+    # does not provide a predicted_trajectory. "constant_acceleration" uses
+    # a/acceleration_mps2/ax/ay if present and degenerates to CV if not.
+    lane_change_prediction_model: constant_acceleration
+    lane_change_prediction_max_abs_acceleration_mps2: 4.0
+
     # Minimum FSM state hold times [s]. Safety overrides such as emergency
     # braking, traffic-light stops, and cooperative reroutes can still preempt.
     # lane_keep_min_hold_s also acts as a cooldown after a lane-change is
@@ -110,6 +116,15 @@ mpc:
     prepare_lane_change_min_hold_s: 0.5
     execute_lane_change_min_hold_s: 1.0
     lane_keep_min_hold_s: 0.5
+
+    # Once EXECUTE_LANE_CHANGE_* has run past this many seconds, a target-lane
+    # safety-score dip alone no longer reverses the maneuver -- reversing after
+    # this much commitment costs more (an extra unwind) than finishing it.
+    # Prediction-risk aborts (imminent front/rear conflict) still apply
+    # regardless of commit time. Seen in town10_scenario_6: slow, congested
+    # execute phases were being reversed at ~3s on a soft safety-score dip
+    # after already covering ~45% of the lateral distance to the target lane.
+    lane_change_safety_abort_commit_s: 2.0
 
     # Lane change completion thresholds.
     lane_change_completion_lateral_threshold_m: 0.75
@@ -126,6 +141,49 @@ mpc:
     # More forward samples catch the curvature peak earlier on approach.
     curve_speed_cap_sample_count: 12
 
+    # MPC horizon-reference continuity guard. The temporary destination can be
+    # stable while the per-stage lane reference still jumps; when the first
+    # reference sample jumps this far in a non-lane-change decision, keep the
+    # previous horizon instead of feeding the discontinuity into MPC.
+    reference_stabilization_freeze_on_jump: true
+    reference_stabilization_jump_threshold_m: 2.25
+    reference_freeze_reanchor_after_replans: 4
+    # Geometry guards before feeding local goals/references into MPC.
+    # If the blue dot or first reference sample is far to the side while not
+    # changing lanes, re-anchor to a local lane-center/heading-safe target.
+    temp_destination_min_forward_m: 3.0
+    temp_destination_max_lateral_m: 4.5
+    temp_destination_fallback_forward_m: 8.0
+    reference_first_sample_min_forward_m: -0.5
+    reference_first_sample_max_lateral_m: 4.5
+
+    # Limit how far the temporary destination is allowed to move in a single
+    # replan when a new stop target becomes active. Speed is still capped by
+    # remaining stop distance, but the target point itself no longer snaps
+    # across a long distance in one frame.
+    stop_target_max_destination_step_m: 5.0
+    stop_profile_braking_deceleration_mps2: 1.2
+    # Caps below (IDM, stop profile, curvature, reference-jump) are each
+    # recomputed from scratch every cycle and combined by taking the
+    # tightest. When the binding one is noisy (e.g. IDM reacting to a lead
+    # vehicle's fluctuating gap near an intersection), the combined cap can
+    # swing down and back up by several m/s within a couple of ticks, which
+    # reads to the MPC as alternating hard-brake/floor-it commands and shows
+    # up as exaggerated corrective steering once the vehicle drifts during
+    # the jerk. This only rate-limits how fast the cap may *rise* back up;
+    # a cap that needs to drop (new obstacle, tighter stop, emergency brake)
+    # always applies immediately.
+    speed_cap_rise_limit_mps2: 2.0
+    # Desired standstill buffer before a traffic stop target. Keep this small:
+    # a large value (e.g. 5m) makes the speed cap hit zero while the ego is
+    # still visibly far from the stop line, which looks like the vehicle is
+    # stuck before the intersection.
+    stop_profile_buffer_m: 1.5
+
+    # Minimum time [s] to keep a non-emergency MPC cost profile before allowing
+    # another profile switch. Stop/recovery can still preempt immediately.
+    mpc_cost_profile_min_hold_s: 1.5
+
     # Involuntary-standstill recovery timeout [s].
     # If the ego has been stationary this long while NOT in a voluntary stop
     # (stop_sign / traffic-light), the runner forces an MPC seed reset and a
@@ -133,6 +191,11 @@ mpc:
     # is in emergency_brake (the obstacle may still be present).
     standstill_recovery_timeout_s: 15.0
     standstill_emergency_brake_recovery_timeout_s: 30.0
+    # After a collision sensor event, briefly hold brake and clear the MPC
+    # seed so the controller does not continue to apply throttle into the
+    # object it just hit.
+    collision_recovery_hold_s: 2.0
+    collision_recovery_brake: 1.0
 
     # CARLA-native traffic-light stopping logic.
     #
@@ -144,6 +207,13 @@ mpc:
       enabled: true
       search_distance_m: 60.0
       stop_buffer_m: 2.0
+      # If a light briefly disappears at a CARLA trigger-volume boundary, keep
+      # the last reliable state only for this short window.  Red is remembered
+      # only while a current stop target still exists.
+      unknown_hold_s: 0.75
+      # After this much continuous unknown with no valid stop target, release a
+      # traffic-light stop latch instead of staying stopped on a phantom red.
+      unknown_release_s: 2.0
 
   # Rolling temporary-destination settings shared by the integration layer and
   # the MPC interface. These parameters control what destination state is fed
@@ -323,6 +393,19 @@ mpc:
     # Set 0 to disable this automatic reset.
     consecutive_solver_failure_reset_threshold: 10 #4
 
+    # Deceleration [m/s^2, positive magnitude] applied to the fallback
+    # trajectory's speed profile on a cycle where every QP solve attempt
+    # fails, as long as consecutive failures stay below
+    # fail_safe_emergency_stop_failure_threshold ("brake gently, hold last
+    # safe path" instead of handing back the raw unvalidated rollout speed).
+    fail_safe_gentle_brake_deceleration_mps2: 2.0
+
+    # Consecutive solve failures after which the fallback trajectory
+    # escalates from gentle braking to full emergency braking
+    # (min_acceleration_mps2). Defaults to 2x
+    # consecutive_solver_failure_reset_threshold if unset.
+    fail_safe_emergency_stop_failure_threshold: 20
+
     # Number of early stages searched when aligning the current ego state to the
     # previous solved plan.
     # Increase -> more chances to match a reused plan.
@@ -385,6 +468,98 @@ mpc:
 
   # MPC objective:
   #   J = Cost_Attractive + Cost_LaneCenter + Cost_RoadBoundary + Cost_Repulsive + Cost_Control
+  mode_cost_profile_blend_alpha: 0.18
+  mode_cost_profiles:
+    lane_follow:
+      w_attractive: 1.0
+      q_x: 2.0
+      q_y: 0.0
+      q_v: 2.0
+      q_psi: 0.0
+      lane_center_w0: 20.0
+      lane_center_q_psi: 2.0
+      road_boundary_w: 10000.0
+      road_boundary_margin_m: 0.50
+      road_boundary_max_slack_m: 0.10
+      w_control: 5.0
+      q_a: 5.0
+      q_delta: 100.0
+
+    intersection_turn:
+      w_attractive: 0.8
+      q_x: 1.5
+      q_y: 0.0
+      q_v: 1.2
+      q_psi: 0.0
+      lane_center_w0: 36.0
+      lane_center_q_psi: 3.0
+      road_boundary_w: 16000.0
+      road_boundary_margin_m: 0.65
+      road_boundary_max_slack_m: 0.06
+      w_control: 8.0
+      q_a: 8.0
+      q_delta: 180.0
+
+    stop:
+      w_attractive: 1.2
+      q_x: 2.0
+      q_y: 0.0
+      q_v: 6.0
+      q_psi: 0.0
+      lane_center_w0: 24.0
+      lane_center_q_psi: 2.5
+      road_boundary_w: 12000.0
+      road_boundary_margin_m: 0.55
+      road_boundary_max_slack_m: 0.08
+      w_control: 10.0
+      q_a: 12.0
+      q_delta: 140.0
+
+    prepare_lane_change:
+      w_attractive: 0.9
+      q_x: 1.5
+      q_y: 0.0
+      q_v: 1.8
+      q_psi: 0.0
+      lane_center_w0: 18.0
+      lane_center_q_psi: 2.0
+      road_boundary_w: 11000.0
+      road_boundary_margin_m: 0.55
+      road_boundary_max_slack_m: 0.09
+      w_control: 7.0
+      q_a: 7.0
+      q_delta: 130.0
+
+    execute_lane_change:
+      w_attractive: 1.1
+      q_x: 2.5
+      q_y: 0.0
+      q_v: 1.6
+      q_psi: 0.0
+      lane_center_w0: 28.0
+      lane_center_q_psi: 2.5
+      road_boundary_w: 14000.0
+      road_boundary_margin_m: 0.60
+      road_boundary_max_slack_m: 0.07
+      w_control: 8.0
+      q_a: 8.0
+      q_delta: 160.0
+
+    recovery:
+      w_attractive: 0.7
+      q_x: 1.0
+      q_y: 0.0
+      q_v: 0.8
+      q_psi: 0.0
+      lane_center_w0: 16.0
+      lane_center_q_psi: 2.0
+      road_boundary_w: 10000.0
+      road_boundary_margin_m: 0.60
+      road_boundary_max_slack_m: 0.10
+      w_control: 14.0
+      q_a: 14.0
+      q_delta: 180.0
+
   cost:
     attractive:
       # Global weight on destination-state tracking.

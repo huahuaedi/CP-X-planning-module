@@ -23,6 +23,7 @@ class _BehaviorCommandRequired(TypedDict):
     target_lane_id: int
     selected_lane_id: int
     lc_state: str
+    fsm_state: str
     blue_dot_rolling: bool
     stop: bool
     blocking_obstacle_id: str
@@ -41,3 +42,11 @@ class BehaviorCommand(_BehaviorCommandRequired, total=False):
     rejected_candidates: list[dict[str, Any]]
     candidate_evaluation: dict[str, Any]
     invariant_violations: list[str]
+    lane_change_phase: str
+    lane_change_abort_reason: str
+    lane_change_cancel_reason: str
+    lane_change_source_lane_id: int | str
+    lane_change_target_lane_id: int | str
+    lane_change_recovery_lane_id: int | str
+    lane_change_state_elapsed_s: float
+    lane_change_state_min_hold_s: float

@@ -42,6 +42,31 @@ class BridgeHelper(object):
         _VTYPES = json.load(f)['carla_blueprints']
 
     @staticmethod
+    def _sanitize_sumo_dimension(value, *, default, minimum, maximum, label, type_id):
+        """
+        SUMO rejects non-finite, zero, negative, and some extreme vehicle
+        dimensions. Some CARLA blueprints/fallback actors can expose invalid
+        bounding-box extents, so guard the TraCI vtype setters here.
+        """
+        try:
+            dimension = float(value)
+        except Exception:
+            dimension = float(default)
+        if not math.isfinite(dimension) or dimension <= 0.0:
+            logging.warning(
+                "[BridgeHelper] Invalid %s %.3f for %s; using default %.3f",
+                label, dimension, type_id, float(default),
+            )
+            dimension = float(default)
+        clamped = min(max(float(dimension), float(minimum)), float(maximum))
+        if abs(float(clamped) - float(dimension)) > 1.0e-6:
+            logging.warning(
+                "[BridgeHelper] Clamped %s for %s from %.3f to %.3f",
+                label, type_id, float(dimension), float(clamped),
+            )
+        return float(clamped)
+
+    @staticmethod
     def get_carla_transform(in_sumo_transform, extent):
         """
         Returns carla transform based on sumo transform.
@@ -185,9 +210,33 @@ class BridgeHelper(object):
             color = attrs['color'].split(',')
             traci.vehicletype.setColor(type_id, color)
 
-        traci.vehicletype.setLength(type_id, 2.0 * extent.x)
-        traci.vehicletype.setWidth(type_id, 2.0 * extent.y)
-        traci.vehicletype.setHeight(type_id, 2.0 * extent.z)
+        length = BridgeHelper._sanitize_sumo_dimension(
+            2.0 * getattr(extent, 'x', 0.0),
+            default=4.5,
+            minimum=0.5,
+            maximum=30.0,
+            label='length',
+            type_id=type_id,
+        )
+        width = BridgeHelper._sanitize_sumo_dimension(
+            2.0 * getattr(extent, 'y', 0.0),
+            default=2.0,
+            minimum=0.5,
+            maximum=5.0,
+            label='width',
+            type_id=type_id,
+        )
+        height = BridgeHelper._sanitize_sumo_dimension(
+            2.0 * getattr(extent, 'z', 0.0),
+            default=1.6,
+            minimum=0.5,
+            maximum=5.0,
+            label='height',
+            type_id=type_id,
+        )
+        traci.vehicletype.setLength(type_id, length)
+        traci.vehicletype.setWidth(type_id, width)
+        traci.vehicletype.setHeight(type_id, height)
 
         logging.debug(
             '''[BridgeHelper] blueprint %s not found in sumo vtypes

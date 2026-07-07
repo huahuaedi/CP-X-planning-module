@@ -118,6 +118,20 @@ class RunnerFinalDestinationSnapTests(unittest.TestCase):
         self.assertAlmostEqual(float(temporary_destination_state[2]), float(active_v_max))
         self.assertLessEqual(float(active_v_max), 7.0)
 
+    def test_stop_target_speed_cap_slows_red_light_approach_before_lock_distance(self):
+        temporary_destination_state, active_v_max = _apply_stop_target_speed_cap(
+            temporary_destination_state=[0.0, 19.0, 10.0, 1.57, 1],
+            ego_state=[0.0, 0.0, 10.0, 1.57],
+            stop_target_distance_m=19.0,
+            original_max_velocity_mps=10.0,
+            braking_deceleration_mps2=1.2,
+            stop_buffer_m=5.0,
+        )
+
+        self.assertIsNotNone(temporary_destination_state)
+        self.assertLess(float(active_v_max), 6.0)
+        self.assertAlmostEqual(float(temporary_destination_state[2]), float(active_v_max))
+
     def test_exact_stop_target_snap_uses_final_destination_stop_method(self):
         temporary_destination_state, active_v_max = _apply_exact_stop_target_snap(
             temporary_destination_state=[10.0, 0.0, 5.0, 0.0, 1, 1.0],

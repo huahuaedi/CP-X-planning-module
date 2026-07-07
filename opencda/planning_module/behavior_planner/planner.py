@@ -57,6 +57,7 @@ DEFAULT_STOP_SIGN_WAIT_DURATION_S = 3.0
 DEFAULT_PREPARE_LANE_CHANGE_MIN_HOLD_S = 0.5
 DEFAULT_EXECUTE_LANE_CHANGE_MIN_HOLD_S = 1.0
 DEFAULT_LANE_KEEP_MIN_HOLD_S = 0.3
+DEFAULT_LANE_CHANGE_SAFETY_ABORT_COMMIT_S = 2.0
 DEFAULT_STOP_SIGN_COUNTDOWN_SPEED_THRESHOLD_MPS = 1.0
 DEFAULT_STOP_SIGN_COUNTDOWN_DISTANCE_THRESHOLD_M = 2.0
 DEFAULT_STOP_SIGN_COUNTDOWN_START_DISTANCE_THRESHOLD_M = 5.0
@@ -171,13 +172,24 @@ def _behavior_command_invariant_violations(
     command: Mapping[str, object],
     *,
     ego_lane_id: int,
-) -> list[str]:
-    """Check the "Required invariant" rules from the architecture proposal's
+) -> list[dict[str, object]]:
+    """Check the "Required invariant" rule from the architecture proposal's
     Behavior Layer section: stop and emergency-brake decisions must keep the
-    ego lane as target, and a lane-change decision must target a different
-    lane than the ego lane.
+    ego lane as target.
+
+    Note: a lane-change decision whose ``target_lane_id`` equals the ego lane
+    is *not* flagged here. That state is legitimately reached when an
+    in-progress lane change is reversed before the vehicle has physically
+    left its source lane (see
+    ``test_ongoing_lane_change_reverses_when_target_lane_becomes_worse_than_previous_lane``)
+    -- the decision string still names the direction of travel, not "target
+    differs from current lane".
+
+    Returns structured records (``kind`` + human-readable ``message``) rather
+    than plain strings so the caller can apply the matching correction, not
+    just log the problem.
     """
-    violations: list[str] = []
+    violations: list[dict[str, object]] = []
     decision = str(command.get("decision", ""))
     raw_target_lane_id = command.get("target_lane_id", None)
     try:
@@ -187,24 +199,17 @@ def _behavior_command_invariant_violations(
     if target_lane_id is None:
         return violations
 
-    if is_fixed_stop_decision(decision) and int(target_lane_id) != int(ego_lane_id):
-        violations.append(
-            f"decision={decision!r} (stop) must target ego lane {int(ego_lane_id)}, "
-            f"got target_lane_id={int(target_lane_id)}"
-        )
-    if is_emergency_brake_decision(decision) and int(target_lane_id) != int(ego_lane_id):
-        violations.append(
-            f"decision={decision!r} (emergency_brake) must target ego lane "
-            f"{int(ego_lane_id)}, got target_lane_id={int(target_lane_id)}"
-        )
     if (
-        decision in {_DECISION_CHANGE_LEFT, _DECISION_CHANGE_RIGHT}
-        and int(target_lane_id) == int(ego_lane_id)
+        (is_fixed_stop_decision(decision) or is_emergency_brake_decision(decision))
+        and int(target_lane_id) != int(ego_lane_id)
     ):
-        violations.append(
-            f"decision={decision!r} must target a lane different from ego lane "
-            f"{int(ego_lane_id)}, got target_lane_id={int(target_lane_id)}"
-        )
+        violations.append({
+            "kind": "stop_target_lane_mismatch",
+            "message": (
+                f"decision={decision!r} must target ego lane {int(ego_lane_id)}, "
+                f"got target_lane_id={int(target_lane_id)}"
+            ),
+        })
     return violations
 
 
@@ -437,6 +442,7 @@ class RuleBasedBehaviorPlanner:
         prepare_lane_change_min_hold_s: float = DEFAULT_PREPARE_LANE_CHANGE_MIN_HOLD_S,
         execute_lane_change_min_hold_s: float = DEFAULT_EXECUTE_LANE_CHANGE_MIN_HOLD_S,
         lane_keep_min_hold_s: float = DEFAULT_LANE_KEEP_MIN_HOLD_S,
+        lane_change_safety_abort_commit_s: float = DEFAULT_LANE_CHANGE_SAFETY_ABORT_COMMIT_S,
         candidate_route_deviation_weight: float = 0.15,
         candidate_lane_change_weight: float = 0.20,
     ) -> None:
@@ -479,6 +485,10 @@ class RuleBasedBehaviorPlanner:
         self._prepare_lane_change_min_hold_s = max(0.0, float(prepare_lane_change_min_hold_s))
         self._execute_lane_change_min_hold_s = max(0.0, float(execute_lane_change_min_hold_s))
         self._lane_keep_min_hold_s = max(0.0, float(lane_keep_min_hold_s))
+        self._lane_change_safety_abort_commit_s = max(
+            0.0,
+            float(lane_change_safety_abort_commit_s),
+        )
         self._candidate_route_deviation_weight = max(0.0, float(candidate_route_deviation_weight))
         self._candidate_lane_change_weight = max(0.0, float(candidate_lane_change_weight))
         self._last_cp_message_check_time_s: float | None = None
@@ -815,16 +825,19 @@ class RuleBasedBehaviorPlanner:
                 return self._attach_current_candidate_evaluation(prepared_lane_change_result)
 
         if self._is_execute_lane_change_state() and self._target_lane_id is not None and planner_mode == "INTERSECTION":
-            current_selected_lane_id = int(
-                self._selected_lane_id if self._selected_lane_id is not None else self._target_lane_id
-            )
+            # Compare against the *physical* ego lane, not
+            # self._selected_lane_id: entering EXECUTE sets selected_lane_id
+            # to the target immediately, so comparing intent-to-intent here
+            # would fire this reset one tick after every EXECUTE start (the
+            # vehicle hasn't moved yet), cancelling the maneuver before it
+            # can make any lateral progress.
             desired_lane_id = self._intersection_target_lane_id(
                 ego_lane_id=int(ego_lane_id),
                 route_optimal_lane_id=route_optimal_lane_id,
                 next_macro_maneuver=next_macro_maneuver,
                 available_lane_ids=available,
             )
-            if desired_lane_id is not None and int(current_selected_lane_id) == int(desired_lane_id):
+            if desired_lane_id is not None and int(ego_lane_id) == int(desired_lane_id):
                 self._reset_lane_change_state(reason="reset")
 
         # -------------------------------------------------------------- #
@@ -879,6 +892,25 @@ class RuleBasedBehaviorPlanner:
         # -------------------------------------------------------------- #
         if planner_mode == "INTERSECTION":
             current_selected_lane_id = int(self._selected_lane_id or ego_lane_id)
+            if bool(ego_in_junction):
+                self._simple_candidate_evaluation(
+                    selected_candidate="intersection_inside_lane_keep",
+                    decision=_DECISION_FOLLOW,
+                    target_lane_id=int(current_selected_lane_id),
+                    reason="ego_in_junction_lane_change_locked",
+                    rejected_reasons={
+                        "intersection_route_lane_change": "ego_in_junction",
+                    },
+                )
+                return self._make_result(
+                    _DECISION_FOLLOW,
+                    int(current_selected_lane_id),
+                    traffic_light_debug=dict(
+                        dict(traffic_light_debug or {}),
+                        intersection_lane_change_locked=True,
+                        intersection_lane_change_lock_reason="ego_in_junction",
+                    ),
+                )
             if not bool(ego_in_junction):
                 self._simple_candidate_evaluation(
                     selected_candidate="intersection_approach_lane_keep",
@@ -1025,16 +1057,27 @@ class RuleBasedBehaviorPlanner:
                 traffic_light_debug=candidate_debug,
             )
 
+        prediction_rejected_candidates = [
+            dict(candidate)
+            for candidate in list(candidate_evaluation.get("rejected_candidates", []) or [])
+            if str(dict(candidate).get("reason", "")) == "prediction_risk"
+        ]
+        follow_debug = dict(
+            dict(traffic_light_debug or {}),
+            candidate_selector_active=True,
+            selected_candidate=str(candidate_evaluation.get("selected_candidate", "lane_keep")),
+            candidate_selection_reason=str(candidate_evaluation.get("selection_reason", "")),
+            lane_keep_cooldown_active=bool(self._state_min_hold_active()),
+        )
+        if len(prediction_rejected_candidates) > 0:
+            follow_debug["lane_change_blocked_by_prediction"] = True
+            follow_debug["lane_change_prediction_risk"] = dict(
+                prediction_rejected_candidates[0].get("components", {})
+            )
         return self._make_result(
             _DECISION_FOLLOW,
             int(current_selected_lane_id),
-            traffic_light_debug=dict(
-                dict(traffic_light_debug or {}),
-                candidate_selector_active=True,
-                selected_candidate=str(candidate_evaluation.get("selected_candidate", "lane_keep")),
-                candidate_selection_reason=str(candidate_evaluation.get("selection_reason", "")),
-                lane_keep_cooldown_active=bool(self._state_min_hold_active()),
-            ),
+            traffic_light_debug=follow_debug,
         )
 
     # ----------------------------------------------------------------- #
@@ -1398,6 +1441,8 @@ class RuleBasedBehaviorPlanner:
         debug = dict(traffic_light_debug or {})
         if risk_debug is not None:
             debug.update(dict(risk_debug))
+        debug["lane_change_source_lane_id"] = int(selected_lane_id)
+        debug["lane_change_recovery_lane_id"] = int(selected_lane_id)
         return self._make_result(
             _DECISION_FOLLOW,
             int(selected_lane_id),
@@ -2629,12 +2674,28 @@ class RuleBasedBehaviorPlanner:
             abort_debug["lane_change_aborted"] = True
             abort_debug["lane_change_abort_reason"] = "prediction_risk"
             abort_debug["lane_change_prediction_risk"] = dict(prediction_risk)
+            abort_debug["lane_change_source_lane_id"] = int(source_lane_id)
+            abort_debug["lane_change_target_lane_id"] = int(target_lane_id)
+            abort_debug["lane_change_recovery_lane_id"] = int(source_lane_id)
             return self._make_result(
                 _DECISION_FOLLOW,
                 int(source_lane_id),
                 traffic_light_debug=abort_debug,
             )
         if self._state_min_hold_active():
+            return None
+        # Once execute has run past the commit window, a soft safety-score dip
+        # alone no longer reverses the maneuver -- by then the vehicle has
+        # likely made real lateral progress toward the target lane, and
+        # reversing costs more (an extra unwind maneuver) than finishing.
+        # Imminent-collision risk (prediction_blocked, checked above) still
+        # aborts regardless of commit time. An infinite elapsed time means no
+        # sim/wall clock was supplied this cycle -- treat that as "not yet
+        # committed" rather than silently disabling the abort path.
+        state_elapsed_s = float(self._state_elapsed_s())
+        if math.isfinite(state_elapsed_s) and state_elapsed_s >= float(
+            self._lane_change_safety_abort_commit_s
+        ):
             return None
         if float(target_lane_safety) >= float(self._lane_change_abort_safety_threshold):
             return None
@@ -2657,6 +2718,9 @@ class RuleBasedBehaviorPlanner:
             abort_debug = dict(traffic_light_debug or {})
             abort_debug["lane_change_aborted"] = True
             abort_debug["lane_change_abort_reason"] = "target_lane_safety"
+            abort_debug["lane_change_source_lane_id"] = int(source_lane_id)
+            abort_debug["lane_change_target_lane_id"] = int(target_lane_id)
+            abort_debug["lane_change_recovery_lane_id"] = int(source_lane_id)
             return self._make_result(
                 str(reverse_decision),
                 int(source_lane_id),
@@ -2689,6 +2753,8 @@ class RuleBasedBehaviorPlanner:
         prepare_debug = dict(traffic_light_debug or {})
         prepare_debug["lane_change_preparing"] = True
         prepare_debug["lane_change_prepare_target_lane_id"] = int(target_lane_id)
+        prepare_debug["lane_change_source_lane_id"] = int(self._source_lane_id)
+        prepare_debug["lane_change_target_lane_id"] = int(target_lane_id)
         return self._make_result(
             _DECISION_FOLLOW,
             int(self._selected_lane_id),
@@ -2717,6 +2783,8 @@ class RuleBasedBehaviorPlanner:
         self._selected_lane_id = int(target_lane_id)
         execute_debug = dict(traffic_light_debug or {})
         execute_debug["lane_change_executing"] = True
+        execute_debug["lane_change_source_lane_id"] = int(self._source_lane_id)
+        execute_debug["lane_change_target_lane_id"] = int(target_lane_id)
         return self._make_result(
             str(normalized_decision),
             int(target_lane_id),
@@ -2766,13 +2834,46 @@ class RuleBasedBehaviorPlanner:
                 else None
             )
         )
+        debug = dict(traffic_light_debug or {})
+        exported_lc_state = "IDLE" if str(self._lc_state) == _LANE_KEEP else str(self._lc_state)
+        lane_change_phase = "idle"
+        if str(exported_lc_state).startswith("PREPARE_LANE_CHANGE"):
+            lane_change_phase = "prepare"
+        elif str(exported_lc_state).startswith("EXECUTE_LANE_CHANGE"):
+            lane_change_phase = "execute"
+        elif str(exported_lc_state) == _ABORT_LANE_CHANGE:
+            lane_change_phase = "abort"
+        elif str(exported_lc_state) == _CANCEL_LANE_CHANGE:
+            lane_change_phase = "cancel"
+        elif str(exported_lc_state) == _STOP_STATE:
+            lane_change_phase = "stop"
+        elif str(exported_lc_state) == _YIELD_STATE:
+            lane_change_phase = "yield"
+        lane_change_source_lane_id = debug.get(
+            "lane_change_source_lane_id",
+            "" if self._source_lane_id is None else int(self._source_lane_id),
+        )
+        lane_change_target_lane_id = debug.get(
+            "lane_change_target_lane_id",
+            "" if self._target_lane_id is None else int(self._target_lane_id),
+        )
+        lane_change_recovery_lane_id = debug.get("lane_change_recovery_lane_id", "")
         result = {
             "decision": str(normalize_behavior_decision(decision)),
             "target_lane_id": int(target_lane_id),
             "selected_lane_id": int(
                 self._selected_lane_id if self._selected_lane_id is not None else target_lane_id
             ),
-            "lc_state": "IDLE" if str(self._lc_state) == _LANE_KEEP else str(self._lc_state),
+            "lc_state": str(exported_lc_state),
+            "fsm_state": str(exported_lc_state),
+            "lane_change_phase": str(lane_change_phase),
+            "lane_change_abort_reason": str(debug.get("lane_change_abort_reason", "")),
+            "lane_change_cancel_reason": str(debug.get("lane_change_cancel_reason", "")),
+            "lane_change_source_lane_id": lane_change_source_lane_id,
+            "lane_change_target_lane_id": lane_change_target_lane_id,
+            "lane_change_recovery_lane_id": lane_change_recovery_lane_id,
+            "lane_change_state_elapsed_s": float(self._state_elapsed_s()),
+            "lane_change_state_min_hold_s": float(self._state_min_hold_s()),
             "blue_dot_rolling": bool(blue_dot_rolling),
             "mode_override": str(normalized_mode_override) if normalized_mode_override else None,
             "stop": bool(active_stop),
@@ -2785,7 +2886,7 @@ class RuleBasedBehaviorPlanner:
         if follow_target is not None:
             result["follow_target"] = dict(follow_target)
         if traffic_light_debug is not None:
-            result["traffic_light_debug"] = dict(traffic_light_debug)
+            result["traffic_light_debug"] = dict(debug)
         if isinstance(self._current_candidate_evaluation, Mapping):
             candidate_evaluation = dict(self._current_candidate_evaluation)
             result["selected_candidate"] = str(candidate_evaluation.get("selected_candidate", ""))
@@ -2803,16 +2904,35 @@ class RuleBasedBehaviorPlanner:
             if isinstance(follow_target, Mapping)
             else ""
         )
+        self._enforce_behavior_command_invariants(result)
         result["decision_reason"] = str(self._pending_transition_reason or "")
         self._record_transition_if_needed(result=result, traffic_light_debug=traffic_light_debug)
-        violations = _behavior_command_invariant_violations(
-            result, ego_lane_id=self._current_ego_lane_id
-        )
-        if violations:
-            result["invariant_violations"] = violations
-            for violation in violations:
-                print(f"[BEHAVIOR][INVARIANT_VIOLATION] {violation}")
         return result
+
+    def _enforce_behavior_command_invariants(self, result: Dict[str, Any]) -> None:
+        """Apply the Behavior Layer's "Required invariant" rules in place.
+
+        This used to only log a warning when a command violated an
+        invariant (e.g. a stop decision targeting a neighboring lane instead
+        of the ego lane) and let it flow downstream unchanged. Path/MPC have
+        no way to safely recover from a self-contradictory command, so a
+        violation here must be corrected before the command leaves the
+        behavior layer, not just reported.
+        """
+        ego_lane_id = int(self._current_ego_lane_id)
+        violations = _behavior_command_invariant_violations(result, ego_lane_id=ego_lane_id)
+        if not violations:
+            return
+        for violation in violations:
+            if str(violation.get("kind", "")) == "stop_target_lane_mismatch":
+                # A stop/emergency-brake command must always resolve to the
+                # ego lane: there is nowhere else "stop" can mean.
+                result["target_lane_id"] = int(ego_lane_id)
+                result["selected_lane_id"] = int(ego_lane_id)
+                self._selected_lane_id = int(ego_lane_id)
+        result["invariant_violations"] = [str(v.get("message", "")) for v in violations]
+        for violation in violations:
+            print(f"[BEHAVIOR][INVARIANT_CORRECTED] {violation.get('message', '')}")
 
     def _record_transition_if_needed(
         self,
@@ -2833,7 +2953,11 @@ class RuleBasedBehaviorPlanner:
             "decision": str(result.get("decision", "")),
             "target_lane_id": result.get("target_lane_id", ""),
             "selected_lane_id": result.get("selected_lane_id", ""),
-            "source_lane_id": "" if self._source_lane_id is None else int(self._source_lane_id),
+            "source_lane_id": dict(traffic_light_debug or {}).get(
+                "lane_change_source_lane_id",
+                "" if self._source_lane_id is None else int(self._source_lane_id),
+            ),
+            "lane_change_phase": result.get("lane_change_phase", ""),
             "state_elapsed_s": float(self._state_elapsed_s()),
             "state_min_hold_s": float(self._state_min_hold_s(old_state)),
             "target_lane_safety": (
@@ -2844,6 +2968,14 @@ class RuleBasedBehaviorPlanner:
             ),
             "lane_change_abort_reason": (
                 dict(traffic_light_debug or {}).get("lane_change_abort_reason", "")
+            ),
+            "lane_change_target_lane_id": dict(traffic_light_debug or {}).get(
+                "lane_change_target_lane_id",
+                result.get("target_lane_id", ""),
+            ),
+            "lane_change_recovery_lane_id": dict(traffic_light_debug or {}).get(
+                "lane_change_recovery_lane_id",
+                "",
             ),
             "candidate_target_lane_id": (
                 dict(traffic_light_debug or {}).get("candidate_target_lane_id", "")
@@ -2874,10 +3006,12 @@ class RuleBasedBehaviorPlanner:
         signal_lateral_m = None
         signal_match_distance_m = None
         signal_match_rank = None
+        signal_actor_raw_state = ""
         if isinstance(traffic_signal_context, Mapping):
             signal_found = bool(traffic_signal_context.get("signal_found", False))
             signal_actor_id = traffic_signal_context.get("signal_actor_id", None)
             signal_actor_name = str(traffic_signal_context.get("signal_actor_name", ""))
+            signal_actor_raw_state = str(traffic_signal_context.get("signal_actor_raw_state", ""))
             signal_source = str(traffic_signal_context.get("signal_source", "none"))
             raw_signal_distance_m = traffic_signal_context.get("signal_distance_m", None)
             try:
@@ -2960,6 +3094,7 @@ class RuleBasedBehaviorPlanner:
             "signal_found": bool(signal_found),
             "signal_actor_id": signal_actor_id,
             "signal_actor_name": str(signal_actor_name),
+            "signal_actor_raw_state": str(signal_actor_raw_state),
             "signal_source": str(signal_source),
             "signal_forward_m": signal_forward_m,
             "signal_lateral_m": signal_lateral_m,

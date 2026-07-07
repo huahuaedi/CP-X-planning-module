@@ -45,13 +45,16 @@ def build_prediction_frame(
     min_front_gap_m: float,
     min_rear_gap_m: float,
     min_ttc_s: float,
+    prediction_model: str = "constant_acceleration",
+    max_abs_acceleration_mps2: float = 4.0,
 ) -> PredictionFrame:
     """Build an Apollo-style prediction frame for one planning tick.
 
     Existing CP-X messages may already include `predicted_trajectory`.  When
-    they do not, the fallback is a constant-velocity prediction.  The behavior
-    planner then uses the lane-level risk summaries to prepare, execute, cancel,
-    or abort lane changes.
+    they do not, the default fallback is a constant-acceleration prediction
+    (`prediction_model="constant_acceleration"`).  With no acceleration field
+    available this degenerates to constant velocity, so existing snapshots keep
+    their previous behaviour.
     """
 
     normalized_ego = {
@@ -70,6 +73,8 @@ def build_prediction_frame(
             snapshot,
             horizon_s=float(horizon_s),
             dt_s=float(dt_s),
+            model=str(prediction_model),
+            max_abs_acceleration_mps2=float(max_abs_acceleration_mps2),
         )
         for snapshot in normalized_obstacles
         for obstacle_id in [_obstacle_id(snapshot)]
@@ -86,6 +91,8 @@ def build_prediction_frame(
             min_front_gap_m=float(min_front_gap_m),
             min_rear_gap_m=float(min_rear_gap_m),
             min_ttc_s=float(min_ttc_s),
+            prediction_model=str(prediction_model),
+            max_abs_acceleration_mps2=float(max_abs_acceleration_mps2),
         )
         for lane_id in list(available_lane_ids or [])
     }

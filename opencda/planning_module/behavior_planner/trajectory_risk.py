@@ -59,7 +59,65 @@ def _constant_velocity_points(
     ]
 
 
-def obstacle_future_trajectory(snapshot: Mapping[str, object], *, horizon_s: float, dt_s: float) -> list[dict]:
+def _longitudinal_acceleration_mps2(snapshot: Mapping[str, object]) -> float:
+    for key in (
+        "a",
+        "acceleration",
+        "acceleration_mps2",
+        "longitudinal_acceleration_mps2",
+        "a_mps2",
+    ):
+        if key in snapshot:
+            return _safe_float(snapshot.get(key, 0.0))
+    if "ax" in snapshot or "ay" in snapshot:
+        heading_rad = _safe_float(snapshot.get("psi", 0.0))
+        ax_mps2 = _safe_float(snapshot.get("ax", 0.0))
+        ay_mps2 = _safe_float(snapshot.get("ay", 0.0))
+        return float(math.cos(heading_rad) * ax_mps2 + math.sin(heading_rad) * ay_mps2)
+    return 0.0
+
+
+def _constant_acceleration_points(
+    snapshot: Mapping[str, object],
+    *,
+    horizon_s: float,
+    dt_s: float,
+    max_abs_acceleration_mps2: float = 4.0,
+) -> list[dict]:
+    x0_m = _safe_float(snapshot.get("x", 0.0))
+    y0_m = _safe_float(snapshot.get("y", 0.0))
+    speed_mps = max(0.0, _safe_float(snapshot.get("v", 0.0)))
+    heading_rad = _safe_float(snapshot.get("psi", 0.0))
+    accel_mps2 = max(
+        -float(max_abs_acceleration_mps2),
+        min(float(max_abs_acceleration_mps2), _longitudinal_acceleration_mps2(snapshot)),
+    )
+    dt_s = max(1.0e-3, float(dt_s))
+    horizon_s = max(dt_s, float(horizon_s))
+    count = max(1, int(math.ceil(float(horizon_s) / float(dt_s))))
+    points: list[dict] = []
+    for step in range(1, count + 1):
+        t_s = float(dt_s * step)
+        distance_m = max(0.0, float(speed_mps) * t_s + 0.5 * float(accel_mps2) * t_s * t_s)
+        points.append({
+            "x": float(x0_m + distance_m * math.cos(heading_rad)),
+            "y": float(y0_m + distance_m * math.sin(heading_rad)),
+            "t": float(t_s),
+            "v": float(max(0.0, float(speed_mps) + float(accel_mps2) * t_s)),
+            "a": float(accel_mps2),
+            "model": "constant_acceleration",
+        })
+    return points
+
+
+def obstacle_future_trajectory(
+    snapshot: Mapping[str, object],
+    *,
+    horizon_s: float,
+    dt_s: float,
+    model: str = "constant_acceleration",
+    max_abs_acceleration_mps2: float = 4.0,
+) -> list[dict]:
     points = _trajectory_points(snapshot)
     if len(points) > 0:
         return [
@@ -67,6 +125,13 @@ def obstacle_future_trajectory(snapshot: Mapping[str, object], *, horizon_s: flo
             for point in points
             if 0.0 <= float(point.get("t", 0.0)) <= float(horizon_s)
         ]
+    if str(model).strip().lower() in {"ca", "constant_acceleration", "constant-acceleration"}:
+        return _constant_acceleration_points(
+            snapshot,
+            horizon_s=float(horizon_s),
+            dt_s=float(dt_s),
+            max_abs_acceleration_mps2=float(max_abs_acceleration_mps2),
+        )
     return _constant_velocity_points(snapshot, horizon_s=float(horizon_s), dt_s=float(dt_s))
 
 
@@ -81,6 +146,8 @@ def lane_prediction_risk(
     min_front_gap_m: float = 12.0,
     min_rear_gap_m: float = 8.0,
     min_ttc_s: float = 2.5,
+    prediction_model: str = "constant_acceleration",
+    max_abs_acceleration_mps2: float = 4.0,
 ) -> Dict[str, object]:
     """Estimate whether a lane will stay safe over a short future horizon.
 
@@ -112,7 +179,13 @@ def lane_prediction_risk(
         if lane_assignments.get(obstacle_id, None) != int(target_lane_id):
             continue
         obstacle_v = max(0.0, _safe_float(snapshot.get("v", 0.0)))
-        points = obstacle_future_trajectory(snapshot, horizon_s=float(horizon_s), dt_s=float(dt_s))
+        points = obstacle_future_trajectory(
+            snapshot,
+            horizon_s=float(horizon_s),
+            dt_s=float(dt_s),
+            model=str(prediction_model),
+            max_abs_acceleration_mps2=float(max_abs_acceleration_mps2),
+        )
         for point in points:
             t_s = max(0.0, _safe_float(point.get("t", 0.0)))
             ego_future_x = float(ego_x) + float(ego_v) * math.cos(ego_psi) * float(t_s)

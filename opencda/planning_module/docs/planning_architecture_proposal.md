@@ -1,336 +1,653 @@
 # Planning Architecture Proposal
 
-This proposal is for moving the current planner from bug-by-bug fixes to a
-layered, inspectable planning stack. The reference style is close to common
-open-source autonomous-driving stacks such as Apollo planning, Autoware
-behavior/path planning, and CARLA's BehaviorAgent: separate route intent,
-behavior decisions, path generation, speed decisions, and low-level control.
+This document describes the current planning stack and the target direction
+for making it more stable, inspectable, and easier to optimize. The practical
+goal is to stop treating each scenario failure as an isolated bug and instead
+assign every failure to a clear layer: route, behavior, prediction, path,
+speed, MPC, or diagnostics.
 
-## 0. Current Implementation Status (as of 2026-06-30)
+The style is close to common autonomous-driving stacks such as Apollo,
+Autoware, and CARLA BehaviorAgent: route intent, behavior decisions, path
+generation, speed shaping, and low-level control are separate responsibilities.
 
-This section tracks how much of the target architecture already exists in
-`opencda/planning_module/`. Status tags used below: **DONE**, **PARTIAL**,
-**MISSING**.
+## 0. Current Status
 
-| Layer / Item | Status | Where |
+Status tags:
+
+- **DONE**: implemented and covered by tests or runtime artifacts.
+- **PARTIAL**: implemented but still mixed with another layer or not fully
+  typed.
+- **MISSING**: still mostly implicit or embedded in runner logic.
+
+| Layer / Item | Status | Current implementation |
 | --- | --- | --- |
-| Route layer (separate module) | MISSING | Route info (`route_optimal_lane_id`, `next_macro_maneuver`) flows directly into `behavior_planner/planner.py`; no isolated route-corridor/segment module |
-| Behavior layer FSM + priority order | DONE | `behavior_planner/planner.py` (`RuleBasedBehaviorPlanner.update`) implements emergency brake -> traffic/CP stop -> reroute -> lane-change candidate evaluation in that priority order |
-| Behavior command object (typed contract) | MISSING | `update()` still returns a loose `Dict[str, Any]`; `planning_runner.py` reads it with `.get(...)` rather than a typed `BehaviorCommand` |
-| Red-light / stop-sign invariants | DONE | `behavior_planner/traffic_light_stop.py` (`find_relevant_signal_context`, `should_stop_for_signal`) handles ego-association vs stop-waypoint vs actor-position priority and avoids stale-red via explicit `is not None` checks |
-| TEMP_DES target-lane consistency during lane change | DONE | `temp_destination.py` (`_start_wp_for_decision`, `_follow_route_lane_for_decision`) routes both the rolling anchor and reference samples off the behavior-selected lane during `lane_change_*` decisions |
-| Path layer continuity (reference path vs jumping point) | PARTIAL | `_build_lane_reference_samples_to_target` / `_build_route_reference_samples_from_anchor` build multi-step reference samples, but there is no single dedicated "Path Layer" module decoupled from `temp_destination.py` |
-| Speed layer (unified speed envelope) | PARTIAL | Stop profile and obstacle following speed live inside `MPC/mpc.py` (`final_stop_speed_cap`, reference-rollout obstacle speed); curvature cap is computed and applied pre-solve in `planning_runner.py` (~line 5570-5596); there is no single `speed_envelope` object passed into MPC |
-| MPC hard/soft constraint split | DONE | `MPC/mpc.py`: hard bounds in `MPCConstraintSpec`; soft costs (`Cost_LaneCenter`, `Cost_RoadBoundary`, `Cost_Repulsive`, `Cost_Control`) configured via `MPCComfortCostSpec` / `MPCSafetyCostSpec` / `MPCRepulsivePotentialSpec`, weights in `mpc.yaml` |
-| MPC fail-safe fallback | PARTIAL | On solver failure the rollout/seed is reset and retried; after repeated failures it returns the reference rollout — there is no explicit "brake gently" / emergency-stop escalation distinct from just falling back to the reference path |
-| Diagnostics artifacts | MOSTLY DONE | Produced: `planning_metrics_timeseries.csv`, `control_timeseries.csv`, `lane_reference_timeseries.csv`, `fsm_transition_log.csv`, `mpc_cost_history.csv`, `planned_trajectory.csv`, `analysis_report.txt`, `analysis_plots.png`, `tracking_dashboard.png`. Missing: `tracking_error_timeseries.csv` (referenced by `analyze_run.py` but never written) and `mpc_diagnostics.json` |
-| Scenario regression suite | DONE | `opencda/planning_module/tests/` has ~26 files covering red light, intersection behavior, reroute/lane-closure, lane keeping, lane reference, route planning, and multiple town/SUMO scenarios |
+| Route layer | PARTIAL | Global route points, route-optimal lane, and maneuver labels are available, but route corridor logic is still embedded in `planning_runner.py` and `behavior_planner/temp_destination.py`. |
+| Behavior FSM | DONE | `behavior_planner/planner.py` chooses emergency brake, traffic/stop-sign stop, reroute, lane-change, or lane follow. FSM states include `IDLE`, `LANE_KEEP`, `PREPARE_LANE_CHANGE_*`, `EXECUTE_LANE_CHANGE_*`, and abort/reset states. |
+| Behavior command contract | PARTIAL | `behavior_planner/contract.py` documents the command shape. Runtime still passes a loose dict, but `_enforce_behavior_command_invariants()` corrects unsafe lane/stop inconsistencies before output. |
+| Traffic-light stop logic | PARTIAL | Red/yellow/green detection, stop target matching, signal memory, unknown release, and raw actor state logging are implemented. Recent issue: red was detected but speed profile still allowed high speed; this is now addressed with conservative stop speed shaping. |
+| Other-vehicle prediction | PARTIAL | Behavior risk checks use CP `predicted_trajectory` when provided and constant-acceleration fallback otherwise. This is implemented in `behavior_planner/trajectory_risk.py` and `pipeline/prediction.py`. |
+| Temp destination | PARTIAL | `temp_des` is stabilized and guarded against behind-ego / wrong-lane jumps, but it is still both a display point and a local goal input to MPC. Stop target movement is now step-limited. |
+| Lane-center reference | PARTIAL | `lane_center_reference_samples` are generated for MPC. Non-lane-change jumps are frozen, and repeated freeze can re-anchor to ego heading. A dedicated path module is still missing. |
+| Speed layer | PARTIAL | Curvature, IDM, stop, and reference-jump caps are stacked before MPC using `utility/speed_profile.py`, but there is not yet a first-class speed-envelope object. |
+| MPC cost profiles | DONE | Different behavior modes use different cost profiles. Profile switching now has hysteresis/min-hold and weight blending to reduce oscillation. |
+| MPC hard/soft split | DONE | Vehicle bounds are hard constraints. Lane center, road boundary, obstacle, attractive, and control terms are soft costs. |
+| MPC fail-safe | DONE | Solver failure falls back to a path-holding braking trajectory and escalates to stronger braking after repeated failures. |
+| Diagnostics | DONE | Runtime writes temp destination, lane reference, control, cost, FSM, planned trajectory, metrics, and run status artifacts. |
+| Regression tests | DONE | Tests cover traffic lights, temp destination guards, speed caps, prediction risk, planning pipeline, MPC fail-safe, route/reference behavior, and scenario helpers. |
 
-Net read: **Phase 1 (diagnostics) is essentially done** modulo two missing
-artifacts. **Phase 4 (MPC hard/soft split, curvature pre-cap) is done**, with
-the fail-safe escalation still incomplete. **Phase 2 (behavior command
-object)** and the dedicated **Route layer** are the biggest structural gaps —
-the behavior layer already makes the right decisions, but downstream code
-still consumes them as an untyped dict instead of a typed contract. **Phase
-3 (path/speed split)** is partially there: lane-following reference
-continuity exists, but speed-envelope logic is scattered across MPC and the
-runner rather than isolated in its own layer.
+## 1. Layered Runtime Flow
 
-## 1. Target Layering
+Current high-level flow:
 
-### Route Layer
+```text
+CARLA/SUMO/CP inputs
+  -> prediction frame and lane safety
+  -> behavior planner command
+  -> temp_des and lane_center_reference_samples
+  -> speed caps and MPC cost profile selection
+  -> MPC trajectory and control sequence
+  -> CARLA VehicleControl
+  -> diagnostics CSV/JSON artifacts
+```
 
-Input:
+The most important rule is that `temp_des` is not the whole plan. MPC also
+uses lane-center reference samples, speed caps, cost profile, obstacle
+predictions, warm-start state, and hard vehicle constraints.
 
-- Global route points
-- Current ego pose
-- Map topology and lane graph
+## 2. Route Layer
 
-Output:
+Current files:
 
-- Route corridor
-- Current route segment
-- Route-preferred lane
-- Upcoming maneuver: straight, left, right, merge, junction
+- `utility/global_planner.py`
+- `behavior_planner/temp_destination.py`
+- route handling inside `planning_runner.py`
 
-Rule:
+Inputs:
 
-- The route layer never decides stop, lane change, or speed.
-- It only says where the mission wants the vehicle to go.
+- Global route points.
+- Current ego pose and lane context.
+- CARLA map topology.
+- Final destination.
 
-### Behavior Layer
+Outputs:
 
-Input:
+- Current route summary.
+- Route-optimal lane id.
+- Upcoming macro maneuver: `straight`, `left`, `right`, etc.
+- Global route visualization points.
+- Route-follow latch used after reroute.
 
-- Route corridor
-- Ego lane state
-- Traffic light and stop controls
-- Static and dynamic obstacles
-- Lane safety / prediction risk
+Constraints / invariants:
 
-Output:
+- The route layer must not decide stop, emergency brake, or lane-change safety.
+- Route-preferred lane must not override a committed behavior lane during
+  active lane change.
+- During strict lane follow, the reference lane should stay on the current ego
+  lane rather than being pulled back to the global route lane.
 
-- Behavior state:
-  - `LANE_KEEP`
-  - `PREPARE_LANE_CHANGE_LEFT`
-  - `EXECUTE_LANE_CHANGE_LEFT`
-  - `PREPARE_LANE_CHANGE_RIGHT`
-  - `EXECUTE_LANE_CHANGE_RIGHT`
-  - `STOP_FOR_RED_LIGHT`
-  - `STOP_FOR_STOP_SIGN`
-  - `FOLLOW_LEAD`
-  - `REROUTE`
-  - `EMERGENCY_BRAKE`
-- Target lane id
-- Stop target, if any
-- Desired speed envelope
-- Reason/debug fields
+Recent optimizations:
 
-Hard priority order:
+- Route fallback is disabled when it would pull non-lane-change reference into
+  the wrong lane.
+- Reference generation can reject a first sample whose lane id does not match
+  the expected lane.
+- Reroute latch is cleared when an active lane change is executing toward a
+  lane that is not the route-optimal lane.
 
-1. Emergency collision risk
-2. Red light / required stop before stop line
-3. Stop sign wait logic
-4. Blocked lane / reroute
-5. Lane-change safety
-6. Route preference
-7. Cruise / car following
+Remaining gap:
 
-Important invariant:
+- There is still no standalone route-corridor module. Route decisions are
+  spread across the runner and temp destination builder.
 
-- If behavior says stop for red light, the target lane must be the ego lane.
-- If behavior says execute lane change, TEMP_DES and MPC reference must both
-  use the target lane, not the route-preferred lane.
+## 3. Prediction And Risk Layer
 
-### Path Layer
+Current files:
 
-Input:
+- `pipeline/prediction.py`
+- `behavior_planner/trajectory_risk.py`
+- lane-safety logic in `behavior_planner/lane_safety.py`
 
-- Behavior target lane
-- Route corridor
-- Stop/follow target
-- Map lane centerline
+Inputs:
 
-Output:
+- Dynamic object snapshots from CARLA/SUMO/CP.
+- CP-provided `predicted_trajectory`, when available.
+- Object position, heading, speed, and optional acceleration.
+- Ego lane context and target lane candidate.
 
-- Reference path samples:
+Outputs:
+
+- Prediction frame.
+- Per-lane prediction risk.
+- Future front/rear gap.
+- Future TTC.
+- Risk debug summary consumed by behavior planner and artifacts.
+
+Constraints / invariants:
+
+- CP `predicted_trajectory` has priority when provided.
+- If no trajectory is provided, use constant-acceleration fallback.
+- If acceleration is unavailable, the model degenerates to constant velocity.
+- Prediction risk can block or abort lane change, but it should not directly
+  change MPC constraints.
+
+Recent optimizations:
+
+- Added constant-acceleration fallback prediction.
+- Added configurable prediction model:
+  - `lane_change_prediction_model: constant_acceleration`
+  - `lane_change_prediction_max_abs_acceleration_mps2: 4.0`
+- Lane-change candidate evaluation now considers predicted future gaps and
+  TTC, not only instantaneous lane safety.
+
+Remaining gap:
+
+- Long-horizon interaction prediction is still simple. Current prediction is
+  sufficient for candidate risk, but not a full multi-agent planner.
+
+## 4. Behavior Layer
+
+Current files:
+
+- `behavior_planner/planner.py`
+- `behavior_planner/contract.py`
+- `behavior_planner/traffic_light_stop.py`
+
+Inputs:
+
+- Route summary and route-optimal lane.
+- Ego state and lane context.
+- Lane safety scores.
+- Prediction risk.
+- Traffic-light / stop-sign context.
+- CP control messages.
+- Front/follow target.
+- Current FSM state and timers.
+
+Outputs:
+
+- Behavior decision:
+  - `lane_follow`
+  - `lane_change_left`
+  - `lane_change_right`
+  - `stop_at_intersection`
+  - `stop_sign`
+  - `reroute`
+  - `emergency_brake`
+- FSM state.
+- Target lane id.
+- Selected lane id.
+- Stop target or follow target.
+- Candidate summaries and risk debug.
+- Traffic-light debug.
+
+Priority order:
+
+1. Emergency brake / imminent collision.
+2. Traffic-light or stop-sign stop.
+3. CP stop / intersection control.
+4. Reroute / blocked lane.
+5. Lane-change candidate evaluation.
+6. Route preference.
+7. Lane follow / car following.
+
+Constraints / invariants:
+
+- Stop and emergency brake must use ego lane, not a neighboring lane.
+- Active lane-change commands must use behavior-selected target lane.
+- Stop latch must release on green or when the stop target has been passed.
+- Unknown traffic-light state must not preserve stale red forever.
+- Unknown traffic-light state should not create a new stop unless there is a
+  valid current stop target/latch.
+
+Recent optimizations:
+
+- Added short traffic-light memory:
+  - `unknown_hold_s`
+  - `unknown_release_s`
+- Added raw signal actor state logging.
+- Avoided stale-red stop when no current stop target exists.
+- Added lane-change cooldown/commit windows after stop release, lane-change
+  completion, and abort.
+- Added stronger guard for unknown signal: an unknown signal with
+  `should_stop_now=False` cannot newly trigger `stop_at_intersection`.
+
+Remaining gap:
+
+- The command is still a dict. A dataclass command should eventually replace
+  loose `.get(...)` access in `planning_runner.py`.
+
+## 5. Temp Destination Layer
+
+Current files:
+
+- `behavior_planner/temp_destination.py`
+- destination shaping helpers in `planning_runner.py`
+
+Inputs:
+
+- Behavior decision.
+- Target lane id.
+- Current ego pose.
+- Route points.
+- Stop target or follow target.
+- Previous temp destination.
+- Mode context: normal / intersection.
+- Dynamic lookahead configuration.
+
+Outputs:
+
+- Temporary destination state:
+  - `x`
+  - `y`
+  - `v_ref`
+  - `heading`
+  - `lane_id`
+  - `mode`
+  - `road_id`
+  - `entered_intersection`
+- Debug history in `temporary_destination_timeseries.csv`.
+
+Constraints / invariants:
+
+- `temp_des` must stay ahead of ego unless it is a fixed stop target.
+- During active lane change, `temp_des` must use behavior target lane.
+- During `PREPARE_LANE_CHANGE_*`, `temp_des` should remain on current lane.
+- During stop, target speed should be shaped by stop distance, not remain at
+  cruise speed.
+- A new stop target should not make `temp_des` jump tens of meters in one
+  replan cycle.
+
+Recent optimizations:
+
+- Added temp destination smoothing and forward guard.
+- Added junction lane-follow lock to avoid blue-dot lane hopping in
+  intersections.
+- Added post-stop lookahead smoothing.
+- Added exact final-destination snap near final goal.
+- Added stop target movement limiter:
+  - `stop_target_max_destination_step_m: 5.0`
+- Added conservative stop profile:
+  - `stop_profile_braking_deceleration_mps2: 1.2`
+  - `stop_profile_buffer_m: 5.0`
+
+Important note:
+
+- A stable `temp_des` is necessary but not sufficient for a stable MPC
+  trajectory. MPC also tracks the whole lane reference, speed envelope,
+  profile weights, obstacle costs, and warm-start state.
+
+## 6. Path Reference Layer
+
+Current files:
+
+- `behavior_planner/temp_destination.py`
+- reference fallback/stabilization helpers in `planning_runner.py`
+
+Inputs:
+
+- Ego pose.
+- Behavior decision.
+- Target lane id.
+- Route points.
+- Stop/follow target.
+- Previous reference samples.
+- Current maneuver and mode.
+
+Outputs:
+
+- `lane_center_reference_samples`, each with:
   - `x_ref_m`
   - `y_ref_m`
   - `heading_rad`
   - `lane_id`
-  - road boundary widths
+  - road boundary width / offset fields
+- `lane_reference_timeseries.csv`.
 
-Rule:
+Constraints / invariants:
 
-- TEMP_DES is only a rolling anchor.
-- MPC should primarily track a continuous reference path, not chase a jumping
-  point.
-- Reference path continuity must be measured every run:
-  - reference jump
-  - lateral tracking error
-  - heading error
-  - boundary cost
+- Non-lane-change reference must not jump to a different lane.
+- First reference sample must not be behind ego or laterally far away.
+- Stop references should approach and hold the stop target.
+- Lane-change reference can move toward target lane only after execute state.
+- Reference should be continuous enough that MPC is not solving a new geometry
+  every replan.
 
-### Speed Layer
+Recent optimizations:
 
-Input:
+- Added first-sample invalid checks:
+  - behind ego
+  - lateral jump
+  - reversed heading
+  - lane mismatch
+  - non-lane-change discontinuity
+- Added route fallback only when route-follow is allowed.
+- Added heading fallback when route fallback is unsafe.
+- Added reference stabilization:
+  - `reference_stabilization_freeze_on_jump: true`
+  - `reference_stabilization_jump_threshold_m: 2.25`
+- Added re-anchor after repeated freezes:
+  - `reference_freeze_reanchor_after_replans: 4`
+- Added reference-jump speed cap via `reference_jump_speed_cap_mps()`.
 
-- Behavior state
-- Lead vehicle
-- Stop line distance
-- Curvature
-- Speed limit / configured max speed
+Remaining gap:
 
-Output:
+- Freeze is still a guard, not a full reference smoother. The next structural
+  step is to blend reference horizons or anchor them to the previous solved
+  MPC trajectory.
 
-- Speed envelope:
-  - desired cruise speed
-  - max speed cap
-  - stop profile
-  - following profile
+## 7. Speed Layer
 
-Rule:
+Current files:
 
-- Red light stop and stop sign stop are speed-profile problems, not lane
-  selection problems.
-- Curvature cap should be applied before MPC solve.
-- IDM should not force `vmax=0` unless the behavior layer is in a true stop
-  context.
+- `utility/speed_profile.py`
+- speed-cap application in `planning_runner.py`
+- final stop cap inside `MPC/mpc.py`
 
-### MPC Layer
+Inputs:
 
-Input:
+- Behavior decision.
+- Ego speed.
+- Stop target distance.
+- Lead vehicle gap and speed.
+- Curvature estimate from reference samples.
+- Reference jump magnitude.
+- Configured maximum speed.
 
-- Reference path
-- Speed envelope
-- Obstacle predictions
-- Vehicle state
+Outputs:
 
-Output:
+- Effective MPC max velocity.
+- Active speed cap names.
+- Temporary destination speed.
+- Control trace fields:
+  - `mpc_vmax_mps`
+  - `temporary_destination_v_mps`
+  - `path_speed_cap_active`
+  - `path_speed_cap_reason`
 
-- Planned trajectory
-- Control sequence
-- Feasibility/cost diagnostics
+Constraints / invariants:
 
-Recommended decoupling:
+- Effective max speed is the minimum of active caps.
+- Red-light / stop-sign handling is a speed-profile problem once behavior has
+  selected a stop.
+- Curvature cap should activate before entering the curve.
+- IDM should cap speed for following but should not create a false stop unless
+  behavior is truly stopping.
 
-- Hard constraints:
-  - vehicle dynamics
-  - acceleration / steering bounds
-  - terminal stop only when behavior explicitly says stop
-- Soft constraints:
-  - lane center cost
-  - road boundary slack
-  - obstacle repulsive cost
-  - control smoothness
-- Pre-MPC shaping:
-  - curvature speed cap
-  - stop speed profile
-  - lane-change reference path
-- Post-MPC diagnostics:
-  - solver status
-  - lateral error
-  - heading error
-  - road boundary cost
-  - obstacle collision cost
+Current caps:
 
-## 2. Current Problems Mapped To Layers
+- IDM following cap.
+- Stop profile cap.
+- Curvature cap.
+- Reference-jump cap.
+- Final-goal stop cap.
 
-### Red Light Still Moving
+Recent optimizations:
 
-Likely causes:
+- Extracted speed cap helpers into `utility/speed_profile.py`.
+- Added sequential speed-cap application.
+- Added conservative stop profile for red lights / stop signs.
+- Added curvature-aware speed cap for bends.
+- Added reference-jump cap to avoid chasing discontinuous path at speed.
 
-- CP control type mismatch
-- stale or unknown signal blocking fallback
-- stop target assigned to neighboring lane
-- traffic-light fallback disabled when CP obstacle pipeline is active
+Remaining gap:
 
-Required invariant:
+- There is no explicit `SpeedEnvelope` object. Caps are computed and applied in
+  sequence in the runner.
 
-- Red/yellow control produces `STOP_FOR_RED_LIGHT`.
-- Stop target is on ego lane.
-- Green clears the latch.
-- Unknown signal does not preserve stale red.
+## 8. MPC Layer
 
-### TEMP_DES On Wrong Lane During Lane Change
+Current files:
 
-Likely causes:
+- `MPC/mpc.py`
+- `MPC/mpc.yaml`
 
-- TEMP_DES smoothing blends old lane and target lane.
-- route-optimal lane overrides behavior-selected lane.
-- reference lane is overwritten by blue-dot lane.
+Inputs:
 
-Required invariant:
+- Current ego state.
+- Temporary destination state.
+- Lane-center reference samples.
+- Dynamic object snapshots and predictions.
+- Current acceleration / steering.
+- Active speed upper bound.
+- Cost profile selected by behavior/mode.
 
-- During `EXECUTE_LANE_CHANGE_*`, both TEMP_DES and MPC reference use the
-  behavior target lane.
+Outputs:
 
-### Curve Boundary Breach
+- Planned trajectory.
+- Control sequence.
+- Runtime solver status.
+- Cost breakdown.
+- Lateral and heading error diagnostics.
+- Fail-safe fallback trajectory when needed.
 
-Likely causes:
+Hard constraints:
 
-- speed cap does not activate early enough
-- reference jumps on curve
-- road boundary slack too permissive
-- MPC is solving many goals at once: lane center, route progress, obstacle,
-  stop, and speed
+- Velocity bounds.
+- Acceleration bounds.
+- Jerk bounds.
+- Steering angle bounds.
+- Steering-rate bounds.
+- Terminal velocity constraint when active.
+- Kinematic model equality constraints.
 
-Required invariant:
+Soft costs:
 
-- Curve speed cap must be active before entering the bend.
-- Road boundary breach must be visible in every run report.
-- Boundary cost should not be the first signal that the vehicle is already
-  outside the lane.
+- Attractive destination cost.
+- Lane-center cost.
+- Road-boundary cost and slack.
+- Obstacle repulsive cost.
+- Control effort and rate smoothness.
 
-## 3. Diagnostics Required For Every Run
+Cost profiles:
 
-Artifacts now expected:
+- `lane_follow`
+- `intersection_turn`
+- `stop`
+- `prepare_lane_change`
+- `execute_lane_change`
+- `recovery`
 
+Constraints / invariants:
+
+- MPC should not decide behavior. It should optimize the command produced by
+  behavior/path/speed layers.
+- Traffic-light state should not directly enter MPC; it should be converted
+  into stop target and speed profile first.
+- Cost profiles should not switch every frame.
+- Solver failure must return a safe braking plan, not arbitrary controls.
+
+Recent optimizations:
+
+- Added `mode_cost_profiles` in `mpc.yaml`.
+- Added profile blending:
+  - `mode_cost_profile_blend_alpha: 0.18`
+- Added runner-side cost profile hysteresis:
+  - `mpc_cost_profile_min_hold_s: 1.5`
+- Added stop/recovery safety preemption.
+- Added fail-safe fallback with gentle braking and emergency escalation.
+- Added planned trajectory trace:
+  - `planned_trajectory_timeseries.csv`
+
+Remaining gap:
+
+- MPC still receives both `temp_des` and lane reference. This is acceptable
+  short term, but the longer-term design should make `temp_des` a local anchor
+  and make the continuous reference/speed envelope the primary MPC contract.
+
+## 9. Diagnostics Layer
+
+Runtime artifacts:
+
+- `run_status.json`
+- `planning_metrics.json`
 - `planning_metrics_timeseries.csv`
-- `control_timeseries.csv`
+- `temporary_destination_timeseries.csv`
 - `lane_reference_timeseries.csv`
-- `fsm_transition_log.csv`
+- `control_timeseries.csv`
 - `mpc_cost_history.csv`
+- `fsm_transition_log.csv`
 - `planned_trajectory.csv`
-- `tracking_error_timeseries.csv`
-- `mpc_diagnostics.json`
+- `planned_trajectory_timeseries.csv`
+- `collision_events.csv`
+
+Post-run artifacts:
+
 - `analysis_report.txt`
 - `analysis_plots.png`
 - `tracking_dashboard.png`
+- `tracking_error_timeseries.csv`
+- `mpc_diagnostics.json`
 
-Minimum dashboard panels:
+Key fields for diagnosing instability:
 
-- actual path vs reference path
-- lateral/position error
-- speed, acceleration, MPC vmax
-- throttle/brake/steer
-- FSM timeline
-- MPC solver/cost timeline
+- Temp destination:
+  - `temp_destination_jump_m`
+  - `temp_v_mps`
+  - `effective_lookahead_m`
+  - `traffic_signal_state`
+  - `traffic_should_stop_now`
+  - `stop_target_distance_m`
+- Reference:
+  - `reference_jump_m`
+  - `reference_stabilized`
+  - `reference_fallback_reason`
+- MPC profile:
+  - `mpc_cost_profile`
+  - `requested_mpc_cost_profile`
+  - `mpc_cost_profile_switch_reason`
+  - `mpc_cost_profile_elapsed_s`
+- MPC result:
+  - `solver_status`
+  - `Cost_ref`
+  - `Cost_Control`
+  - `Cost_RoadBoundary`
+  - `Cost_Repulsive`
+  - planned trajectory stage errors in `planned_trajectory_timeseries.csv`
 
-## 4. Refactor Plan
+Recommended dashboard panels:
 
-Phase 1: Diagnostics first — **MOSTLY DONE**
+- Actual path vs reference path.
+- Temp destination history.
+- Lane reference first-sample history.
+- Speed, acceleration, MPC vmax.
+- Control commands.
+- FSM timeline.
+- Behavior decision timeline.
+- Cost profile requested vs applied.
+- MPC solver status and costs.
+- Traffic signal state vs stop target distance.
 
-- Keep current planner running.
-- Make every run produce tracking/error/control/FSM/MPC reports.
-- Use the reports to identify layer ownership for each failure.
-- Remaining: `tracking_error_timeseries.csv` and `mpc_diagnostics.json` are
-  referenced/expected but not currently written.
+## 10. Recent Optimization Summary
 
-Phase 2: Behavior decision contract — **NOT STARTED**
+Traffic-light / stop handling:
 
-- Replace implicit strings with a behavior command object:
-  - state
-  - target lane
-  - stop target
-  - speed target
-  - reason
-  - priority
-- Enforce invariants at the interface before path generation.
-- `RuleBasedBehaviorPlanner.update()` already computes all of these fields
-  (state/decision, target lane, stop target, candidate reasons/priority via
-  `_simple_candidate_evaluation` / `_set_candidate_evaluation`) but returns
-  them as a loose `Dict[str, Any]`, and `planning_runner.py` reads them with
-  `.get(...)`. The data already has the right shape; it just needs a typed
-  wrapper (e.g. dataclass) and call-site updates.
+- Added raw signal state logging.
+- Added short unknown memory and unknown release.
+- Blocked new `stop_at_intersection` from unknown signal when
+  `should_stop_now=False`.
+- Added stop target passed release and green release.
+- Added conservative stop speed profile so red-light detection actually
+  reduces `temp_v_mps` / `mpc_vmax_mps` before the stop line.
 
-Phase 3: Path and speed split — **PARTIAL**
+Temp destination:
 
-- TEMP_DES becomes a display/anchor output.
-- MPC receives a continuous reference path plus speed envelope.
-- Stop profile and curvature cap live in speed layer.
-- Reference-path continuity exists (`_build_lane_reference_samples_to_target`,
-  `_build_route_reference_samples_from_anchor` in `temp_destination.py`).
-  Curvature cap is already computed and applied before the MPC solve in
-  `planning_runner.py`. What's missing is a single speed-envelope object —
-  stop profile, follow profile, and curvature cap are currently computed in
-  separate places (`MPC/mpc.py`, `planning_runner.py`) rather than merged
-  into one speed-layer output consumed by MPC.
+- Added smoothing.
+- Added forward guard.
+- Added junction lane-follow lock.
+- Added stop target step limit.
+- Added post-stop release smoothing.
 
-Phase 4: MPC simplification — **MOSTLY DONE**
+Reference:
 
-- Keep dynamics and actuator limits hard.
-- Move red-light/stop/following/curve logic outside MPC.
-- Keep lane center, boundary, obstacle, and smoothness as weighted soft costs.
-- Add fail-safe fallback:
-  - if solver fails, brake gently and hold last safe path for one cycle
-  - if repeated failure, emergency stop
-- Hard/soft constraint split and pre-solve curvature capping are implemented
-  in `MPC/mpc.py` / `mpc.yaml`. Remaining gap: on solver failure the code
-  resets and retries, then falls back to the reference rollout, but there is
-  no explicit "brake gently" / escalating-emergency-stop behavior distinct
-  from that fallback.
+- Added first-sample validation.
+- Disabled unsafe route fallback.
+- Added freeze-on-jump for non-lane-change reference.
+- Added freeze timeout re-anchor to ego heading.
+- Added reference jump speed cap.
 
-Phase 5: Scenario regression suite — **DONE**
+Behavior / lane change:
 
-- Red light stop/release
-- Green light pass
-- Lane change target consistency
-- Curve boundary compliance
-- Static blocked lane reroute
-- Dynamic lead vehicle following
-- Mixed traffic with SUMO/autopilot actors
-- `opencda/planning_module/tests/` already has ~26 test files covering most
-  of these cases (red light, intersection behavior, reroute, lane keeping,
-  lane reference, route planning, multi-town/SUMO scenarios).
+- Added candidate hysteresis and lane-change cooldown.
+- Added prepare/execute separation so `PREPARE_LANE_CHANGE_*` does not pull
+  the blue dot into the target lane too early.
+- Added prediction risk with constant-acceleration fallback.
+- Added abort/commit cooldown to avoid immediate reattempt oscillation.
 
+MPC:
+
+- Added behavior-mode cost profiles.
+- Added profile min-hold and blending.
+- Added fail-safe fallback and repeated-failure escalation.
+- Added planned trajectory trace for direct comparison against reference.
+
+Speed:
+
+- Extracted speed caps into reusable helpers.
+- Applied IDM, stop, curvature, and reference-jump caps sequentially.
+- Added curvature speed cap for turns.
+- Added stop speed cap before MPC solve.
+
+## 11. Remaining Structural Work
+
+High priority:
+
+- Create a typed `BehaviorCommand` dataclass and remove loose dict access from
+  the runner.
+- Create a dedicated `PathReference` module that owns reference continuity,
+  branch lock, smoothing, and stop/turn/lane-change reference generation.
+- Create a `SpeedEnvelope` object with all active caps and reasons.
+- Make route corridor a first-class module instead of mixing route logic into
+  temp destination and runner.
+
+Medium priority:
+
+- Replace hard reference freeze with horizon blending.
+- Anchor reference to previous solved trajectory when safe.
+- Add explicit stop-state phases: approach, hold, release.
+- Add per-mode MPC constraint/cost sanity checks.
+- Add scenario-level regression thresholds for:
+  - max temp destination jump
+  - max reference jump
+  - MPC infeasible count
+  - max control jump
+  - red-light stop distance
+
+Low priority:
+
+- Convert diagnostics into a single HTML dashboard.
+- Add CI jobs for deterministic non-CARLA unit tests.
+- Add replay scripts that compare two runs side by side.
+
+## 12. Practical Debugging Rules
+
+If the car ignores red:
+
+1. Check `traffic_signal_state`, `traffic_should_stop_now`, and
+   `stop_target_distance_m`.
+2. If red is detected but `temp_v_mps` / `mpc_vmax_mps` remains high, the
+   problem is speed profile.
+3. If no stop target exists, the problem is traffic-light association.
+4. If behavior is not `stop_at_intersection`, the problem is behavior gating.
+
+If `temp_des` is stable but MPC trajectory is unstable:
+
+1. Check `reference_jump_m`.
+2. Check `reference_stabilized`.
+3. Check requested vs applied MPC profile.
+4. Check solver status.
+5. Check `Cost_Control` and planned trajectory stage jumps.
+
+If the vehicle cuts a curve or presses lane boundaries:
+
+1. Check curvature cap activation.
+2. Check reference heading and first sample.
+3. Check road boundary cost.
+4. Check speed entering the curve.
+
+If lane change flickers:
+
+1. Check FSM transitions.
+2. Check candidate summaries.
+3. Check prediction risk summary.
+4. Check lane-change cooldown/hold reason.
+5. Check whether `PREPARE` is pulling target lane too early.

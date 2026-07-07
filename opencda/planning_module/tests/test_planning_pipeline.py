@@ -67,6 +67,32 @@ class PlanningPipelineTests(unittest.TestCase):
         self.assertAlmostEqual(trajectory[0]["x"], 10.5)
         self.assertTrue(frame.risk_for_lane(1)["risk"])
 
+    def test_prediction_frame_uses_constant_acceleration_fallback(self):
+        frame = build_prediction_frame(
+            ego_snapshot={"x": 0.0, "y": 0.0, "v": 4.0, "psi": 0.0},
+            obstacle_snapshots=[
+                {
+                    "vehicle_id": "accelerating_front",
+                    "x": 10.0,
+                    "y": 0.0,
+                    "v": 2.0,
+                    "psi": 0.0,
+                    "acceleration_mps2": 2.0,
+                }
+            ],
+            lane_assignments={"accelerating_front": 1},
+            available_lane_ids=[1],
+            horizon_s=1.0,
+            dt_s=1.0,
+            min_front_gap_m=12.0,
+            min_rear_gap_m=8.0,
+            min_ttc_s=2.5,
+        )
+
+        trajectory = frame.obstacle_future_trajectories["accelerating_front"]
+        self.assertAlmostEqual(trajectory[0]["x"], 13.0)
+        self.assertEqual(trajectory[0]["model"], "constant_acceleration")
+
     def test_candidate_evaluation_prefers_safe_route_lane(self):
         frame = evaluate_behavior_candidates(
             lane_safety_scores={1: 0.3, 2: 0.95},
