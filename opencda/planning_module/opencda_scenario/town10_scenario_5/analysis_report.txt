@@ -1,0 +1,30 @@
+============================================================
+  Planning Run Analysis: town10_scenario_5
+============================================================
+
+── SAFETY ─────────────────────────────────────────────────
+  Collisions          : 4  [FAIL]
+  Collision / km      : 12.643  [FAIL]
+  Min TTC (s)         : nan  [N/A ]
+  Max DRAC (m/s²)     : 0.00  [PASS]
+  Min PET (s)         : N/A
+  Boundary breaches   : 163/393 ticks (41.5%)  [FAIL]
+
+── EFFICIENCY ──────────────────────────────────────────────
+  Distance traveled   : 316.4 m
+  Avg speed           : 5.61 m/s  (20.2 km/h)
+  Max speed           : 8.10 m/s  (29.1 km/h)
+
+── MPC PLANNER HEALTH ──────────────────────────────────────
+  Plan attempts       : 393
+  Plan success rate   : 100.0%  [PASS]
+  Solver failures     : 0
+  Avg solve time      : 2.2 ms
+  P95 solve time      : 3.22 ms
+  Max solve time      : 4.4 ms  [WARN]
+
+── LEGEND ──────────────────────────────────────────────────
+  PASS  within target range
+  WARN  marginal — monitor closely
+  FAIL  outside acceptable range
+============================================================

@@ -1,0 +1,12 @@
+source;share/PROJ4/hook/cmake_prefix_path.ps1
+source;share/PROJ4/hook/cmake_prefix_path.dsv
+source;share/PROJ4/hook/cmake_prefix_path.sh
+source;share/PROJ4/hook/ld_library_path_lib.ps1
+source;share/PROJ4/hook/ld_library_path_lib.dsv
+source;share/PROJ4/hook/ld_library_path_lib.sh
+source;share/PROJ4/hook/path.ps1
+source;share/PROJ4/hook/path.dsv
+source;share/PROJ4/hook/path.sh
+source;share/PROJ4/hook/pythonscriptspath.ps1
+source;share/PROJ4/hook/pythonscriptspath.dsv
+source;share/PROJ4/hook/pythonscriptspath.sh

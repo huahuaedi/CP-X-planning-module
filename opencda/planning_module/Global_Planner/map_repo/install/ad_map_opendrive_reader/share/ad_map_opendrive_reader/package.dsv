@@ -1,0 +1,6 @@
+source;share/ad_map_opendrive_reader/hook/cmake_prefix_path.ps1
+source;share/ad_map_opendrive_reader/hook/cmake_prefix_path.dsv
+source;share/ad_map_opendrive_reader/hook/cmake_prefix_path.sh
+source;share/ad_map_opendrive_reader/hook/ld_library_path_lib.ps1
+source;share/ad_map_opendrive_reader/hook/ld_library_path_lib.dsv
+source;share/ad_map_opendrive_reader/hook/ld_library_path_lib.sh

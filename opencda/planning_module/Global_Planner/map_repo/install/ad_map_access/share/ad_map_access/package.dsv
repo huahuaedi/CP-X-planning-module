@@ -1,0 +1,14 @@
+source;share/ad_map_access/hook/cmake_prefix_path.ps1
+source;share/ad_map_access/hook/cmake_prefix_path.dsv
+source;share/ad_map_access/hook/cmake_prefix_path.sh
+source;share/ad_map_access/hook/ld_library_path_lib.ps1
+source;share/ad_map_access/hook/ld_library_path_lib.dsv
+source;share/ad_map_access/hook/ld_library_path_lib.sh
+source;share/ad_map_access/hook/pythonpath.ps1
+source;share/ad_map_access/hook/pythonpath.dsv
+source;share/ad_map_access/hook/pythonpath.sh
+source;share/ad_map_access/local_setup.bash
+source;share/ad_map_access/local_setup.dsv
+source;share/ad_map_access/local_setup.ps1
+source;share/ad_map_access/local_setup.sh
+source;share/ad_map_access/local_setup.zsh
