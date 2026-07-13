@@ -11,15 +11,14 @@ def _read_requirements_file():
 
 
 setup(
-    name='OpenCDA',
+    name='opencda-planning-module',
     version=__version__,
     packages=find_packages(),
-    url='https://github.com/ucla-mobility/OpenCDA.git',
+    url='',
     license='MIT',
-    author='Runsheng Xu, Xu Han',
-    author_email='rxx3386@ucla.edu',
-    description='A framework for fast developing cooperative driving automation and autonomous '
-                'vehicle modules in multi-resolution simulation environment"',
+    author='',
+    author_email='',
+    description='OpenCDA-based CARLA planning module with behavior planning, global routing, MPC, and metrics.',
     long_description=open("README.md").read(),
     install_requires=_read_requirements_file(),
 )
