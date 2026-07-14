@@ -288,6 +288,7 @@ def find_relevant_signal_context(
     stop_target: Mapping[str, object] | None,
     max_stop_waypoint_match_distance_m: float = 12.0,
     max_actor_position_match_distance_m: float = 40.0,
+    max_actor_position_lateral_m: float = 4.5,
 ) -> Dict[str, object]:
     default_context: Dict[str, object] = {
         "signal_found": False,
@@ -492,7 +493,10 @@ def find_relevant_signal_context(
                 continue
             if signal_forward_m is not None and float(signal_forward_m) < -2.0:
                 continue
-            if signal_lateral_m is not None and abs(float(signal_lateral_m)) > 8.0:
+            if (
+                signal_lateral_m is not None
+                and abs(float(signal_lateral_m)) > max(0.0, float(max_actor_position_lateral_m))
+            ):
                 continue
 
         candidate_context = {

@@ -2423,6 +2423,7 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
     )
 
     sample_distance_m = float(planning_cfg.get("waypoint_sample_distance_m", 2.0))
+    global_planner_mode = str(planning_cfg.get("global_planner_mode", "carla_grp")).strip().lower()
     lane_center_waypoints, road_cfg = build_lane_center_waypoints(
         map_obj=world_map,
         carla=carla,
@@ -2450,18 +2451,30 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
     if spawn_waypoint is None or destination_waypoint is None:
         raise RuntimeError("Could not align the spawn or destination anchors to a driving lane.")
 
-    initial_global_route_summary = global_planner.plan_route_from_locations(
-        start_location=global_route_start_location,
-        goal_location=global_route_goal_location,
-        fallback_start_xy=[
-            float(global_route_start_location.x),
-            float(global_route_start_location.y),
-        ],
-        fallback_goal_xy=[
-            float(global_route_goal_location.x),
-            float(global_route_goal_location.y),
-        ],
-    )
+    if global_planner_mode == "astar":
+        initial_global_route_summary = global_planner.plan_route_astar(
+            start_xy=[
+                float(global_route_start_location.x),
+                float(global_route_start_location.y),
+            ],
+            goal_xy=[
+                float(global_route_goal_location.x),
+                float(global_route_goal_location.y),
+            ],
+        )
+    else:
+        initial_global_route_summary = global_planner.plan_route_from_locations(
+            start_location=global_route_start_location,
+            goal_location=global_route_goal_location,
+            fallback_start_xy=[
+                float(global_route_start_location.x),
+                float(global_route_start_location.y),
+            ],
+            fallback_goal_xy=[
+                float(global_route_goal_location.x),
+                float(global_route_goal_location.y),
+            ],
+        )
     initial_route_points: List[List[float]] = []
     if bool(initial_global_route_summary.route_found):
         initial_route_points = [
@@ -2930,6 +2943,9 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
             behavior_runtime_cfg.get("traffic_light_stop", {}),
         )
     )
+    scenario_traffic_light_stop_cfg = dict(runtime_cfg.get("traffic_light_stop", {}))
+    if scenario_traffic_light_stop_cfg:
+        traffic_light_stop_cfg.update(scenario_traffic_light_stop_cfg)
     traffic_light_stop_enabled = bool(traffic_light_stop_cfg.get("enabled", False))
     traffic_light_stop_search_distance_m = max(
         1.0,
@@ -2938,6 +2954,36 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
     traffic_light_stop_buffer_m = max(
         0.0,
         float(traffic_light_stop_cfg.get("stop_buffer_m", 2.0)),
+    )
+    traffic_light_stop_waypoint_match_distance_m = max(
+        0.0,
+        float(
+            runtime_cfg.get(
+                "traffic_light_stop_waypoint_match_distance_m",
+                traffic_light_stop_cfg.get("stop_waypoint_match_distance_m", 12.0),
+            )
+        ),
+    )
+    traffic_light_actor_position_match_distance_m = max(
+        0.0,
+        float(
+            runtime_cfg.get(
+                "traffic_light_actor_position_match_distance_m",
+                traffic_light_stop_cfg.get(
+                    "actor_position_match_distance_m",
+                    traffic_light_stop_search_distance_m,
+                ),
+            )
+        ),
+    )
+    traffic_light_actor_position_lateral_m = max(
+        0.0,
+        float(
+            runtime_cfg.get(
+                "traffic_light_actor_position_lateral_m",
+                traffic_light_stop_cfg.get("actor_position_lateral_m", 4.5),
+            )
+        ),
     )
     last_static_intersection_replan_time_s = -float("inf")
     print("[CARLA SCENARIO] Rule-based behavior planner initialized.")
@@ -3099,6 +3145,15 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                         ego_vehicle=ego_vehicle,
                         ego_transform=tick_ego_transform,
                         stop_target=tick_traffic_stop_target,
+                        max_stop_waypoint_match_distance_m=float(
+                            traffic_light_stop_waypoint_match_distance_m
+                        ),
+                        max_actor_position_match_distance_m=float(
+                            traffic_light_actor_position_match_distance_m
+                        ),
+                        max_actor_position_lateral_m=float(
+                            traffic_light_actor_position_lateral_m
+                        ),
                     )
             tracker.update(
                 obstacle_snapshots=dynamic_object_snapshots,

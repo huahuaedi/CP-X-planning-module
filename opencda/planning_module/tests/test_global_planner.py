@@ -283,6 +283,19 @@ class StaticObstacleAvoidanceRouteTests(unittest.TestCase):
             )
         )
 
+    def test_plan_route_astar_finds_direct_route_with_no_obstacles(self):
+        planner = self._make_planner()
+
+        summary = planner.plan_route_astar(
+            start_xy=[0.0, 0.0],
+            goal_xy=[20.0, 0.0],
+        )
+
+        self.assertTrue(bool(summary.route_found))
+        self.assertTrue(all(abs(float(point[1])) <= 1e-6 for point in summary.route_waypoints))
+        self.assertAlmostEqual(float(summary.route_waypoints[0][0]), 0.0, places=6)
+        self.assertAlmostEqual(float(summary.route_waypoints[-1][0]), 20.0, places=6)
+
     def test_internal_astar_with_segment_penalty_prefers_unblocked_lane(self):
         planner = self._make_planner()
 
@@ -376,6 +389,160 @@ class StaticObstacleAvoidanceRouteTests(unittest.TestCase):
 
         self.assertTrue(bool(summary.route_found))
         self.assertEqual(int(summary.start_graph_index), 2)
+
+
+class IntersectionLaneChangeAdjacencyTests(unittest.TestCase):
+    """`_build_adjacency` must never create a lane-change edge touching a
+    junction node, even though forward/successor edges must still cross it."""
+
+    @staticmethod
+    def _new_planner(nodes) -> AStarGlobalPlanner:
+        planner = object.__new__(AStarGlobalPlanner)
+        planner._nodes = nodes
+        planner._lane_change_penalty_m = 5.0
+        planner._lane_change_progress_tolerance_m = 5.0
+        planner._lane_change_distance_factor = 1.8
+        planner._max_heading_diff_rad = 0.8
+        return planner
+
+    def _lane_change_targets(self, adjacency, from_index, to_indices):
+        neighbor_indices = {int(edge_target) for edge_target, _cost in adjacency[from_index]}
+        return neighbor_indices.intersection({int(i) for i in to_indices})
+
+    def test_no_lane_change_edge_between_intersection_nodes(self):
+        # Two lanes, three progress steps; the middle step sits inside a junction.
+        nodes = [
+            WaypointNode(0, 0.0, 0.0, 1, 3.5, "1:0", "positive", 0.0, 0.0, "straight", False, 1, (1,), None),
+            WaypointNode(1, 10.0, 0.0, 1, 3.5, "1:0", "positive", 0.0, 10.0, "straight", True, 2, (2,), None),
+            WaypointNode(2, 20.0, 0.0, 1, 3.5, "1:0", "positive", 0.0, 20.0, "straight", False, None, (), None),
+            WaypointNode(3, 0.0, 3.5, 2, 3.5, "1:0", "positive", 0.0, 0.0, "straight", False, 4, (4,), None),
+            WaypointNode(4, 10.0, 3.5, 2, 3.5, "1:0", "positive", 0.0, 10.0, "straight", True, 5, (5,), None),
+            WaypointNode(5, 20.0, 3.5, 2, 3.5, "1:0", "positive", 0.0, 20.0, "straight", False, None, (), None),
+        ]
+        planner = self._new_planner(nodes)
+
+        adjacency = planner._build_adjacency()
+
+        # No lane-change edge between the two junction nodes, in either direction.
+        self.assertEqual(self._lane_change_targets(adjacency, 1, [4]), set())
+        self.assertEqual(self._lane_change_targets(adjacency, 4, [1]), set())
+        # Forward/successor edges through the junction node must still exist.
+        self.assertIn(2, {int(edge_target) for edge_target, _cost in adjacency[1]})
+        self.assertIn(5, {int(edge_target) for edge_target, _cost in adjacency[4]})
+
+    def test_lane_change_edge_still_created_outside_intersection(self):
+        nodes = [
+            WaypointNode(0, 0.0, 0.0, 1, 3.5, "1:0", "positive", 0.0, 0.0, "straight", False, 1, (1,), None),
+            WaypointNode(1, 10.0, 0.0, 1, 3.5, "1:0", "positive", 0.0, 10.0, "straight", False, None, (), None),
+            WaypointNode(2, 0.0, 3.5, 2, 3.5, "1:0", "positive", 0.0, 0.0, "straight", False, 3, (3,), None),
+            WaypointNode(3, 10.0, 3.5, 2, 3.5, "1:0", "positive", 0.0, 10.0, "straight", False, None, (), None),
+        ]
+        planner = self._new_planner(nodes)
+
+        adjacency = planner._build_adjacency()
+
+        self.assertEqual(self._lane_change_targets(adjacency, 0, [2]), {2})
+        self.assertEqual(self._lane_change_targets(adjacency, 1, [3]), {3})
+
+    def test_no_lane_change_edge_into_intersection_node_from_outside(self):
+        # `node` itself is not in the junction, but the only same-progress
+        # neighbor candidate is -- must not jump laterally into it.
+        nodes = [
+            WaypointNode(0, 0.0, 0.0, 1, 3.5, "1:0", "positive", 0.0, 0.0, "straight", False, None, (), None),
+            WaypointNode(1, 0.0, 3.5, 2, 3.5, "1:0", "positive", 0.0, 0.0, "straight", True, None, (), None),
+        ]
+        planner = self._new_planner(nodes)
+
+        adjacency = planner._build_adjacency()
+
+        self.assertEqual(self._lane_change_targets(adjacency, 0, [1]), set())
+        self.assertEqual(self._lane_change_targets(adjacency, 1, [0]), set())
+
+    def test_no_lane_change_edge_across_opposing_directions(self):
+        nodes = [
+            WaypointNode(0, 0.0, 0.0, 1, 3.5, "1:0", "positive", 0.0, 0.0, "straight", False, None, (), None),
+            WaypointNode(1, 0.0, -3.5, -1, 3.5, "1:0", "negative", math.pi, 0.0, "straight", False, None, (), None),
+        ]
+        planner = self._new_planner(nodes)
+
+        adjacency = planner._build_adjacency()
+
+        self.assertEqual(adjacency[0], [])
+        self.assertEqual(adjacency[1], [])
+
+
+class SuccessorLaneSnappingTests(unittest.TestCase):
+    """`_normalize_waypoints` must recover a successor link even when
+    waypoint.next(d) lands between two sampled grid points on the target
+    lane -- the common case at junction connectors, whose lengths rarely
+    divide evenly by the sample distance."""
+
+    @staticmethod
+    def _waypoint(
+        carla_waypoint_key,
+        position,
+        road_id,
+        *,
+        is_intersection=False,
+        next_position=None,
+        next_key=None,
+    ):
+        entry = {
+            "carla_waypoint": None,
+            "carla_waypoint_key": carla_waypoint_key,
+            "position": list(position),
+            "heading_rad": 0.0,
+            "lane_id": 1,
+            "carla_lane_id": 1,
+            "road_id": road_id,
+            "direction": "positive",
+            "lane_width_m": 3.5,
+            "is_intersection": bool(is_intersection),
+            "maneuver": "straight",
+        }
+        if next_position is not None:
+            entry["next"] = list(next_position)
+        if next_key is not None:
+            entry["next_key"] = next_key
+        return entry
+
+    def test_next_key_snaps_to_nearest_sampled_point_in_target_lane(self):
+        lane_center_waypoints = [
+            self._waypoint(
+                (1, 0, 1, 0.0), [0.0, 0.0], "1:0",
+                next_position=[10.76, 0.0], next_key=(2, 0, 1, 0.76),
+            ),
+            self._waypoint((2, 0, 1, 0.0), [10.0, 0.0], "2:0", is_intersection=True),
+            self._waypoint((2, 0, 1, 3.0), [13.0, 0.0], "2:0", is_intersection=True),
+        ]
+
+        planner = AStarGlobalPlanner(
+            lane_center_waypoints=lane_center_waypoints,
+            world_map=None,
+            route_sample_distance_m=3.0,
+        )
+
+        node0 = planner._nodes[0]
+        self.assertIsNotNone(node0.next_index)
+        self.assertEqual(int(node0.next_index), 1)
+
+    def test_next_key_does_not_snap_beyond_tolerance(self):
+        lane_center_waypoints = [
+            self._waypoint(
+                (1, 0, 1, 0.0), [0.0, 0.0], "1:0",
+                next_position=[50.0, 0.0], next_key=(2, 0, 1, 50.0),
+            ),
+            self._waypoint((2, 0, 1, 0.0), [10.0, 0.0], "2:0", is_intersection=True),
+        ]
+
+        planner = AStarGlobalPlanner(
+            lane_center_waypoints=lane_center_waypoints,
+            world_map=None,
+            route_sample_distance_m=3.0,
+        )
+
+        node0 = planner._nodes[0]
+        self.assertIsNone(node0.next_index)
 
 
 class LaneContextConsistencyTests(unittest.TestCase):

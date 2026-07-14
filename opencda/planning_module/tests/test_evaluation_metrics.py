@@ -26,6 +26,7 @@ _METRICS_SPEC.loader.exec_module(evaluation_metrics)
 
 EvaluationMetricsRecorder = evaluation_metrics.EvaluationMetricsRecorder
 compute_pairwise_ttc_drac = evaluation_metrics.compute_pairwise_ttc_drac
+compute_pairwise_ttc_drac_debug = evaluation_metrics.compute_pairwise_ttc_drac_debug
 write_planning_metrics_artifacts = evaluation_metrics.write_planning_metrics_artifacts
 
 
@@ -56,6 +57,45 @@ class EvaluationMetricsTests(unittest.TestCase):
 
         self.assertEqual(ttc_s, float("inf"))
         self.assertEqual(drac_mps2, 0.0)
+
+    def test_ttc_debug_records_overlap_geometry(self):
+        details = compute_pairwise_ttc_drac_debug(
+            ego_state={"x": 0.0, "y": 0.0, "v": 5.0, "psi": 0.0},
+            obstacle_snapshot={
+                "vehicle_id": "front_close",
+                "x": 3.0,
+                "y": 0.1,
+                "v": 0.0,
+                "psi": 0.0,
+                "length_m": 4.0,
+            },
+            ego_length_m=4.0,
+            lateral_conflict_width_m=2.0,
+        )
+
+        self.assertEqual(details["ttc_s"], 0.0)
+        self.assertEqual(details["reason"], "bumper_overlap")
+        self.assertLessEqual(details["bumper_gap_m"], 1.0e-9)
+        self.assertGreater(details["closing_speed_mps"], 0.0)
+
+    def test_ttc_ignores_stopped_ego(self):
+        details = compute_pairwise_ttc_drac_debug(
+            ego_state={"x": 0.0, "y": 0.0, "v": 0.0, "psi": 0.0},
+            obstacle_snapshot={
+                "vehicle_id": "crossing_close",
+                "x": 3.0,
+                "y": 0.1,
+                "v": 5.0,
+                "psi": 1.57,
+                "length_m": 4.0,
+            },
+            ego_length_m=4.0,
+            lateral_conflict_width_m=2.0,
+        )
+
+        self.assertEqual(details["ttc_s"], float("inf"))
+        self.assertEqual(details["drac_mps2"], 0.0)
+        self.assertEqual(details["reason"], "ego_speed_below_ttc_threshold")
 
     def test_recorder_accumulates_summary_metrics(self):
         recorder = EvaluationMetricsRecorder(ego_length_m=4.0)
@@ -109,6 +149,28 @@ class EvaluationMetricsTests(unittest.TestCase):
                 rows = list(csv.DictReader(handle))
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["sample_index"], "0")
+            self.assertIn("nearest_ttc_obstacle_id", rows[0])
+
+    def test_writer_includes_nearest_ttc_debug_columns(self):
+        recorder = EvaluationMetricsRecorder(ego_length_m=4.0)
+        recorder.update(
+            ego_state=[0.0, 0.0, 5.0, 0.0],
+            obstacle_snapshots=[{"vehicle_id": "front_close", "x": 3.0, "y": 0.0, "v": 0.0}],
+            sim_time_s=0.0,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            artifacts = write_planning_metrics_artifacts(
+                artifact_dir=tmp_dir,
+                recorder=recorder,
+                scenario_name="town10",
+            )
+            with open(artifacts["csv_path"], "r", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+
+        self.assertEqual(rows[0]["nearest_ttc_obstacle_id"], "front_close")
+        self.assertEqual(rows[0]["nearest_ttc_reason"], "bumper_overlap")
+        self.assertEqual(float(rows[0]["nearest_ttc_s"]), 0.0)
 
 
 if __name__ == "__main__":

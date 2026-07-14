@@ -1771,6 +1771,7 @@ def compute_temp_destination(
     if (
         str(normalized_decision) == "lane_follow"
         and int(route_alignment_lane_id) != int(current_lane_id)
+        and not bool(is_intersection)
     ):
         # In normal road segments the global route may already be on the
         # adjacent lane while the ego is still in the current lane. Do not place

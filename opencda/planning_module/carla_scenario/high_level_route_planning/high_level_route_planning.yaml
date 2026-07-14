@@ -58,6 +58,7 @@ constraints:
 planning:
   waypoint_sample_distance_m: 3.0
   prompt_period_s: 1.0
+  global_planner_mode: astar
 
 camera:
   enabled: true

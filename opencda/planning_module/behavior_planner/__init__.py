@@ -18,6 +18,7 @@ from .temp_destination import (
     compute_temp_destination_mode,
     compute_temp_destination,
 )
+from .reference_generator import ReferenceIntent, select_reference_intent
 from .reroute import (
     CP_MESSAGE_PATH,
     ensure_cp_message_file_exists,
@@ -37,6 +38,11 @@ from .traffic_light_stop import (
     normalize_signal_state,
     should_stop_for_signal,
 )
+from .cp_traffic_light_provider import (
+    CarlaTrafficLightCPResult,
+    build_carla_traffic_light_cp_message,
+    cp_traffic_control_from_signal_context,
+)
 from .trajectory_risk import lane_prediction_risk, obstacle_future_trajectory
 
 __all__ = [
@@ -54,6 +60,8 @@ __all__ = [
     "compute_ego_lane_offset",
     "compute_temp_destination_mode",
     "compute_temp_destination",
+    "ReferenceIntent",
+    "select_reference_intent",
     "CP_MESSAGE_PATH",
     "ensure_cp_message_file_exists",
     "control_messages",
@@ -69,6 +77,9 @@ __all__ = [
     "find_stop_target_from_ego",
     "normalize_signal_state",
     "should_stop_for_signal",
+    "CarlaTrafficLightCPResult",
+    "build_carla_traffic_light_cp_message",
+    "cp_traffic_control_from_signal_context",
     "lane_prediction_risk",
     "obstacle_future_trajectory",
 ]

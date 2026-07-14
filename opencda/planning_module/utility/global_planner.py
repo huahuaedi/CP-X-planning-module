@@ -18,7 +18,7 @@ import os
 import platform
 import sys
 import threading
-from typing import Dict, List, Mapping, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -342,6 +342,79 @@ class AStarGlobalPlanner:
             return maneuver_name
         return "LANEFOLLOW"
 
+    @staticmethod
+    def _signed_heading_delta_rad(after_rad: float, before_rad: float) -> float:
+        return math.atan2(
+            math.sin(float(after_rad) - float(before_rad)),
+            math.cos(float(after_rad) - float(before_rad)),
+        )
+
+    @staticmethod
+    def _segment_heading_rad(
+        route_points_xy: Sequence[Tuple[float, float]],
+        start_index: int,
+        end_index: int,
+    ) -> Optional[float]:
+        if not route_points_xy:
+            return None
+        start_index = max(0, min(int(start_index), len(route_points_xy) - 1))
+        end_index = max(0, min(int(end_index), len(route_points_xy) - 1))
+        if start_index == end_index:
+            return None
+        sx, sy = route_points_xy[start_index]
+        ex, ey = route_points_xy[end_index]
+        if math.hypot(float(ex) - float(sx), float(ey) - float(sy)) < 0.25:
+            return None
+        return math.atan2(float(ey) - float(sy), float(ex) - float(sx))
+
+    @classmethod
+    def _geometric_road_options_from_route_waypoints(
+        cls,
+        route_waypoints: Sequence[Sequence[float]],
+        base_options: Sequence[str],
+    ) -> List[str]:
+        options = [str(option or "LANEFOLLOW").upper() for option in list(base_options or [])]
+        route_points_xy: List[Tuple[float, float]] = []
+        for point in list(route_waypoints or []):
+            if not isinstance(point, Sequence) or len(point) < 2:
+                continue
+            try:
+                route_points_xy.append((float(point[0]), float(point[1])))
+            except Exception:
+                continue
+        if len(route_points_xy) < 5 or len(options) != len(route_points_xy):
+            return options
+
+        lookback = 3
+        lookahead = 5
+        turn_threshold_rad = math.radians(28.0)
+        straight_threshold_rad = math.radians(10.0)
+        for index in range(len(route_points_xy)):
+            before_heading = cls._segment_heading_rad(
+                route_points_xy,
+                max(0, index - lookback),
+                index,
+            )
+            after_heading = cls._segment_heading_rad(
+                route_points_xy,
+                index,
+                min(len(route_points_xy) - 1, index + lookahead),
+            )
+            if before_heading is None or after_heading is None:
+                continue
+            heading_delta = cls._signed_heading_delta_rad(after_heading, before_heading)
+            abs_delta = abs(float(heading_delta))
+            if abs_delta >= float(turn_threshold_rad):
+                inferred_option = "LEFT" if float(heading_delta) > 0.0 else "RIGHT"
+            elif abs_delta >= float(straight_threshold_rad):
+                inferred_option = "STRAIGHT"
+            else:
+                continue
+            for nearby_index in range(max(0, index - 2), min(len(options), index + 3)):
+                if options[nearby_index] == "LANEFOLLOW" or inferred_option in {"LEFT", "RIGHT"}:
+                    options[nearby_index] = inferred_option
+        return options
+
     def _internal_metadata_from_route_waypoints(
         self,
         route_waypoints: Sequence[Sequence[float]],
@@ -364,6 +437,10 @@ class AStarGlobalPlanner:
             node = self._nodes[int(waypoint_query.index)]
             per_waypoint_options.append(self._default_road_option_for_node(node))
             per_waypoint_lane_ids.append(int(node.lane_id))
+        per_waypoint_options = self._geometric_road_options_from_route_waypoints(
+            route_waypoints,
+            per_waypoint_options,
+        )
         return per_waypoint_options, per_waypoint_lane_ids
 
     def _blocked_node_indices_for_points(
@@ -828,6 +905,7 @@ class AStarGlobalPlanner:
 
         index_by_key: Dict[Tuple[float, float], int] = {}
         index_by_carla_key: Dict[Tuple[int, int, int, float], int] = {}
+        index_by_lane_group: Dict[Tuple[int, int, int], List[Tuple[float, int]]] = {}
         for idx, (waypoint, position) in enumerate(raw_items):
             index_by_key[self._waypoint_key(*position)] = idx
             carla_key = self._coerce_carla_waypoint_key(waypoint.get("carla_waypoint_key", None))
@@ -840,6 +918,44 @@ class AStarGlobalPlanner:
                         carla_key = None
             if carla_key is not None:
                 index_by_carla_key[carla_key] = idx
+                lane_group_key = (int(carla_key[0]), int(carla_key[1]), int(carla_key[2]))
+                index_by_lane_group.setdefault(lane_group_key, []).append((float(carla_key[3]), idx))
+        for lane_group_entries in index_by_lane_group.values():
+            lane_group_entries.sort(key=lambda entry: float(entry[0]))
+
+        # CARLA's own generate_waypoints(d) samples each lane independently
+        # from its own s=0, so a waypoint.next(d) call crossing into a
+        # different lane (almost always true at junction connectors, whose
+        # lengths rarely divide evenly by d) very often lands at an s-value
+        # that was never sampled on the target lane -- an exact key/xy match
+        # then silently drops the link, splitting the graph into small
+        # islands right at junction boundaries. Fall back to the nearest
+        # already-sampled point on that same (road, section, lane).
+        max_snap_gap_m = 1.5 * float(self._route_sample_distance_m)
+
+        def _nearest_index_in_lane_group(carla_key: Tuple[int, int, int, float] | None) -> int | None:
+            if carla_key is None:
+                return None
+            lane_group_key = (int(carla_key[0]), int(carla_key[1]), int(carla_key[2]))
+            entries = index_by_lane_group.get(lane_group_key)
+            if not entries:
+                return None
+            target_s = float(carla_key[3])
+            s_values = [float(entry[0]) for entry in entries]
+            insert_at = bisect_left(s_values, target_s)
+            best_index = None
+            best_gap_m = float("inf")
+            for candidate_pos in (insert_at - 1, insert_at):
+                if not (0 <= candidate_pos < len(entries)):
+                    continue
+                candidate_s, candidate_idx = entries[candidate_pos]
+                gap_m = abs(float(candidate_s) - float(target_s))
+                if gap_m < best_gap_m:
+                    best_gap_m = gap_m
+                    best_index = int(candidate_idx)
+            if best_index is not None and best_gap_m <= max_snap_gap_m:
+                return int(best_index)
+            return None
 
         nodes: List[WaypointNode] = []
         for idx, (waypoint, position) in enumerate(raw_items):
@@ -853,6 +969,8 @@ class AStarGlobalPlanner:
                     next_index = index_by_key.get(
                         self._waypoint_key(float(next_position[0]), float(next_position[1]))
                     )
+            if next_index is None:
+                next_index = _nearest_index_in_lane_group(next_key)
 
             successor_indices: List[int] = []
             successor_keys_raw = waypoint.get("successor_keys", [])
@@ -862,6 +980,8 @@ class AStarGlobalPlanner:
                     if successor_key is None:
                         continue
                     successor_index = index_by_carla_key.get(successor_key)
+                    if successor_index is None:
+                        successor_index = _nearest_index_in_lane_group(successor_key)
                     if successor_index is None:
                         continue
                     if int(successor_index) not in successor_indices:
@@ -973,6 +1093,9 @@ class AStarGlobalPlanner:
                         continue
                     neighbor_progress = [float(node.progress_m) for node in neighbor_lane_nodes]
                     for node in base_lane_nodes:
+                        if bool(node.is_intersection):
+                            # Never start a lane change from inside a junction.
+                            continue
                         insert_at = bisect_left(neighbor_progress, float(node.progress_m))
                         candidate_indices = [insert_at - 1, insert_at, insert_at + 1]
                         best_candidate = None
@@ -981,6 +1104,9 @@ class AStarGlobalPlanner:
                             if not (0 <= candidate_idx < len(neighbor_lane_nodes)):
                                 continue
                             candidate = neighbor_lane_nodes[candidate_idx]
+                            if bool(candidate.is_intersection):
+                                # Never land a lane change inside a junction.
+                                continue
                             progress_gap_m = abs(float(candidate.progress_m) - float(node.progress_m))
                             if progress_gap_m > float(self._lane_change_progress_tolerance_m):
                                 continue
@@ -2741,23 +2867,17 @@ class AStarGlobalPlanner:
                 debug_reason="No sampled lane-center waypoint was available near the start or goal query point.",
             )
 
-        start_index = int(start_query.index)
-        goal_index = int(goal_query.index)
-        start_node = self._nodes[int(start_index)]
-        goal_node = self._nodes[int(goal_index)]
-
-        return self._plan_route_with_internal_astar(
+        route_summary = self._route_with_endpoint_candidates(
             start_x_m=float(start_x_m),
             start_y_m=float(start_y_m),
             goal_x_m=float(goal_x_m),
             goal_y_m=float(goal_y_m),
-            start_index=int(start_index),
-            goal_index=int(goal_index),
-            start_node=start_node,
-            goal_node=goal_node,
             start_query=start_query,
             goal_query=goal_query,
         )
+        if bool(getattr(route_summary, "route_found", False)):
+            print("new path generated by global planner")
+        return route_summary
 
     def plan_route_astar_with_segment_penalties(
         self,

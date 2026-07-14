@@ -1,0 +1,194 @@
+name: mdrive_blocked_lane_1
+runner_module: planning_runner
+carla:
+  host: 127.0.0.1
+  port: 2000
+  timeout_s: 30.0
+  synchronous_mode: true
+  launch_if_needed: true
+  launch_timeout_s: 120.0
+  carla_root: /home/umd-user/carla_source/carla
+  launch_mode: ue4editor_map
+  rhi: -vulkan
+  launch_extra_args:
+  - -quality-level=Low
+  - -ResX=800
+  - -ResY=600
+  map: /Game/Carla/Maps/Town05
+anchors:
+  ego_spawn: mdrive_blocked_lane_1_ego
+  final_destination: mdrive_blocked_lane_1_final_destination
+  ego_spawn_xyz_yaw:
+  - -83.638
+  - 87.971
+  - 0.0
+  - -179.92838
+  final_destination_xyz_yaw:
+  - -169.798
+  - 87.872
+  - 0.0
+  - -179.942704
+ego:
+  blueprint: vehicle.tesla.model3
+  role_name: ego
+  color_rgb: 255,0,0
+  spawn_z_offset_m: 1.0
+constraints:
+  min_velocity_mps: 0.0
+  max_velocity_mps: 10.0
+  min_acceleration_mps2: -10.0
+  max_acceleration_mps2: 3.0
+  max_jerk_mps3: 10.0
+  min_steer_rad: -0.6
+  max_steer_rad: 0.6
+  min_steer_rate_rps: -0.2
+  max_steer_rate_rps: 0.2
+  enforce_terminal_velocity_constraint: true
+  terminal_velocity_mps: 0.0
+planning:
+  waypoint_sample_distance_m: 3.0
+  prompt_period_s: 1.0
+  global_planner_mode: astar
+  imported_route_waypoints:
+  - - -83.638
+    - 87.971
+    - 0.0
+    - -179.92838
+  - - -87.638
+    - 87.966
+    - 0.0
+    - -179.92838
+  - - -93.638
+    - 87.96
+    - 0.0
+    - -179.92838
+  - - -97.638
+    - 87.955
+    - 0.0
+    - -179.92838
+  - - -103.638
+    - 87.948
+    - 0.0
+    - -179.92838
+  - - -109.638
+    - 87.941
+    - 0.0
+    - -179.92838
+  - - -109.684
+    - 87.941
+    - 0.0
+    - -179.942704
+  - - -111.684
+    - 87.939
+    - 0.0
+    - -179.942704
+  - - -115.684
+    - 87.934
+    - 0.0
+    - -179.942704
+  - - -119.684
+    - 87.93
+    - 0.0
+    - -179.942704
+  - - -123.684
+    - 87.925
+    - 0.0
+    - -179.942704
+  - - -125.684
+    - 87.923
+    - 0.0
+    - -179.942704
+  - - -129.684
+    - 87.918
+    - 0.0
+    - -179.942704
+  - - -133.684
+    - 87.914
+    - 0.0
+    - -179.942704
+  - - -137.684
+    - 87.909
+    - 0.0
+    - -179.942704
+  - - -141.684
+    - 87.905
+    - 0.0
+    - -179.942704
+  - - -141.798
+    - 87.904
+    - 0.0
+    - -179.942704
+  - - -143.798
+    - 87.902
+    - 0.0
+    - -179.942704
+  - - -147.798
+    - 87.898
+    - 0.0
+    - -179.942704
+  - - -151.798
+    - 87.893
+    - 0.0
+    - -179.942704
+  - - -155.798
+    - 87.888
+    - 0.0
+    - -179.942704
+  - - -157.798
+    - 87.886
+    - 0.0
+    - -179.942704
+  - - -161.798
+    - 87.882
+    - 0.0
+    - -179.942704
+  - - -165.798
+    - 87.877
+    - 0.0
+    - -179.942704
+  - - -169.798
+    - 87.872
+    - 0.0
+    - -179.942704
+runtime:
+  traffic_light_stop:
+    enabled: false
+  traffic_light_stop_waypoint_match_distance_m: 8.0
+  traffic_light_actor_position_match_distance_m: 28.0
+  traffic_light_actor_position_lateral_m: 4.5
+camera:
+  enabled: true
+  image_size_x: 640
+  image_size_y: 480
+  fov: 90.0
+  hud_position: bottom
+  hud_panel_height_px: 220
+  topdown:
+    world_fixed: false
+    height: 65.0
+    padding_m: 20.0
+  chase:
+    back: 8.0
+    height: 2.8
+    pitch: -10.0
+obstacles:
+  spawner_module: utility.coordinate_obstacle_spawner
+  static_actors:
+  - blueprint: vehicle.tesla.cybertruck
+    role_name: entity_1_1
+    x: -101.865
+    y: 88.825
+    z: 0.0
+    yaw: -179.933155
+  - blueprint: vehicle.tesla.cybertruck
+    role_name: entity_1_2
+    x: -108.639
+    y: 88.817
+    z: 0.0
+    yaw: -179.933155
+  - blueprint: vehicle.tesla.cybertruck
+    role_name: entity_1_3
+    x: -109.119
+    y: 88.817
+    z: 0.0
+    yaw: -179.933155

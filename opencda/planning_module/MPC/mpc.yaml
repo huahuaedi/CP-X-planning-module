@@ -129,6 +129,8 @@ mpc:
     # Lane change completion thresholds.
     lane_change_completion_lateral_threshold_m: 0.75
     lane_change_completion_heading_threshold_rad: 0.20
+    lane_change_abort_cooldown_s: 8.0
+    lane_change_commit_cooldown_s: 6.0
 
     # Curvature-aware speed cap used by the runner before MPC solve.
     # Lower -> more conservative cornering and less boundary pressure.
@@ -148,6 +150,16 @@ mpc:
     reference_stabilization_freeze_on_jump: true
     reference_stabilization_jump_threshold_m: 2.25
     reference_freeze_reanchor_after_replans: 4
+    # Lane-follow gets stricter reference filtering because even small
+    # first-sample jumps make the green MPC horizon visibly wiggle while the
+    # behavior state is otherwise steady.
+    lane_follow_reference_min_first_forward_m: 1.0
+    lane_follow_reference_guard_min_forward_m: 0.75
+    lane_follow_reference_guard_max_lateral_m: 2.5
+    lane_follow_reference_blend_jump_threshold_m: 1.25
+    lane_follow_reference_blend_alpha: 0.65
+    lane_follow_reference_freeze_jump_threshold_m: 2.0
+    lane_follow_destination_reference_forward_m: 6.0
     # Geometry guards before feeding local goals/references into MPC.
     # If the blue dot or first reference sample is far to the side while not
     # changing lanes, re-anchor to a local lane-center/heading-safe target.
@@ -156,11 +168,19 @@ mpc:
     temp_destination_fallback_forward_m: 8.0
     reference_first_sample_min_forward_m: -0.5
     reference_first_sample_max_lateral_m: 4.5
+    # Keep the global route as a mission-level hint. The blue temp_des and MPC
+    # horizon should track locally generated lane/turn references instead of
+    # directly chasing raw global route samples, which can be behind ego or on
+    # a different junction connector after projection.
+    temp_destination_allow_global_route_target: false
+    mpc_allow_global_route_reference: false
+    mpc_allow_global_route_reference_in_junction: false
 
     # Limit how far the temporary destination is allowed to move in a single
-    # replan when a new stop target becomes active. Speed is still capped by
-    # remaining stop distance, but the target point itself no longer snaps
-    # across a long distance in one frame.
+    # replan. The stop-specific cap applies when a stop target becomes active;
+    # the generic cap applies to ordinary lane-follow/release updates so the
+    # blue point does not jump across a junction connector in one frame.
+    temp_destination_max_step_m: 6.0
     stop_target_max_destination_step_m: 5.0
     stop_profile_braking_deceleration_mps2: 1.2
     # Caps below (IDM, stop profile, curvature, reference-jump) are each
@@ -179,6 +199,16 @@ mpc:
     # still visibly far from the stop line, which looks like the vehicle is
     # stuck before the intersection.
     stop_profile_buffer_m: 1.5
+    # Broad lane-follow speed guard for nearby predicted objects in ego's
+    # forward corridor. This complements lane-assigned IDM: if an NPC is
+    # crossing or misassigned, the speed layer can still slow the vehicle
+    # before behavior changes mode.
+    ego_corridor_obstacle_speed_cap_horizon_s: 2.5
+    ego_corridor_obstacle_lateral_margin_m: 2.6
+    ego_corridor_obstacle_max_forward_m: 35.0
+    ego_corridor_obstacle_behind_tolerance_m: 2.0
+    ego_corridor_obstacle_stop_buffer_m: 8.0
+    ego_corridor_obstacle_braking_deceleration_mps2: 2.5
 
     # Minimum time [s] to keep a non-emergency MPC cost profile before allowing
     # another profile switch. Stop/recovery can still preempt immediately.
@@ -471,19 +501,20 @@ mpc:
   mode_cost_profile_blend_alpha: 0.18
   mode_cost_profiles:
     lane_follow:
-      w_attractive: 1.0
-      q_x: 2.0
+      w_attractive: 0.6
+      q_x: 0.0
       q_y: 0.0
-      q_v: 2.0
+      q_v: 1.5
       q_psi: 0.0
       lane_center_w0: 20.0
+      lane_center_xy_w0: 4.0
       lane_center_q_psi: 2.0
       road_boundary_w: 10000.0
       road_boundary_margin_m: 0.50
       road_boundary_max_slack_m: 0.10
-      w_control: 5.0
-      q_a: 5.0
-      q_delta: 100.0
+      w_control: 8.0
+      q_a: 8.0
+      q_delta: 160.0
 
     intersection_turn:
       w_attractive: 0.8
@@ -492,6 +523,7 @@ mpc:
       q_v: 1.2
       q_psi: 0.0
       lane_center_w0: 36.0
+      lane_center_xy_w0: 3.5
       lane_center_q_psi: 3.0
       road_boundary_w: 16000.0
       road_boundary_margin_m: 0.65
@@ -507,6 +539,7 @@ mpc:
       q_v: 6.0
       q_psi: 0.0
       lane_center_w0: 24.0
+      lane_center_xy_w0: 1.5
       lane_center_q_psi: 2.5
       road_boundary_w: 12000.0
       road_boundary_margin_m: 0.55
@@ -522,6 +555,7 @@ mpc:
       q_v: 1.8
       q_psi: 0.0
       lane_center_w0: 18.0
+      lane_center_xy_w0: 2.0
       lane_center_q_psi: 2.0
       road_boundary_w: 11000.0
       road_boundary_margin_m: 0.55
@@ -537,6 +571,7 @@ mpc:
       q_v: 1.6
       q_psi: 0.0
       lane_center_w0: 28.0
+      lane_center_xy_w0: 2.0
       lane_center_q_psi: 2.5
       road_boundary_w: 14000.0
       road_boundary_margin_m: 0.60
@@ -552,6 +587,7 @@ mpc:
       q_v: 0.8
       q_psi: 0.0
       lane_center_w0: 16.0
+      lane_center_xy_w0: 2.0
       lane_center_q_psi: 2.0
       road_boundary_w: 10000.0
       road_boundary_margin_m: 0.60
@@ -583,6 +619,12 @@ mpc:
       # Increase -> stronger pull to the lane center and lane heading.
       # Decrease -> weaker lane-centering behavior.
       w0: 20.0 #5, 20
+      # Stage-wise centerline tracking weight. This is stronger than the pure
+      # lateral offset term: it asks each MPC horizon stage to stay near the
+      # corresponding lane-center reference sample. Lane-follow uses this to
+      # behave like a direct centerline tracker instead of chasing one temp_des
+      # point with the whole horizon.
+      xy_w0: 3.0
 
       # When matching a stage to a lane-center reference sample, search only
       # within this many stages around the nominal stage index. This prevents

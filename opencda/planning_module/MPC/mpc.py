@@ -354,6 +354,15 @@ class MPC:
         lane_center_cfg = dict(cost_cfg.get("lane_center_follow", {}))
         self.lane_center_follow_enabled = bool(lane_center_cfg.get("enabled", False))
         self.lane_center_follow_weight = max(0.0, float(lane_center_cfg.get("w0", lane_center_cfg.get("w_lane_center", 0.0))))
+        self.lane_center_follow_xy_weight = max(
+            0.0,
+            float(
+                lane_center_cfg.get(
+                    "xy_w0",
+                    lane_center_cfg.get("w_xy", lane_center_cfg.get("centerline_xy_weight", 0.0)),
+                )
+            ),
+        )
         self.lane_center_follow_qpsi = max(
             0.0,
             float(lane_center_cfg.get("q_psi", lane_center_cfg.get("heading_weight", 0.0))),
@@ -518,6 +527,7 @@ class MPC:
         self._last_cost_terms: Dict[str, float] = {
             "Cost_ref": 0.0,
             "Cost_LaneCenter": 0.0,
+            "Cost_CenterlineXY": 0.0,
             "Cost_RoadBoundary": 0.0,
             "Cost_LaneBoundary": 0.0,
             "Cost_Lane": 0.0,
@@ -553,6 +563,7 @@ class MPC:
             "q_a": float(self.comfort_cost.qa),
             "q_delta": float(self.comfort_cost.qdelta),
             "lane_center_w0": float(self.lane_center_follow_weight),
+            "lane_center_xy_w0": float(self.lane_center_follow_xy_weight),
             "lane_center_q_psi": float(self.lane_center_follow_qpsi),
             "road_boundary_w": float(self.road_boundary_weight),
             "road_boundary_margin_m": float(self.road_boundary_margin_m),
@@ -586,6 +597,13 @@ class MPC:
             "q_a": ("q_a", "qa"),
             "q_delta": ("q_delta", "qdelta"),
             "lane_center_w0": ("lane_center_w0", "lane_center_weight", "w_lane_center", "w0"),
+            "lane_center_xy_w0": (
+                "lane_center_xy_w0",
+                "lane_center_xy_weight",
+                "centerline_xy_weight",
+                "xy_w0",
+                "w_xy",
+            ),
             "lane_center_q_psi": ("lane_center_q_psi", "lane_center_heading_weight"),
             "road_boundary_w": ("road_boundary_w", "road_boundary_weight", "w_boundary"),
             "road_boundary_margin_m": ("road_boundary_margin_m", "road_boundary_margin"),
@@ -631,6 +649,7 @@ class MPC:
         self.comfort_cost.qa = float(blended["q_a"])
         self.comfort_cost.qdelta = float(blended["q_delta"])
         self.lane_center_follow_weight = float(blended["lane_center_w0"])
+        self.lane_center_follow_xy_weight = float(blended["lane_center_xy_w0"])
         self.lane_center_follow_qpsi = float(blended["lane_center_q_psi"])
         self.road_boundary_weight = float(blended["road_boundary_w"])
         self.lane_keep_boundary_weight = float(self.road_boundary_weight)
@@ -2115,6 +2134,11 @@ class MPC:
                 default_lane_width_m=float(getattr(self, "lane_width_m", 4.0)),
             )
             if lane_reference is not None:
+                centerline_xy_weight = float(getattr(self, "lane_center_follow_xy_weight", 0.0))
+                if bool(self.lane_center_follow_enabled) and float(centerline_xy_weight) > 0.0:
+                    add_tracking(x_k_idx, centerline_xy_weight, float(lane_reference.x_center_m))
+                    add_tracking(y_k_idx, centerline_xy_weight, float(lane_reference.y_center_m))
+
                 lane_affine = signed_lateral_offset_affine_form(lane_reference)
                 a_coef = float(lane_affine.x_coef)
                 b_coef = float(lane_affine.y_coef)
@@ -2478,10 +2502,33 @@ class MPC:
         )
         self._last_lane_keeping_profile = lane_keep_profile
         cost_lane_center = 0.0
+        cost_centerline_xy = 0.0
         cost_road_boundary = 0.0
         for metric in lane_keep_profile.stage_metrics:
             if int(metric.stage_index) <= 0:
                 continue
+            lane_sample = self._get_lane_center_stage_sample(
+                lane_center_reference=lane_center_reference,
+                stage_index=int(metric.stage_index),
+                query_x_m=float(x_traj[int(metric.stage_index), 0]),
+                query_y_m=float(x_traj[int(metric.stage_index), 1]),
+            )
+            lane_reference = normalize_lane_reference_sample(
+                lane_sample,
+                default_lane_width_m=float(getattr(self, "lane_width_m", 4.0)),
+            )
+            centerline_xy_weight = float(getattr(self, "lane_center_follow_xy_weight", 0.0))
+            if (
+                lane_reference is not None
+                and bool(self.lane_center_follow_enabled)
+                and float(centerline_xy_weight) > 0.0
+            ):
+                dx_center = float(x_traj[int(metric.stage_index), 0]) - float(lane_reference.x_center_m)
+                dy_center = float(x_traj[int(metric.stage_index), 1]) - float(lane_reference.y_center_m)
+                cost_centerline_xy += float(centerline_xy_weight) * (
+                    float(dx_center) * float(dx_center)
+                    + float(dy_center) * float(dy_center)
+                )
             cost_lane_center += float(metric.centering_cost)
             cost_road_boundary += float(metric.boundary_cost)
             if bool(self.lane_center_follow_enabled) and float(self.lane_center_follow_weight) > 0.0:
@@ -2550,9 +2597,10 @@ class MPC:
         return {
             "Cost_ref": float(cost_attractive),
             "Cost_LaneCenter": float(cost_lane_center),
+            "Cost_CenterlineXY": float(cost_centerline_xy),
             "Cost_RoadBoundary": float(cost_road_boundary),
             "Cost_LaneBoundary": float(cost_road_boundary),
-            "Cost_Lane": float(cost_lane_center + cost_road_boundary),
+            "Cost_Lane": float(cost_lane_center + cost_centerline_xy + cost_road_boundary),
             "Cost_Repulsive_Safe": float(cost_repulsive_safe),
             "Cost_Repulsive_Collision": float(cost_repulsive_collision),
             "Cost_Repulsive": float(cost_repulsive),

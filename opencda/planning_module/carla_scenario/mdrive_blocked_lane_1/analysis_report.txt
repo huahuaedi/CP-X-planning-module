@@ -1,27 +1,27 @@
 ============================================================
-  Planning Run Analysis: town10_scenario_6
+  Planning Run Analysis: mdrive_blocked_lane_1
 ============================================================
 
 ── SAFETY ─────────────────────────────────────────────────
   Collisions          : 0  [PASS]
   Collision / km      : 0.000  [PASS]
-  Min TTC (s)         : 17.81  [PASS]
-  Max DRAC (m/s²)     : 0.06  [WARN]
+  Min TTC (s)         : 3.49  [WARN]
+  Max DRAC (m/s²)     : 0.34  [WARN]
   Min PET (s)         : N/A
-  Boundary breaches   : 24/5060 ticks (0.5%)  [WARN]
+  Boundary breaches   : 417/2416 ticks (17.3%)  [FAIL]
 
 ── EFFICIENCY ──────────────────────────────────────────────
-  Distance traveled   : 400.1 m
-  Avg speed           : 1.19 m/s  (4.3 km/h)
-  Max speed           : 7.69 m/s  (27.7 km/h)
+  Distance traveled   : 69.5 m
+  Avg speed           : 0.33 m/s  (1.2 km/h)
+  Max speed           : 7.68 m/s  (27.6 km/h)
 
 ── MPC PLANNER HEALTH ──────────────────────────────────────
-  Plan attempts       : 5060
-  Plan success rate   : 99.5%  [PASS]
-  Solver failures     : 25
-  Avg solve time      : 1.9 ms
-  P95 solve time      : 2.73 ms
-  Max solve time      : 39.7 ms  [WARN]
+  Plan attempts       : 2416
+  Plan success rate   : 83.3%  [FAIL]
+  Solver failures     : 404
+  Avg solve time      : 2.4 ms
+  P95 solve time      : 4.95 ms
+  Max solve time      : 20.7 ms  [WARN]
 
 ── LEGEND ──────────────────────────────────────────────────
   PASS  within target range

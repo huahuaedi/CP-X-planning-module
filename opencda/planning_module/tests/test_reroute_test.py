@@ -151,6 +151,14 @@ class RerouteTestHelpers(unittest.TestCase):
         self.assertEqual(runtime_cfg["camera_fov_deg"], 100.0)
         self.assertEqual(runtime_cfg["camera_height_m"], 42.0)
         self.assertGreater(runtime_cfg["route_debug_life_s"], 100.0)
+        self.assertEqual(runtime_cfg["planner_mode"], "carla_grp")
+
+    def test_runtime_cfg_reads_global_planner_mode(self):
+        runtime_cfg = _runtime_cfg(
+            {"planning": {"global_planner_mode": "astar"}},
+        )
+
+        self.assertEqual(runtime_cfg["planner_mode"], "astar")
 
     def test_normalize_route_points_keeps_start_and_goal(self):
         route_points = _normalize_route_points_with_endpoints(
@@ -289,6 +297,60 @@ class RerouteTestHelpers(unittest.TestCase):
         self.assertEqual(len(planner.carla_route_calls), 1)
         self.assertEqual(len(planner.nearest_calls), 0)
         self.assertEqual(len(planner.route_calls), 0)
+
+    def test_plan_initial_route_skips_carla_graph_in_astar_mode(self):
+        planner = _FakePlanner(
+            raw_segments=[("20:0", 1)],
+            route_found=True,
+            carla_blocked_edges=[(7, 8)],
+        )
+        start_state = MarkerWaypointState(
+            marker_name="start",
+            matched_object_name="start",
+            marker_position_xy=(0.0, 0.0),
+            waypoint_position_xy=(0.0, 0.0),
+            road_id=20,
+            section_id=0,
+            carla_lane_id=-2,
+            waypoint_key=(20, 0, -2, 0.0),
+            waypoint=_FakeWaypoint(road_id=20, section_id=0, lane_id=-2, s=0.0, x_m=0.0, y_m=0.0),
+        )
+        end_state = MarkerWaypointState(
+            marker_name="end",
+            matched_object_name="end",
+            marker_position_xy=(10.0, 0.0),
+            waypoint_position_xy=(10.0, 0.0),
+            road_id=20,
+            section_id=0,
+            carla_lane_id=-2,
+            waypoint_key=(20, 0, -2, 10.0),
+            waypoint=_FakeWaypoint(road_id=20, section_id=0, lane_id=-2, s=10.0, x_m=10.0, y_m=0.0),
+        )
+        close_state = MarkerWaypointState(
+            marker_name="close",
+            matched_object_name="close",
+            marker_position_xy=(5.0, 0.0),
+            waypoint_position_xy=(5.0, 0.0),
+            road_id=20,
+            section_id=0,
+            carla_lane_id=-2,
+            waypoint_key=(20, 0, -2, 5.0),
+            waypoint=_FakeWaypoint(road_id=20, section_id=0, lane_id=-2, s=5.0, x_m=5.0, y_m=0.0),
+        )
+
+        route_summary, blocked_segments, route_method = _plan_initial_route(
+            planner=planner,
+            start_state=start_state,
+            end_state=end_state,
+            close_state=close_state,
+            planner_mode="astar",
+        )
+
+        self.assertTrue(bool(route_summary.route_found))
+        self.assertEqual(route_method, "blocked_close_waypoint")
+        self.assertEqual(len(planner.carla_blocked_edge_calls), 0)
+        self.assertEqual(len(planner.carla_route_calls), 0)
+        self.assertEqual(len(planner.route_calls), 1)
 
 
 if __name__ == "__main__":

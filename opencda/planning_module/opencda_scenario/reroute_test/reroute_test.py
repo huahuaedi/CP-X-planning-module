@@ -712,16 +712,20 @@ def _plan_initial_route(
     start_state: MarkerWaypointState,
     end_state: MarkerWaypointState,
     close_state: MarkerWaypointState,
+    planner_mode: str = "carla_grp",
 ):
     start_location = getattr(getattr(start_state.waypoint, "transform", None), "location", None)
     goal_location = getattr(getattr(end_state.waypoint, "transform", None), "location", None)
     carla_route_failure_reason = ""
-    carla_blocked_edges = list(
-        getattr(planner, "blocked_carla_graph_edges_for_waypoints", lambda _blocked_waypoints: [])(
-            [close_state.waypoint]
+    if planner_mode == "astar":
+        carla_blocked_edges: list = []
+    else:
+        carla_blocked_edges = list(
+            getattr(planner, "blocked_carla_graph_edges_for_waypoints", lambda _blocked_waypoints: [])(
+                [close_state.waypoint]
+            )
         )
-    )
-    if start_location is not None and goal_location is not None and len(carla_blocked_edges) > 0:
+    if planner_mode != "astar" and start_location is not None and goal_location is not None and len(carla_blocked_edges) > 0:
         route_summary = planner.plan_route_from_locations_with_blocked_carla_waypoints(
             start_location=start_location,
             goal_location=goal_location,
@@ -844,6 +848,7 @@ def _runtime_cfg(scenario_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
                 planning_cfg.get("waypoint_sample_distance_m", DEFAULT_SAMPLE_DISTANCE_M),
             )
         ),
+        "planner_mode": str(planning_cfg.get("global_planner_mode", "carla_grp")).strip().lower(),
         "poll_interval_s": float(runtime_cfg.get("poll_interval_s", DEFAULT_POLL_INTERVAL_S)),
         "draw_life_s": float(runtime_cfg.get("draw_life_s", DEFAULT_DRAW_LIFE_S)),
         "camera_enabled": bool(camera_cfg.get("enabled", True)),
@@ -1064,6 +1069,7 @@ def run_loaded_world(client, world, scenario_cfg, carla) -> int:
                     start_state=start_state,
                     end_state=end_state,
                     close_state=close_state,
+                    planner_mode=str(runtime_cfg["planner_mode"]),
                 )
                 route_found = bool(getattr(route_summary, "route_found", False))
                 cached_route_points = (

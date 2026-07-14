@@ -418,6 +418,7 @@ def run_carla_scenario(name: str) -> int:
 
     runner_module_name = str(scenario_cfg.get("runner_module", "")).strip()
     if runner_module_name:
+        print(f"Runner module: {runner_module_name}")
         runner_module = importlib.import_module(runner_module_name)
         if not hasattr(runner_module, "run_loaded_world"):
             raise AttributeError(

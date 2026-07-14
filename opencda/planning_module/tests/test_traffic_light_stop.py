@@ -442,6 +442,29 @@ class TrafficLightStopTests(unittest.TestCase):
         self.assertEqual(str(signal_context["signal_source"]), "stop_waypoint_match")
         self.assertAlmostEqual(float(signal_context["signal_distance_m"]), 12.0, places=3)
 
+    def test_find_relevant_signal_context_rejects_laterally_far_actor_match(self):
+        wrong_side_signal = _FakeTrafficLightActor(
+            actor_id=17,
+            name="wrong_side_red",
+            state="Red",
+            x_m=7.6,
+            y_m=-7.8,
+            stop_waypoints=[],
+        )
+        signal_context = find_relevant_signal_context(
+            world=_FakeWorld([wrong_side_signal]),
+            ego_vehicle=_FakeEgoVehicle(),
+            ego_transform=types.SimpleNamespace(
+                location=types.SimpleNamespace(x=0.0, y=0.0, z=0.0),
+                rotation=types.SimpleNamespace(yaw=0.0),
+            ),
+            stop_target=None,
+            max_actor_position_match_distance_m=40.0,
+        )
+
+        self.assertFalse(bool(signal_context["signal_found"]))
+        self.assertEqual(str(signal_context["signal_state"]), "unknown")
+
     def test_find_relevant_signal_context_prefers_stop_waypoint_match_over_wrong_associated_signal(self):
         stop_target = {"x_m": 0.0, "y_m": 12.0, "distance_m": 12.0}
         matching_wp = _DummyWaypoint(

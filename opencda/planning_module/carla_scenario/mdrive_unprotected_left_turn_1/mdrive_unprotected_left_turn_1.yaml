@@ -1,6 +1,5 @@
-name: town10
+name: mdrive_unprotected_left_turn_1
 runner_module: planning_runner
-
 carla:
   host: 127.0.0.1
   port: 2000
@@ -12,32 +11,28 @@ carla:
   launch_mode: ue4editor_map
   rhi: -vulkan
   launch_extra_args:
-    - "-quality-level=Low"
-    - "-ResX=800"
-    - "-ResY=600"
-
-  # Built-in CARLA map asset for:
-  # /home/umd-user/carla_source/carla/Unreal/CarlaUE4/Content/Carla/Maps/Town10HD_Opt.umap
-  map: /Game/Carla/Maps/Town10HD_Opt
-
+  - -quality-level=Low
+  - -ResX=800
+  - -ResY=600
+  map: /Game/Carla/Maps/Town05
 anchors:
-  ego_spawn: cav_spawn
-  final_destination: final_destination
-
-obstacles:
-  spawner_module: carla_scenario.town10.obstacle_spawner
-  cube_name_prefix: obstacle
-  vehicle_blueprint: vehicle.tesla.model3
-  role_name_prefix: static_obstacle
-  color_rgb: "90,90,90"
-  spawn_z_offset_m: 0.05
-
+  ego_spawn: mdrive_unprotected_left_turn_1_ego
+  final_destination: mdrive_unprotected_left_turn_1_final_destination
+  ego_spawn_xyz_yaw:
+  - -173.802
+  - 91.368
+  - 0.0
+  - 0.057296
+  final_destination_xyz_yaw:
+  - -124.475
+  - 27.894
+  - 0.0
+  - -90.515734
 ego:
   blueprint: vehicle.tesla.model3
   role_name: ego
-  color_rgb: "255,0,0"
+  color_rgb: 255,0,0
   spawn_z_offset_m: 1.0
-
 constraints:
   min_velocity_mps: 0.0
   max_velocity_mps: 10.0
@@ -50,19 +45,16 @@ constraints:
   max_steer_rate_rps: 0.2
   enforce_terminal_velocity_constraint: true
   terminal_velocity_mps: 0.0
-
 planning:
   waypoint_sample_distance_m: 3.0
   prompt_period_s: 1.0
   global_planner_mode: astar
-
 runtime:
   traffic_light_stop:
     enabled: false
   traffic_light_stop_waypoint_match_distance_m: 8.0
   traffic_light_actor_position_match_distance_m: 28.0
   traffic_light_actor_position_lateral_m: 4.5
-
 camera:
   enabled: true
   image_size_x: 640

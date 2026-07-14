@@ -21,13 +21,15 @@ Status tags:
 
 | Layer / Item | Status | Current implementation |
 | --- | --- | --- |
+| Planning context / world-model boundary | PARTIAL | `utility/planning_context.py` now defines typed per-cycle context objects for ego, route, traffic control, and targets. It is integrated into `planning_runner.py` for behavior input normalization and diagnostics, but the runner still owns most context construction. |
 | Route layer | PARTIAL | Global route points, route-optimal lane, and maneuver labels are available, but route corridor logic is still embedded in `planning_runner.py` and `behavior_planner/temp_destination.py`. |
 | Behavior FSM | DONE | `behavior_planner/planner.py` chooses emergency brake, traffic/stop-sign stop, reroute, lane-change, or lane follow. FSM states include `IDLE`, `LANE_KEEP`, `PREPARE_LANE_CHANGE_*`, `EXECUTE_LANE_CHANGE_*`, and abort/reset states. |
 | Behavior command contract | PARTIAL | `behavior_planner/contract.py` documents the command shape. Runtime still passes a loose dict, but `_enforce_behavior_command_invariants()` corrects unsafe lane/stop inconsistencies before output. |
 | Traffic-light stop logic | PARTIAL | Red/yellow/green detection, stop target matching, signal memory, unknown release, and raw actor state logging are implemented. Recent issue: red was detected but speed profile still allowed high speed; this is now addressed with conservative stop speed shaping. |
 | Other-vehicle prediction | PARTIAL | Behavior risk checks use CP `predicted_trajectory` when provided and constant-acceleration fallback otherwise. This is implemented in `behavior_planner/trajectory_risk.py` and `pipeline/prediction.py`. |
 | Temp destination | PARTIAL | `temp_des` is stabilized and guarded against behind-ego / wrong-lane jumps, but it is still both a display point and a local goal input to MPC. Stop target movement is now step-limited. |
-| Lane-center reference | PARTIAL | `lane_center_reference_samples` are generated for MPC. Non-lane-change jumps are frozen, and repeated freeze can re-anchor to ego heading. A dedicated path module is still missing. |
+| Reference intent contract | PARTIAL | `behavior_planner/reference_generator.py` now chooses whether MPC should track lane center, route branch, lane-change, stop, or follow-lead reference. This is the first step toward separating `temp_des` from the actual MPC reference. |
+| Lane-center reference | PARTIAL | `lane_center_reference_samples` are generated for MPC. Non-lane-change jumps are frozen, and repeated freeze can re-anchor to ego heading. Route-branch reference is no longer treated as ordinary lane-follow noise inside junctions. |
 | Speed layer | PARTIAL | Curvature, IDM, stop, and reference-jump caps are stacked before MPC using `utility/speed_profile.py`, but there is not yet a first-class speed-envelope object. |
 | MPC cost profiles | DONE | Different behavior modes use different cost profiles. Profile switching now has hysteresis/min-hold and weight blending to reduce oscillation. |
 | MPC hard/soft split | DONE | Vehicle bounds are hard constraints. Lane center, road boundary, obstacle, attractive, and control terms are soft costs. |
@@ -41,6 +43,7 @@ Current high-level flow:
 
 ```text
 CARLA/SUMO/CP inputs
+  -> PlanningContext: ego, route, traffic control, separated targets
   -> prediction frame and lane safety
   -> behavior planner command
   -> temp_des and lane_center_reference_samples
@@ -53,6 +56,119 @@ CARLA/SUMO/CP inputs
 The most important rule is that `temp_des` is not the whole plan. MPC also
 uses lane-center reference samples, speed caps, cost profile, obstacle
 predictions, warm-start state, and hard vehicle constraints.
+
+The new `PlanningContext` boundary separates target semantics:
+
+```text
+stop_target: longitudinal stopping target for traffic control / speed layer
+local_goal / temp_des: rolling local goal and blue-dot visualization
+lane_reference: continuous lateral/path tracking reference for MPC
+final_goal: mission completion target
+global_route: mission-level route hint, not a direct MPC reference
+```
+
+This is intentionally a boundary object, not a new planner. Its purpose is to
+make the layer inputs inspectable and prevent a stop line, global route point,
+and MPC tracking reference from being treated as the same object.
+
+## 1.2 Reference Intent Contract
+
+Current file:
+
+- `behavior_planner/reference_generator.py`
+
+Purpose:
+
+- Convert a behavior decision plus route/lane state into a first-class
+  reference intent before MPC reference samples are generated.
+- Prevent `temp_des`, selected lane, stop target, and global route from
+  competing for the same meaning.
+
+Inputs:
+
+- Behavior decision: lane follow, lane change, stop, emergency/follow lead.
+- Behavior FSM state: idle, prepare lane change, execute lane change, abort.
+- Current lane id, selected/reference target lane id, route-optimal lane id.
+- Junction flag and traffic-control lock flag.
+- Global-route-reference gate result.
+
+Outputs:
+
+- `ReferenceIntent.mode`
+  - `lane_follow`: track selected/current lane centerline.
+  - `route_branch_follow`: track global route branch through a junction or
+    route rejoin segment.
+  - `lane_change`: track a committed lane-change transition reference.
+  - `stop`: keep lateral reference lane-based; stop target belongs to speed
+    layer unless final-stop snapping is explicitly active.
+  - `follow_lead`: keep lateral reference lane-based while speed/follow target
+    handles longitudinal behavior.
+- `ReferenceIntent.target_lane_id`
+- `ReferenceIntent.follow_global_route_lane`
+- `ReferenceIntent.reason` for CSV diagnostics.
+
+Current integration:
+
+- `planning_runner.py` calls `select_reference_intent()` after route-reference
+  gating.
+- `lane_reference_timeseries.csv` records `reference_intent_mode` and
+  `reference_intent_reason`.
+- Route-branch intent bypasses ordinary lane-follow first-sample/lateral
+  reanchor guards, because the desired route branch can be laterally offset in
+  a junction.
+
+Key invariant:
+
+- MPC should track the reference generated from `ReferenceIntent`, not chase a
+  raw global-route point or a jumpy `temp_des`.
+
+## 1.1 Planning Context Boundary
+
+Current file:
+
+- `utility/planning_context.py`
+
+Inputs:
+
+- Ego state and lane context.
+- Current route summary and active route points.
+- CP/CARLA traffic-control context.
+- Stop target mapping, if available.
+- Temporary destination and final goal.
+- Behavior/FSM state and reference gate status.
+
+Outputs:
+
+- `EgoPlanningState`
+- `TrafficControlContext`
+- `RouteContext`
+- `TargetContext`
+- `PlanningContext.trace_fields()` for CSV diagnostics.
+
+Required invariants:
+
+- `TrafficControlContext.stop_target` is only a longitudinal stop target.
+- `RouteContext` is a mission-level hint and must not directly pull MPC.
+- `TargetContext.local_goal`, `stop_target`, and `final_goal` must remain
+  separate.
+- MPC should receive `lane_center_reference_samples`; global route reference
+  is allowed only if the route-reference gate explicitly passes.
+
+Current integration:
+
+- `planning_runner.py` builds a `PlanningContext` before behavior planning.
+- Behavior traffic-signal input is read from `PlanningContext`.
+- After reference gating, `PlanningContext` records reference priority and
+  global-route-reference gate result.
+- `temporary_destination_timeseries.csv` and `lane_reference_timeseries.csv`
+  include flattened planning-context fields.
+
+Remaining gap:
+
+- Context construction still lives inside `planning_runner.py`. The next
+  cleanup step is to move context construction into a dedicated
+  `PlanningContextBuilder` so the runner becomes an event loop rather than a
+  planning-policy owner.
 
 ## 2. Route Layer
 

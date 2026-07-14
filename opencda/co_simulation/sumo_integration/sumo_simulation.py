@@ -13,6 +13,7 @@
 
 import collections
 import enum
+from contextlib import contextmanager
 import logging
 import os
 
@@ -27,6 +28,47 @@ import lxml.etree as ET  # pylint: disable=import-error
 # ==================================================================================================
 # -- sumo definitions ------------------------------------------------------------------------------
 # ==================================================================================================
+
+
+def _filtered_sumo_library_path(raw_value):
+    """Remove conda library dirs that can break system SUMO/SUMO-GUI binaries."""
+    blocked_fragments = (
+        "conda",
+        "miniconda",
+        "miniforge",
+        "mambaforge",
+    )
+    kept_paths = []
+    for path_item in str(raw_value or "").split(os.pathsep):
+        normalized = path_item.strip()
+        if not normalized:
+            continue
+        lowered = normalized.lower()
+        if any(fragment in lowered for fragment in blocked_fragments):
+            continue
+        kept_paths.append(normalized)
+    return os.pathsep.join(kept_paths)
+
+
+@contextmanager
+def _clean_sumo_process_environment():
+    """Temporarily sanitize process env inherited by subprocess-based traci.start()."""
+    managed_keys = ("LD_LIBRARY_PATH", "QT_PLUGIN_PATH", "QT_QPA_PLATFORM_PLUGIN_PATH")
+    previous_values = {key: os.environ.get(key) for key in managed_keys}
+    try:
+        for key in managed_keys:
+            filtered_value = _filtered_sumo_library_path(os.environ.get(key, ""))
+            if filtered_value:
+                os.environ[key] = filtered_value
+            else:
+                os.environ.pop(key, None)
+        yield
+    finally:
+        for key, value in previous_values.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 # https://sumo.dlr.de/docs/Simulation/Traffic_Lights.html#signal_state_definitions
@@ -321,11 +363,12 @@ class SumoSimulation(object):
             if sumo_gui is True:
                 logging.info('Remember to press the play button to start the simulation')
 
-            traci.start([sumo_binary,
-                '--configuration-file', cfg_file,
-                '--step-length', str(step_length),
-                '--collision.check-junctions'
-            ])
+            with _clean_sumo_process_environment():
+                traci.start([sumo_binary,
+                    '--configuration-file', cfg_file,
+                    '--step-length', str(step_length),
+                    '--collision.check-junctions'
+                ])
 
         else:
             logging.info('Connection to sumo server. Host: %s Port: %s', host, port)

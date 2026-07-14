@@ -59,7 +59,8 @@ def compute_pairwise_ttc_drac(
     *,
     ego_length_m: float = 4.5,
     obstacle_length_m: float | None = None,
-    lateral_conflict_width_m: float = 3.5,
+    lateral_conflict_width_m: float = 2.5,
+    min_ego_speed_for_ttc_mps: float = 0.5,
 ) -> Tuple[float, float]:
     """Return longitudinal TTC and DRAC for one obstacle.
 
@@ -67,6 +68,30 @@ def compute_pairwise_ttc_drac(
     close enough to conflict, and the ego is closing on it. DRAC is the
     constant deceleration needed to avoid reaching the obstacle gap.
     """
+    details = compute_pairwise_ttc_drac_debug(
+        ego_state=ego_state,
+        obstacle_snapshot=obstacle_snapshot,
+        ego_length_m=float(ego_length_m),
+        obstacle_length_m=obstacle_length_m,
+        lateral_conflict_width_m=float(lateral_conflict_width_m),
+        min_ego_speed_for_ttc_mps=float(min_ego_speed_for_ttc_mps),
+    )
+    return (
+        float(details.get("ttc_s", float("inf"))),
+        float(details.get("drac_mps2", 0.0)),
+    )
+
+
+def compute_pairwise_ttc_drac_debug(
+    ego_state: Mapping[str, object] | Sequence[object],
+    obstacle_snapshot: Mapping[str, object],
+    *,
+    ego_length_m: float = 4.5,
+    obstacle_length_m: float | None = None,
+    lateral_conflict_width_m: float = 2.5,
+    min_ego_speed_for_ttc_mps: float = 0.5,
+) -> Dict[str, object]:
+    """Return TTC/DRAC plus the geometry that produced the result."""
 
     ego_x, ego_y, ego_v, ego_psi = _state_xyvpsi(ego_state)
     obs_x = _finite_float(obstacle_snapshot.get("x", 0.0))
@@ -85,22 +110,54 @@ def compute_pairwise_ttc_drac(
     ego_sin = math.sin(float(ego_psi))
     longitudinal_gap_m = float(ego_cos * dx_m + ego_sin * dy_m)
     lateral_gap_m = float(-ego_sin * dx_m + ego_cos * dy_m)
-
-    if longitudinal_gap_m <= 0.0 or abs(lateral_gap_m) > max(0.0, float(lateral_conflict_width_m)):
-        return float("inf"), 0.0
-
     obs_velocity_along_ego_mps = float(obs_v) * math.cos(float(obs_psi) - float(ego_psi))
     closing_speed_mps = float(ego_v) - float(obs_velocity_along_ego_mps)
-    bumper_gap_m = float(longitudinal_gap_m) - 0.5 * max(0.0, float(ego_length_m)) - 0.5 * max(0.0, float(obs_length))
-    bumper_gap_m = max(0.0, float(bumper_gap_m))
-    if closing_speed_mps <= 0.0:
-        return float("inf"), 0.0
-    if bumper_gap_m <= _EPS:
-        return 0.0, float("inf")
-    return (
-        float(bumper_gap_m / max(_EPS, closing_speed_mps)),
-        float((closing_speed_mps * closing_speed_mps) / max(_EPS, 2.0 * bumper_gap_m)),
+    bumper_gap_raw_m = (
+        float(longitudinal_gap_m)
+        - 0.5 * max(0.0, float(ego_length_m))
+        - 0.5 * max(0.0, float(obs_length))
     )
+    bumper_gap_m = max(0.0, float(bumper_gap_raw_m))
+
+    details: Dict[str, object] = {
+        "ttc_s": float("inf"),
+        "drac_mps2": 0.0,
+        "longitudinal_gap_m": float(longitudinal_gap_m),
+        "lateral_gap_m": float(lateral_gap_m),
+        "bumper_gap_m": float(bumper_gap_m),
+        "bumper_gap_raw_m": float(bumper_gap_raw_m),
+        "closing_speed_mps": float(closing_speed_mps),
+        "obstacle_x": float(obs_x),
+        "obstacle_y": float(obs_y),
+        "obstacle_v_mps": float(obs_v),
+        "obstacle_psi_rad": float(obs_psi),
+        "reason": "",
+    }
+
+    if float(ego_v) < max(0.0, float(min_ego_speed_for_ttc_mps)):
+        details["reason"] = "ego_speed_below_ttc_threshold"
+        return details
+
+    if longitudinal_gap_m <= 0.0 or abs(lateral_gap_m) > max(0.0, float(lateral_conflict_width_m)):
+        details["reason"] = (
+            "behind_or_lateral_clear"
+            if float(longitudinal_gap_m) <= 0.0
+            else "lateral_clear"
+        )
+        return details
+
+    if closing_speed_mps <= 0.0:
+        details["reason"] = "not_closing"
+        return details
+    if bumper_gap_m <= _EPS:
+        details["ttc_s"] = 0.0
+        details["drac_mps2"] = float("inf")
+        details["reason"] = "bumper_overlap"
+        return details
+    details["ttc_s"] = float(bumper_gap_m / max(_EPS, closing_speed_mps))
+    details["drac_mps2"] = float((closing_speed_mps * closing_speed_mps) / max(_EPS, 2.0 * bumper_gap_m))
+    details["reason"] = "closing_conflict"
+    return details
 
 
 @dataclass
@@ -109,7 +166,8 @@ class EvaluationMetricsRecorder:
 
     ego_length_m: float = 4.5
     collision_rate_distance_epsilon_km: float = 1.0e-6
-    lateral_conflict_width_m: float = 3.5
+    lateral_conflict_width_m: float = 2.5
+    min_ego_speed_for_ttc_mps: float = 0.5
     pet_conflict_radius_m: float = 3.0
     pet_bin_size_m: float = 3.0
     samples: list[Dict[str, object]] = field(default_factory=list)
@@ -235,19 +293,27 @@ class EvaluationMetricsRecorder:
 
         nearest_ttc_s = float("inf")
         max_tick_drac_mps2 = 0.0
+        nearest_ttc_debug: Dict[str, object] = {}
         for index, snapshot in enumerate(list(obstacle_snapshots or [])):
             if not isinstance(snapshot, Mapping):
                 continue
-            ttc_s, drac_mps2 = compute_pairwise_ttc_drac(
+            obstacle_id = _snapshot_id(snapshot, index)
+            ttc_debug = compute_pairwise_ttc_drac_debug(
                 ego_state={"x": ego_x, "y": ego_y, "v": ego_v, "psi": ego_psi},
                 obstacle_snapshot=snapshot,
                 ego_length_m=float(self.ego_length_m),
                 lateral_conflict_width_m=float(self.lateral_conflict_width_m),
+                min_ego_speed_for_ttc_mps=float(self.min_ego_speed_for_ttc_mps),
             )
+            ttc_debug["obstacle_id"] = str(obstacle_id)
+            ttc_s = float(ttc_debug.get("ttc_s", float("inf")))
+            drac_mps2 = float(ttc_debug.get("drac_mps2", 0.0))
+            if float(ttc_s) < float(nearest_ttc_s):
+                nearest_ttc_debug = dict(ttc_debug)
             nearest_ttc_s = min(float(nearest_ttc_s), float(ttc_s))
             max_tick_drac_mps2 = max(float(max_tick_drac_mps2), float(drac_mps2))
             self._update_pet(
-                obstacle_id=_snapshot_id(snapshot, index),
+                obstacle_id=str(obstacle_id),
                 obstacle_xy=(
                     _finite_float(snapshot.get("x", 0.0)),
                     _finite_float(snapshot.get("y", 0.0)),
@@ -267,6 +333,48 @@ class EvaluationMetricsRecorder:
                 "ego_speed_mps": float(ego_v),
                 "obstacle_count": int(len(list(obstacle_snapshots or []))),
                 "nearest_ttc_s": None if not math.isfinite(nearest_ttc_s) else float(nearest_ttc_s),
+                "nearest_ttc_obstacle_id": str(nearest_ttc_debug.get("obstacle_id", "")),
+                "nearest_ttc_reason": str(nearest_ttc_debug.get("reason", "")),
+                "nearest_ttc_longitudinal_gap_m": (
+                    None
+                    if "longitudinal_gap_m" not in nearest_ttc_debug
+                    else float(nearest_ttc_debug.get("longitudinal_gap_m", 0.0))
+                ),
+                "nearest_ttc_lateral_gap_m": (
+                    None
+                    if "lateral_gap_m" not in nearest_ttc_debug
+                    else float(nearest_ttc_debug.get("lateral_gap_m", 0.0))
+                ),
+                "nearest_ttc_bumper_gap_m": (
+                    None
+                    if "bumper_gap_m" not in nearest_ttc_debug
+                    else float(nearest_ttc_debug.get("bumper_gap_m", 0.0))
+                ),
+                "nearest_ttc_bumper_gap_raw_m": (
+                    None
+                    if "bumper_gap_raw_m" not in nearest_ttc_debug
+                    else float(nearest_ttc_debug.get("bumper_gap_raw_m", 0.0))
+                ),
+                "nearest_ttc_closing_speed_mps": (
+                    None
+                    if "closing_speed_mps" not in nearest_ttc_debug
+                    else float(nearest_ttc_debug.get("closing_speed_mps", 0.0))
+                ),
+                "nearest_ttc_obstacle_x": (
+                    None
+                    if "obstacle_x" not in nearest_ttc_debug
+                    else float(nearest_ttc_debug.get("obstacle_x", 0.0))
+                ),
+                "nearest_ttc_obstacle_y": (
+                    None
+                    if "obstacle_y" not in nearest_ttc_debug
+                    else float(nearest_ttc_debug.get("obstacle_y", 0.0))
+                ),
+                "nearest_ttc_obstacle_v_mps": (
+                    None
+                    if "obstacle_v_mps" not in nearest_ttc_debug
+                    else float(nearest_ttc_debug.get("obstacle_v_mps", 0.0))
+                ),
                 "max_drac_mps2": None if not math.isfinite(max_tick_drac_mps2) else float(max_tick_drac_mps2),
                 "min_pet_s": None if not math.isfinite(self.min_pet_s) else float(self.min_pet_s),
                 "behavior_decision": str(behavior_decision),
@@ -361,6 +469,16 @@ def write_planning_metrics_artifacts(
         "ego_speed_mps",
         "obstacle_count",
         "nearest_ttc_s",
+        "nearest_ttc_obstacle_id",
+        "nearest_ttc_reason",
+        "nearest_ttc_longitudinal_gap_m",
+        "nearest_ttc_lateral_gap_m",
+        "nearest_ttc_bumper_gap_m",
+        "nearest_ttc_bumper_gap_raw_m",
+        "nearest_ttc_closing_speed_mps",
+        "nearest_ttc_obstacle_x",
+        "nearest_ttc_obstacle_y",
+        "nearest_ttc_obstacle_v_mps",
         "max_drac_mps2",
         "min_pet_s",
         "behavior_decision",
