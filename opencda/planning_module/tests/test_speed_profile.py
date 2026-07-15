@@ -3,11 +3,14 @@ import unittest
 
 from utility.speed_profile import (
     apply_sequential_speed_caps,
+    build_speed_cap_trace,
+    compute_speed_envelope,
     curvature_speed_cap_mps,
     idm_following_speed_cap_mps,
     rate_limit_speed_cap_rise_mps,
     reference_jump_speed_cap_mps,
     stop_profile_speed_cap_mps,
+    summarize_speed_cap_history,
     trapezoidal_stop_profile,
 )
 
@@ -259,6 +262,107 @@ class RateLimitSpeedCapRiseTests(unittest.TestCase):
         )
 
         self.assertAlmostEqual(capped, 5.2)
+
+
+class SpeedCapTraceTests(unittest.TestCase):
+    def test_compute_speed_envelope_owns_stacking_and_rise_limit(self):
+        trace = compute_speed_envelope(
+            base_max_velocity_mps=10.0,
+            previous_max_velocity_mps=4.0,
+            dt_s=0.25,
+            max_rise_mps2=2.0,
+            idm_cap_mps=9.0,
+            ego_corridor_obstacle_cap_mps=None,
+            stop_profile_cap_mps=8.0,
+            curvature_cap_mps=0.5,
+            reference_jump_cap_mps=None,
+            curvature_floor_mps=1.5,
+        )
+
+        self.assertEqual(trace.active_caps, ["idm", "stop_profile", "curvature"])
+        self.assertEqual(trace.binding_cap, "curvature")
+        # Curvature floor preserves the historical behavior after tightening.
+        self.assertAlmostEqual(trace.final_max_velocity_mps, 1.5)
+        # Drops are never rate-limited.
+        self.assertAlmostEqual(trace.final_after_rise_limit_mps, 1.5)
+        self.assertEqual(trace.path_speed_cap_reason, "curve_curvature")
+
+    def test_compute_speed_envelope_limits_cap_rise(self):
+        trace = compute_speed_envelope(
+            base_max_velocity_mps=10.0,
+            previous_max_velocity_mps=2.0,
+            dt_s=0.25,
+            max_rise_mps2=2.0,
+            idm_cap_mps=None,
+            ego_corridor_obstacle_cap_mps=None,
+            stop_profile_cap_mps=None,
+            curvature_cap_mps=None,
+            reference_jump_cap_mps=None,
+        )
+
+        self.assertEqual(trace.binding_cap, "base")
+        self.assertAlmostEqual(trace.final_max_velocity_mps, 10.0)
+        self.assertAlmostEqual(trace.final_after_rise_limit_mps, 2.5)
+        self.assertTrue(trace.rise_limited)
+
+    def test_trace_records_binding_cap_and_rise_limit(self):
+        trace = build_speed_cap_trace(
+            base_max_velocity_mps=10.0,
+            final_raw_mps=6.0,
+            final_after_rise_limit_mps=5.5,
+            active_caps=["idm", "stop_profile"],
+            idm_cap_mps=8.0,
+            ego_corridor_obstacle_cap_mps=None,
+            stop_profile_cap_mps=6.0,
+            curvature_cap_mps=None,
+            reference_jump_cap_mps=None,
+            rise_dt_s=0.25,
+            path_speed_cap_reason="",
+        )
+
+        fields = trace.as_trace_fields()
+
+        self.assertEqual(fields["speed_cap_binding_cap"], "stop_profile")
+        self.assertEqual(fields["speed_cap_active_caps"], "idm|stop_profile")
+        self.assertEqual(fields["speed_cap_rise_limited"], 1)
+        self.assertAlmostEqual(fields["speed_cap_final_after_rise_limit_mps"], 5.5)
+
+    def test_speed_cap_summary_aggregates_binding_and_active_caps(self):
+        rows = [
+            build_speed_cap_trace(
+                base_max_velocity_mps=10.0,
+                final_raw_mps=8.0,
+                final_after_rise_limit_mps=8.0,
+                active_caps=["idm"],
+                idm_cap_mps=8.0,
+                ego_corridor_obstacle_cap_mps=None,
+                stop_profile_cap_mps=None,
+                curvature_cap_mps=None,
+                reference_jump_cap_mps=None,
+                rise_dt_s=0.1,
+            ).as_trace_fields(),
+            build_speed_cap_trace(
+                base_max_velocity_mps=10.0,
+                final_raw_mps=4.0,
+                final_after_rise_limit_mps=4.5,
+                active_caps=["idm", "stop_profile"],
+                idm_cap_mps=8.0,
+                ego_corridor_obstacle_cap_mps=None,
+                stop_profile_cap_mps=4.0,
+                curvature_cap_mps=None,
+                reference_jump_cap_mps=None,
+                rise_dt_s=0.1,
+            ).as_trace_fields(),
+        ]
+
+        summary = summarize_speed_cap_history(rows)
+
+        self.assertEqual(summary["samples"], 2)
+        self.assertEqual(summary["binding_caps"]["idm"], 1)
+        self.assertEqual(summary["binding_caps"]["stop_profile"], 1)
+        self.assertEqual(summary["active_caps"]["idm"], 2)
+        self.assertAlmostEqual(summary["min_final_cap_mps"], 4.5)
+        self.assertAlmostEqual(summary["max_final_cap_mps"], 8.0)
 
 
 if __name__ == "__main__":

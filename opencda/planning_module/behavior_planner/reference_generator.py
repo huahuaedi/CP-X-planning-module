@@ -23,6 +23,10 @@ class ReferenceIntent:
     target_lane_id: int
     follow_global_route_lane: bool
     reason: str
+    lateral_reference_source: str = "lane_center"
+    longitudinal_target_kind: str = "speed_profile"
+    stop_target_role: str = "none"
+    route_role: str = "mission_hint"
 
 
 def select_reference_intent(
@@ -58,6 +62,10 @@ def select_reference_intent(
             target_lane_id=int(target_lane_id),
             follow_global_route_lane=False,
             reason=f"behavior_{normalized_decision}",
+            lateral_reference_source="lane_center",
+            longitudinal_target_kind="stop_target",
+            stop_target_role="longitudinal_speed_target",
+            route_role="mission_hint",
         )
 
     if bool(is_emergency_brake_decision(normalized_decision)):
@@ -66,6 +74,10 @@ def select_reference_intent(
             target_lane_id=int(target_lane_id),
             follow_global_route_lane=False,
             reason="emergency_brake",
+            lateral_reference_source="lane_center",
+            longitudinal_target_kind="follow_or_brake",
+            stop_target_role="none",
+            route_role="mission_hint",
         )
 
     if normalized_decision in {"lane_change_left", "lane_change_right"} or normalized_fsm in {
@@ -79,6 +91,10 @@ def select_reference_intent(
             target_lane_id=int(target_lane_id),
             follow_global_route_lane=False,
             reason=f"decision_or_fsm_{normalized_decision}:{normalized_fsm}",
+            lateral_reference_source="lane_change_blend",
+            longitudinal_target_kind="speed_profile",
+            stop_target_role="none",
+            route_role="mission_hint",
         )
 
     # The global route is a mission-level path, not a directly trackable MPC
@@ -92,6 +108,10 @@ def select_reference_intent(
             target_lane_id=int(target_lane_id),
             follow_global_route_lane=False,
             reason="route_hint_local_lane_reference",
+            lateral_reference_source="lane_center",
+            longitudinal_target_kind="speed_profile",
+            stop_target_role="none",
+            route_role="lane_choice_hint_only",
         )
 
     return ReferenceIntent(
@@ -99,4 +119,8 @@ def select_reference_intent(
         target_lane_id=int(target_lane_id),
         follow_global_route_lane=False,
         reason="lane_center_follow",
+        lateral_reference_source="lane_center",
+        longitudinal_target_kind="speed_profile",
+        stop_target_role="none",
+        route_role="mission_hint",
     )

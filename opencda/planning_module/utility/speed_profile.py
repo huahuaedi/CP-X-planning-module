@@ -11,7 +11,10 @@ Usage:
 
 from __future__ import annotations
 
+from collections import Counter
+from dataclasses import dataclass
 import math
+from typing import Dict, Iterable, Mapping, Sequence
 
 
 def trapezoidal_stop_profile(
@@ -229,3 +232,204 @@ def apply_sequential_speed_caps(
             current_mps = float(value) if floor is None else max(float(floor), float(value))
             applied.append(str(name))
     return current_mps, applied
+
+
+@dataclass(frozen=True)
+class SpeedCapTrace:
+    """Compact trace of the stacked speed-envelope decision for one tick."""
+
+    base_max_velocity_mps: float
+    final_max_velocity_mps: float
+    final_after_rise_limit_mps: float
+    active_caps: list[str]
+    binding_cap: str
+    idm_cap_mps: float | None = None
+    ego_corridor_obstacle_cap_mps: float | None = None
+    stop_profile_cap_mps: float | None = None
+    curvature_cap_mps: float | None = None
+    reference_jump_cap_mps: float | None = None
+    rise_limited: bool = False
+    rise_dt_s: float = 0.0
+    path_speed_cap_reason: str = ""
+
+    def as_trace_fields(self) -> Dict[str, object]:
+        return {
+            "speed_cap_base_max_velocity_mps": float(self.base_max_velocity_mps),
+            "speed_cap_final_raw_mps": float(self.final_max_velocity_mps),
+            "speed_cap_final_after_rise_limit_mps": float(self.final_after_rise_limit_mps),
+            "speed_cap_active_caps": "|".join(str(name) for name in self.active_caps),
+            "speed_cap_binding_cap": str(self.binding_cap),
+            "speed_cap_idm_mps": "" if self.idm_cap_mps is None else float(self.idm_cap_mps),
+            "speed_cap_ego_corridor_obstacle_mps": (
+                "" if self.ego_corridor_obstacle_cap_mps is None else float(self.ego_corridor_obstacle_cap_mps)
+            ),
+            "speed_cap_stop_profile_mps": (
+                "" if self.stop_profile_cap_mps is None else float(self.stop_profile_cap_mps)
+            ),
+            "speed_cap_curvature_mps": "" if self.curvature_cap_mps is None else float(self.curvature_cap_mps),
+            "speed_cap_reference_jump_mps": (
+                "" if self.reference_jump_cap_mps is None else float(self.reference_jump_cap_mps)
+            ),
+            "speed_cap_rise_limited": int(bool(self.rise_limited)),
+            "speed_cap_rise_dt_s": float(self.rise_dt_s),
+            "speed_cap_path_reason": str(self.path_speed_cap_reason),
+        }
+
+
+def build_speed_cap_trace(
+    *,
+    base_max_velocity_mps: float,
+    final_raw_mps: float,
+    final_after_rise_limit_mps: float,
+    active_caps: Sequence[str],
+    idm_cap_mps: float | None,
+    ego_corridor_obstacle_cap_mps: float | None,
+    stop_profile_cap_mps: float | None,
+    curvature_cap_mps: float | None,
+    reference_jump_cap_mps: float | None,
+    rise_dt_s: float,
+    path_speed_cap_reason: str = "",
+) -> SpeedCapTrace:
+    """Build a trace for the stacked speed caps after rate limiting."""
+
+    active_cap_list = [str(name) for name in list(active_caps or [])]
+    binding_cap = active_cap_list[-1] if active_cap_list else "base"
+    rise_limited = float(final_after_rise_limit_mps) < float(final_raw_mps) - 1.0e-6
+    return SpeedCapTrace(
+        base_max_velocity_mps=float(base_max_velocity_mps),
+        final_max_velocity_mps=float(final_raw_mps),
+        final_after_rise_limit_mps=float(final_after_rise_limit_mps),
+        active_caps=active_cap_list,
+        binding_cap=str(binding_cap),
+        idm_cap_mps=None if idm_cap_mps is None else float(idm_cap_mps),
+        ego_corridor_obstacle_cap_mps=(
+            None if ego_corridor_obstacle_cap_mps is None else float(ego_corridor_obstacle_cap_mps)
+        ),
+        stop_profile_cap_mps=None if stop_profile_cap_mps is None else float(stop_profile_cap_mps),
+        curvature_cap_mps=None if curvature_cap_mps is None else float(curvature_cap_mps),
+        reference_jump_cap_mps=None if reference_jump_cap_mps is None else float(reference_jump_cap_mps),
+        rise_limited=bool(rise_limited),
+        rise_dt_s=float(rise_dt_s),
+        path_speed_cap_reason=str(path_speed_cap_reason),
+    )
+
+
+def _path_speed_cap_reason(active_caps: Sequence[str], ego_corridor_cap_reason: str = "") -> str:
+    active = {str(name) for name in list(active_caps or [])}
+    if "reference_jump" in active:
+        return "reference_jump"
+    if "curvature" in active:
+        return "curve_curvature"
+    if "ego_corridor_obstacle" in active:
+        return str(ego_corridor_cap_reason)
+    return ""
+
+
+def compute_speed_envelope(
+    *,
+    base_max_velocity_mps: float,
+    previous_max_velocity_mps: float,
+    dt_s: float,
+    max_rise_mps2: float,
+    idm_cap_mps: float | None,
+    ego_corridor_obstacle_cap_mps: float | None,
+    ego_corridor_cap_reason: str = "",
+    stop_profile_cap_mps: float | None,
+    curvature_cap_mps: float | None,
+    reference_jump_cap_mps: float | None,
+    curvature_floor_mps: float = 1.5,
+) -> SpeedCapTrace:
+    """Compute the final speed envelope and return a traceable contract.
+
+    This is the speed-layer boundary consumed by the runner.  It owns cap
+    stacking order, curvature floor semantics, and rise-rate limiting, so the
+    runner does not need to duplicate speed-policy mechanics inline.
+    """
+
+    final_raw_mps, active_caps = apply_sequential_speed_caps(
+        float(base_max_velocity_mps),
+        [
+            ("idm", idm_cap_mps, None),
+            ("ego_corridor_obstacle", ego_corridor_obstacle_cap_mps, None),
+            ("stop_profile", stop_profile_cap_mps, None),
+            ("curvature", curvature_cap_mps, float(curvature_floor_mps)),
+            ("reference_jump", reference_jump_cap_mps, None),
+        ],
+    )
+    final_after_rise_limit_mps = rate_limit_speed_cap_rise_mps(
+        previous_cap_mps=float(previous_max_velocity_mps),
+        new_cap_mps=float(final_raw_mps),
+        dt_s=float(dt_s),
+        max_rise_mps2=float(max_rise_mps2),
+    )
+    return build_speed_cap_trace(
+        base_max_velocity_mps=float(base_max_velocity_mps),
+        final_raw_mps=float(final_raw_mps),
+        final_after_rise_limit_mps=float(final_after_rise_limit_mps),
+        active_caps=active_caps,
+        idm_cap_mps=idm_cap_mps,
+        ego_corridor_obstacle_cap_mps=ego_corridor_obstacle_cap_mps,
+        stop_profile_cap_mps=stop_profile_cap_mps,
+        curvature_cap_mps=curvature_cap_mps,
+        reference_jump_cap_mps=reference_jump_cap_mps,
+        rise_dt_s=float(dt_s),
+        path_speed_cap_reason=_path_speed_cap_reason(
+            active_caps,
+            ego_corridor_cap_reason=str(ego_corridor_cap_reason),
+        ),
+    )
+
+
+def summarize_speed_cap_history(history: Iterable[Mapping[str, object]]) -> Dict[str, object]:
+    """Aggregate speed-cap trace rows into a compact run summary."""
+
+    rows = [dict(row) for row in list(history or [])]
+    binding_counter: Counter[str] = Counter()
+    active_counter: Counter[str] = Counter()
+    path_reason_counter: Counter[str] = Counter()
+    rise_limited_count = 0
+    min_final_cap_mps = None
+    max_final_cap_mps = 0.0
+    min_nonzero_final_cap_mps = None
+
+    for row in rows:
+        binding = str(row.get("speed_cap_binding_cap", ""))
+        if binding:
+            binding_counter[binding] += 1
+        path_reason = str(row.get("speed_cap_path_reason", ""))
+        if path_reason:
+            path_reason_counter[path_reason] += 1
+        for name in str(row.get("speed_cap_active_caps", "")).split("|"):
+            if name:
+                active_counter[name] += 1
+        try:
+            rise_limited_count += int(bool(int(row.get("speed_cap_rise_limited", 0) or 0)))
+        except Exception:
+            rise_limited_count += int(bool(row.get("speed_cap_rise_limited", False)))
+        try:
+            final_cap = float(row.get("speed_cap_final_after_rise_limit_mps", 0.0) or 0.0)
+            min_final_cap_mps = final_cap if min_final_cap_mps is None else min(float(min_final_cap_mps), final_cap)
+            max_final_cap_mps = max(float(max_final_cap_mps), final_cap)
+            if final_cap > 1.0e-6:
+                min_nonzero_final_cap_mps = (
+                    final_cap
+                    if min_nonzero_final_cap_mps is None
+                    else min(float(min_nonzero_final_cap_mps), final_cap)
+                )
+        except Exception:
+            pass
+
+    total_rows = len(rows)
+    return {
+        "samples": int(total_rows),
+        "rise_limited_samples": int(rise_limited_count),
+        "rise_limited_rate": 0.0 if total_rows <= 0 else float(rise_limited_count) / float(total_rows),
+        "min_final_cap_mps": "" if min_final_cap_mps is None else float(min_final_cap_mps),
+        "max_final_cap_mps": float(max_final_cap_mps),
+        "min_nonzero_final_cap_mps": (
+            "" if min_nonzero_final_cap_mps is None else float(min_nonzero_final_cap_mps)
+        ),
+        "binding_caps": dict(binding_counter.most_common()),
+        "active_caps": dict(active_counter.most_common()),
+        "path_speed_cap_reasons": dict(path_reason_counter.most_common()),
+    }

@@ -19,6 +19,16 @@ from .temp_destination import (
     compute_temp_destination,
 )
 from .reference_generator import ReferenceIntent, select_reference_intent
+from .reference_pipeline import (
+    MpcReferenceGenerationContext,
+    MpcReferenceGenerationOutput,
+    MpcReferenceResult,
+    ReferencePipelineTrace,
+    build_mpc_reference_result,
+    generate_mpc_reference,
+    summarize_reference_pipeline_history,
+    trace_reference_pipeline,
+)
 from .reroute import (
     CP_MESSAGE_PATH,
     ensure_cp_message_file_exists,
@@ -62,6 +72,14 @@ __all__ = [
     "compute_temp_destination",
     "ReferenceIntent",
     "select_reference_intent",
+    "MpcReferenceGenerationContext",
+    "MpcReferenceGenerationOutput",
+    "MpcReferenceResult",
+    "ReferencePipelineTrace",
+    "build_mpc_reference_result",
+    "generate_mpc_reference",
+    "summarize_reference_pipeline_history",
+    "trace_reference_pipeline",
     "CP_MESSAGE_PATH",
     "ensure_cp_message_file_exists",
     "control_messages",

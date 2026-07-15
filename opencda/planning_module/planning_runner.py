@@ -21,7 +21,6 @@ import numpy as np
 
 from MPC import (
     MPC,
-    build_route_reference_samples,
     compute_lane_lookahead_distance,
 )
 from behavior_planner import (
@@ -41,21 +40,33 @@ from behavior_planner import (
     compute_temp_destination,
     compute_ego_lane_offset,
     select_reference_intent,
+    MpcReferenceGenerationContext,
+    generate_mpc_reference,
+    summarize_reference_pipeline_history,
 )
 from behavior_planner.reroute import reroute_from_lane_closure_messages
 from behavior_planner.cp_traffic_light_provider import build_carla_traffic_light_cp_message
+from opencda_bridge.cp_provider import OpenCDACPProvider
 from utility import (
     AStarGlobalPlanner,
     CP_MESSAGE_PATH,
+    CPMessageContext,
     EgoPlanningState,
     EvaluationMetricsRecorder,
+    MapLaneContext,
+    PerceptionContext,
+    PlannerInputFrame,
     PlanningContext,
+    PredictionContext,
     RouteContext,
     RoutePlanSummary,
     TargetContext,
     Tracker,
     TrafficControlContext,
     build_lane_center_waypoints,
+    build_planning_debug_summary,
+    write_dict_csv_artifact,
+    write_json_artifact,
     load_control_messages,
     load_lane_closure_messages,
     load_obstacle_snapshots,
@@ -68,11 +79,11 @@ from utility import canonical_lane_id_for_waypoint, canonical_lane_waypoint_for_
 from pipeline import build_prediction_frame, evaluate_behavior_candidates
 from behavior_planner.car_follow import idm_acceleration
 from utility.speed_profile import (
-    apply_sequential_speed_caps,
+    compute_speed_envelope,
     curvature_speed_cap_mps,
     idm_following_speed_cap_mps,
-    rate_limit_speed_cap_rise_mps,
     reference_jump_speed_cap_mps,
+    summarize_speed_cap_history,
     stop_profile_speed_cap_mps,
 )
 
@@ -168,6 +179,10 @@ def _update_scenario_run_manifest(
         "control_timeseries.csv",
         "temporary_destination_timeseries.csv",
         "lane_reference_timeseries.csv",
+        "reference_pipeline_summary.json",
+        "speed_cap_timeseries.csv",
+        "speed_cap_summary.json",
+        "planning_debug_summary.json",
         "planned_trajectory_timeseries.csv",
     ]
     scenarios[str(scenario_name)] = {
@@ -574,6 +589,43 @@ def _fallback_route_anchor_transforms_from_spawn_points(world_map) -> Tuple[Any 
                 best_start = start_transform
                 best_goal = goal_transform
     return best_start, best_goal
+
+
+_WEATHER_PARAMETER_KEYS = (
+    "cloudiness",
+    "precipitation",
+    "precipitation_deposits",
+    "wind_intensity",
+    "sun_azimuth_angle",
+    "sun_altitude_angle",
+    "fog_density",
+    "fog_distance",
+    "fog_falloff",
+    "wetness",
+    "scattering_intensity",
+    "mie_scattering_scale",
+    "rayleigh_scattering_scale",
+)
+
+
+def _apply_scenario_weather(world, carla, weather_cfg: Mapping[str, object] | None) -> None:
+    if not isinstance(weather_cfg, Mapping) or len(weather_cfg) == 0:
+        return
+    weather_kwargs: Dict[str, float] = {}
+    for key in _WEATHER_PARAMETER_KEYS:
+        if key not in weather_cfg:
+            continue
+        try:
+            weather_kwargs[key] = float(weather_cfg[key])
+        except (TypeError, ValueError):
+            continue
+    if not weather_kwargs:
+        return
+    try:
+        world.set_weather(carla.WeatherParameters(**weather_kwargs))
+        print(f"[CARLA SCENARIO] Applied scenario weather: {weather_kwargs}")
+    except Exception as exc:
+        print(f"[CARLA SCENARIO] Failed to apply scenario weather: {exc}")
 
 
 def _transform_from_xyzyaw_config(carla, raw_value: object, *, label: str):
@@ -3201,86 +3253,6 @@ def _destination_forward_lateral_m(
     return float(forward_m), float(lateral_m)
 
 
-def _reference_sample_forward_lateral_m(
-    *,
-    reference_sample: Mapping[str, object] | None,
-    ego_state: Sequence[float],
-) -> tuple[float | None, float | None]:
-    if not isinstance(reference_sample, Mapping) or len(ego_state) < 4:
-        return None, None
-    try:
-        ref_x_m = float(
-            reference_sample.get(
-                "x_ref_m",
-                reference_sample.get("x_m", reference_sample.get("x", "")),
-            )
-        )
-        ref_y_m = float(
-            reference_sample.get(
-                "y_ref_m",
-                reference_sample.get("y_m", reference_sample.get("y", "")),
-            )
-        )
-    except Exception:
-        return None, None
-    ego_x_m = float(ego_state[0])
-    ego_y_m = float(ego_state[1])
-    ego_heading_rad = float(ego_state[3])
-    dx_m = float(ref_x_m) - float(ego_x_m)
-    dy_m = float(ref_y_m) - float(ego_y_m)
-    forward_m = math.cos(ego_heading_rad) * dx_m + math.sin(ego_heading_rad) * dy_m
-    lateral_m = -math.sin(ego_heading_rad) * dx_m + math.cos(ego_heading_rad) * dy_m
-    return float(forward_m), float(lateral_m)
-
-
-def _lane_center_destination_from_reference(
-    *,
-    destination_state: Sequence[float] | None,
-    lane_center_reference: Sequence[Mapping[str, object]] | None,
-    ego_state: Sequence[float],
-    target_forward_m: float,
-) -> List[float] | None:
-    if destination_state is None:
-        return None
-    destination = list(destination_state)
-    if len(destination) < 4 or not lane_center_reference:
-        return destination
-
-    target_forward_m = max(1.0, float(target_forward_m))
-    chosen_sample: Mapping[str, object] | None = None
-    chosen_forward_m: float | None = None
-    for sample in list(lane_center_reference or []):
-        forward_m, _ = _reference_sample_forward_lateral_m(
-            reference_sample=sample,
-            ego_state=ego_state,
-        )
-        if forward_m is None:
-            continue
-        chosen_sample = sample
-        chosen_forward_m = float(forward_m)
-        if float(forward_m) >= float(target_forward_m):
-            break
-    if chosen_sample is None:
-        return destination
-
-    try:
-        destination[0] = float(chosen_sample.get("x_ref_m", chosen_sample.get("x", destination[0])))
-        destination[1] = float(chosen_sample.get("y_ref_m", chosen_sample.get("y", destination[1])))
-        destination[3] = float(chosen_sample.get("heading_rad", destination[3]))
-        if len(destination) >= 5:
-            destination[4] = float(chosen_sample.get("lane_id", destination[4]))
-        if chosen_forward_m is not None and float(chosen_forward_m) < 0.5:
-            ego_x_m = float(ego_state[0])
-            ego_y_m = float(ego_state[1])
-            ego_heading_rad = float(ego_state[3])
-            destination[0] = ego_x_m + target_forward_m * math.cos(ego_heading_rad)
-            destination[1] = ego_y_m + target_forward_m * math.sin(ego_heading_rad)
-            destination[3] = ego_heading_rad
-    except Exception:
-        return list(destination_state)
-    return destination
-
-
 def _walk_waypoint_forward_simple(
     waypoint,
     distance_m: float,
@@ -4165,19 +4137,6 @@ def _ego_corridor_obstacle_speed_cap_mps(
     return best_cap_mps, best_reason
 
 
-def _is_lane_change_reference_decision(decision: object) -> bool:
-    normalized = str(decision or "").strip().lower()
-    return normalized in {
-        "lane_change_left",
-        "lane_change_right",
-        "reroute",
-        "prepare_lane_change_left",
-        "prepare_lane_change_right",
-        "execute_lane_change_left",
-        "execute_lane_change_right",
-    }
-
-
 def _effective_motion_behavior_label(
     *,
     current_behavior: object,
@@ -4195,341 +4154,6 @@ def _effective_motion_behavior_label(
     if normalized_fsm in fsm_to_behavior:
         return str(fsm_to_behavior[normalized_fsm])
     return str(normalized_behavior)
-
-
-def _reference_first_sample_jump_m(
-    previous_reference: Sequence[Mapping[str, object]] | None,
-    current_reference: Sequence[Mapping[str, object]] | None,
-) -> float:
-    if not previous_reference or not current_reference:
-        return 0.0
-    try:
-        previous_sample = previous_reference[0]
-        current_sample = current_reference[0]
-        return float(math.hypot(
-            float(current_sample.get("x_ref_m", current_sample.get("x", 0.0)))
-            - float(previous_sample.get("x_ref_m", previous_sample.get("x", 0.0))),
-            float(current_sample.get("y_ref_m", current_sample.get("y", 0.0)))
-            - float(previous_sample.get("y_ref_m", previous_sample.get("y", 0.0))),
-        ))
-    except Exception:
-        return 0.0
-
-
-def _extrapolate_reference_sample(
-    sample: Mapping[str, object],
-    *,
-    step_distance_m: float,
-) -> Dict[str, object]:
-    next_sample = dict(sample)
-    try:
-        heading_rad = float(next_sample.get("heading_rad", 0.0))
-        x_m = float(next_sample.get("x_ref_m", next_sample.get("x", 0.0)))
-        y_m = float(next_sample.get("y_ref_m", next_sample.get("y", 0.0)))
-        next_sample["x_ref_m"] = float(x_m) + float(step_distance_m) * math.cos(heading_rad)
-        next_sample["y_ref_m"] = float(y_m) + float(step_distance_m) * math.sin(heading_rad)
-    except Exception:
-        pass
-    return next_sample
-
-
-def _lane_follow_reference_forward_trim(
-    reference_samples: Sequence[Mapping[str, object]] | None,
-    *,
-    ego_state: Sequence[float],
-    min_first_forward_m: float,
-    step_distance_m: float,
-) -> List[Dict[str, object]]:
-    """Drop near/behind first samples so lane-follow tracking starts ahead."""
-    samples = [dict(sample) for sample in list(reference_samples or [])]
-    if len(samples) <= 1 or len(ego_state) < 4 or float(min_first_forward_m) <= 0.0:
-        return samples
-
-    first_valid_index = 0
-    for index, sample in enumerate(samples):
-        forward_m, _ = _reference_sample_forward_lateral_m(
-            reference_sample=sample,
-            ego_state=ego_state,
-        )
-        if forward_m is not None and float(forward_m) >= float(min_first_forward_m):
-            first_valid_index = int(index)
-            break
-    else:
-        first_valid_index = min(len(samples) - 1, 1)
-
-    if int(first_valid_index) <= 0:
-        return samples
-
-    trimmed = [dict(sample) for sample in samples[int(first_valid_index):]]
-    estimated_step_m = max(0.25, float(step_distance_m))
-    if len(samples) >= 2:
-        try:
-            a = samples[-2]
-            b = samples[-1]
-            estimated_step_m = max(
-                0.25,
-                math.hypot(
-                    float(b.get("x_ref_m", b.get("x", 0.0))) - float(a.get("x_ref_m", a.get("x", 0.0))),
-                    float(b.get("y_ref_m", b.get("y", 0.0))) - float(a.get("y_ref_m", a.get("y", 0.0))),
-                ),
-            )
-        except Exception:
-            estimated_step_m = max(0.25, float(step_distance_m))
-    while len(trimmed) < len(samples) and trimmed:
-        trimmed.append(
-            _extrapolate_reference_sample(
-                trimmed[-1],
-                step_distance_m=float(estimated_step_m),
-            )
-        )
-    return trimmed[: len(samples)]
-
-
-def _blend_reference_samples_with_previous(
-    current_reference: Sequence[Mapping[str, object]] | None,
-    previous_reference: Sequence[Mapping[str, object]] | None,
-    *,
-    alpha_current: float,
-    blend_when_jump_above_m: float,
-) -> tuple[List[Dict[str, object]], bool]:
-    """Low-pass filter the reference horizon when the first sample jitters."""
-    current_samples = [dict(sample) for sample in list(current_reference or [])]
-    previous_samples = [dict(sample) for sample in list(previous_reference or [])]
-    if not current_samples or not previous_samples:
-        return current_samples, False
-    jump_m = _reference_first_sample_jump_m(previous_samples, current_samples)
-    if float(jump_m) < max(0.0, float(blend_when_jump_above_m)):
-        return current_samples, False
-
-    alpha = min(1.0, max(0.0, float(alpha_current)))
-    count = min(len(current_samples), len(previous_samples))
-    blended: List[Dict[str, object]] = []
-    for index in range(count):
-        current = dict(current_samples[index])
-        previous = dict(previous_samples[index])
-        out = dict(current)
-        for x_key in ("x_ref_m", "x"):
-            if x_key in current or x_key in previous:
-                try:
-                    out[x_key] = (
-                        alpha * float(current.get(x_key, current.get("x_ref_m", current.get("x", 0.0))))
-                        + (1.0 - alpha) * float(previous.get(x_key, previous.get("x_ref_m", previous.get("x", 0.0))))
-                    )
-                except Exception:
-                    pass
-        for y_key in ("y_ref_m", "y"):
-            if y_key in current or y_key in previous:
-                try:
-                    out[y_key] = (
-                        alpha * float(current.get(y_key, current.get("y_ref_m", current.get("y", 0.0))))
-                        + (1.0 - alpha) * float(previous.get(y_key, previous.get("y_ref_m", previous.get("y", 0.0))))
-                    )
-                except Exception:
-                    pass
-        try:
-            c_heading = float(current.get("heading_rad", 0.0))
-            p_heading = float(previous.get("heading_rad", c_heading))
-            delta = math.atan2(math.sin(c_heading - p_heading), math.cos(c_heading - p_heading))
-            out["heading_rad"] = p_heading + alpha * delta
-        except Exception:
-            pass
-        blended.append(out)
-    if len(current_samples) > count:
-        blended.extend([dict(sample) for sample in current_samples[count:]])
-    return blended, True
-
-
-def _stabilize_lane_reference_samples(
-    current_reference: Sequence[Mapping[str, object]] | None,
-    previous_reference: Sequence[Mapping[str, object]] | None,
-    *,
-    decision: object,
-    max_non_lc_first_sample_jump_m: float = 2.25,
-    freeze_on_jump: bool = True,
-) -> tuple[List[Dict[str, object]], bool, float]:
-    """Keep the MPC horizon continuous when a non-lane-change reference jumps."""
-    current_samples = [dict(sample) for sample in list(current_reference or [])]
-    previous_samples = [dict(sample) for sample in list(previous_reference or [])]
-    if not current_samples:
-        return current_samples, False, 0.0
-    jump_m = _reference_first_sample_jump_m(previous_samples, current_samples)
-    jump_detected = (
-        bool(previous_samples)
-        and not _is_lane_change_reference_decision(decision)
-        and float(jump_m) > float(max_non_lc_first_sample_jump_m)
-    )
-    if bool(jump_detected) and bool(freeze_on_jump) and previous_samples:
-        # The fed MPC reference is unchanged when frozen, so downstream speed
-        # caps should see the actual applied jump (zero), not the rejected raw
-        # candidate jump. The rejected reason is still reflected by the
-        # stabilized flag/fallback text.
-        return previous_samples, True, 0.0
-    return current_samples, bool(jump_detected), float(jump_m)
-
-
-def _angle_diff_abs_rad(a_rad: float, b_rad: float) -> float:
-    return abs(math.atan2(math.sin(float(a_rad) - float(b_rad)), math.cos(float(a_rad) - float(b_rad))))
-
-
-def _reference_first_sample_invalid_reason(
-    *,
-    ego_state: Sequence[float],
-    current_reference: Sequence[Mapping[str, object]] | None,
-    previous_reference: Sequence[Mapping[str, object]] | None,
-    decision: object,
-    expected_lane_id: int | None = None,
-    max_non_lc_jump_m: float = 4.0,
-    max_heading_error_rad: float = 2.2,
-    max_backward_m: float = 1.0,
-) -> str:
-    samples = list(current_reference or [])
-    if not samples:
-        return "empty_reference"
-    if len(ego_state) < 4:
-        return ""
-    first = dict(samples[0])
-    try:
-        ref_x = float(first.get("x_ref_m", first.get("x", 0.0)))
-        ref_y = float(first.get("y_ref_m", first.get("y", 0.0)))
-        ref_heading = float(first.get("heading_rad", float(ego_state[3])))
-        ref_lane_id = int(first.get("lane_id", 0))
-        ego_x = float(ego_state[0])
-        ego_y = float(ego_state[1])
-        ego_yaw = float(ego_state[3])
-    except Exception:
-        return "invalid_reference_values"
-
-    if (
-        expected_lane_id is not None
-        and int(expected_lane_id) != 0
-        and int(ref_lane_id) != 0
-        and int(ref_lane_id) != int(expected_lane_id)
-        and not _is_lane_change_reference_decision(decision)
-    ):
-        return "first_sample_lane_mismatch"
-
-    dx_m = ref_x - ego_x
-    dy_m = ref_y - ego_y
-    forward_m = math.cos(ego_yaw) * dx_m + math.sin(ego_yaw) * dy_m
-    lateral_m = -math.sin(ego_yaw) * dx_m + math.cos(ego_yaw) * dy_m
-    if float(forward_m) < -float(max_backward_m) and math.hypot(dx_m, dy_m) > 3.0:
-        return "first_sample_behind_ego"
-    if abs(float(lateral_m)) > 4.5 and float(forward_m) < 2.0:
-        return "first_sample_lateral_jump"
-    if _angle_diff_abs_rad(ref_heading, ego_yaw) > float(max_heading_error_rad):
-        return "first_sample_heading_reversed"
-
-    jump_m = _reference_first_sample_jump_m(previous_reference, current_reference)
-    if (
-        bool(previous_reference)
-        and not _is_lane_change_reference_decision(decision)
-        and not bool(is_fixed_stop_decision(normalize_behavior_decision(decision)))
-        and float(jump_m) > float(max_non_lc_jump_m)
-    ):
-        return "first_sample_discontinuous"
-    return ""
-
-
-def _route_reference_fallback_samples(
-    *,
-    ego_state: Sequence[float],
-    global_route_points: Sequence[Sequence[float]],
-    horizon_steps: int,
-    step_distance_m: float,
-    target_lane_id: int,
-) -> List[Dict[str, object]]:
-    if len(global_route_points or []) < 2 or len(ego_state) < 4:
-        return []
-    ego_snapshot = {
-        "x": float(ego_state[0]),
-        "y": float(ego_state[1]),
-        "psi": float(ego_state[3]),
-    }
-    route_samples = build_route_reference_samples(
-        ego_snapshot=ego_snapshot,
-        route_points=global_route_points,
-        horizon_steps=int(horizon_steps),
-        step_distance_m=float(step_distance_m),
-        target_lane_id=int(target_lane_id),
-    )
-    return [dict(sample) for sample in route_samples]
-
-
-def _heading_reference_fallback_samples(
-    *,
-    ego_state: Sequence[float],
-    horizon_steps: int,
-    step_distance_m: float,
-    target_lane_id: int,
-) -> List[Dict[str, object]]:
-    if len(ego_state) < 4:
-        return []
-    ego_x_m = float(ego_state[0])
-    ego_y_m = float(ego_state[1])
-    ego_heading_rad = float(ego_state[3])
-    step_m = max(0.5, float(step_distance_m))
-    samples: List[Dict[str, object]] = []
-    for index in range(max(1, int(horizon_steps))):
-        distance_m = float(index + 1) * float(step_m)
-        samples.append({
-            "x_ref_m": float(ego_x_m) + float(distance_m) * math.cos(ego_heading_rad),
-            "y_ref_m": float(ego_y_m) + float(distance_m) * math.sin(ego_heading_rad),
-            "heading_rad": float(ego_heading_rad),
-            "lane_id": int(target_lane_id),
-        })
-    return samples
-
-
-def _reference_with_route_fallback(
-    *,
-    ego_state: Sequence[float],
-    current_reference: Sequence[Mapping[str, object]] | None,
-    previous_reference: Sequence[Mapping[str, object]] | None,
-    decision: object,
-    global_route_points: Sequence[Sequence[float]],
-    horizon_steps: int,
-    step_distance_m: float,
-    target_lane_id: int,
-    allow_route_fallback: bool = True,
-    expected_lane_id: int | None = None,
-) -> tuple[List[Dict[str, object]], str]:
-    reason = _reference_first_sample_invalid_reason(
-        ego_state=ego_state,
-        current_reference=current_reference,
-        previous_reference=previous_reference,
-        decision=decision,
-        expected_lane_id=expected_lane_id,
-    )
-    if not reason:
-        return [dict(sample) for sample in list(current_reference or [])], ""
-    if bool(allow_route_fallback):
-        fallback_samples = _route_reference_fallback_samples(
-            ego_state=ego_state,
-            global_route_points=global_route_points,
-            horizon_steps=int(horizon_steps),
-            step_distance_m=float(step_distance_m),
-            target_lane_id=int(target_lane_id),
-        )
-        if fallback_samples:
-            fallback_reason = _reference_first_sample_invalid_reason(
-                ego_state=ego_state,
-                current_reference=fallback_samples,
-                previous_reference=None,
-                decision=decision,
-                expected_lane_id=expected_lane_id,
-            )
-            if not fallback_reason:
-                return fallback_samples, str(reason)
-    heading_fallback_samples = _heading_reference_fallback_samples(
-        ego_state=ego_state,
-        horizon_steps=int(horizon_steps),
-        step_distance_m=float(step_distance_m),
-        target_lane_id=int(target_lane_id),
-    )
-    if heading_fallback_samples:
-        fallback_kind = "heading_fallback_no_route" if not bool(allow_route_fallback) else "heading_fallback"
-        return heading_fallback_samples, f"{reason}:{fallback_kind}"
-    return [dict(sample) for sample in list(current_reference or [])], ""
 
 
 def _control_from_mpc(mpc: MPC, carla, acceleration_mps2: float, steering_angle_rad: float):
@@ -4654,6 +4278,7 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
 
     world_map = world.get_map()
     blueprint_library = world.get_blueprint_library()
+    _apply_scenario_weather(world, carla, scenario_cfg.get("weather"))
     mpc_payload = load_yaml_file(MPC_CONFIG_PATH)
     tracker_payload = load_yaml_file(TRACKER_CONFIG_PATH)
     mpc_cfg = dict(mpc_payload.get("mpc", mpc_payload))
@@ -4938,6 +4563,7 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
     mpc = MPC(mpc_cfg=mpc_cfg, road_cfg=road_cfg)
     mpc_cost_history: List[Dict[str, object]] = []
     lane_ref_history: List[Dict[str, object]] = []
+    speed_cap_history: List[Dict[str, object]] = []
     control_history: List[Dict[str, object]] = []
     temp_destination_history: List[Dict[str, object]] = []
     planned_trajectory_history: List[Dict[str, object]] = []
@@ -5439,9 +5065,32 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
         module_name=scenario_runtime_module_name,
         purpose="scenario runtime",
     )
+    opencda_cp_provider_cfg = dict(runtime_cfg.get("opencda_cp_provider", {}) or {})
+    opencda_cp_provider_enabled = (
+        bool(opencda_cp_provider_cfg.get("enabled", False))
+        or str(os.environ.get("OPENCDA_CP_PROVIDER", "")).strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
     use_cp_obstacle_pipeline = bool(
         scenario_runtime_module_name.startswith("opencda_scenario.")
+        or bool(opencda_cp_provider_enabled)
     )
+    opencda_cp_provider = None
+    if bool(opencda_cp_provider_enabled):
+        opencda_cp_provider = OpenCDACPProvider(
+            message_path=str(cooperative_message_path),
+            schema_version=1,
+            communication_range_m=float(
+                opencda_cp_provider_cfg.get("communication_range_m", 80.0)
+            ),
+            prediction_horizon_s=float(mpc.horizon_s),
+            prediction_dt_s=float(mpc.dt_s),
+        )
+        print(
+            "[OpenCDA CP Provider] Enabled for planning-module scenario "
+            f"(range={float(opencda_cp_provider.communication_range_m):.1f}m, "
+            f"path={cooperative_message_path})."
+        )
     scenario_runtime_state = _initialize_scenario_runtime_state(
         module=scenario_runtime_module,
         world=world,
@@ -5615,6 +5264,18 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                 })
                 print(f"[SCENARIO FINISHED] reason=timeout elapsed={float(sim_time_s) - float(run_start_sim_time_s):.2f}s")
                 return 0
+
+            if opencda_cp_provider is not None:
+                try:
+                    opencda_cp_provider.publish(
+                        world=world,
+                        world_map=world_map,
+                        carla=carla,
+                        ego_vehicle=ego_vehicle,
+                        sim_time_s=float(sim_time_s),
+                    )
+                except Exception as exc:
+                    print(f"[OpenCDA CP Provider] Failed to publish CP obstacles: {exc}")
 
             dynamic_object_snapshots: List[dict] = []
             if bool(use_cp_obstacle_pipeline):
@@ -6633,6 +6294,74 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                     ),
                     behavior_decision=str(current_applied_behavior),
                     behavior_fsm_state=str(cached_planner_lc_state),
+                )
+                try:
+                    frame_lane_closures = load_lane_closure_messages(
+                        message_path=cooperative_message_path
+                    )
+                except Exception:
+                    frame_lane_closures = []
+                planner_input_frame = PlannerInputFrame(
+                    planning=planning_context,
+                    map_lane=MapLaneContext.from_local_context(
+                        local_context=current_lane_context,
+                        allowed_lane_ids=local_allowed_lane_ids,
+                        in_junction=bool(ego_in_junction),
+                        route_context=planning_context.route,
+                    ),
+                    perception=PerceptionContext(
+                        dynamic_objects=[dict(item) for item in list(dynamic_object_snapshots or [])],
+                        static_objects=[dict(item) for item in list(static_object_snapshots or [])],
+                        planning_objects=[dict(item) for item in list(predicted_snapshots or [])],
+                        source=(
+                            "opencda_cp"
+                            if opencda_cp_provider is not None
+                            else ("cp" if bool(use_cp_obstacle_pipeline) else "carla")
+                        ),
+                    ),
+                    prediction=PredictionContext(
+                        lane_assignments=dict(lane_assignments),
+                        lane_prediction_risks=dict(lane_prediction_risks),
+                        obstacle_future_trajectories=dict(cached_predicted_obstacle_trajectories),
+                        model=str(
+                            behavior_runtime_cfg.get(
+                                "lane_change_prediction_model",
+                                "constant_acceleration",
+                            )
+                        ),
+                        horizon_s=float(
+                            behavior_runtime_cfg.get(
+                                "lane_change_prediction_horizon_s",
+                                min(3.0, float(mpc.horizon_s)),
+                            )
+                        ),
+                        dt_s=float(
+                            behavior_runtime_cfg.get(
+                                "lane_change_prediction_dt_s",
+                                max(0.1, float(mpc.dt_s)),
+                            )
+                        ),
+                    ),
+                    cp_messages=CPMessageContext(
+                        message_path=str(cooperative_message_path),
+                        traffic_controls=[dict(item) for item in list(cp_traffic_controls or [])],
+                        selected_traffic_control=(
+                            dict(selected_cp_traffic_control)
+                            if isinstance(selected_cp_traffic_control, Mapping)
+                            else None
+                        ),
+                        lane_closures=[dict(item) for item in list(frame_lane_closures or [])],
+                        obstacles=(
+                            [dict(item) for item in list(predicted_snapshots or [])]
+                            if bool(use_cp_obstacle_pipeline)
+                            else []
+                        ),
+                        generated_traffic_light_control=(
+                            dict(generated_cp_traffic_control)
+                            if isinstance(generated_cp_traffic_control, Mapping)
+                            else None
+                        ),
+                    ),
                 )
 
                 # ---- Rule-based behavior planner (synchronous) ------- #
@@ -8177,370 +7906,60 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                     0.5,
                     float(lane_reference_speed_mps) * float(mpc.dt_s),
                 )
-                _reference_route_points = (
-                    active_global_route_points
-                    if (
-                        bool(reference_intent.follow_global_route_lane)
-                        and not bool(is_fixed_stop_decision(current_applied_behavior))
-                        and not bool(traffic_control_lane_lock_active)
-                    )
-                    else []
-                )
-                reference_stop_target_state = (
-                    stop_target_state if bool(final_goal_stop_active) else None
-                )
-                raw_lane_center_reference = build_reference_samples(
+                mpc_reference_context = MpcReferenceGenerationContext(
                     world_map=world_map,
                     carla=carla,
                     ego_transform=ego_transform,
-                    target_lane_id=int(reference_target_lane_id),
-                    decision=str(current_applied_behavior),
-                    horizon_steps=int(mpc.horizon_steps),
-                    step_distance_m=float(lane_reference_step_distance_m),
-                    global_route_points=_reference_route_points,
-                    mode_reference_xy=current_temp_reference_xy,
-                    prev_mode=current_temp_mode_value,
-                    prev_road_id=current_temp_road_id,
-                    prev_entered_intersection=bool(current_temp_entered_intersection),
-                    next_macro_maneuver=str(active_reference_maneuver),
-                    mode_override=str(current_temp_mode_str),
-                    stop_target_state=reference_stop_target_state,
-                    follow_target_state=follow_target_state,
-                    follow_global_route_lane=bool(reference_intent.follow_global_route_lane),
-                    force_stop_reference=False,
-                )
-                reference_input_samples, last_reference_fallback_reason = _reference_with_route_fallback(
                     ego_state=ego_state,
-                    current_reference=raw_lane_center_reference,
-                    previous_reference=previous_lane_center_reference,
-                    decision=str(current_applied_behavior),
-                    global_route_points=active_global_route_points,
-                    horizon_steps=int(mpc.horizon_steps),
-                    step_distance_m=float(lane_reference_step_distance_m),
-                    target_lane_id=int(reference_target_lane_id),
-                    allow_route_fallback=(
-                        bool(reference_intent.follow_global_route_lane)
-                        and not bool(is_fixed_stop_decision(current_applied_behavior))
-                    ),
-                    expected_lane_id=(
-                        0
-                        if str(reference_intent.mode) == "route_branch_follow"
-                        else int(reference_target_lane_id)
-                    ),
+                    active_global_route_points=active_global_route_points,
+                    previous_lane_center_reference=previous_lane_center_reference,
+                    behavior_runtime_cfg=behavior_runtime_cfg,
+                    reference_intent=reference_intent,
+                    current_applied_behavior=str(current_applied_behavior),
+                    cached_planner_lc_state=str(cached_planner_lc_state),
+                    reference_target_lane_id=int(reference_target_lane_id),
+                    current_lane_id=int(current_lane_id),
+                    global_route_reference_allowed=bool(global_route_reference_allowed),
+                    global_route_reference_gate_reason=str(global_route_reference_gate_reason),
+                    should_follow_global_route_lane_for_reference=bool(should_follow_global_route_lane_for_reference),
+                    traffic_control_lane_lock_active=bool(traffic_control_lane_lock_active),
+                    final_goal_stop_active=bool(final_goal_stop_active),
+                    stop_target_state=stop_target_state,
+                    follow_target_state=follow_target_state,
+                    current_temp_reference_xy=current_temp_reference_xy,
+                    current_temp_mode_value=float(current_temp_mode_value),
+                    current_temp_road_id=current_temp_road_id,
+                    current_temp_entered_intersection=bool(current_temp_entered_intersection),
+                    active_reference_maneuver=str(active_reference_maneuver),
+                    current_temp_mode_str=str(current_temp_mode_str),
+                    lane_reference_speed_mps=float(lane_reference_speed_mps),
+                    lane_reference_step_distance_m=float(lane_reference_step_distance_m),
+                    mpc_horizon_steps=int(mpc.horizon_steps),
+                    mpc_dt_s=float(mpc.dt_s),
+                    temporary_destination_state=temporary_destination_state,
+                    lane_reference_freeze_count=int(lane_reference_freeze_count),
+                    sim_time_s=float(sim_time_s),
+                    stop_release_temp_smooth_until_sim_time_s=float(stop_release_temp_smooth_until_sim_time_s),
                 )
-                if (
-                    str(last_reference_fallback_reason)
-                    and not bool(global_route_reference_allowed)
-                    and str(global_route_reference_gate_reason)
-                ):
-                    last_reference_fallback_reason = (
-                        f"{last_reference_fallback_reason}:"
-                        f"route_reference_{global_route_reference_gate_reason}"
-                    )
-                lane_follow_reference_filter_active = (
-                    str(reference_intent.mode) == "lane_follow"
-                    and
-                    str(normalize_behavior_decision(current_applied_behavior)) == "lane_follow"
-                    and not bool(is_fixed_stop_decision(current_applied_behavior))
-                    and str(cached_planner_lc_state or "").upper() in {"IDLE", "LANE_KEEP"}
+                mpc_reference_output = generate_mpc_reference(mpc_reference_context)
+                mpc_reference_result = mpc_reference_output.mpc_reference_result
+                local_lane_center_reference = list(mpc_reference_output.local_lane_center_reference)
+                temporary_destination_state = mpc_reference_output.temporary_destination_state
+                reference_target_lane_id = int(mpc_reference_output.reference_target_lane_id)
+                should_follow_global_route_lane_for_reference = bool(
+                    mpc_reference_output.should_follow_global_route_lane_for_reference
                 )
-                route_branch_reference_filter_active = (
-                    str(reference_intent.mode) == "route_branch_follow"
-                    and
-                    str(normalize_behavior_decision(current_applied_behavior)) == "lane_follow"
-                    and not bool(is_fixed_stop_decision(current_applied_behavior))
-                    and str(cached_planner_lc_state or "").upper() in {"IDLE", "LANE_KEEP"}
-                )
-                lane_follow_reference_min_first_forward_m = float(
-                    behavior_runtime_cfg.get(
-                        "lane_follow_reference_min_first_forward_m",
-                        1.0,
-                    )
-                )
-                reference_forward_filter_active = (
-                    bool(lane_follow_reference_filter_active)
-                    or bool(route_branch_reference_filter_active)
-                )
-                if bool(reference_forward_filter_active):
-                    reference_input_samples = _lane_follow_reference_forward_trim(
-                        reference_input_samples,
-                        ego_state=ego_state,
-                        min_first_forward_m=float(lane_follow_reference_min_first_forward_m),
-                        step_distance_m=float(lane_reference_step_distance_m),
-                    )
-                previous_reference_for_stabilization = previous_lane_center_reference
-                if bool(reference_forward_filter_active) and previous_lane_center_reference:
-                    _prev_forward_m, _ = _reference_sample_forward_lateral_m(
-                        reference_sample=previous_lane_center_reference[0],
-                        ego_state=ego_state,
-                    )
-                    if (
-                        _prev_forward_m is not None
-                        and float(_prev_forward_m)
-                        < 0.5 * float(lane_follow_reference_min_first_forward_m)
-                    ):
-                        previous_reference_for_stabilization = []
-                local_lane_center_reference, last_reference_stabilized, last_reference_jump_m = (
-                    _stabilize_lane_reference_samples(
-                        reference_input_samples,
-                        previous_reference_for_stabilization,
-                        decision=str(current_applied_behavior),
-                        max_non_lc_first_sample_jump_m=max(
-                            0.0,
-                            float(
-                                behavior_runtime_cfg.get(
-                                    (
-                                        "lane_follow_reference_freeze_jump_threshold_m"
-                                        if bool(lane_follow_reference_filter_active)
-                                        else "reference_stabilization_jump_threshold_m"
-                                    ),
-                                    1.0 if bool(lane_follow_reference_filter_active) else 2.25,
-                                )
-                            ),
-                        ),
-                        freeze_on_jump=bool(
-                            behavior_runtime_cfg.get(
-                                "reference_stabilization_freeze_on_jump",
-                                True,
-                            )
-                        ),
-                    )
-                )
-                if (
-                    bool(lane_follow_reference_filter_active)
-                    and not bool(last_reference_stabilized)
-                    and previous_reference_for_stabilization
-                ):
-                    local_lane_center_reference, _lane_follow_blended = _blend_reference_samples_with_previous(
-                        local_lane_center_reference,
-                        previous_reference_for_stabilization,
-                        alpha_current=float(
-                            behavior_runtime_cfg.get(
-                                "lane_follow_reference_blend_alpha",
-                                0.55,
-                            )
-                        ),
-                        blend_when_jump_above_m=float(
-                            behavior_runtime_cfg.get(
-                                "lane_follow_reference_blend_jump_threshold_m",
-                                0.75,
-                            )
-                        ),
-                    )
-                    if bool(_lane_follow_blended):
-                        last_reference_stabilized = True
-                        last_reference_jump_m = _reference_first_sample_jump_m(
-                            previous_reference_for_stabilization,
-                            local_lane_center_reference,
-                        )
-                        last_reference_fallback_reason = (
-                            f"{last_reference_fallback_reason}:"
-                            if str(last_reference_fallback_reason)
-                            else ""
-                        ) + "lane_follow_reference_blend"
-                first_reference_forward_m = None
-                first_reference_lateral_m = None
+                lane_reference_freeze_count = int(mpc_reference_output.lane_reference_freeze_count)
+                last_reference_fallback_reason = str(mpc_reference_output.last_reference_fallback_reason)
+                last_reference_stabilized = bool(mpc_reference_output.last_reference_stabilized)
+                last_reference_jump_m = float(mpc_reference_output.last_reference_jump_m)
+                first_reference_forward_m = mpc_reference_output.first_reference_forward_m
+                first_reference_lateral_m = mpc_reference_output.first_reference_lateral_m
+                reference_geometry_guard_active = bool(mpc_reference_output.reference_geometry_guard_active)
+                reference_geometry_guard_reason = str(mpc_reference_output.reference_geometry_guard_reason)
                 if local_lane_center_reference:
-                    first_reference_forward_m, first_reference_lateral_m = _reference_sample_forward_lateral_m(
-                        reference_sample=local_lane_center_reference[0],
-                        ego_state=ego_state,
-                    )
-                reference_geometry_guard_active = False
-                reference_geometry_guard_reason = ""
-                if (
-                    local_lane_center_reference
-                    and str(reference_intent.mode) != "route_branch_follow"
-                    and not bool(is_fixed_stop_decision(current_applied_behavior))
-                    and str(normalize_behavior_decision(current_applied_behavior))
-                    not in {"lane_change_left", "lane_change_right"}
-                ):
-                    min_ref_forward_m = float(
-                        behavior_runtime_cfg.get(
-                            (
-                                "lane_follow_reference_guard_min_forward_m"
-                                if bool(lane_follow_reference_filter_active)
-                                else "reference_first_sample_min_forward_m"
-                            ),
-                            0.75 if bool(lane_follow_reference_filter_active) else -0.5,
-                        )
-                    )
-                    max_ref_lateral_m = float(
-                        behavior_runtime_cfg.get(
-                            (
-                                "lane_follow_reference_guard_max_lateral_m"
-                                if bool(lane_follow_reference_filter_active)
-                                else "reference_first_sample_max_lateral_m"
-                            ),
-                            2.5 if bool(lane_follow_reference_filter_active) else 4.5,
-                        )
-                    )
-                    if (
-                        first_reference_forward_m is not None
-                        and float(first_reference_forward_m) < float(min_ref_forward_m)
-                    ):
-                        reference_geometry_guard_active = True
-                        reference_geometry_guard_reason = "first_sample_behind"
-                    elif (
-                        first_reference_lateral_m is not None
-                        and abs(float(first_reference_lateral_m)) > max(0.0, float(max_ref_lateral_m))
-                    ):
-                        reference_geometry_guard_active = True
-                        reference_geometry_guard_reason = "first_sample_lateral_too_far"
-                if bool(reference_geometry_guard_active):
-                    reanchored_reference = build_reference_samples(
-                        world_map=world_map,
-                        carla=carla,
-                        ego_transform=ego_transform,
-                        target_lane_id=int(current_lane_id),
-                        decision="lane_follow",
-                        horizon_steps=int(mpc.horizon_steps),
-                        step_distance_m=max(0.5, float(lane_reference_speed_mps) * float(mpc.dt_s)),
-                        global_route_points=[],
-                        mode_reference_xy=None,
-                        prev_mode=0.0,
-                        prev_road_id=None,
-                        prev_entered_intersection=False,
-                        next_macro_maneuver="straight",
-                        mode_override="NORMAL",
-                        stop_target_state=None,
-                        follow_target_state=None,
-                        follow_global_route_lane=False,
-                        force_stop_reference=False,
-                    )
-                    reanchor_reason = "lane_center_reanchor"
-                    reanchor_invalid_reason = _reference_first_sample_invalid_reason(
-                        ego_state=ego_state,
-                        current_reference=reanchored_reference,
-                        previous_reference=None,
-                        decision="lane_follow",
-                        expected_lane_id=int(current_lane_id),
-                        max_non_lc_jump_m=max(
-                            0.0,
-                            float(
-                                behavior_runtime_cfg.get(
-                                    "reference_stabilization_jump_threshold_m",
-                                    2.25,
-                                )
-                            ),
-                        ),
-                    )
-                    if reanchor_invalid_reason:
-                        reanchored_reference = _heading_reference_fallback_samples(
-                            ego_state=ego_state,
-                            horizon_steps=int(mpc.horizon_steps),
-                            step_distance_m=max(0.5, float(lane_reference_speed_mps) * float(mpc.dt_s)),
-                            target_lane_id=int(current_lane_id),
-                        )
-                        reanchor_reason = "heading_reanchor"
-                    if bool(lane_follow_reference_filter_active):
-                        reanchored_reference = _lane_follow_reference_forward_trim(
-                            reanchored_reference,
-                            ego_state=ego_state,
-                            min_first_forward_m=float(lane_follow_reference_min_first_forward_m),
-                            step_distance_m=float(lane_reference_step_distance_m),
-                        )
-                    local_lane_center_reference = [dict(sample) for sample in reanchored_reference]
-                    reference_target_lane_id = int(current_lane_id)
-                    should_follow_global_route_lane_for_reference = False
-                    last_reference_stabilized = True
-                    last_reference_fallback_reason = (
-                        f"{last_reference_fallback_reason}:"
-                        if last_reference_fallback_reason
-                        else ""
-                    ) + f"{reference_geometry_guard_reason}:{reanchor_reason}"
-                    last_reference_jump_m = _reference_first_sample_jump_m(
-                        previous_reference_for_stabilization,
-                        local_lane_center_reference,
-                    )
-                if bool(last_reference_stabilized):
-                    lane_reference_freeze_count += 1
-                else:
-                    lane_reference_freeze_count = 0
-                reference_freeze_reanchor_after_replans = max(
-                    0,
-                    int(
-                        behavior_runtime_cfg.get(
-                            "reference_freeze_reanchor_after_replans",
-                            4,
-                        )
-                    ),
-                )
-                if (
-                    bool(last_reference_stabilized)
-                    and str(reference_intent.mode) != "route_branch_follow"
-                    and int(reference_freeze_reanchor_after_replans) > 0
-                    and int(lane_reference_freeze_count)
-                    > int(reference_freeze_reanchor_after_replans)
-                ):
-                    allow_heading_reanchor = (
-                        not bool(is_fixed_stop_decision(current_applied_behavior))
-                        and float(sim_time_s) >= float(stop_release_temp_smooth_until_sim_time_s)
-                    )
-                    reanchored_reference = []
-                    if bool(is_fixed_stop_decision(current_applied_behavior)):
-                        reanchored_reference = build_reference_samples(
-                            world_map=world_map,
-                            carla=carla,
-                            ego_transform=ego_transform,
-                            target_lane_id=int(reference_target_lane_id),
-                            decision=str(current_applied_behavior),
-                            horizon_steps=int(mpc.horizon_steps),
-                            step_distance_m=max(0.5, float(lane_reference_speed_mps) * float(mpc.dt_s)),
-                            global_route_points=_reference_route_points,
-                            mode_reference_xy=current_temp_reference_xy,
-                            prev_mode=current_temp_mode_value,
-                            prev_road_id=current_temp_road_id,
-                            prev_entered_intersection=bool(current_temp_entered_intersection),
-                            next_macro_maneuver=str(active_reference_maneuver),
-                            mode_override=str(current_temp_mode_str),
-                            stop_target_state=reference_stop_target_state,
-                            follow_target_state=follow_target_state,
-                            follow_global_route_lane=bool(reference_intent.follow_global_route_lane),
-                            force_stop_reference=True,
-                        )
-                    elif bool(allow_heading_reanchor):
-                        reanchored_reference = _heading_reference_fallback_samples(
-                            ego_state=ego_state,
-                            horizon_steps=int(mpc.horizon_steps),
-                            step_distance_m=max(0.5, float(lane_reference_speed_mps) * float(mpc.dt_s)),
-                            target_lane_id=int(reference_target_lane_id),
-                        )
-                    if reanchored_reference:
-                        local_lane_center_reference = [dict(sample) for sample in reanchored_reference]
-                        reanchor_kind = (
-                            "stop_target_reanchor"
-                            if bool(is_fixed_stop_decision(current_applied_behavior))
-                            else "heading_reanchor"
-                        )
-                        last_reference_fallback_reason = (
-                            f"{last_reference_fallback_reason}:"
-                            if str(last_reference_fallback_reason)
-                            else ""
-                        ) + f"reference_freeze_timeout:{reanchor_kind}"
-                        lane_reference_freeze_count = 0
-                if (
-                    temporary_destination_state is not None
-                    and local_lane_center_reference
-                    and str(reference_intent.mode) == "lane_follow"
-                    and str(normalize_behavior_decision(current_applied_behavior)) == "lane_follow"
-                    and str(cached_planner_lc_state or "").upper() in {"IDLE", "LANE_KEEP"}
-                    and not bool(is_fixed_stop_decision(current_applied_behavior))
-                    and not bool(final_goal_stop_active)
-                ):
-                    temporary_destination_state = _lane_center_destination_from_reference(
-                        destination_state=temporary_destination_state,
-                        lane_center_reference=local_lane_center_reference,
-                        ego_state=ego_state,
-                        target_forward_m=float(
-                            behavior_runtime_cfg.get(
-                                "lane_follow_destination_reference_forward_m",
-                                6.0,
-                            )
-                        ),
-                    )
-                if local_lane_center_reference:
-                    previous_lane_center_reference = [dict(sample) for sample in local_lane_center_reference]
-                    _s0 = dict(local_lane_center_reference[0])
+                    previous_lane_center_reference = [dict(sample) for sample in mpc_reference_result.samples]
+                    _s0 = dict(mpc_reference_result.first_sample or local_lane_center_reference[0])
                     lane_ref_history.append({
                         "sim_time_s": float(sim_time_s),
                         "ref_x": float(_s0.get("x_ref_m", 0.0)),
@@ -8561,6 +7980,10 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                         "reference_priority": str(reference_priority),
                         "reference_intent_mode": str(reference_intent.mode),
                         "reference_intent_reason": str(reference_intent.reason),
+                        "reference_lateral_source": str(reference_intent.lateral_reference_source),
+                        "reference_longitudinal_target_kind": str(reference_intent.longitudinal_target_kind),
+                        "reference_stop_target_role": str(reference_intent.stop_target_role),
+                        "reference_route_role": str(reference_intent.route_role),
                         "current_behavior": str(current_applied_behavior),
                         "planner_lc_state": str(cached_planner_lc_state),
                         "first_ref_forward_m": (
@@ -8577,7 +8000,8 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                         "road_left_width_m": float(_s0.get("road_left_width_m", 0.0)),
                         "road_right_width_m": float(_s0.get("road_right_width_m", 0.0)),
                         "road_center_offset_m": float(_s0.get("road_center_offset_m", 0.0)),
-                        **planning_context.trace_fields(),
+                        **mpc_reference_result.trace_fields(),
+                        **planner_input_frame.trace_fields(),
                     })
                 curve_curvature_abs = _reference_curvature_abs(
                     local_lane_center_reference,
@@ -8607,29 +8031,26 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                     configured_cap_mps=float(behavior_runtime_cfg.get("reference_jump_speed_cap_mps", 5.0)),
                 )
 
-                mpc.constraints.max_velocity_mps, active_speed_cap_names = apply_sequential_speed_caps(
-                    float(active_plan_max_velocity_mps),
-                    [
-                        ("idm", idm_cap_mps, None),
-                        ("ego_corridor_obstacle", ego_corridor_cap_mps, None),
-                        ("stop_profile", stop_cap_mps, None),
-                        ("curvature", curvature_cap_mps, 1.5),
-                        ("reference_jump", reference_jump_cap_mps, None),
-                    ],
-                )
                 _speed_cap_rise_dt_s = (
                     0.0
                     if speed_cap_rise_limiter_prev_sim_time_s is None
                     else max(0.0, float(sim_time_s) - float(speed_cap_rise_limiter_prev_sim_time_s))
                 )
-                mpc.constraints.max_velocity_mps = rate_limit_speed_cap_rise_mps(
-                    previous_cap_mps=float(cached_mpc_max_velocity_mps),
-                    new_cap_mps=float(mpc.constraints.max_velocity_mps),
+                speed_cap_trace = compute_speed_envelope(
+                    base_max_velocity_mps=float(active_plan_max_velocity_mps),
+                    previous_max_velocity_mps=float(cached_mpc_max_velocity_mps),
                     dt_s=float(_speed_cap_rise_dt_s),
-                    max_rise_mps2=float(
-                        behavior_runtime_cfg.get("speed_cap_rise_limit_mps2", 2.0)
-                    ),
+                    max_rise_mps2=float(behavior_runtime_cfg.get("speed_cap_rise_limit_mps2", 2.0)),
+                    idm_cap_mps=idm_cap_mps,
+                    ego_corridor_obstacle_cap_mps=ego_corridor_cap_mps,
+                    ego_corridor_cap_reason=str(ego_corridor_cap_reason),
+                    stop_profile_cap_mps=stop_cap_mps,
+                    curvature_cap_mps=curvature_cap_mps,
+                    reference_jump_cap_mps=reference_jump_cap_mps,
+                    curvature_floor_mps=1.5,
                 )
+                mpc.constraints.max_velocity_mps = float(speed_cap_trace.final_after_rise_limit_mps)
+                active_speed_cap_names = list(speed_cap_trace.active_caps)
                 speed_cap_rise_limiter_prev_sim_time_s = float(sim_time_s)
                 cached_mpc_max_velocity_mps = float(mpc.constraints.max_velocity_mps)
                 path_speed_cap_active = bool(
@@ -8637,17 +8058,21 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                     or "reference_jump" in active_speed_cap_names
                     or "ego_corridor_obstacle" in active_speed_cap_names
                 )
-                path_speed_cap_reason = (
-                    "reference_jump" if "reference_jump" in active_speed_cap_names
-                    else (
-                        "curve_curvature" if "curvature" in active_speed_cap_names
-                        else (
-                            str(ego_corridor_cap_reason)
-                            if "ego_corridor_obstacle" in active_speed_cap_names
-                            else ""
-                        )
-                    )
-                )
+                path_speed_cap_reason = str(speed_cap_trace.path_speed_cap_reason)
+                speed_cap_history.append({
+                    "sim_time_s": float(sim_time_s),
+                    "ego_speed_mps": float(ego_state[2]),
+                    "current_behavior": str(current_applied_behavior),
+                    "planner_lc_state": str(cached_planner_lc_state),
+                    "traffic_signal_state": str(traffic_signal_state),
+                    "stop_target_distance_m": (
+                        "" if stop_target_distance_m is None else float(stop_target_distance_m)
+                    ),
+                    "curve_curvature_abs": float(curve_curvature_abs),
+                    "reference_jump_m": float(last_reference_jump_m),
+                    "ego_corridor_cap_reason": str(ego_corridor_cap_reason),
+                    **speed_cap_trace.as_trace_fields(),
+                })
                 requested_mpc_cost_profile = _mpc_cost_profile_for_behavior(
                     behavior=str(current_applied_behavior),
                     planner_lc_state=str(cached_planner_lc_state),
@@ -9121,6 +8546,9 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                 sumo_bridge.close()
             except Exception:
                 pass
+        metrics_summary: Dict[str, object] = {}
+        reference_pipeline_summary: Dict[str, object] = {}
+        speed_cap_summary: Dict[str, object] = {}
         try:
             cost_artifacts = _write_mpc_cost_artifacts(mpc_cost_history, scenario_cfg)
             if cost_artifacts:
@@ -9137,6 +8565,7 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                 recorder=metrics_recorder,
                 scenario_name=str(scenario_cfg.get("name", "scenario")),
             )
+            metrics_summary = dict(metrics_recorder.summary())
             print(
                 "[Metrics] Saved planning metrics to "
                 f"{metric_artifacts.get('json_path', '<unknown>')} and "
@@ -9159,11 +8588,11 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                     "acceleration_mps2", "steering_rad", "throttle", "brake", "steer",
                     "control_reason", "planned_trajectory_len", "control_sequence_len",
                 ]
-                with open(_control_csv, "w", encoding="utf-8", newline="") as _fh:
-                    _writer = csv.DictWriter(_fh, fieldnames=_control_fields)
-                    _writer.writeheader()
-                    for _row in control_history:
-                        _writer.writerow({k: _row.get(k, "") for k in _control_fields})
+                write_dict_csv_artifact(
+                    _control_csv,
+                    rows=control_history,
+                    fieldnames=_control_fields,
+                )
                 print(f"[Metrics] Saved control trace to {_control_csv}")
         except Exception as exc:
             print(f"[Metrics] Failed to save control trace: {exc}")
@@ -9253,15 +8682,31 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                     "planning_context_reference_priority",
                     "planning_context_global_route_reference_allowed",
                     "planning_context_global_route_reference_gate_reason",
+                    "planner_input_lane_id",
+                    "planner_input_road_id",
+                    "planner_input_section_id",
+                    "planner_input_allowed_lane_count",
+                    "planner_input_in_junction",
+                    "planner_input_perception_dynamic_count",
+                    "planner_input_perception_static_count",
+                    "planner_input_perception_planning_count",
+                    "planner_input_perception_source",
+                    "planner_input_prediction_model",
+                    "planner_input_prediction_assigned_object_count",
+                    "planner_input_prediction_predicted_object_count",
+                    "planner_input_prediction_risky_lane_count",
+                    "planner_input_cp_message_path",
+                    "planner_input_cp_traffic_control_count",
+                    "planner_input_cp_lane_closure_count",
+                    "planner_input_cp_obstacle_count",
+                    "planner_input_cp_selected_control_id",
+                    "planner_input_cp_generated_tl",
                 ]
-                with open(_temp_destination_csv, "w", encoding="utf-8", newline="") as _fh:
-                    _writer = csv.DictWriter(_fh, fieldnames=_temp_destination_fields)
-                    _writer.writeheader()
-                    for _row in temp_destination_history:
-                        _writer.writerow({
-                            k: _row.get(k, "")
-                            for k in _temp_destination_fields
-                        })
+                write_dict_csv_artifact(
+                    _temp_destination_csv,
+                    rows=temp_destination_history,
+                    fieldnames=_temp_destination_fields,
+                )
                 print(f"[Metrics] Saved temporary destination trace to {_temp_destination_csv}")
         except Exception as exc:
             print(f"[Metrics] Failed to save temporary destination trace: {exc}")
@@ -9278,11 +8723,11 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                     "lane_change_cancel_reason", "lane_change_abort_reason",
                     "candidate_target_lane_id",
                 ]
-                with open(_transition_csv, "w", encoding="utf-8", newline="") as _fh:
-                    _writer = csv.DictWriter(_fh, fieldnames=_transition_fields)
-                    _writer.writeheader()
-                    for _row in _transition_events:
-                        _writer.writerow({k: _row.get(k, "") for k in _transition_fields})
+                write_dict_csv_artifact(
+                    _transition_csv,
+                    rows=_transition_events,
+                    fieldnames=_transition_fields,
+                )
                 print(f"[Metrics] Saved FSM transition log to {_transition_csv}")
         except Exception as exc:
             print(f"[Metrics] Failed to save FSM transition log: {exc}")
@@ -9298,10 +8743,28 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                     "global_route_reference_allowed", "global_route_reference_gate_reason",
                     "traffic_control_lane_lock_active", "reference_priority",
                     "reference_intent_mode", "reference_intent_reason",
+                    "reference_lateral_source", "reference_longitudinal_target_kind",
+                    "reference_stop_target_role", "reference_route_role",
                     "current_behavior", "planner_lc_state",
                     "first_ref_forward_m", "first_ref_lateral_m",
                     "reference_geometry_guard_active", "reference_geometry_guard_reason",
                     "reference_jump_m", "reference_stabilized", "reference_fallback_reason",
+                    "reference_pipeline_stage",
+                    "reference_pipeline_intent_mode",
+                    "reference_pipeline_lateral_source",
+                    "reference_pipeline_longitudinal_target_kind",
+                    "reference_pipeline_stop_target_role",
+                    "reference_pipeline_route_role",
+                    "reference_pipeline_target_lane_id",
+                    "reference_pipeline_output_lane_id",
+                    "reference_pipeline_follow_global_route_lane",
+                    "reference_pipeline_fallback_reason",
+                    "reference_pipeline_stabilized",
+                    "reference_pipeline_jump_m",
+                    "reference_pipeline_first_forward_m",
+                    "reference_pipeline_first_lateral_m",
+                    "reference_pipeline_violation_count",
+                    "reference_pipeline_violations",
                     "road_left_width_m", "road_right_width_m", "road_center_offset_m",
                     "planning_context_signal_state",
                     "planning_context_signal_source",
@@ -9315,14 +8778,68 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                     "planning_context_global_route_reference_allowed",
                     "planning_context_global_route_reference_gate_reason",
                 ]
-                with open(_lane_ref_csv, "w", encoding="utf-8", newline="") as _fh:
-                    _writer = csv.DictWriter(_fh, fieldnames=_lane_ref_fields)
-                    _writer.writeheader()
-                    for _row in lane_ref_history:
-                        _writer.writerow({k: _row.get(k, "") for k in _lane_ref_fields})
+                write_dict_csv_artifact(
+                    _lane_ref_csv,
+                    rows=lane_ref_history,
+                    fieldnames=_lane_ref_fields,
+                )
                 print(f"[Metrics] Saved lane reference to {_lane_ref_csv}")
+                _reference_pipeline_summary = summarize_reference_pipeline_history(lane_ref_history)
+                reference_pipeline_summary = dict(_reference_pipeline_summary)
+                _reference_pipeline_summary_path = os.path.join(
+                    _scenario_artifact_dir(scenario_cfg),
+                    "reference_pipeline_summary.json",
+                )
+                write_json_artifact(_reference_pipeline_summary_path, _reference_pipeline_summary)
+                print(f"[Metrics] Saved reference pipeline summary to {_reference_pipeline_summary_path}")
         except Exception as exc:
             print(f"[Metrics] Failed to save lane reference: {exc}")
+        try:
+            if speed_cap_history:
+                _speed_cap_csv = os.path.join(
+                    _scenario_artifact_dir(scenario_cfg),
+                    "speed_cap_timeseries.csv",
+                )
+                _speed_cap_fields = [
+                    "sim_time_s",
+                    "ego_speed_mps",
+                    "current_behavior",
+                    "planner_lc_state",
+                    "traffic_signal_state",
+                    "stop_target_distance_m",
+                    "curve_curvature_abs",
+                    "reference_jump_m",
+                    "ego_corridor_cap_reason",
+                    "speed_cap_base_max_velocity_mps",
+                    "speed_cap_final_raw_mps",
+                    "speed_cap_final_after_rise_limit_mps",
+                    "speed_cap_active_caps",
+                    "speed_cap_binding_cap",
+                    "speed_cap_idm_mps",
+                    "speed_cap_ego_corridor_obstacle_mps",
+                    "speed_cap_stop_profile_mps",
+                    "speed_cap_curvature_mps",
+                    "speed_cap_reference_jump_mps",
+                    "speed_cap_rise_limited",
+                    "speed_cap_rise_dt_s",
+                    "speed_cap_path_reason",
+                ]
+                write_dict_csv_artifact(
+                    _speed_cap_csv,
+                    rows=speed_cap_history,
+                    fieldnames=_speed_cap_fields,
+                )
+                print(f"[Metrics] Saved speed-cap trace to {_speed_cap_csv}")
+                _speed_cap_summary = summarize_speed_cap_history(speed_cap_history)
+                speed_cap_summary = dict(_speed_cap_summary)
+                _speed_cap_summary_path = os.path.join(
+                    _scenario_artifact_dir(scenario_cfg),
+                    "speed_cap_summary.json",
+                )
+                write_json_artifact(_speed_cap_summary_path, _speed_cap_summary)
+                print(f"[Metrics] Saved speed-cap summary to {_speed_cap_summary_path}")
+        except Exception as exc:
+            print(f"[Metrics] Failed to save speed-cap trace: {exc}")
         try:
             if planned_trajectory_history:
                 _planned_traj_csv = os.path.join(
@@ -9343,11 +8860,11 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                     "global_route_reference_allowed",
                     "global_route_reference_gate_reason",
                 ]
-                with open(_planned_traj_csv, "w", encoding="utf-8", newline="") as _fh:
-                    _writer = csv.DictWriter(_fh, fieldnames=_planned_traj_fields)
-                    _writer.writeheader()
-                    for _row in planned_trajectory_history:
-                        _writer.writerow({k: _row.get(k, "") for k in _planned_traj_fields})
+                write_dict_csv_artifact(
+                    _planned_traj_csv,
+                    rows=planned_trajectory_history,
+                    fieldnames=_planned_traj_fields,
+                )
                 print(f"[Metrics] Saved planned trajectory trace to {_planned_traj_csv}")
         except Exception as exc:
             print(f"[Metrics] Failed to save planned trajectory trace: {exc}")
@@ -9385,9 +8902,19 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
             if not bool(run_status.get("finished", False)):
                 run_status["reason"] = str(run_status.get("reason", "interrupted_or_exception"))
             _status_path = os.path.join(_artifact_dir, "run_status.json")
-            with open(_status_path, "w", encoding="utf-8") as _fh:
-                json.dump(run_status, _fh, indent=2, sort_keys=True)
-                _fh.write("\n")
+            write_json_artifact(_status_path, run_status)
+            _planning_debug_summary = build_planning_debug_summary(
+                scenario_name=str(scenario_cfg.get("name", "scenario")),
+                run_status=run_status,
+                metrics_summary=metrics_summary,
+                reference_summary=reference_pipeline_summary,
+                speed_summary=speed_cap_summary,
+            )
+            _planning_debug_summary_path = os.path.join(
+                _artifact_dir,
+                "planning_debug_summary.json",
+            )
+            write_json_artifact(_planning_debug_summary_path, _planning_debug_summary)
             _update_scenario_run_manifest(
                 scenario_cfg=scenario_cfg,
                 artifact_dir=_artifact_dir,

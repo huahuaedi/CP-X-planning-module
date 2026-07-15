@@ -3,9 +3,11 @@ import types
 import unittest
 
 from behavior_planner.temp_destination import (
+    _blend_reference_samples,
     _build_route_reference_samples_from_anchor,
     _determine_mode,
     _route_waypoint_from_anchor,
+    _smooth_lane_change_alpha,
     _should_follow_turn_branch_from_route,
     _walk_forward,
     build_reference_samples,
@@ -129,6 +131,58 @@ class _DummyCarla:
 
 
 class TempDestinationModeTests(unittest.TestCase):
+    def test_lane_change_blend_uses_smootherstep_alpha(self):
+        self.assertAlmostEqual(_smooth_lane_change_alpha(0.0), 0.0)
+        self.assertAlmostEqual(_smooth_lane_change_alpha(0.5), 0.5)
+        self.assertAlmostEqual(_smooth_lane_change_alpha(1.0), 1.0)
+        # Smootherstep should be gentler than a linear blend at the start and
+        # stronger than linear near the end, reducing endpoint jerk.
+        self.assertLess(_smooth_lane_change_alpha(0.25), 0.25)
+        self.assertGreater(_smooth_lane_change_alpha(0.75), 0.75)
+
+    def test_lane_change_blended_reference_records_smooth_transition_metadata(self):
+        source_samples = [
+            {
+                "x_ref_m": float(index),
+                "y_ref_m": 0.0,
+                "heading_rad": 0.0,
+                "lane_id": 1,
+                "lane_width_m": 3.5,
+                "road_center_offset_m": 0.0,
+                "road_left_width_m": 1.75,
+                "road_right_width_m": 1.75,
+            }
+            for index in range(5)
+        ]
+        target_samples = [
+            {
+                "x_ref_m": float(index),
+                "y_ref_m": 3.5,
+                "heading_rad": 0.0,
+                "lane_id": 2,
+                "lane_width_m": 3.5,
+                "road_center_offset_m": 0.0,
+                "road_left_width_m": 1.75,
+                "road_right_width_m": 1.75,
+            }
+            for index in range(5)
+        ]
+
+        samples = _blend_reference_samples(
+            source_samples=source_samples,
+            target_samples=target_samples,
+            blend_steps=4,
+        )
+
+        self.assertEqual(len(samples), 5)
+        self.assertEqual(samples[0]["blend_type"], "lane_change_smootherstep")
+        self.assertEqual(samples[0]["blend_transition_steps"], 4)
+        self.assertAlmostEqual(samples[1]["blend_raw_alpha"], 0.25)
+        self.assertAlmostEqual(samples[1]["blend_alpha"], _smooth_lane_change_alpha(0.25))
+        self.assertLess(samples[1]["y_ref_m"], 0.875)
+        self.assertAlmostEqual(samples[4]["blend_alpha"], 1.0)
+        self.assertAlmostEqual(samples[4]["y_ref_m"], 3.5)
+
     def test_turn_maneuver_does_not_enter_intersection_mode_from_junction_topology(self):
         start_wp = _DummyWaypoint(road_id=10, is_junction=False)
         ego_wp = _DummyWaypoint(road_id=10, is_junction=False)

@@ -175,6 +175,130 @@ class TargetContext:
 
 
 @dataclass(frozen=True)
+class MapLaneContext:
+    """Lane-level map context available to the planner on this tick."""
+
+    lane_id: int = 0
+    road_id: int = 0
+    section_id: int = 0
+    lane_count: int = 0
+    allowed_lane_ids: Sequence[int] = field(default_factory=list)
+    in_junction: bool = False
+    route_lane_id: int = 0
+    route_maneuver: str = "straight"
+
+    @classmethod
+    def from_local_context(
+        cls,
+        *,
+        local_context: Mapping[str, object] | None,
+        allowed_lane_ids: Sequence[int] | None,
+        in_junction: bool,
+        route_context: RouteContext,
+    ) -> "MapLaneContext":
+        context = dict(local_context or {})
+        normalized_allowed = [
+            _to_int(lane_id)
+            for lane_id in list(allowed_lane_ids or [])
+        ]
+        return cls(
+            lane_id=_to_int(context.get("lane_id", 0)),
+            road_id=_to_int(context.get("road_id", 0)),
+            section_id=_to_int(context.get("section_id", 0)),
+            lane_count=len(normalized_allowed),
+            allowed_lane_ids=normalized_allowed,
+            in_junction=bool(in_junction),
+            route_lane_id=int(route_context.optimal_lane_id),
+            route_maneuver=str(route_context.next_macro_maneuver),
+        )
+
+
+@dataclass(frozen=True)
+class PerceptionContext:
+    """Object-level perception snapshots exposed to planning."""
+
+    dynamic_objects: Sequence[Mapping[str, object]] = field(default_factory=list)
+    static_objects: Sequence[Mapping[str, object]] = field(default_factory=list)
+    planning_objects: Sequence[Mapping[str, object]] = field(default_factory=list)
+    source: str = "carla"
+
+    @property
+    def dynamic_count(self) -> int:
+        return len(list(self.dynamic_objects or []))
+
+    @property
+    def static_count(self) -> int:
+        return len(list(self.static_objects or []))
+
+    @property
+    def planning_count(self) -> int:
+        return len(list(self.planning_objects or []))
+
+
+@dataclass(frozen=True)
+class PredictionContext:
+    """Future-object information and lane-level risk used by behavior planning."""
+
+    lane_assignments: Mapping[str, int] = field(default_factory=dict)
+    lane_prediction_risks: Mapping[int, Mapping[str, object]] = field(default_factory=dict)
+    obstacle_future_trajectories: Mapping[str, Sequence[Sequence[float]]] = field(default_factory=dict)
+    model: str = "constant_acceleration"
+    horizon_s: float = 0.0
+    dt_s: float = 0.0
+
+    @property
+    def assigned_object_count(self) -> int:
+        return len(dict(self.lane_assignments or {}))
+
+    @property
+    def risky_lane_count(self) -> int:
+        return sum(
+            1
+            for risk in dict(self.lane_prediction_risks or {}).values()
+            if bool(dict(risk or {}).get("risk", False))
+        )
+
+    @property
+    def predicted_object_count(self) -> int:
+        return len(dict(self.obstacle_future_trajectories or {}))
+
+
+@dataclass(frozen=True)
+class CPMessageContext:
+    """Cooperative perception/control messages visible to the planner."""
+
+    message_path: str = ""
+    traffic_controls: Sequence[Mapping[str, object]] = field(default_factory=list)
+    selected_traffic_control: Mapping[str, object] | None = None
+    lane_closures: Sequence[Mapping[str, object]] = field(default_factory=list)
+    obstacles: Sequence[Mapping[str, object]] = field(default_factory=list)
+    generated_traffic_light_control: Mapping[str, object] | None = None
+
+    @property
+    def traffic_control_count(self) -> int:
+        return len(list(self.traffic_controls or []))
+
+    @property
+    def lane_closure_count(self) -> int:
+        return len(list(self.lane_closures or []))
+
+    @property
+    def obstacle_count(self) -> int:
+        return len(list(self.obstacles or []))
+
+    @property
+    def selected_control_id(self) -> str:
+        if not isinstance(self.selected_traffic_control, Mapping):
+            return ""
+        return str(
+            self.selected_traffic_control.get(
+                "control_id",
+                self.selected_traffic_control.get("id", ""),
+            )
+        )
+
+
+@dataclass(frozen=True)
 class PlanningContext:
     """Stable per-cycle context object for planning-layer boundaries."""
 
@@ -213,3 +337,58 @@ class PlanningContext:
             ),
         }
 
+
+@dataclass(frozen=True)
+class PlannerInputFrame:
+    """Complete planner-facing input bundle for one planning tick.
+
+    This is the intended boundary between upstream data providers
+    (CARLA/SUMO/CP/perception/prediction/map/route) and the planning stack.
+    Existing code can still consume the smaller `PlanningContext`, while new
+    modules can depend on this richer frame.
+    """
+
+    planning: PlanningContext
+    map_lane: MapLaneContext = field(default_factory=MapLaneContext)
+    perception: PerceptionContext = field(default_factory=PerceptionContext)
+    prediction: PredictionContext = field(default_factory=PredictionContext)
+    cp_messages: CPMessageContext = field(default_factory=CPMessageContext)
+
+    def trace_fields(self) -> Dict[str, object]:
+        fields = dict(self.planning.trace_fields())
+        fields.update({
+            "planner_input_lane_id": int(self.map_lane.lane_id),
+            "planner_input_road_id": int(self.map_lane.road_id),
+            "planner_input_section_id": int(self.map_lane.section_id),
+            "planner_input_allowed_lane_count": int(self.map_lane.lane_count),
+            "planner_input_in_junction": int(bool(self.map_lane.in_junction)),
+            "planner_input_perception_dynamic_count": int(self.perception.dynamic_count),
+            "planner_input_perception_static_count": int(self.perception.static_count),
+            "planner_input_perception_planning_count": int(self.perception.planning_count),
+            "planner_input_perception_source": str(self.perception.source),
+            "planner_input_prediction_model": str(self.prediction.model),
+            "planner_input_prediction_assigned_object_count": int(
+                self.prediction.assigned_object_count
+            ),
+            "planner_input_prediction_predicted_object_count": int(
+                self.prediction.predicted_object_count
+            ),
+            "planner_input_prediction_risky_lane_count": int(
+                self.prediction.risky_lane_count
+            ),
+            "planner_input_cp_message_path": str(self.cp_messages.message_path),
+            "planner_input_cp_traffic_control_count": int(
+                self.cp_messages.traffic_control_count
+            ),
+            "planner_input_cp_lane_closure_count": int(
+                self.cp_messages.lane_closure_count
+            ),
+            "planner_input_cp_obstacle_count": int(self.cp_messages.obstacle_count),
+            "planner_input_cp_selected_control_id": str(
+                self.cp_messages.selected_control_id
+            ),
+            "planner_input_cp_generated_tl": int(
+                isinstance(self.cp_messages.generated_traffic_light_control, Mapping)
+            ),
+        })
+        return fields

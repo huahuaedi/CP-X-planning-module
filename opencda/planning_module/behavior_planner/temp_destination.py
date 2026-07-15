@@ -1493,6 +1493,15 @@ def _interpolate_heading_rad(start_heading_rad: float, end_heading_rad: float, a
     return float(math.atan2(blend_y, blend_x))
 
 
+def _smooth_lane_change_alpha(raw_alpha: float) -> float:
+    """Return a zero-slope endpoint blend factor for lane-change references."""
+    alpha = min(1.0, max(0.0, float(raw_alpha)))
+    # Smootherstep: C2-continuous with zero slope and curvature at both ends.
+    # This keeps the local reference from asking MPC for an abrupt lateral
+    # velocity at lane-change start/end.
+    return float(alpha * alpha * alpha * (alpha * (alpha * 6.0 - 15.0) + 10.0))
+
+
 def _blend_reference_samples(
     source_samples: Sequence[Mapping[str, object]],
     target_samples: Sequence[Mapping[str, object]],
@@ -1523,10 +1532,16 @@ def _blend_reference_samples(
         source_sample = normalized_source[stage_idx]
         target_sample = normalized_target[stage_idx]
         if stage_idx >= transition_steps:
-            blended_samples.append(dict(target_sample))
+            completed_sample = dict(target_sample)
+            completed_sample["blend_alpha"] = 1.0
+            completed_sample["blend_raw_alpha"] = 1.0
+            completed_sample["blend_transition_steps"] = int(transition_steps)
+            completed_sample["blend_type"] = "lane_change_smootherstep"
+            blended_samples.append(completed_sample)
             continue
 
-        alpha = float(stage_idx) / float(transition_steps)
+        raw_alpha = float(stage_idx) / float(transition_steps)
+        alpha = _smooth_lane_change_alpha(raw_alpha)
         source_heading_rad = float(source_sample.get("heading_rad", 0.0))
         target_heading_rad = float(target_sample.get("heading_rad", source_heading_rad))
         blended_samples.append(
@@ -1566,6 +1581,10 @@ def _blend_reference_samples(
                     (1.0 - alpha) * float(source_sample.get("road_right_width_m", 0.0))
                     + alpha * float(target_sample.get("road_right_width_m", 0.0))
                 ),
+                "blend_alpha": float(alpha),
+                "blend_raw_alpha": float(raw_alpha),
+                "blend_transition_steps": int(transition_steps),
+                "blend_type": "lane_change_smootherstep",
             }
         )
     return blended_samples
@@ -1771,13 +1790,12 @@ def compute_temp_destination(
     if (
         str(normalized_decision) == "lane_follow"
         and int(route_alignment_lane_id) != int(current_lane_id)
-        and not bool(is_intersection)
     ):
-        # In normal road segments the global route may already be on the
-        # adjacent lane while the ego is still in the current lane. Do not place
-        # the rolling target laterally across lanes until the FSM explicitly
-        # enters a lane-change state; otherwise MPC cuts directly toward the
-        # route lane and can collide at scenario start.
+        # The global route may already be on an adjacent lane/connector while
+        # the ego is still in the current lane, especially near junctions. Do
+        # not place the rolling target laterally across lanes until the FSM
+        # explicitly enters a lane-change state; otherwise MPC cuts toward the
+        # route lane during plain lane-follow.
         blue_dot_target_lane_id = int(current_lane_id)
         blue_dot_follow_route_lane = False
 

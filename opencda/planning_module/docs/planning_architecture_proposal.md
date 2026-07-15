@@ -34,7 +34,7 @@ Status tags:
 | MPC cost profiles | DONE | Different behavior modes use different cost profiles. Profile switching now has hysteresis/min-hold and weight blending to reduce oscillation. |
 | MPC hard/soft split | DONE | Vehicle bounds are hard constraints. Lane center, road boundary, obstacle, attractive, and control terms are soft costs. |
 | MPC fail-safe | DONE | Solver failure falls back to a path-holding braking trajectory and escalates to stronger braking after repeated failures. |
-| Diagnostics | DONE | Runtime writes temp destination, lane reference, control, cost, FSM, planned trajectory, metrics, and run status artifacts. |
+| Diagnostics | DONE | Runtime writes temp destination, lane reference, reference-pipeline summary, speed-cap summary, control, cost, FSM, planned trajectory, metrics, run status, and a compact planning debug summary. |
 | Regression tests | DONE | Tests cover traffic lights, temp destination guards, speed caps, prediction risk, planning pipeline, MPC fail-safe, route/reference behavior, and scenario helpers. |
 
 ## 1. Layered Runtime Flow
@@ -43,7 +43,7 @@ Current high-level flow:
 
 ```text
 CARLA/SUMO/CP inputs
-  -> PlanningContext: ego, route, traffic control, separated targets
+  -> PlannerInputFrame: ego, map/lane, route, CP, perception, prediction, targets
   -> prediction frame and lane safety
   -> behavior planner command
   -> temp_des and lane_center_reference_samples
@@ -57,7 +57,19 @@ The most important rule is that `temp_des` is not the whole plan. MPC also
 uses lane-center reference samples, speed caps, cost profile, obstacle
 predictions, warm-start state, and hard vehicle constraints.
 
-The new `PlanningContext` boundary separates target semantics:
+The planner-input boundary has two levels:
+
+```text
+PlannerInputFrame
+  planning: PlanningContext
+  map_lane: MapLaneContext
+  perception: PerceptionContext
+  prediction: PredictionContext
+  cp_messages: CPMessageContext
+```
+
+`PlanningContext` remains the compatibility layer for existing behavior code
+and separates target semantics:
 
 ```text
 stop_target: longitudinal stopping target for traffic control / speed layer
@@ -67,15 +79,17 @@ final_goal: mission completion target
 global_route: mission-level route hint, not a direct MPC reference
 ```
 
-This is intentionally a boundary object, not a new planner. Its purpose is to
-make the layer inputs inspectable and prevent a stop line, global route point,
-and MPC tracking reference from being treated as the same object.
+These are boundary objects, not new planners. Their purpose is to make layer
+inputs inspectable and prevent a stop line, global route point, CP message,
+prediction trajectory, and MPC tracking reference from being treated as the
+same object.
 
 ## 1.2 Reference Intent Contract
 
 Current file:
 
 - `behavior_planner/reference_generator.py`
+- `behavior_planner/reference_pipeline.py`
 
 Purpose:
 
@@ -106,13 +120,44 @@ Outputs:
 - `ReferenceIntent.target_lane_id`
 - `ReferenceIntent.follow_global_route_lane`
 - `ReferenceIntent.reason` for CSV diagnostics.
+- `ReferenceIntent.lateral_reference_source`
+  - `lane_center`: MPC lateral reference comes from the selected/current lane
+    centerline.
+  - `lane_change_blend`: MPC lateral reference is a smooth transition from the
+    current lane to the committed target lane.
+- `ReferenceIntent.longitudinal_target_kind`
+  - `speed_profile`: longitudinal behavior is handled by the stacked speed
+    caps and MPC velocity target.
+  - `stop_target`: traffic-control stop line is a longitudinal stop target,
+    not a lateral tracking point.
+  - `follow_or_brake`: follow-lead/emergency behavior owns longitudinal speed.
+- `ReferenceIntent.stop_target_role`
+  - `longitudinal_speed_target`: stop line affects speed and stopping only.
+  - `none`: no active stop-line role in this reference tick.
+- `ReferenceIntent.route_role`
+  - `mission_hint`: global route informs long-horizon intent but does not
+    directly pull MPC.
+  - `lane_choice_hint_only`: route can influence lane selection, while MPC
+    still tracks a local lane reference.
 
 Current integration:
 
 - `planning_runner.py` calls `select_reference_intent()` after route-reference
   gating.
+- `planning_runner.py` now delegates raw reference generation, route fallback,
+  trimming, stabilization, geometry guard, reanchor, and local-goal alignment
+  to `behavior_planner/reference_pipeline.py::generate_mpc_reference()`.
+  The runner supplies runtime context and consumes the typed
+  `MpcReferenceGenerationOutput`; the reference pipeline owns the behavior-to-
+  MPC reference contract.
 - `lane_reference_timeseries.csv` records `reference_intent_mode` and
-  `reference_intent_reason`.
+  `reference_intent_reason`, plus the explicit lateral/longitudinal/route
+  roles listed above.
+- `temporary_destination_timeseries.csv` remains focused on the rolling
+  blue-dot/local-goal behavior. It can be compared against
+  `lane_reference_timeseries.csv` using `sim_time_s` to verify that the
+  visualization point and actual MPC tracking reference are no longer being
+  treated as the same semantic target.
 - Route-branch intent bypasses ordinary lane-follow first-sample/lateral
   reanchor guards, because the desired route branch can be laterally offset in
   a junction.
@@ -121,6 +166,126 @@ Key invariant:
 
 - MPC should track the reference generated from `ReferenceIntent`, not chase a
   raw global-route point or a jumpy `temp_des`.
+
+## 1.3 Reference Pipeline Trace
+
+Current file:
+
+- `behavior_planner/reference_pipeline.py`
+
+Purpose:
+
+- Make the behavior-to-MPC boundary inspectable on every planning tick.
+- Record what the MPC lateral reference is supposed to mean after raw
+  generation, fallback, geometry guard, stabilization, and reanchor logic.
+- Surface interface violations directly in CSV diagnostics instead of relying
+  on visual inspection of a jumping blue point.
+
+Inputs:
+
+- `MpcReferenceGenerationContext`
+  - CARLA map/transform handles needed to build local reference samples.
+  - Ego state, active global-route points, and previous lane-center reference.
+  - Behavior runtime config and `ReferenceIntent`.
+  - Current behavior decision, FSM state, current/target lane ids, and
+    route-reference gate state.
+  - Traffic-control lock state, stop/follow targets, temp-destination mode
+    state, reference speed/step settings, freeze counter, and timing gates.
+- `ReferenceIntent` remains the semantic policy inside that context: it states
+  whether this tick should produce lane-center, route-branch, stop, follow, or
+  lane-change reference behavior.
+
+Outputs:
+
+- `MpcReferenceGenerationOutput`
+  - Complete runner handoff for one reference-generation tick.
+  - Contains the final `MpcReferenceResult`, updated temp destination state,
+    updated target lane id, route-follow flag, freeze count, fallback reason,
+    jump metrics, and geometry-guard status.
+- `MpcReferenceResult`
+  - `samples`: final lateral reference samples handed to MPC.
+  - `trace`: `ReferencePipelineTrace` for the same handoff.
+  - `first_sample`, `first_forward_m`, `first_lateral_m`.
+  - `fallback_reason`, `stabilized`, `jump_m`.
+- `ReferencePipelineTrace.stage`, for example
+  `intent>raw>validated>fallback>stabilized`.
+- `reference_pipeline_lateral_source`
+- `reference_pipeline_longitudinal_target_kind`
+- `reference_pipeline_stop_target_role`
+- `reference_pipeline_route_role`
+- `reference_pipeline_violations`
+
+Current invariants checked:
+
+- `lane_follow` should use `lane_center` lateral reference.
+- `lane_follow` should not directly track the global route.
+- `stop_at_intersection` and `stop_sign` should treat the stop target as a
+  longitudinal speed/stopping target, not a lateral tracking reference.
+- Active lane change should use `lane_change_blend`.
+- Non-lane-change reference should not have a large first-sample lateral jump.
+
+Diagnostics:
+
+- `lane_reference_timeseries.csv` now includes the flattened
+  `ReferencePipelineTrace` fields. This is the first CSV to inspect when the
+  MPC trajectory looks unstable while behavior still says `lane_follow`.
+- `planning_runner.py` now packages the final MPC lateral reference as an
+  `MpcReferenceResult` inside `MpcReferenceGenerationOutput`, so downstream
+  MPC/speed diagnostics consume named interfaces instead of loose reference
+  variables or string-key dictionaries.
+- The runner calls `generate_mpc_reference(MpcReferenceGenerationContext(...))`
+  rather than passing a long keyword-argument list. This makes the reference
+  boundary easier to log, test, and refactor.
+- `generate_mpc_reference()` and its reference validation/stabilization
+  helpers now live in `behavior_planner/reference_pipeline.py`, so the runner
+  only coordinates inputs and stores outputs.
+- `reference_pipeline_summary.json` aggregates the same fields over the full
+  run: violation counts, violation rate, stabilization rate, maximum reference
+  jump, maximum first-sample lateral offset, common fallback reasons, and
+  common lateral-reference sources.
+
+## 1.4 Run-Level Debug Summary
+
+Current file:
+
+- `utility/run_diagnostics.py`
+- `utility/artifacts.py`
+
+Purpose:
+
+- Provide a single first-look artifact after a scenario run.
+- Combine `run_status.json`, `planning_metrics.json`,
+  `reference_pipeline_summary.json`, and `speed_cap_summary.json`.
+- Report layer-level health before diving into CSV traces.
+- Keep CSV/JSON writing mechanics out of `planning_runner.py` through
+  `write_dict_csv_artifact()` and `write_json_artifact()`.
+
+Output artifact:
+
+- `planning_debug_summary.json`
+
+Main fields:
+
+- `layer_health`
+  - `mission`
+  - `safety`
+  - `reference`
+  - `speed`
+  - `mpc`
+- `likely_issues`
+  - examples: `collision_detected`, `reference_pipeline_violation`,
+    `speed_limited_by_reference_jump`, `speed_limited_by_stop_profile`,
+    `speed_cap_rise_limited_often`, `mpc_solver_success_rate_low`.
+
+Debug workflow:
+
+1. Open `planning_debug_summary.json`.
+2. If reference health is warn/fail, inspect `reference_pipeline_summary.json`
+   and `lane_reference_timeseries.csv`.
+3. If speed health is warn/fail, inspect `speed_cap_summary.json` and
+   `speed_cap_timeseries.csv`.
+4. If safety/MPC health is warn/fail, inspect `planning_metrics.json`,
+   `control_timeseries.csv`, and `mpc_cost_history.csv`.
 
 ## 1.1 Planning Context Boundary
 
@@ -133,6 +298,10 @@ Inputs:
 - Ego state and lane context.
 - Current route summary and active route points.
 - CP/CARLA traffic-control context.
+- CP message lists: traffic controls, lane closures, and obstacle/hazard
+  messages.
+- Perception object snapshots from CARLA/SUMO or CP obstacle pipeline.
+- Prediction lane assignments, lane risks, and future trajectories.
 - Stop target mapping, if available.
 - Temporary destination and final goal.
 - Behavior/FSM state and reference gate status.
@@ -140,10 +309,16 @@ Inputs:
 Outputs:
 
 - `EgoPlanningState`
+- `MapLaneContext`
+- `PerceptionContext`
+- `PredictionContext`
+- `CPMessageContext`
 - `TrafficControlContext`
 - `RouteContext`
 - `TargetContext`
+- `PlannerInputFrame`
 - `PlanningContext.trace_fields()` for CSV diagnostics.
+- `PlannerInputFrame.trace_fields()` for CSV diagnostics.
 
 Required invariants:
 
@@ -157,11 +332,19 @@ Required invariants:
 Current integration:
 
 - `planning_runner.py` builds a `PlanningContext` before behavior planning.
+- `planning_runner.py` also builds a richer `PlannerInputFrame` each heavy
+  planning tick. This frame packages lane-map context, dynamic/static/planning
+  object snapshots, prediction risks and trajectories, raw/selected CP
+  controls, lane closures, and generated CARLA-to-CP traffic-light controls.
 - Behavior traffic-signal input is read from `PlanningContext`.
 - After reference gating, `PlanningContext` records reference priority and
   global-route-reference gate result.
 - `temporary_destination_timeseries.csv` and `lane_reference_timeseries.csv`
   include flattened planning-context fields.
+- `lane_reference_timeseries.csv` now includes `planner_input_*` fields for
+  perception object counts, prediction model/risky-lane count, CP traffic
+  control count, lane-closure count, selected CP control id, and whether a
+  CARLA traffic-light control was generated this tick.
 
 Remaining gap:
 
@@ -456,7 +639,8 @@ Remaining gap:
 Current files:
 
 - `utility/speed_profile.py`
-- speed-cap application in `planning_runner.py`
+- `compute_speed_envelope()` as the speed-layer boundary consumed by
+  `planning_runner.py`
 - final stop cap inside `MPC/mpc.py`
 
 Inputs:
@@ -473,6 +657,13 @@ Outputs:
 
 - Effective MPC max velocity.
 - Active speed cap names.
+- `SpeedCapTrace` fields:
+  - `speed_cap_binding_cap`
+  - `speed_cap_active_caps`
+  - `speed_cap_final_raw_mps`
+  - `speed_cap_final_after_rise_limit_mps`
+  - per-source caps for IDM, stop profile, curvature, reference jump, and
+    ego-corridor obstacle.
 - Temporary destination speed.
 - Control trace fields:
   - `mpc_vmax_mps`
@@ -501,14 +692,23 @@ Recent optimizations:
 
 - Extracted speed cap helpers into `utility/speed_profile.py`.
 - Added sequential speed-cap application.
+- Added `compute_speed_envelope()` so cap stacking, curvature-floor semantics,
+  and speed-cap rise limiting live in the speed layer instead of inline runner
+  policy code.
 - Added conservative stop profile for red lights / stop signs.
 - Added curvature-aware speed cap for bends.
 - Added reference-jump cap to avoid chasing discontinuous path at speed.
+- Added `SpeedCapTrace` plus `speed_cap_timeseries.csv` and
+  `speed_cap_summary.json`, so route/debug reports can identify whether a
+  vehicle is slow because of stop profile, IDM, curvature, obstacle corridor,
+  reference jump, or speed-cap rise limiting.
 
 Remaining gap:
 
-- There is no explicit `SpeedEnvelope` object. Caps are computed and applied in
-  sequence in the runner.
+- There is not yet a full first-class multi-step `SpeedEnvelope` trajectory.
+  The current boundary is a per-tick speed envelope: cap sources are computed
+  upstream, then `compute_speed_envelope()` stacks them, applies rise limiting,
+  and returns a traceable final max-speed contract for MPC.
 
 ## 8. MPC Layer
 

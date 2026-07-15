@@ -8,8 +8,10 @@ from planning_runner import (
     _limit_destination_xy_step,
     _lock_junction_lane_follow_destination,
     _select_mpc_cost_profile_with_hysteresis,
-    _stabilize_lane_reference_samples,
-    _reference_with_route_fallback,
+)
+from behavior_planner.reference_pipeline import (
+    reference_with_route_fallback,
+    stabilize_lane_reference_samples,
 )
 
 
@@ -74,7 +76,7 @@ class TempDestinationForwardGuardTests(unittest.TestCase):
         self.assertIsNone(stop_target)
 
     def test_reference_fallback_generates_forward_heading_samples_when_route_is_bad(self):
-        samples, reason = _reference_with_route_fallback(
+        samples, reason = reference_with_route_fallback(
             ego_state=[0.0, 0.0, 2.0, 0.0],
             current_reference=[
                 {"x_ref_m": -10.0, "y_ref_m": 0.0, "heading_rad": 0.0, "lane_id": 1}
@@ -93,7 +95,7 @@ class TempDestinationForwardGuardTests(unittest.TestCase):
         self.assertAlmostEqual(float(samples[0]["y_ref_m"]), 0.0)
 
     def test_reference_fallback_rejects_non_lane_change_lane_mismatch(self):
-        samples, reason = _reference_with_route_fallback(
+        samples, reason = reference_with_route_fallback(
             ego_state=[0.0, 0.0, 2.0, 0.0],
             current_reference=[
                 {"x_ref_m": 2.0, "y_ref_m": 0.0, "heading_rad": 0.0, "lane_id": 1}
@@ -124,7 +126,7 @@ class TempDestinationForwardGuardTests(unittest.TestCase):
             {"x_ref_m": 4.0, "y_ref_m": 5.0, "heading_rad": 0.0, "lane_id": 1},
         ]
 
-        samples, stabilized, jump_m = _stabilize_lane_reference_samples(
+        samples, stabilized, jump_m = stabilize_lane_reference_samples(
             current,
             previous,
             decision="lane_follow",
@@ -143,7 +145,7 @@ class TempDestinationForwardGuardTests(unittest.TestCase):
             {"x_ref_m": 2.0, "y_ref_m": 5.0, "heading_rad": 0.0, "lane_id": 2}
         ]
 
-        samples, stabilized, _jump_m = _stabilize_lane_reference_samples(
+        samples, stabilized, _jump_m = stabilize_lane_reference_samples(
             current,
             previous,
             decision="lane_change_left",
