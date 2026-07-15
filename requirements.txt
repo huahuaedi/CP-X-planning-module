@@ -1,5 +1,7 @@
 #matplotlib==3.4.2
 matplotlib
+#networkx==2.5.1
+networkx
 #numpy==1.20.0
 numpy
 pillow
