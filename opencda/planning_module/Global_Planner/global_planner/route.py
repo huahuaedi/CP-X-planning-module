@@ -9,7 +9,7 @@ if TYPE_CHECKING:
     from .waypoint import Waypoint
 
 
-@dataclass(slots=True)
+@dataclass
 class Route:
     """Store one planned route and the data most callers need to inspect."""
 

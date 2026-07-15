@@ -9,7 +9,7 @@ if TYPE_CHECKING:
     from .planner import GlobalPlanner
 
 
-@dataclass(slots=True)
+@dataclass
 class Waypoint:
     """Represent one planner waypoint with CARLA-format and ENU coordinates."""
 

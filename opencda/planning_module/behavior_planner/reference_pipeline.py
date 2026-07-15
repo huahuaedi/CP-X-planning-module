@@ -529,7 +529,7 @@ class MpcReferenceResult:
         return self.trace.as_trace_fields()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class MpcReferenceGenerationContext:
     """Inputs required to generate the MPC lateral reference for one tick."""
 
@@ -565,6 +565,32 @@ class MpcReferenceGenerationContext:
     lane_reference_freeze_count: int
     sim_time_s: float
     stop_release_temp_smooth_until_sim_time_s: float
+
+    def __init__(self, **kwargs: object) -> None:
+        legacy_keys = {"world_map", "carla", "ego_transform"}
+        if "map_planner" not in kwargs and "world_map" in kwargs:
+            kwargs["map_planner"] = kwargs["world_map"]
+        if "ego_pose" not in kwargs and "ego_transform" in kwargs:
+            ego_transform = kwargs["ego_transform"]
+            location = getattr(ego_transform, "location", None)
+            rotation = getattr(ego_transform, "rotation", None)
+            kwargs["ego_pose"] = {
+                "x": float(getattr(location, "x", 0.0)),
+                "y": float(getattr(location, "y", 0.0)),
+                "z": float(getattr(location, "z", 0.0)),
+                "heading_rad": math.radians(float(getattr(rotation, "yaw", 0.0))),
+            }
+
+        field_names = set(self.__dataclass_fields__.keys())
+        unknown_keys = set(kwargs.keys()) - field_names - legacy_keys
+        if unknown_keys:
+            unknown = ", ".join(sorted(str(key) for key in unknown_keys))
+            raise TypeError(f"Unexpected MpcReferenceGenerationContext argument(s): {unknown}")
+
+        for name in self.__dataclass_fields__:
+            if name not in kwargs:
+                raise TypeError(f"Missing MpcReferenceGenerationContext argument: {name}")
+            object.__setattr__(self, name, kwargs[name])
 
 
 @dataclass(frozen=True)
