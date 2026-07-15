@@ -8,6 +8,22 @@ import math
 import time
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
+from utility.global_planner import world_heading_rad
+
+
+def _custom_waypoint_transform(waypoint, carla):
+    if waypoint is None:
+        return None
+    position = waypoint.position
+    return carla.Transform(
+        carla.Location(
+            x=float(position["x"]),
+            y=float(position["y"]),
+            z=float(position.get("z", 0.0)),
+        ),
+        carla.Rotation(yaw=math.degrees(float(world_heading_rad(waypoint) or 0.0))),
+    )
+
 
 def _resolved_wall_time_s(wall_time_s: float | None = None) -> float:
     if wall_time_s is not None:
@@ -274,6 +290,7 @@ def spawn_obstacles(
     *,
     world,
     world_map=None,
+    map_planner=None,
     carla,
     blueprint_library,
     scenario_cfg: Mapping[str, object],
@@ -282,6 +299,9 @@ def spawn_obstacles(
     **_,
 ) -> List[Any]:
     del route_summary, route_points
+    del world_map
+    if map_planner is None:
+        raise ValueError("Traffic-light obstacle spawning requires map_planner.")
 
     obstacle_cfg = dict(scenario_cfg.get("obstacles", {}))
     marker_names = [
@@ -315,19 +335,15 @@ def spawn_obstacles(
         if color_rgb and blueprint.has_attribute("color"):
             blueprint.set_attribute("color", color_rgb)
 
-        rotation_transform = marker_transform
-        if world_map is not None and hasattr(world_map, "get_waypoint"):
-            try:
-                spawn_waypoint = world_map.get_waypoint(
-                    marker_transform.location,
-                    project_to_road=True,
-                    lane_type=carla.LaneType.Driving,
-                )
-            except Exception:
-                spawn_waypoint = None
-            waypoint_transform = getattr(spawn_waypoint, "transform", None)
-            if waypoint_transform is not None:
-                rotation_transform = waypoint_transform
+        marker_location = marker_transform.location
+        spawn_waypoint = map_planner.get_waypoint(
+            {
+                "x": float(marker_location.x),
+                "y": float(marker_location.y),
+                "z": float(marker_location.z),
+            }
+        )
+        rotation_transform = _custom_waypoint_transform(spawn_waypoint, carla) or marker_transform
 
         spawn_vehicle = None
         for attempt_transform in _spawn_attempt_transforms(

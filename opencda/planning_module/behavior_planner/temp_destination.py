@@ -24,7 +24,6 @@ Key functions
 from __future__ import annotations
 
 import math
-from types import SimpleNamespace
 from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
 from .planner import (
@@ -33,10 +32,11 @@ from .planner import (
     normalize_behavior_decision,
     normalize_macro_maneuver,
 )
-from utility.carla_lane_graph import (
+from utility.global_planner import (
     canonical_lane_id_for_waypoint,
-    canonical_lane_waypoints,
     canonical_lane_waypoint_for_lane_id,
+    canonical_lane_waypoints,
+    world_heading_rad,
 )
 
 # -------------------------------------------------------------------- #
@@ -54,6 +54,34 @@ JUNCTION_ROUTE_SNAP_HEADING_DEG: float = 35.0
 _cached_route_id: int | None = None
 _cached_cum_dists: List[float] = []
 
+
+
+def _waypoint_xy(waypoint) -> tuple[float, float]:
+    return float(waypoint.position["x"]), float(waypoint.position["y"])
+
+
+def _waypoint_xyz(waypoint) -> Dict[str, float]:
+    return {
+        "x": float(waypoint.position["x"]),
+        "y": float(waypoint.position["y"]),
+        "z": float(waypoint.position["z"]),
+    }
+
+
+def _waypoint_heading_rad(waypoint) -> float:
+    return float(world_heading_rad(waypoint) or 0.0)
+
+
+def _project_waypoint(map_planner, point) -> object | None:
+    return map_planner.get_waypoint(point)
+
+
+def _pose_xyz(pose: Mapping[str, object]) -> Dict[str, float]:
+    return {
+        "x": float(pose["x"]),
+        "y": float(pose["y"]),
+        "z": float(pose.get("z", 0.0)),
+    }
 
 def _route_cum_dists(
     route_points: Sequence[Sequence[float]],
@@ -230,21 +258,21 @@ def _route_match_metrics(
     anchor_arc_m: float,
 ) -> Tuple[float, float, float]:
     """Return ``(route_arc_m, distance_to_route_m, heading_error_rad)``."""
-    waypoint_loc = getattr(getattr(waypoint, "transform", None), "location", None)
-    waypoint_rot = getattr(getattr(waypoint, "transform", None), "rotation", None)
-    if waypoint_loc is None or waypoint_rot is None:
+    if waypoint is None:
         return float(anchor_arc_m), float("inf"), float("inf")
 
+    waypoint_x_m, waypoint_y_m = _waypoint_xy(waypoint)
+
     route_arc_m = _closest_route_arc_ahead(
-        float(waypoint_loc.x),
-        float(waypoint_loc.y),
+        waypoint_x_m,
+        waypoint_y_m,
         route_points,
         cum_dists,
         anchor_arc_m,
     )
     route_x_m, route_y_m = _route_point_at_arc(route_points, cum_dists, route_arc_m)
     route_heading_rad = _route_heading_at_arc(route_points, cum_dists, route_arc_m)
-    waypoint_heading_rad = math.radians(float(waypoint_rot.yaw))
+    waypoint_heading_rad = _waypoint_heading_rad(waypoint)
     heading_error_rad = abs(
         math.atan2(
             math.sin(float(waypoint_heading_rad) - float(route_heading_rad)),
@@ -255,8 +283,8 @@ def _route_match_metrics(
         float(route_arc_m),
         float(
             math.hypot(
-                float(waypoint_loc.x) - float(route_x_m),
-                float(waypoint_loc.y) - float(route_y_m),
+                waypoint_x_m - float(route_x_m),
+                waypoint_y_m - float(route_y_m),
             )
         ),
         float(heading_error_rad),
@@ -265,8 +293,7 @@ def _route_match_metrics(
 
 def _snap_junction_waypoint_to_route(
     *,
-    world_map: Any,
-    carla: Any,
+    map_planner: Any,
     waypoint: Any,
     anchor_wp: Any,
     route_points: Sequence[Sequence[float]],
@@ -274,7 +301,7 @@ def _snap_junction_waypoint_to_route(
     anchor_arc_m: float,
 ) -> Any:
     """Snap an off-route junction waypoint back onto the remaining route."""
-    if waypoint is None or not bool(getattr(waypoint, "is_junction", False)):
+    if waypoint is None or not bool(getattr(waypoint, "is_intersection", False)):
         return waypoint
 
     route_arc_m, route_distance_m, route_heading_error_rad = _route_match_metrics(
@@ -290,19 +317,11 @@ def _snap_junction_waypoint_to_route(
         return waypoint
 
     route_x_m, route_y_m = _route_point_at_arc(route_points, cum_dists, route_arc_m)
-    anchor_loc = getattr(getattr(anchor_wp, "transform", None), "location", None)
-    waypoint_loc = getattr(getattr(waypoint, "transform", None), "location", None)
     snap_z_m = float(
-        getattr(anchor_loc, "z", getattr(waypoint_loc, "z", 0.0))
+        anchor_wp.position.get("z", waypoint.position.get("z", 0.0))
     )
-    snapped_wp = world_map.get_waypoint(
-        carla.Location(
-            x=float(route_x_m),
-            y=float(route_y_m),
-            z=float(snap_z_m),
-        ),
-        project_to_road=True,
-        lane_type=carla.LaneType.Driving,
+    snapped_wp = map_planner.get_waypoint(
+        {"x": float(route_x_m), "y": float(route_y_m), "z": snap_z_m}
     )
     if snapped_wp is not None:
         _, snapped_distance_m, snapped_heading_error_rad = _route_match_metrics(
@@ -329,7 +348,7 @@ def _snap_junction_waypoint_to_route(
 
 
 # -------------------------------------------------------------------- #
-# CARLA helpers                                                          #
+# Custom-waypoint helpers                                                #
 # -------------------------------------------------------------------- #
 def _normalize_angle_deg(angle_deg: float) -> float:
     a = float(angle_deg) % 360.0
@@ -344,27 +363,31 @@ def _walk_forward(
     route_points: Sequence[Sequence[float]] | None = None,
     cum_dists: Sequence[float] | None = None,
     maneuver: str | None = None,
-    target_wp: Any | None = None,
+    target_position: Mapping[str, object] | None = None,
 ) -> Any:
     """Walk *wp* forward by *distance_m* using ``wp.next()``.
 
     When *route_points* / *cum_dists* are provided, junction branches
     are resolved by picking the candidate closest to the route's
     lookahead point first (route-guided). When route guidance is not
-    available, *target_wp* is used next, then maneuver bias, then the
+    available, *target_position* is used next, then maneuver bias, then the
     straightest successor.
     """
-    target_loc = getattr(getattr(target_wp, "transform", None), "location", None)
+    target_xy = (
+        None
+        if target_position is None
+        else (float(target_position["x"]), float(target_position["y"]))
+    )
     target_arc = None
     if (
-        target_loc is not None
+        target_xy is not None
         and route_points is not None
         and cum_dists is not None
         and len(route_points) >= 2
     ):
         target_arc = project_ego_to_route(
-            float(target_loc.x),
-            float(target_loc.y),
+            float(target_xy[0]),
+            float(target_xy[1]),
             route_points,
             cum_dists,
         )
@@ -379,8 +402,7 @@ def _walk_forward(
         if len(candidates) == 1:
             wp = candidates[0]
         elif route_points is not None and cum_dists is not None:
-            wp_x = float(wp.transform.location.x)
-            wp_y = float(wp.transform.location.y)
+            wp_x, wp_y = _waypoint_xy(wp)
             arc = project_ego_to_route(wp_x, wp_y, route_points, cum_dists)
             total_arc_m = float(cum_dists[-1]) if len(cum_dists) > 0 else float(arc)
             expected_arc_m = min(float(total_arc_m), float(arc) + float(step_m))
@@ -398,16 +420,7 @@ def _walk_forward(
                     cum_dists,
                     float(arc),
                 )
-                candidate_loc = getattr(getattr(candidate, "transform", None), "location", None)
-                if candidate_loc is None:
-                    return (
-                        1.0,
-                        float("inf"),
-                        float("inf"),
-                        float("inf"),
-                        float("inf"),
-                        float("inf"),
-                    )
+                candidate_x_m, candidate_y_m = _waypoint_xy(candidate)
                 preview_wp = candidate
                 preview_wp_candidates = preview_wp.next(step_m)
                 if len(preview_wp_candidates) > 0:
@@ -430,8 +443,8 @@ def _walk_forward(
                     1.0 if float(candidate_arc_m) + 1.0e-6 < float(arc) else 0.0
                 )
                 expected_point_distance_m = math.hypot(
-                    float(candidate_loc.x) - float(look_x),
-                    float(candidate_loc.y) - float(look_y),
+                    candidate_x_m - float(look_x),
+                    candidate_y_m - float(look_y),
                 )
                 return (
                     float(backward_penalty),
@@ -446,9 +459,8 @@ def _walk_forward(
                 candidates,
                 key=_route_guided_score,
             )
-        elif target_loc is not None:
-            wp_x = float(wp.transform.location.x)
-            wp_y = float(wp.transform.location.y)
+        elif target_xy is not None:
+            wp_x, wp_y = _waypoint_xy(wp)
             current_arc = (
                 project_ego_to_route(wp_x, wp_y, route_points, cum_dists)
                 if route_points is not None and cum_dists is not None
@@ -456,12 +468,10 @@ def _walk_forward(
             )
 
             def _target_guided_score(candidate: Any) -> tuple[float, float, float, float]:
-                candidate_loc = getattr(getattr(candidate, "transform", None), "location", None)
-                if candidate_loc is None:
-                    return (float("inf"), float("inf"), float("inf"), float("inf"))
+                candidate_x_m, candidate_y_m = _waypoint_xy(candidate)
                 distance_to_target_m = math.hypot(
-                    float(candidate_loc.x) - float(target_loc.x),
-                    float(candidate_loc.y) - float(target_loc.y),
+                    candidate_x_m - float(target_xy[0]),
+                    candidate_y_m - float(target_xy[1]),
                 )
                 if (
                     route_points is not None
@@ -470,8 +480,8 @@ def _walk_forward(
                     and current_arc is not None
                 ):
                     candidate_arc = project_ego_to_route(
-                        float(candidate_loc.x),
-                        float(candidate_loc.y),
+                        candidate_x_m,
+                        candidate_y_m,
                         route_points,
                         cum_dists,
                     )
@@ -485,12 +495,10 @@ def _walk_forward(
                     behind_penalty = 0.0
                     arc_error_m = 0.0
                 heading_to_target_rad = math.atan2(
-                    float(target_loc.y) - float(candidate_loc.y),
-                    float(target_loc.x) - float(candidate_loc.x),
+                    float(target_xy[1]) - candidate_y_m,
+                    float(target_xy[0]) - candidate_x_m,
                 )
-                candidate_yaw_rad = math.radians(
-                    float(candidate.transform.rotation.yaw)
-                )
+                candidate_yaw_rad = _waypoint_heading_rad(candidate)
                 heading_error_rad = abs(
                     math.atan2(
                         math.sin(float(candidate_yaw_rad) - float(heading_to_target_rad)),
@@ -505,36 +513,36 @@ def _walk_forward(
                 )
             wp = min(candidates, key=_target_guided_score)
         elif maneuver is not None:
-            current_yaw = wp.transform.rotation.yaw
+            current_yaw = math.degrees(_waypoint_heading_rad(wp))
             maneuver_name = str(maneuver).strip().upper()
             if "LEFT" in maneuver_name:
                 wp = max(
                     candidates,
                     key=lambda c: _normalize_angle_deg(
-                        c.transform.rotation.yaw - current_yaw
+                        math.degrees(_waypoint_heading_rad(c)) - current_yaw
                     ),
                 )
             elif "RIGHT" in maneuver_name:
                 wp = min(
                     candidates,
                     key=lambda c: _normalize_angle_deg(
-                        c.transform.rotation.yaw - current_yaw
+                        math.degrees(_waypoint_heading_rad(c)) - current_yaw
                     ),
                 )
             else:
                 wp = min(
                     candidates,
                     key=lambda c: abs(
-                        _normalize_angle_deg(c.transform.rotation.yaw - current_yaw)
+                        _normalize_angle_deg(math.degrees(_waypoint_heading_rad(c)) - current_yaw)
                     ),
                 )
         else:
             # Straightest successor
-            current_yaw = wp.transform.rotation.yaw
+            current_yaw = math.degrees(_waypoint_heading_rad(wp))
             wp = min(
                 candidates,
                 key=lambda c: abs(
-                    _normalize_angle_deg(c.transform.rotation.yaw - current_yaw)
+                    _normalize_angle_deg(math.degrees(_waypoint_heading_rad(c)) - current_yaw)
                 ),
             )
         cumulative += step_m
@@ -542,7 +550,6 @@ def _walk_forward(
 
 
 def move_to_lane(
-    carla: Any,
     wp: Any,
     target_lane_id: int,
     *,
@@ -559,23 +566,21 @@ def move_to_lane(
     blue-dot path can opt in when an explicit lane-change decision has
     already been made by the behavior planner.
     """
-    del carla
     if wp is None:
         return wp
-    if bool(getattr(wp, "is_junction", False)) and not bool(allow_junction_lane_snap):
+    if bool(getattr(wp, "is_intersection", False)) and not bool(allow_junction_lane_snap):
         return wp
     return canonical_lane_waypoint_for_lane_id(wp, int(target_lane_id))
 
 
-def _internal_lane_id(carla: Any, wp: Any) -> int:
+def _internal_lane_id(wp: Any) -> int:
     """Return the project lane id for *wp*."""
-    del carla
     return int(canonical_lane_id_for_waypoint(wp))
 
 
 def _lane_width_m(waypoint: Any, default_m: float = 0.0) -> float:
     try:
-        lane_width_m = float(getattr(waypoint, "lane_width", default_m))
+        lane_width_m = float(getattr(waypoint, "lane_width_m", default_m))
     except Exception:
         lane_width_m = float(default_m)
     if not math.isfinite(lane_width_m) or lane_width_m <= 0.0:
@@ -597,17 +602,10 @@ def _road_boundary_fields_for_waypoint(
     if waypoint is None:
         return fallback
 
-    transform = getattr(waypoint, "transform", None)
-    location = getattr(transform, "location", None)
-    rotation = getattr(transform, "rotation", None)
-    if location is None or rotation is None:
-        return fallback
-
-    heading_rad = math.radians(float(getattr(rotation, "yaw", 0.0)))
+    heading_rad = _waypoint_heading_rad(waypoint)
     normal_x = -math.sin(float(heading_rad))
     normal_y = math.cos(float(heading_rad))
-    ref_x = float(getattr(location, "x", 0.0))
-    ref_y = float(getattr(location, "y", 0.0))
+    ref_x, ref_y = _waypoint_xy(waypoint)
 
     lane_waypoints = canonical_lane_waypoints(waypoint)
     if len(lane_waypoints) == 0:
@@ -616,15 +614,12 @@ def _road_boundary_fields_for_waypoint(
     left_edge_m = -math.inf
     right_edge_m = math.inf
     for lane_wp in lane_waypoints:
-        lane_transform = getattr(lane_wp, "transform", None)
-        lane_location = getattr(lane_transform, "location", None)
-        if lane_location is None:
-            continue
         width_m = _lane_width_m(lane_wp, float(lane_width_m))
         if not math.isfinite(width_m) or width_m <= 0.0:
             continue
-        dx_m = float(getattr(lane_location, "x", 0.0)) - float(ref_x)
-        dy_m = float(getattr(lane_location, "y", 0.0)) - float(ref_y)
+        lane_x_m, lane_y_m = _waypoint_xy(lane_wp)
+        dx_m = lane_x_m - float(ref_x)
+        dy_m = lane_y_m - float(ref_y)
         lateral_offset_m = float(normal_x) * float(dx_m) + float(normal_y) * float(dy_m)
         left_edge_m = max(float(left_edge_m), float(lateral_offset_m) + 0.5 * float(width_m))
         right_edge_m = min(float(right_edge_m), float(lateral_offset_m) - 0.5 * float(width_m))
@@ -695,7 +690,7 @@ def _determine_mode(
     del intersection_threshold_m
     del next_macro_maneuver
 
-    ego_in_junction = bool(getattr(ego_wp, "is_junction", False))
+    ego_in_junction = bool(getattr(ego_wp, "is_intersection", False))
     was_intersection = prev_mode is not None and float(prev_mode) > 0.5
     entered_intersection = bool(prev_entered_intersection) or bool(ego_in_junction)
 
@@ -713,7 +708,6 @@ def _determine_mode(
 # Shared start-wp helper                                                 #
 # -------------------------------------------------------------------- #
 def _start_wp_for_decision(
-    carla: Any,
     ego_wp: Any,
     decision: str,
     target_lane_id: int,
@@ -729,7 +723,6 @@ def _start_wp_for_decision(
     normalized_decision = normalize_behavior_decision(decision)
     if normalized_decision in {"lane_change_left", "lane_change_right"}:
         return move_to_lane(
-            carla,
             ego_wp,
             int(target_lane_id),
             allow_junction_lane_snap=bool(allow_junction_lane_snap),
@@ -813,9 +806,8 @@ def _normalized_follow_target_state(
 
 
 def _build_stop_reference_samples(
-    world_map: Any,
-    carla: Any,
-    ego_transform: Any,
+    map_planner: Any,
+    ego_pose: Mapping[str, object],
     stop_target_state: Sequence[float] | Mapping[str, object],
     global_route_points: Sequence[Sequence[float]],
     horizon_steps: int,
@@ -829,18 +821,12 @@ def _build_stop_reference_samples(
     stop_y_m = float(normalized_stop_target_state[1])
     stop_heading_rad = float(normalized_stop_target_state[3])
     stop_lane_id = int(round(float(normalized_stop_target_state[4])))
-    ego_z_m = float(getattr(ego_transform.location, "z", 0.0))
-    stop_wp = world_map.get_waypoint(
-        carla.Location(
-            x=float(stop_x_m),
-            y=float(stop_y_m),
-            z=float(ego_z_m),
-        ),
-        project_to_road=True,
-        lane_type=carla.LaneType.Driving,
+    ego_position = _pose_xyz(ego_pose)
+    ego_z_m = float(ego_position["z"])
+    stop_wp = map_planner.get_waypoint(
+        {"x": stop_x_m, "y": stop_y_m, "z": ego_z_m}
     )
     stop_wp = move_to_lane(
-        carla,
         stop_wp,
         int(stop_lane_id),
         allow_junction_lane_snap=True,
@@ -865,8 +851,8 @@ def _build_stop_reference_samples(
             for _ in range(max(1, int(horizon_steps)))
         ]
 
-    ego_x_m = float(ego_transform.location.x)
-    ego_y_m = float(ego_transform.location.y)
+    ego_x_m = float(ego_position["x"])
+    ego_y_m = float(ego_position["y"])
     route_cum_dists = _route_cum_dists(route_points_valid)
     ego_arc_m = project_ego_to_route(
         ego_x=float(ego_x_m),
@@ -922,17 +908,10 @@ def _build_stop_reference_samples(
             ego_arc=float(ego_arc_m),
             lookahead_m=float(target_arc_m) - float(ego_arc_m),
         )
-        sample_wp = world_map.get_waypoint(
-            carla.Location(
-                x=float(sample_x_m),
-                y=float(sample_y_m),
-                z=float(z_m),
-            ),
-            project_to_road=True,
-            lane_type=carla.LaneType.Driving,
+        sample_wp = map_planner.get_waypoint(
+            {"x": float(sample_x_m), "y": float(sample_y_m), "z": z_m}
         )
         sample_wp = move_to_lane(
-            carla,
             sample_wp,
             int(stop_lane_id),
             allow_junction_lane_snap=False,
@@ -965,9 +944,9 @@ def _build_stop_reference_samples(
 
         samples.append(
             {
-                "x_ref_m": float(sample_wp.transform.location.x),
-                "y_ref_m": float(sample_wp.transform.location.y),
-                "heading_rad": float(math.radians(sample_wp.transform.rotation.yaw)),
+                "x_ref_m": _waypoint_xy(sample_wp)[0],
+                "y_ref_m": _waypoint_xy(sample_wp)[1],
+                "heading_rad": _waypoint_heading_rad(sample_wp),
                 "lane_id": int(stop_lane_id),
                 "lane_width_m": _lane_width_m(sample_wp, float(stop_lane_width_m)),
                 **_road_boundary_fields_for_waypoint(sample_wp, float(stop_lane_width_m)),
@@ -991,8 +970,7 @@ def _should_follow_turn_branch_from_route(
 
 
 def _route_waypoint_from_anchor(
-    world_map: Any,
-    carla: Any,
+    map_planner: Any,
     anchor_wp: Any,
     route_points: Sequence[Sequence[float]],
     lookahead_m: float,
@@ -1004,15 +982,12 @@ def _route_waypoint_from_anchor(
     if anchor_wp is None or route_points is None or len(route_points) < 2:
         return fallback_wp
 
-    anchor_loc = getattr(getattr(anchor_wp, "transform", None), "location", None)
-    fallback_loc = getattr(getattr(fallback_wp, "transform", None), "location", None)
-    if anchor_loc is None:
-        return fallback_wp
+    anchor_position = _waypoint_xyz(anchor_wp)
 
     cum_dists = _route_cum_dists(route_points)
     anchor_arc = project_ego_to_route(
-        ego_x=float(anchor_loc.x),
-        ego_y=float(anchor_loc.y),
+        ego_x=float(anchor_position["x"]),
+        ego_y=float(anchor_position["y"]),
         route_points=route_points,
         cum_dists=cum_dists,
     )
@@ -1022,27 +997,23 @@ def _route_waypoint_from_anchor(
         ego_arc=float(anchor_arc),
         lookahead_m=float(lookahead_m),
     )
-    z_m = float(getattr(anchor_loc, "z", getattr(fallback_loc, "z", 0.0)))
-    route_wp = world_map.get_waypoint(
-        carla.Location(
-            x=float(target_x_m),
-            y=float(target_y_m),
-            z=float(z_m),
-        ),
-        project_to_road=True,
-        lane_type=carla.LaneType.Driving,
+    route_wp = map_planner.get_waypoint(
+        {
+            "x": float(target_x_m),
+            "y": float(target_y_m),
+            "z": float(anchor_position["z"]),
+        }
     )
     resolved_wp = route_wp if route_wp is not None else fallback_wp
     if (
         not bool(follow_route_lane)
         and route_wp is not None
-        and bool(getattr(route_wp, "is_junction", False))
+        and bool(getattr(route_wp, "is_intersection", False))
         and fallback_wp is not None
     ):
         resolved_wp = fallback_wp
     resolved_wp = _snap_junction_waypoint_to_route(
-        world_map=world_map,
-        carla=carla,
+        map_planner=map_planner,
         waypoint=resolved_wp,
         anchor_wp=anchor_wp,
         route_points=route_points,
@@ -1052,7 +1023,6 @@ def _route_waypoint_from_anchor(
     if bool(follow_route_lane) or resolved_wp is None or target_lane_id is None:
         return resolved_wp
     return move_to_lane(
-        carla,
         resolved_wp,
         int(target_lane_id),
         allow_junction_lane_snap=bool(allow_junction_lane_snap),
@@ -1060,8 +1030,7 @@ def _route_waypoint_from_anchor(
 
 
 def _build_route_reference_samples_from_anchor(
-    world_map: Any,
-    carla: Any,
+    map_planner: Any,
     anchor_wp: Any,
     route_points: Sequence[Sequence[float]],
     horizon_steps: int,
@@ -1073,18 +1042,16 @@ def _build_route_reference_samples_from_anchor(
     if anchor_wp is None or route_points is None or len(route_points) < 2:
         return []
 
-    anchor_loc = getattr(getattr(anchor_wp, "transform", None), "location", None)
-    if anchor_loc is None:
-        return []
+    anchor_position = _waypoint_xyz(anchor_wp)
 
     cum_dists = _route_cum_dists(route_points)
     anchor_arc = project_ego_to_route(
-        ego_x=float(anchor_loc.x),
-        ego_y=float(anchor_loc.y),
+        ego_x=float(anchor_position["x"]),
+        ego_y=float(anchor_position["y"]),
         route_points=route_points,
         cum_dists=cum_dists,
     )
-    z_m = float(getattr(anchor_loc, "z", 0.0))
+    z_m = float(anchor_position["z"])
     samples: List[Dict[str, float]] = []
     n = max(1, int(horizon_steps))
     sd = max(0.25, float(step_distance_m))
@@ -1097,14 +1064,8 @@ def _build_route_reference_samples_from_anchor(
             ego_arc=float(anchor_arc),
             lookahead_m=float(k) * float(sd),
         )
-        route_wp = world_map.get_waypoint(
-            carla.Location(
-                x=float(x_ref_m),
-                y=float(y_ref_m),
-                z=float(z_m),
-            ),
-            project_to_road=True,
-            lane_type=carla.LaneType.Driving,
+        route_wp = map_planner.get_waypoint(
+            {"x": float(x_ref_m), "y": float(y_ref_m), "z": z_m}
         )
         walked_wp = continuity_wp
         if k > 0 and continuity_wp is not None:
@@ -1139,7 +1100,7 @@ def _build_route_reference_samples_from_anchor(
                 ):
                     sample_wp = walked_wp
             if not bool(follow_route_lane) and target_lane_id is not None:
-                sample_wp = move_to_lane(carla, route_wp, int(target_lane_id))
+                sample_wp = move_to_lane(route_wp, int(target_lane_id))
             continuity_wp = sample_wp
             next_x_ref_m, next_y_ref_m = get_lookahead_route_point(
                 route_points=route_points,
@@ -1158,20 +1119,20 @@ def _build_route_reference_samples_from_anchor(
             # pure waypoint rotation.yaw can have CARLA discretization jumps
             # that amplify into steering oscillation at high q_psi.
             # 65 % waypoint tangent + 35 % chord is a good compromise.
-            _wp_heading_raw = float(math.radians(sample_wp.transform.rotation.yaw))
+            _wp_heading_raw = _waypoint_heading_rad(sample_wp)
             _d_heading = math.atan2(
                 math.sin(_wp_heading_raw - route_heading_rad),
                 math.cos(_wp_heading_raw - route_heading_rad),
             )
             blended_heading_rad = route_heading_rad + 0.65 * _d_heading
             samples.append({
-                "x_ref_m": float(x_ref_m) if use_exact_route_xy else float(sample_wp.transform.location.x),
-                "y_ref_m": float(y_ref_m) if use_exact_route_xy else float(sample_wp.transform.location.y),
+                "x_ref_m": float(x_ref_m) if use_exact_route_xy else _waypoint_xy(sample_wp)[0],
+                "y_ref_m": float(y_ref_m) if use_exact_route_xy else _waypoint_xy(sample_wp)[1],
                 "heading_rad": float(blended_heading_rad),
                 "lane_id": (
                     int(target_lane_id)
                     if not bool(follow_route_lane) and target_lane_id is not None
-                    else _internal_lane_id(carla, sample_wp)
+                    else _internal_lane_id(sample_wp)
                 ),
                 "lane_width_m": _lane_width_m(sample_wp, _lane_width_m(anchor_wp, 0.0)),
                 **_road_boundary_fields_for_waypoint(
@@ -1201,7 +1162,7 @@ def _build_route_reference_samples_from_anchor(
                 target_lane_id
                 if target_lane_id is not None
                 else (
-                    _internal_lane_id(carla, walked_wp)
+                    _internal_lane_id(walked_wp)
                     if walked_wp is not None
                     else fallback_lane_id
                 )
@@ -1221,7 +1182,6 @@ def _build_route_reference_samples_from_anchor(
 def _build_forward_reference_samples(
     anchor_wp: Any,
     *,
-    carla: Any,
     horizon_steps: int,
     step_distance_m: float,
     route_points: Sequence[Sequence[float]] | None = None,
@@ -1245,20 +1205,20 @@ def _build_forward_reference_samples(
                 if len(candidates) == 1:
                     wp = candidates[0]
                 elif maneuver is not None:
-                    current_yaw = wp.transform.rotation.yaw
+                    current_yaw = math.degrees(_waypoint_heading_rad(wp))
                     maneuver_name = str(maneuver).strip().upper()
                     if "LEFT" in maneuver_name:
                         wp = max(
                             candidates,
                             key=lambda c: _normalize_angle_deg(
-                                c.transform.rotation.yaw - current_yaw
+                                math.degrees(_waypoint_heading_rad(c)) - current_yaw
                             ),
                         )
                     elif "RIGHT" in maneuver_name:
                         wp = min(
                             candidates,
                             key=lambda c: _normalize_angle_deg(
-                                c.transform.rotation.yaw - current_yaw
+                                math.degrees(_waypoint_heading_rad(c)) - current_yaw
                             ),
                         )
                     else:
@@ -1266,37 +1226,36 @@ def _build_forward_reference_samples(
                             candidates,
                             key=lambda c: abs(
                                 _normalize_angle_deg(
-                                    c.transform.rotation.yaw - current_yaw
+                                    math.degrees(_waypoint_heading_rad(c)) - current_yaw
                                 )
                             ),
                         )
                 elif route_points_valid is not None and cum_dists is not None:
-                    wp_x = float(wp.transform.location.x)
-                    wp_y = float(wp.transform.location.y)
+                    wp_x, wp_y = _waypoint_xy(wp)
                     arc = project_ego_to_route(wp_x, wp_y, route_points_valid, cum_dists)
                     lx, ly = get_lookahead_route_point(route_points_valid, cum_dists, arc, sd * 3)
                     wp = min(
                         candidates,
                         key=lambda c: (
-                            (float(c.transform.location.x) - lx) ** 2
-                            + (float(c.transform.location.y) - ly) ** 2
+                            (_waypoint_xy(c)[0] - lx) ** 2
+                            + (_waypoint_xy(c)[1] - ly) ** 2
                         ),
                     )
                 else:
-                    current_yaw = wp.transform.rotation.yaw
+                    current_yaw = math.degrees(_waypoint_heading_rad(wp))
                     wp = min(
                         candidates,
                         key=lambda c: abs(
                             _normalize_angle_deg(
-                                c.transform.rotation.yaw - current_yaw
+                                math.degrees(_waypoint_heading_rad(c)) - current_yaw
                             )
                         ),
                     )
         samples.append({
-            "x_ref_m": float(wp.transform.location.x),
-            "y_ref_m": float(wp.transform.location.y),
-            "heading_rad": float(math.radians(wp.transform.rotation.yaw)),
-            "lane_id": _internal_lane_id(carla, wp) if wp is not None else int(fallback_lane_id),
+            "x_ref_m": _waypoint_xy(wp)[0],
+            "y_ref_m": _waypoint_xy(wp)[1],
+            "heading_rad": _waypoint_heading_rad(wp),
+            "lane_id": _internal_lane_id(wp) if wp is not None else int(fallback_lane_id),
             "lane_width_m": _lane_width_m(wp, 0.0),
             **_road_boundary_fields_for_waypoint(wp, _lane_width_m(wp, 0.0)),
         })
@@ -1307,7 +1266,6 @@ def _build_lane_reference_samples_to_target(
     *,
     start_wp: Any,
     target_wp: Any,
-    carla: Any,
     horizon_steps: int,
     step_distance_m: float,
     walk_step_m: float,
@@ -1327,35 +1285,26 @@ def _build_lane_reference_samples_to_target(
     if start_wp is None or target_wp is None:
         return []
 
-    start_loc = getattr(getattr(start_wp, "transform", None), "location", None)
-    target_loc = getattr(getattr(target_wp, "transform", None), "location", None)
-    if start_loc is None or target_loc is None:
-        return []
+    start_position = _waypoint_xyz(start_wp)
+    target_position = _waypoint_xyz(target_wp)
 
-    exact_target_x_m = float(target_x_m) if target_x_m is not None else float(target_loc.x)
-    exact_target_y_m = float(target_y_m) if target_y_m is not None else float(target_loc.y)
+    exact_target_x_m = float(target_x_m) if target_x_m is not None else float(target_position["x"])
+    exact_target_y_m = float(target_y_m) if target_y_m is not None else float(target_position["y"])
     exact_target_heading_rad = (
         float(target_heading_rad)
         if target_heading_rad is not None
-        else float(math.radians(target_wp.transform.rotation.yaw))
+        else _waypoint_heading_rad(target_wp)
     )
     exact_target_lane_id = (
         int(target_lane_id)
         if target_lane_id is not None
-        else int(_internal_lane_id(carla, target_wp))
+        else int(_internal_lane_id(target_wp))
     )
-    guidance_target_wp = SimpleNamespace(
-        transform=SimpleNamespace(
-            location=SimpleNamespace(
-                x=float(exact_target_x_m),
-                y=float(exact_target_y_m),
-                z=float(getattr(target_loc, "z", getattr(start_loc, "z", 0.0))),
-            ),
-            rotation=SimpleNamespace(
-                yaw=float(math.degrees(exact_target_heading_rad)),
-            ),
-        )
-    )
+    guidance_target_position = {
+        "x": exact_target_x_m,
+        "y": exact_target_y_m,
+        "z": float(target_position["z"]),
+    }
 
     route_points_valid = (
         route_points if route_points is not None and len(route_points) >= 2 else None
@@ -1366,13 +1315,13 @@ def _build_lane_reference_samples_to_target(
         else None
     )
     distance_to_target_m = math.hypot(
-        float(exact_target_x_m) - float(start_loc.x),
-        float(exact_target_y_m) - float(start_loc.y),
+        float(exact_target_x_m) - float(start_position["x"]),
+        float(exact_target_y_m) - float(start_position["y"]),
     )
     if route_points_valid is not None:
         start_arc_m = project_ego_to_route(
-            ego_x=float(start_loc.x),
-            ego_y=float(start_loc.y),
+            ego_x=float(start_position["x"]),
+            ego_y=float(start_position["y"]),
             route_points=route_points_valid,
             cum_dists=route_cum_dists,
         )
@@ -1404,15 +1353,13 @@ def _build_lane_reference_samples_to_target(
             route_points=route_points_valid,
             cum_dists=route_cum_dists,
             maneuver=maneuver,
-            target_wp=guidance_target_wp,
+            target_position=guidance_target_position,
         )
-        next_loc = getattr(getattr(next_wp, "transform", None), "location", None)
-        current_loc = getattr(getattr(current_wp, "transform", None), "location", None)
-        if next_loc is None or current_loc is None:
-            break
+        next_x_m, next_y_m = _waypoint_xy(next_wp)
+        current_x_m, current_y_m = _waypoint_xy(current_wp)
         segment_length_m = math.hypot(
-            float(next_loc.x) - float(current_loc.x),
-            float(next_loc.y) - float(current_loc.y),
+            next_x_m - current_x_m,
+            next_y_m - current_y_m,
         )
         if float(segment_length_m) <= 1.0e-6:
             break
@@ -1420,8 +1367,8 @@ def _build_lane_reference_samples_to_target(
         guided_cum_dists.append(float(guided_cum_dists[-1]) + float(segment_length_m))
         current_wp = next_wp
         current_distance_to_target_m = math.hypot(
-            float(next_loc.x) - float(exact_target_x_m),
-            float(next_loc.y) - float(exact_target_y_m),
+            next_x_m - float(exact_target_x_m),
+            next_y_m - float(exact_target_y_m),
         )
         if float(current_distance_to_target_m) <= max(0.5, 0.5 * float(walk_step_m)):
             break
@@ -1466,12 +1413,10 @@ def _build_lane_reference_samples_to_target(
         lane_width_m = _lane_width_m(sample_wp, _lane_width_m(target_wp, 0.0))
         samples.append(
             {
-                "x_ref_m": float(sample_wp.transform.location.x),
-                "y_ref_m": float(sample_wp.transform.location.y),
-                "heading_rad": float(
-                    math.radians(sample_wp.transform.rotation.yaw)
-                ),
-                "lane_id": _internal_lane_id(carla, sample_wp),
+                "x_ref_m": _waypoint_xy(sample_wp)[0],
+                "y_ref_m": _waypoint_xy(sample_wp)[1],
+                "heading_rad": _waypoint_heading_rad(sample_wp),
+                "lane_id": _internal_lane_id(sample_wp),
                 "lane_width_m": float(lane_width_m),
                 **_road_boundary_fields_for_waypoint(sample_wp, float(lane_width_m)),
             }
@@ -1496,9 +1441,6 @@ def _interpolate_heading_rad(start_heading_rad: float, end_heading_rad: float, a
 def _smooth_lane_change_alpha(raw_alpha: float) -> float:
     """Return a zero-slope endpoint blend factor for lane-change references."""
     alpha = min(1.0, max(0.0, float(raw_alpha)))
-    # Smootherstep: C2-continuous with zero slope and curvature at both ends.
-    # This keeps the local reference from asking MPC for an abrupt lateral
-    # velocity at lane-change start/end.
     return float(alpha * alpha * alpha * (alpha * (alpha * 6.0 - 15.0) + 10.0))
 
 
@@ -1594,9 +1536,8 @@ def _blend_reference_samples(
 # Public API                                                             #
 # -------------------------------------------------------------------- #
 def compute_temp_destination_mode(
-    world_map: Any,
-    carla: Any,
-    ego_transform: Any,
+    map_planner: Any,
+    ego_pose: Mapping[str, object],
     mode_reference_xy: Tuple[float, float] | None = None,
     prev_mode: float | None = None,
     prev_road_id: int | None = None,
@@ -1607,25 +1548,19 @@ def compute_temp_destination_mode(
     step_m: float = DEFAULT_STEP_M,
 ) -> Tuple[float, int, bool]:
     """Return the current blue-dot mode using the same explicit latch logic."""
-    ego_z = float(ego_transform.location.z)
+    ego_position = _pose_xyz(ego_pose)
 
-    ego_wp = world_map.get_waypoint(
-        ego_transform.location,
-        project_to_road=True,
-        lane_type=carla.LaneType.Driving,
-    )
+    ego_wp = map_planner.get_waypoint(ego_position)
     if ego_wp is None:
         return MODE_NORMAL, -1, False
 
     if mode_reference_xy is not None:
-        ref_wp = world_map.get_waypoint(
-            carla.Location(
-                x=float(mode_reference_xy[0]),
-                y=float(mode_reference_xy[1]),
-                z=ego_z,
-            ),
-            project_to_road=True,
-            lane_type=carla.LaneType.Driving,
+        ref_wp = map_planner.get_waypoint(
+            {
+                "x": float(mode_reference_xy[0]),
+                "y": float(mode_reference_xy[1]),
+                "z": float(ego_position["z"]),
+            }
         )
         if ref_wp is None:
             ref_wp = ego_wp
@@ -1654,9 +1589,8 @@ def compute_temp_destination_mode(
 
 
 def compute_temp_destination(
-    world_map: Any,
-    carla: Any,
-    ego_transform: Any,
+    map_planner: Any,
+    ego_pose: Mapping[str, object],
     target_lane_id: int,
     decision: str,
     lookahead_m: float,
@@ -1698,34 +1632,29 @@ def compute_temp_destination(
     [x, y, v_target, heading_rad, lane_id, mode, road_id, entered_intersection]
 
     *mode* is ``0.0`` for NORMAL and ``1.0`` for INTERSECTION.
-    *road_id* is the CARLA ``road_id`` of the reference waypoint.
+    *road_id* is the OpenDRIVE ``road_id`` of the reference waypoint.
     *entered_intersection* is ``1.0`` while the ego has entered the
     current latched intersection and has not yet exited it.
     """
-    ego_x = float(ego_transform.location.x)
-    ego_y = float(ego_transform.location.y)
-    ego_z = float(ego_transform.location.z)
-    ego_psi = float(math.radians(ego_transform.rotation.yaw))
+    ego_position = _pose_xyz(ego_pose)
+    ego_x = float(ego_position["x"])
+    ego_y = float(ego_position["y"])
+    ego_z = float(ego_position["z"])
+    ego_psi = float(ego_pose.get("heading_rad", 0.0))
 
-    ego_wp = world_map.get_waypoint(
-        ego_transform.location,
-        project_to_road=True,
-        lane_type=carla.LaneType.Driving,
-    )
+    ego_wp = map_planner.get_waypoint(ego_position)
     if ego_wp is None:
         return [ego_x, ego_y, 0.0, ego_psi, 0,
                 MODE_NORMAL, -1, 0.0]
 
     # ---- Reference wp for mode check (previous blue-dot pos) ---- #
     if mode_reference_xy is not None:
-        ref_wp = world_map.get_waypoint(
-            carla.Location(
-                x=float(mode_reference_xy[0]),
-                y=float(mode_reference_xy[1]),
-                z=ego_z,
-            ),
-            project_to_road=True,
-            lane_type=carla.LaneType.Driving,
+        ref_wp = map_planner.get_waypoint(
+            {
+                "x": float(mode_reference_xy[0]),
+                "y": float(mode_reference_xy[1]),
+                "z": ego_z,
+            }
         )
         if ref_wp is None:
             ref_wp = ego_wp
@@ -1770,7 +1699,7 @@ def compute_temp_destination(
         return list(normalized_follow_target_state)
 
     normalized_decision = normalize_behavior_decision(decision)
-    current_lane_id = _internal_lane_id(carla, ego_wp)
+    current_lane_id = _internal_lane_id(ego_wp)
     route_alignment_lane_id = (
         int(target_lane_id)
         if int(target_lane_id) != 0
@@ -1791,11 +1720,8 @@ def compute_temp_destination(
         str(normalized_decision) == "lane_follow"
         and int(route_alignment_lane_id) != int(current_lane_id)
     ):
-        # The global route may already be on an adjacent lane/connector while
-        # the ego is still in the current lane, especially near junctions. Do
-        # not place the rolling target laterally across lanes until the FSM
-        # explicitly enters a lane-change state; otherwise MPC cuts toward the
-        # route lane during plain lane-follow.
+        # The route may already be on an adjacent lane/connector while the ego
+        # is still in the current lane. Keep plain lane-follow on the ego lane.
         blue_dot_target_lane_id = int(current_lane_id)
         blue_dot_follow_route_lane = False
 
@@ -1804,7 +1730,7 @@ def compute_temp_destination(
     # connector-like, so a lateral snap can move the blue dot off the intended
     # route branch and make MPC cut across the intersection.
     start_wp = _start_wp_for_decision(
-        carla, ego_wp, str(decision), int(blue_dot_target_lane_id),
+        ego_wp, str(decision), int(blue_dot_target_lane_id),
         allow_junction_lane_snap=(
             str(normalized_decision) in {"lane_change_left", "lane_change_right"}
             and not bool(is_intersection)
@@ -1824,10 +1750,10 @@ def compute_temp_destination(
         # ego pose projected onto the global route, not from the previous
         # blue-dot position. ``mode_reference_xy`` is only for mode latching.
         anchor_wp = ego_wp
-        anchor_loc = getattr(getattr(anchor_wp, "transform", None), "location", None)
+        anchor_x_m, anchor_y_m = _waypoint_xy(anchor_wp)
         anchor_arc = project_ego_to_route(
-            ego_x=float(getattr(anchor_loc, "x", ego_x)),
-            ego_y=float(getattr(anchor_loc, "y", ego_y)),
+            ego_x=anchor_x_m,
+            ego_y=anchor_y_m,
             route_points=route_points_valid,
             cum_dists=route_cum_dists,
         )
@@ -1854,8 +1780,7 @@ def compute_temp_destination(
             route_heading_rad = float(ego_psi)
 
         route_candidate_wp = _route_waypoint_from_anchor(
-            world_map=world_map,
-            carla=carla,
+            map_planner=map_planner,
             anchor_wp=anchor_wp,
             route_points=route_points_valid,
             lookahead_m=float(lookahead_m),
@@ -1872,12 +1797,12 @@ def compute_temp_destination(
             # dot to an adjacent road or turn connector before a lane-change
             # decision exists. If the forward walk cannot move, allow a route
             # projection only when it remains on the requested lane.
-            fallback_loc = getattr(getattr(fallback_wp, "transform", None), "location", None)
+            fallback_x_m, fallback_y_m = _waypoint_xy(fallback_wp)
             fallback_progress_m = math.hypot(
-                float(getattr(fallback_loc, "x", ego_x)) - float(ego_x),
-                float(getattr(fallback_loc, "y", ego_y)) - float(ego_y),
+                fallback_x_m - float(ego_x),
+                fallback_y_m - float(ego_y),
             )
-            candidate_lane_id = _internal_lane_id(carla, route_candidate_wp)
+            candidate_lane_id = _internal_lane_id(route_candidate_wp)
             if (
                 float(fallback_progress_m) < 0.25
                 and int(candidate_lane_id) == int(blue_dot_target_lane_id)
@@ -1912,11 +1837,11 @@ def compute_temp_destination(
         # CARLA lane waypoint.
         use_route_geometry = bool(blue_dot_follow_route_lane)
         return [
-            float(route_x_m) if bool(use_route_geometry) else float(route_wp.transform.location.x),
-            float(route_y_m) if bool(use_route_geometry) else float(route_wp.transform.location.y),
+            float(route_x_m) if bool(use_route_geometry) else _waypoint_xy(route_wp)[0],
+            float(route_y_m) if bool(use_route_geometry) else _waypoint_xy(route_wp)[1],
             float(target_v_mps),
-            float(route_heading_rad) if bool(use_route_geometry) else float(math.radians(route_wp.transform.rotation.yaw)),
-            int(blue_dot_target_lane_id) if not bool(blue_dot_follow_route_lane) else _internal_lane_id(carla, route_wp),
+            float(route_heading_rad) if bool(use_route_geometry) else _waypoint_heading_rad(route_wp),
+            int(blue_dot_target_lane_id) if not bool(blue_dot_follow_route_lane) else _internal_lane_id(route_wp),
             mode,
             int(getattr(route_wp, "road_id", road_id)),
             1.0 if bool(entered_intersection) and float(mode) > 0.5 else 0.0,
@@ -1939,11 +1864,11 @@ def compute_temp_destination(
         mode = MODE_NORMAL
 
     return [
-        float(wp.transform.location.x),
-        float(wp.transform.location.y),
+        _waypoint_xy(wp)[0],
+        _waypoint_xy(wp)[1],
         float(target_v_mps),
-        float(math.radians(wp.transform.rotation.yaw)),
-        _internal_lane_id(carla, wp),
+        _waypoint_heading_rad(wp),
+        _internal_lane_id(wp),
         mode,
         road_id,
         1.0 if bool(entered_intersection) and float(mode) > 0.5 else 0.0,
@@ -1951,9 +1876,8 @@ def compute_temp_destination(
 
 
 def build_reference_samples(
-    world_map: Any,
-    carla: Any,
-    ego_transform: Any,
+    map_planner: Any,
+    ego_pose: Mapping[str, object],
     target_lane_id: int,
     decision: str,
     horizon_steps: int,
@@ -1978,18 +1902,15 @@ def build_reference_samples(
     Returns one sample per horizon step with
     ``{"x_ref_m", "y_ref_m", "heading_rad", "lane_id"}``.
     """
-    ego_x = float(ego_transform.location.x)
-    ego_y = float(ego_transform.location.y)
-    ego_z = float(ego_transform.location.z)
-    ego_psi = float(math.radians(ego_transform.rotation.yaw))
+    ego_position = _pose_xyz(ego_pose)
+    ego_x = float(ego_position["x"])
+    ego_y = float(ego_position["y"])
+    ego_z = float(ego_position["z"])
+    ego_psi = float(ego_pose.get("heading_rad", 0.0))
     n = max(1, int(horizon_steps))
     sd = max(0.25, float(step_distance_m))
 
-    ego_wp = world_map.get_waypoint(
-        ego_transform.location,
-        project_to_road=True,
-        lane_type=carla.LaneType.Driving,
-    )
+    ego_wp = map_planner.get_waypoint(ego_position)
     if ego_wp is None:
         return [
             {
@@ -2005,14 +1926,12 @@ def build_reference_samples(
 
     # ---- Reference wp for mode check ---- #
     if mode_reference_xy is not None:
-        ref_wp = world_map.get_waypoint(
-            carla.Location(
-                x=float(mode_reference_xy[0]),
-                y=float(mode_reference_xy[1]),
-                z=ego_z,
-            ),
-            project_to_road=True,
-            lane_type=carla.LaneType.Driving,
+        ref_wp = map_planner.get_waypoint(
+            {
+                "x": float(mode_reference_xy[0]),
+                "y": float(mode_reference_xy[1]),
+                "z": ego_z,
+            }
         )
         if ref_wp is None:
             ref_wp = ego_wp
@@ -2038,9 +1957,8 @@ def build_reference_samples(
         and stop_target_state is not None
     ):
         stop_reference_samples = _build_stop_reference_samples(
-            world_map=world_map,
-            carla=carla,
-            ego_transform=ego_transform,
+            map_planner=map_planner,
+            ego_pose=ego_pose,
             stop_target_state=stop_target_state,
             global_route_points=global_route_points,
             horizon_steps=n,
@@ -2049,7 +1967,7 @@ def build_reference_samples(
         if len(stop_reference_samples) > 0:
             return stop_reference_samples
     del follow_target_state
-    current_lane_id = _internal_lane_id(carla, ego_wp)
+    current_lane_id = _internal_lane_id(ego_wp)
     route_alignment_lane_id = (
         int(target_lane_id)
         if int(target_lane_id) != 0
@@ -2078,8 +1996,7 @@ def build_reference_samples(
             and normalized_decision in ("lane_change_left", "lane_change_right", "reroute")
         ):
             source_route_samples = _build_route_reference_samples_from_anchor(
-                world_map=world_map,
-                carla=carla,
+                map_planner=map_planner,
                 anchor_wp=anchor_wp,
                 route_points=route_points_valid,
                 horizon_steps=n,
@@ -2089,8 +2006,7 @@ def build_reference_samples(
                 follow_route_lane=False,
             )
             target_route_samples = _build_route_reference_samples_from_anchor(
-                world_map=world_map,
-                carla=carla,
+                map_planner=map_planner,
                 anchor_wp=anchor_wp,
                 route_points=route_points_valid,
                 horizon_steps=n,
@@ -2107,8 +2023,7 @@ def build_reference_samples(
                     blend_steps=blend_steps,
                 )
         route_samples = _build_route_reference_samples_from_anchor(
-            world_map=world_map,
-            carla=carla,
+            map_planner=map_planner,
             anchor_wp=anchor_wp,
             route_points=route_points_valid,
             horizon_steps=n,
@@ -2121,13 +2036,12 @@ def build_reference_samples(
             return route_samples
 
     start_wp = _start_wp_for_decision(
-        carla, ego_wp, str(normalized_decision), int(target_lane_id),
+        ego_wp, str(normalized_decision), int(target_lane_id),
         allow_junction_lane_snap=str(normalized_decision) in {"lane_change_left", "lane_change_right"},
     )
     walk_maneuver = str(next_macro_maneuver or "") if bool(is_intersection) else None
     source_samples = _build_forward_reference_samples(
         ego_wp,
-        carla=carla,
         horizon_steps=n,
         step_distance_m=sd,
         route_points=None,
@@ -2136,7 +2050,6 @@ def build_reference_samples(
     )
     target_samples = _build_forward_reference_samples(
         start_wp,
-        carla=carla,
         horizon_steps=n,
         step_distance_m=sd,
         route_points=None,
@@ -2159,32 +2072,27 @@ def build_reference_samples(
 
 
 def compute_ego_lane_offset(
-    world_map: Any,
-    carla: Any,
-    ego_transform: Any,
+    map_planner: Any,
+    ego_pose: Mapping[str, object],
 ) -> Dict[str, float]:
     """
     Lateral offset and heading error relative to lane centre.
 
     Returns ``{"lateral_offset_m", "heading_error_rad", "lane_id"}``.
     """
-    ego_wp = world_map.get_waypoint(
-        ego_transform.location,
-        project_to_road=True,
-        lane_type=carla.LaneType.Driving,
-    )
+    ego_position = _pose_xyz(ego_pose)
+    ego_wp = map_planner.get_waypoint(ego_position)
     if ego_wp is None:
         return {"lateral_offset_m": 0.0, "heading_error_rad": 0.0,
                 "lane_id": 0}
 
-    wp_loc = ego_wp.transform.location
-    ego_loc = ego_transform.location
-    dx = float(ego_loc.x) - float(wp_loc.x)
-    dy = float(ego_loc.y) - float(wp_loc.y)
-    lane_yaw = math.radians(float(ego_wp.transform.rotation.yaw))
+    wp_x_m, wp_y_m = _waypoint_xy(ego_wp)
+    dx = float(ego_position["x"]) - wp_x_m
+    dy = float(ego_position["y"]) - wp_y_m
+    lane_yaw = _waypoint_heading_rad(ego_wp)
     lateral = -math.sin(lane_yaw) * dx + math.cos(lane_yaw) * dy
 
-    ego_yaw = math.radians(float(ego_transform.rotation.yaw))
+    ego_yaw = float(ego_pose.get("heading_rad", 0.0))
     heading_error = math.atan2(
         math.sin(ego_yaw - lane_yaw),
         math.cos(ego_yaw - lane_yaw),
@@ -2193,5 +2101,5 @@ def compute_ego_lane_offset(
     return {
         "lateral_offset_m": float(lateral),
         "heading_error_rad": float(heading_error),
-        "lane_id": _internal_lane_id(carla, ego_wp),
+        "lane_id": _internal_lane_id(ego_wp),
     }

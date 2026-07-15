@@ -15,6 +15,21 @@ from behavior_planner.reroute import (
     remove_cp_messages_by_id,
     write_cp_messages,
 )
+from utility.global_planner import world_heading_rad
+
+
+def _custom_waypoint_transform(waypoint, carla):
+    if waypoint is None:
+        return None
+    position = waypoint.position
+    return carla.Transform(
+        carla.Location(
+            x=float(position["x"]),
+            y=float(position["y"]),
+            z=float(position.get("z", 0.0)),
+        ),
+        carla.Rotation(yaw=math.degrees(float(world_heading_rad(waypoint) or 0.0))),
+    )
 
 
 def _best_partial_match(candidates: List[Tuple[int, Any]]) -> Any | None:
@@ -277,7 +292,7 @@ def _resolve_marker_transform(world, carla, marker_name: str):
 def _spawn_static_vehicle_at_marker(
     *,
     world,
-    world_map,
+    map_planner,
     carla,
     marker_name: str,
     vehicle_blueprint_id: str,
@@ -303,14 +318,15 @@ def _spawn_static_vehicle_at_marker(
     if str(color_rgb).strip() and blueprint.has_attribute("color"):
         blueprint.set_attribute("color", str(color_rgb).strip())
 
-    waypoint_transform = None
-    if world_map is not None and hasattr(world_map, "get_waypoint"):
-        nearest_waypoint = world_map.get_waypoint(
-            marker_transform.location,
-            project_to_road=True,
-            lane_type=carla.LaneType.Driving,
-        )
-        waypoint_transform = None if nearest_waypoint is None else nearest_waypoint.transform
+    marker_location = marker_transform.location
+    nearest_waypoint = map_planner.get_waypoint(
+        {
+            "x": float(marker_location.x),
+            "y": float(marker_location.y),
+            "z": float(marker_location.z),
+        }
+    )
+    waypoint_transform = _custom_waypoint_transform(nearest_waypoint, carla)
 
     spawn_vehicle = None
     for attempt_transform in _spawn_attempt_transforms(
@@ -339,7 +355,8 @@ def _spawn_static_vehicle_at_marker(
 def spawn_obstacles(
     *,
     world,
-    world_map,
+    world_map=None,
+    map_planner=None,
     carla,
     blueprint_library,
     traffic_manager=None,
@@ -349,6 +366,9 @@ def spawn_obstacles(
     route_points: Sequence[Sequence[float]] | None = None,
 ) -> List[Any]:
     del route_summary, route_points
+    del world_map
+    if map_planner is None:
+        raise ValueError("Roadway-hazard obstacle spawning requires map_planner.")
 
     obstacle_cfg = dict(scenario_cfg.get("obstacles", {}))
     marker_names = _lowercase_name_set(
@@ -385,12 +405,15 @@ def spawn_obstacles(
         if color_rgb and blueprint.has_attribute("color"):
             blueprint.set_attribute("color", color_rgb)
 
-        nearest_waypoint = world_map.get_waypoint(
-            marker.transform.location,
-            project_to_road=True,
-            lane_type=carla.LaneType.Driving,
+        marker_location = marker.transform.location
+        nearest_waypoint = map_planner.get_waypoint(
+            {
+                "x": float(marker_location.x),
+                "y": float(marker_location.y),
+                "z": float(marker_location.z),
+            }
         )
-        waypoint_transform = None if nearest_waypoint is None else nearest_waypoint.transform
+        waypoint_transform = _custom_waypoint_transform(nearest_waypoint, carla)
         spawn_vehicle = None
         for attempt_transform in _spawn_attempt_transforms(
             base_transform=marker.transform,
@@ -432,6 +455,7 @@ def initialize_runtime(
     scenario_cfg: Mapping[str, object],
     world=None,
     world_map=None,
+    map_planner=None,
     carla=None,
     wall_time_s: float | None = None,
     **_,
@@ -466,7 +490,7 @@ def initialize_runtime(
         spawned_actor_id = None
         if (
             world is not None
-            and world_map is not None
+            and map_planner is not None
             and carla is not None
             and hazard_name
             and hazard_transform is not None
@@ -474,7 +498,7 @@ def initialize_runtime(
             _destroy_actors_by_role_name(world, role_name=hazard_vehicle_id)
             spawned_actor = _spawn_static_vehicle_at_marker(
                 world=world,
-                world_map=world_map,
+                map_planner=map_planner,
                 carla=carla,
                 marker_name=hazard_name,
                 vehicle_blueprint_id=str(

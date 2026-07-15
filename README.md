@@ -29,6 +29,22 @@ The module has been tested locally with:
 - `opencda/co_simulation/`: minimal SUMO bridge dependency used by `opencda_scenario`.
 
 
+## Custom Global Planner
+
+This repository includes a custom CARLA-independent global planner under `opencda/planning_module/Global_Planner/`.
+
+It reads the OpenDRIVE map and provides route, waypoint, and lane-context queries used by the planning runner and behavior planner.
+
+CARLA is still used for simulation, actor state, actuation, and visualization, but route search and lane-level planning context come from the custom planner.
+
+From project root run this command to build and installs the required AD-map Python bindings and native libraries for the active Python environment.
+```bash
+cd opencda/planning_module/Global_Planner && ./build_ad_map.sh
+
+```
+
+
+
 ## Main Planning Changes
  The current lane-change states include:
 

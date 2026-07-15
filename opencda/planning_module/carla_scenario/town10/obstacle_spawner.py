@@ -4,8 +4,25 @@ Scenario-local obstacle spawner for Town10.
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Any, List, Mapping, Sequence
+
+from utility.global_planner import world_heading_rad
+
+
+def _custom_waypoint_transform(waypoint, carla):
+    if waypoint is None:
+        return None
+    position = waypoint.position
+    return carla.Transform(
+        carla.Location(
+            x=float(position["x"]),
+            y=float(position["y"]),
+            z=float(position.get("z", 0.0)),
+        ),
+        carla.Rotation(yaw=math.degrees(float(world_heading_rad(waypoint) or 0.0))),
+    )
 
 
 def _obstacle_sort_key(env_obj, prefix: str) -> tuple[int, int, str]:
@@ -108,7 +125,8 @@ def _configure_static_vehicle(vehicle, carla) -> None:
 def spawn_obstacles(
     *,
     world,
-    world_map,
+    world_map=None,
+    map_planner=None,
     carla,
     blueprint_library,
     scenario_cfg: Mapping[str, object],
@@ -116,6 +134,9 @@ def spawn_obstacles(
     route_points: Sequence[Sequence[float]] | None = None,
 ) -> List[Any]:
     del route_summary, route_points
+    del world_map
+    if map_planner is None:
+        raise ValueError("Town10 obstacle spawning requires map_planner.")
 
     obstacle_cfg = dict(scenario_cfg.get("obstacles", {}))
     cube_name_prefix = str(obstacle_cfg.get("cube_name_prefix", "obstacle")).strip() or "obstacle"
@@ -156,12 +177,14 @@ def spawn_obstacles(
         if color_rgb and blueprint.has_attribute("color"):
             blueprint.set_attribute("color", color_rgb)
 
-        nearest_waypoint = world_map.get_waypoint(
-            marker_location,
-            project_to_road=True,
-            lane_type=carla.LaneType.Driving,
+        nearest_waypoint = map_planner.get_waypoint(
+            {
+                "x": float(marker_location.x),
+                "y": float(marker_location.y),
+                "z": float(marker_location.z),
+            }
         )
-        waypoint_transform = None if nearest_waypoint is None else nearest_waypoint.transform
+        waypoint_transform = _custom_waypoint_transform(nearest_waypoint, carla)
         spawn_vehicle = None
         for attempt_transform in _spawn_attempt_transforms(
             base_transform=marker_transform,

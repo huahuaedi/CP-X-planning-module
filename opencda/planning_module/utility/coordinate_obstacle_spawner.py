@@ -24,6 +24,22 @@ from behavior_planner.reroute import (
     load_cp_messages,
     write_cp_messages,
 )
+from utility.global_planner import world_heading_rad
+
+
+def _custom_waypoint_transform(waypoint, carla):
+    if waypoint is None:
+        return None
+    position = waypoint.position
+    heading_rad = world_heading_rad(waypoint)
+    return carla.Transform(
+        carla.Location(
+            x=float(position["x"]),
+            y=float(position["y"]),
+            z=float(position.get("z", 0.0)),
+        ),
+        carla.Rotation(yaw=math.degrees(float(heading_rad or 0.0))),
+    )
 
 
 def _clone_transform_with_pose(location_transform, rotation_transform, carla, z_m: float):
@@ -120,13 +136,17 @@ def _configure_autopilot_vehicle(vehicle, carla, traffic_manager_port) -> None:
 def spawn_obstacles(
     *,
     world,
-    world_map,
+    world_map=None,
+    map_planner=None,
     carla,
     blueprint_library,
     scenario_cfg: Mapping[str, object],
     traffic_manager_port: int | None = None,
     **_ignored: object,
 ) -> List[Any]:
+    del world_map
+    if map_planner is None:
+        raise ValueError("Coordinate obstacle spawning requires map_planner.")
     obstacle_cfg = dict(scenario_cfg.get("obstacles", {}))
     static_actors_cfg = obstacle_cfg.get("static_actors", [])
     if not isinstance(static_actors_cfg, Sequence) or isinstance(static_actors_cfg, (str, bytes)):
@@ -157,12 +177,8 @@ def spawn_obstacles(
             carla.Location(x=x_m, y=y_m, z=z_m),
             carla.Rotation(yaw=yaw_deg),
         )
-        nearest_waypoint = world_map.get_waypoint(
-            base_transform.location,
-            project_to_road=True,
-            lane_type=carla.LaneType.Driving,
-        )
-        waypoint_transform = None if nearest_waypoint is None else nearest_waypoint.transform
+        nearest_waypoint = map_planner.get_waypoint({"x": x_m, "y": y_m, "z": z_m})
+        waypoint_transform = _custom_waypoint_transform(nearest_waypoint, carla)
 
         spawn_vehicle = None
         for attempt_transform in _spawn_attempt_transforms(
@@ -245,12 +261,11 @@ def spawn_obstacles(
                 carla.Location(x=float(first_waypoint[0]), y=float(first_waypoint[1]), z=float(first_waypoint[2]) if len(first_waypoint) > 2 else 0.0),
                 carla.Rotation(yaw=float(first_waypoint[3]) if len(first_waypoint) > 3 else 0.0),
             )
-            nearest_waypoint = world_map.get_waypoint(
-                base_transform.location,
-                project_to_road=True,
-                lane_type=carla.LaneType.Driving,
+            npc_z_m = float(first_waypoint[2]) if len(first_waypoint) > 2 else 0.0
+            nearest_waypoint = map_planner.get_waypoint(
+                {"x": float(first_waypoint[0]), "y": float(first_waypoint[1]), "z": npc_z_m}
             )
-            waypoint_transform = None if nearest_waypoint is None else nearest_waypoint.transform
+            waypoint_transform = _custom_waypoint_transform(nearest_waypoint, carla)
 
             npc_vehicle = None
             for attempt_transform in _spawn_attempt_transforms(

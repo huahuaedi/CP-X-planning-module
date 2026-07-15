@@ -11,7 +11,11 @@ import re
 import time
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
-from utility import canonical_lane_id_for_waypoint, raw_carla_lane_id_for_waypoint
+from utility import (
+    canonical_lane_id_for_waypoint,
+    raw_opendrive_lane_id_for_waypoint,
+    world_heading_rad,
+)
 from utility.cp_messages import (
     empty_cp_payload,
     load_cp_message_payload,
@@ -200,6 +204,20 @@ def _transform_xy(transform: Any) -> List[float] | None:
     return [float(location.x), float(location.y)]
 
 
+def _custom_waypoint_transform(waypoint, carla):
+    if waypoint is None:
+        return None
+    position = waypoint.position
+    return carla.Transform(
+        carla.Location(
+            x=float(position["x"]),
+            y=float(position["y"]),
+            z=float(position.get("z", 0.0)),
+        ),
+        carla.Rotation(yaw=math.degrees(float(world_heading_rad(waypoint) or 0.0))),
+    )
+
+
 def _distance_xy(first_xy: Sequence[object] | None, second_xy: Sequence[object] | None) -> float | None:
     if not isinstance(first_xy, Sequence) or len(first_xy) < 2:
         return None
@@ -226,29 +244,29 @@ def _normalize_signal_state(signal_state: object) -> str:
     return "unknown"
 
 
-def _closest_driving_waypoint(world_map, carla, transform: Any):
+def _closest_driving_waypoint(map_planner, transform: Any):
     location = getattr(transform, "location", None)
-    if location is None or world_map is None or not hasattr(world_map, "get_waypoint"):
+    if location is None or map_planner is None:
         return None
     try:
-        return world_map.get_waypoint(
-            location,
-            project_to_road=True,
-            lane_type=carla.LaneType.Driving,
+        return map_planner.get_waypoint(
+            {"x": float(location.x), "y": float(location.y), "z": float(location.z)}
         )
     except Exception:
         return None
 
 
-def _record_marker(*, world_map, carla, marker_obj: Any, prefix: str = "") -> Dict[str, object]:
+def _record_marker(*, map_planner, carla, marker_obj: Any, prefix: str = "") -> Dict[str, object]:
     transform = _object_transform(marker_obj)
-    waypoint = _closest_driving_waypoint(world_map, carla, transform)
-    waypoint_transform = getattr(waypoint, "transform", None) if waypoint is not None else None
+    waypoint = _closest_driving_waypoint(map_planner, transform)
+    waypoint_transform = _custom_waypoint_transform(waypoint, carla)
     lane_id = None
-    carla_lane_id = None
+    opendrive_lane_id = None
+    ad_lane_id = None
     if waypoint is not None:
         lane_id = int(canonical_lane_id_for_waypoint(waypoint))
-        carla_lane_id = int(raw_carla_lane_id_for_waypoint(waypoint))
+        opendrive_lane_id = int(raw_opendrive_lane_id_for_waypoint(waypoint))
+        ad_lane_id = int(waypoint.ad_lane_id)
     return {
         "name": str(getattr(marker_obj, "name", "")).strip(),
         "index": _marker_index(str(getattr(marker_obj, "name", "")), prefix),
@@ -256,21 +274,22 @@ def _record_marker(*, world_map, carla, marker_obj: Any, prefix: str = "") -> Di
         "position_xy": _transform_xy(transform) or [],
         "waypoint": waypoint,
         "waypoint_transform": waypoint_transform,
-        "road_id": None if waypoint is None else int(getattr(waypoint, "road_id", 0)),
-        "section_id": None if waypoint is None else int(getattr(waypoint, "section_id", 0)),
+        "road_id": None if waypoint is None else int(waypoint.road_id or 0),
+        "section_id": None if waypoint is None else int(waypoint.section_id or 0),
         "lane_id": lane_id,
-        "carla_lane_id": carla_lane_id,
+        "opendrive_lane_id": opendrive_lane_id,
+        "ad_lane_id": ad_lane_id,
     }
 
 
-def _records_by_prefix(*, world, world_map, carla, prefix: str) -> List[Dict[str, object]]:
+def _records_by_prefix(*, world, map_planner, carla, prefix: str) -> List[Dict[str, object]]:
     return [
-        _record_marker(world_map=world_map, carla=carla, marker_obj=obj, prefix=prefix)
+        _record_marker(map_planner=map_planner, carla=carla, marker_obj=obj, prefix=prefix)
         for obj in _find_markers_by_prefix(world, carla, prefix)
     ]
 
 
-def _records_by_indexed_names(*, world, world_map, carla, prefix: str) -> List[Dict[str, object]]:
+def _records_by_indexed_names(*, world, map_planner, carla, prefix: str) -> List[Dict[str, object]]:
     prefix_text = str(prefix).strip()
     if not prefix_text:
         return []
@@ -289,7 +308,7 @@ def _records_by_indexed_names(*, world, world_map, carla, prefix: str) -> List[D
     for marker_index in marker_indices:
         marker_record = _record_by_name(
             world=world,
-            world_map=world_map,
+            map_planner=map_planner,
             carla=carla,
             marker_name=f"{prefix_text}{int(marker_index)}",
         )
@@ -298,11 +317,11 @@ def _records_by_indexed_names(*, world, world_map, carla, prefix: str) -> List[D
     return matched_records
 
 
-def _record_by_name(*, world, world_map, carla, marker_name: str) -> Dict[str, object] | None:
+def _record_by_name(*, world, map_planner, carla, marker_name: str) -> Dict[str, object] | None:
     marker_obj = _find_marker(world, carla, marker_name)
     if marker_obj is None:
         return None
-    return _record_marker(world_map=world_map, carla=carla, marker_obj=marker_obj)
+    return _record_marker(map_planner=map_planner, carla=carla, marker_obj=marker_obj)
 
 
 def _message_id(prefix: str, kind: str, marker: Mapping[str, object]) -> str:
@@ -394,8 +413,10 @@ def _lane_event_from_marker(prefix: str, marker: Mapping[str, object]) -> Dict[s
     if marker.get("lane_id", None) is not None:
         event["lane_id"] = int(marker.get("lane_id"))
         event["lane_ids"] = [int(marker.get("lane_id"))]
-    if marker.get("carla_lane_id", None) is not None:
-        event["carla_lane_id"] = int(marker.get("carla_lane_id"))
+    if marker.get("opendrive_lane_id", None) is not None:
+        event["opendrive_lane_id"] = int(marker.get("opendrive_lane_id"))
+    if marker.get("ad_lane_id", None) is not None:
+        event["ad_lane_id"] = int(marker.get("ad_lane_id"))
     return event
 
 
@@ -407,63 +428,68 @@ def _stopping_point(marker: Mapping[str, object]) -> List[float]:
     return [float(value) for value in list(marker.get("position_xy", []))[:2]]
 
 
-def _traffic_light_stop_waypoints(actor: Any) -> List[Any]:
-    stop_waypoints: List[Any] = []
-    for method_name in ("get_stop_waypoints", "get_affected_lane_waypoints"):
-        method = getattr(actor, method_name, None)
-        if not callable(method):
-            continue
-        try:
-            returned_waypoints = list(method() or [])
-        except Exception:
-            continue
-        for waypoint in returned_waypoints:
-            if waypoint is not None:
-                stop_waypoints.append(waypoint)
-        if stop_waypoints:
-            break
-    return stop_waypoints
+def _traffic_light_actor_point(actor: Any) -> Dict[str, float] | None:
+    """Convert a CARLA signal/trigger transform to a primitive world point."""
+
+    actor_transform = _object_transform(actor)
+    actor_location = getattr(actor_transform, "location", None)
+    if actor_location is None:
+        return None
+    x_m = float(actor_location.x)
+    y_m = float(actor_location.y)
+    z_m = float(getattr(actor_location, "z", 0.0))
+    trigger_location = getattr(getattr(actor, "trigger_volume", None), "location", None)
+    if trigger_location is not None:
+        yaw_rad = math.radians(
+            float(getattr(getattr(actor_transform, "rotation", None), "yaw", 0.0))
+        )
+        local_x_m = float(getattr(trigger_location, "x", 0.0))
+        local_y_m = float(getattr(trigger_location, "y", 0.0))
+        x_m += math.cos(yaw_rad) * local_x_m - math.sin(yaw_rad) * local_y_m
+        y_m += math.sin(yaw_rad) * local_x_m + math.cos(yaw_rad) * local_y_m
+        z_m += float(getattr(trigger_location, "z", 0.0))
+    return {"x": x_m, "y": y_m, "z": z_m}
 
 
-def _stop_waypoint_match_details(
+def _signal_position_match_details(
     *,
-    stop_waypoint: Any,
+    signal_waypoint: Any,
     marker: Mapping[str, object],
 ) -> Tuple[int, float] | None:
     marker_stop_xy = _stopping_point(marker)
     if len(marker_stop_xy) < 2:
         return None
 
-    stop_location = getattr(getattr(stop_waypoint, "transform", None), "location", None)
-    if stop_location is None:
+    signal_position = getattr(signal_waypoint, "position", None)
+    if not isinstance(signal_position, Mapping):
         return None
 
     match_distance_m = float(
         math.hypot(
-            float(stop_location.x) - float(marker_stop_xy[0]),
-            float(stop_location.y) - float(marker_stop_xy[1]),
+            float(signal_position["x"]) - float(marker_stop_xy[0]),
+            float(signal_position["y"]) - float(marker_stop_xy[1]),
         )
     )
 
     marker_road_id = marker.get("road_id", None)
     marker_section_id = marker.get("section_id", None)
     marker_lane_id = marker.get("lane_id", None)
-    stop_waypoint_road_id = int(getattr(stop_waypoint, "road_id", 0))
-    stop_waypoint_section_id = int(getattr(stop_waypoint, "section_id", 0))
-    stop_waypoint_lane_id = int(canonical_lane_id_for_waypoint(stop_waypoint))
+    signal_waypoint_road_id = int(signal_waypoint.road_id or 0)
+    signal_waypoint_section_id = int(signal_waypoint.section_id or 0)
+    signal_waypoint_lane_id = int(canonical_lane_id_for_waypoint(signal_waypoint))
 
     road_matches = (
         marker_road_id is not None
-        and int(stop_waypoint_road_id) == int(marker_road_id)
+        and int(signal_waypoint_road_id) == int(marker_road_id)
     )
     section_matches = (
         marker_section_id is not None
-        and int(stop_waypoint_section_id) == int(marker_section_id)
+        and int(signal_waypoint_section_id) == int(marker_section_id)
     )
     lane_matches = (
         marker_lane_id is not None
         and int(marker_lane_id) != 0
-        and int(stop_waypoint_lane_id) == int(marker_lane_id)
+        and int(signal_waypoint_lane_id) == int(marker_lane_id)
     )
 
     if road_matches and section_matches and lane_matches:
@@ -480,6 +506,7 @@ def _stop_waypoint_match_details(
 def _intersection_signal_state_for_marker(
     *,
     world,
+    map_planner,
     marker: Mapping[str, object],
     stop_waypoint_match_distance_m: float,
     actor_position_match_distance_m: float,
@@ -504,20 +531,20 @@ def _intersection_signal_state_for_marker(
             except Exception:
                 signal_state = "unknown"
 
-        stop_waypoint_distances_m = [
-            _distance_xy(
-                marker_reference_xy,
-                _transform_xy(getattr(stop_waypoint, "transform", None)),
+        actor_point = _traffic_light_actor_point(actor)
+        signal_waypoint = (
+            None if actor_point is None else map_planner.get_waypoint(actor_point)
+        )
+        match_details = (
+            None
+            if signal_waypoint is None
+            else _signal_position_match_details(
+                signal_waypoint=signal_waypoint,
+                marker=marker,
             )
-            for stop_waypoint in _traffic_light_stop_waypoints(actor)
-        ]
-        stop_waypoint_distances_m = [
-            float(distance_m)
-            for distance_m in stop_waypoint_distances_m
-            if distance_m is not None
-        ]
-        if len(stop_waypoint_distances_m) > 0:
-            match_distance_m = min(stop_waypoint_distances_m)
+        )
+        if match_details is not None and int(match_details[0]) <= 2:
+            match_distance_m = float(match_details[1])
             max_match_distance_m = max(
                 float(stop_waypoint_match_distance_m),
                 float(actor_position_match_distance_m),
@@ -528,7 +555,11 @@ def _intersection_signal_state_for_marker(
                     best_candidate = (priority, str(signal_state), str(actor_name))
                 continue
 
-        actor_xy = _transform_xy(_object_transform(actor))
+        actor_xy = (
+            None
+            if actor_point is None
+            else [float(actor_point["x"]), float(actor_point["y"])]
+        )
         actor_distance_m = _distance_xy(marker_reference_xy, actor_xy)
         if (
             actor_distance_m is None
@@ -994,6 +1025,7 @@ def initialize_runtime(
     scenario_cfg: Mapping[str, object],
     world,
     world_map=None,
+    map_planner=None,
     carla,
     **extras,
 ) -> Dict[str, object]:
@@ -1016,37 +1048,37 @@ def initialize_runtime(
 
     hazard_marker = _record_by_name(
         world=world,
-        world_map=world_map,
+        map_planner=map_planner,
         carla=carla,
         marker_name=hazard_marker_name,
     )
     intersection_markers = _records_by_prefix(
         world=world,
-        world_map=world_map,
+        map_planner=map_planner,
         carla=carla,
         prefix=intersection_prefix,
     )
     stop_markers = _records_by_prefix(
         world=world,
-        world_map=world_map,
+        map_planner=map_planner,
         carla=carla,
         prefix=stop_prefix,
     )
     vehicle_markers = _records_by_indexed_names(
         world=world,
-        world_map=world_map,
+        map_planner=map_planner,
         carla=carla,
         prefix=vehicle_prefix,
     )
     vru_start_marker = _record_by_name(
         world=world,
-        world_map=world_map,
+        map_planner=map_planner,
         carla=carla,
         marker_name=vru_start_name,
     )
     vru_goal_marker = _record_by_name(
         world=world,
-        world_map=world_map,
+        map_planner=map_planner,
         carla=carla,
         marker_name=vru_goal_name,
     )
@@ -1218,6 +1250,7 @@ def _maybe_register_intersection_control(
     *,
     runtime_state: Dict[str, object],
     world,
+    map_planner,
     ego_transform,
     active_global_route_points: Sequence[Sequence[float]],
     sim_time_s: float,
@@ -1248,6 +1281,7 @@ def _maybe_register_intersection_control(
 
         signal_state, signal_actor_name = _intersection_signal_state_for_marker(
             world=world,
+            map_planner=map_planner,
             marker=marker,
             stop_waypoint_match_distance_m=float(stop_waypoint_match_distance_m),
             actor_position_match_distance_m=float(actor_position_match_distance_m),
@@ -1524,6 +1558,7 @@ def maybe_replan_global_route(
     runtime_state,
     world,
     world_map,
+    map_planner,
     carla,
     ego_transform,
     active_global_route_points: Sequence[Sequence[float]] | None = None,
@@ -1543,6 +1578,7 @@ def maybe_replan_global_route(
     _maybe_register_intersection_control(
         runtime_state=next_state,
         world=world,
+        map_planner=map_planner,
         ego_transform=ego_transform,
         active_global_route_points=list(active_global_route_points or []),
         sim_time_s=float(sim_time_s),
@@ -1573,8 +1609,7 @@ def maybe_replan_global_route(
     next_state = world_messages.publish_obstacle_messages(
         runtime_state=next_state,
         world=world,
-        world_map=world_map,
-        carla=carla,
+        map_planner=map_planner,
         ego_vehicle=extras.get("ego_vehicle", None),
         sim_time_s=float(sim_time_s),
         sumo_bridge=extras.get("sumo_bridge", None),

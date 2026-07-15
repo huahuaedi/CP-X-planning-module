@@ -14,6 +14,7 @@ import math
 from typing import Any, Mapping, Optional
 
 from utility.cp_messages import replace_cp_list
+from utility.global_planner import canonical_lane_id_for_waypoint
 
 
 class OpenCDACPProvider:
@@ -41,8 +42,7 @@ class OpenCDACPProvider:
         self,
         *,
         world: Any,
-        world_map: Any,
-        carla: Any,
+        map_planner: Any,
         ego_vehicle: Any,
         sim_time_s: float,
     ) -> list[dict]:
@@ -60,8 +60,7 @@ class OpenCDACPProvider:
                 continue
             message = self._vehicle_actor_to_cp_message(
                 actor=actor,
-                world_map=world_map,
-                carla=carla,
+                map_planner=map_planner,
                 sim_time_s=float(sim_time_s),
                 distance_m=float(distance_m),
             )
@@ -87,8 +86,7 @@ class OpenCDACPProvider:
         self,
         *,
         actor: Any,
-        world_map: Any,
-        carla: Any,
+        map_planner: Any,
         sim_time_s: float,
         distance_m: float,
     ) -> Optional[dict]:
@@ -109,13 +107,15 @@ class OpenCDACPProvider:
         lane_id = 0
         road_id = -1
         try:
-            waypoint = world_map.get_waypoint(
-                location,
-                project_to_road=True,
-                lane_type=carla.LaneType.Driving,
+            waypoint = map_planner.get_waypoint(
+                {
+                    "x": float(location.x),
+                    "y": float(location.y),
+                    "z": float(location.z),
+                }
             )
-            lane_id = int(getattr(waypoint, "lane_id", 0))
-            road_id = int(getattr(waypoint, "road_id", -1))
+            lane_id = int(canonical_lane_id_for_waypoint(waypoint))
+            road_id = int(getattr(waypoint, "road_id", -1) or -1)
         except Exception:
             pass
 

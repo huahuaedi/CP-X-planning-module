@@ -1,9 +1,8 @@
 """CARLA-to-CP traffic-light adapter.
 
-This module converts CARLA traffic-light state, map geometry, and ego pose
-into the cooperative-perception traffic-control message consumed by the
-behavior planner.  The runner should treat this as the boundary between raw
-simulator APIs and planner-facing CP messages.
+This module converts CARLA traffic-light actors/state and primitive actor
+positions into the cooperative-perception traffic-control message consumed by
+the behavior planner. Road and stop geometry comes from the custom planner.
 """
 
 from __future__ import annotations
@@ -13,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 from .traffic_light_stop import find_relevant_signal_context, find_stop_target_from_ego
+from utility.global_planner import canonical_lane_id_for_waypoint, world_heading_rad
 
 
 _STOP_SIGNAL_STATES = {"red", "yellow", "amber"}
@@ -44,7 +44,7 @@ def signal_state_requires_stop(signal_state: object) -> bool:
 
 
 def stop_target_forward_lateral_m(
-    ego_transform: Any,
+    ego_pose: Mapping[str, object],
     stop_target: Mapping[str, object] | None,
 ) -> Tuple[float, float]:
     """Return stop target coordinates in ego-forward/lateral frame."""
@@ -53,12 +53,12 @@ def stop_target_forward_lateral_m(
         return float("nan"), float("nan")
     try:
         dx_m = float(stop_target.get("x_m", stop_target.get("x", 0.0))) - float(
-            ego_transform.location.x
+            ego_pose["x"]
         )
         dy_m = float(stop_target.get("y_m", stop_target.get("y", 0.0))) - float(
-            ego_transform.location.y
+            ego_pose["y"]
         )
-        yaw_rad = math.radians(float(ego_transform.rotation.yaw))
+        yaw_rad = float(ego_pose.get("heading_rad", 0.0))
         forward_m = dx_m * math.cos(yaw_rad) + dy_m * math.sin(yaw_rad)
         lateral_m = -dx_m * math.sin(yaw_rad) + dy_m * math.cos(yaw_rad)
         return float(forward_m), float(lateral_m)
@@ -68,12 +68,12 @@ def stop_target_forward_lateral_m(
 
 def with_stop_target_distance_from_ego(
     *,
-    ego_transform: Any,
+    ego_pose: Mapping[str, object],
     stop_target: Mapping[str, object],
 ) -> Dict[str, object]:
     updated = dict(stop_target)
     forward_m, lateral_m = stop_target_forward_lateral_m(
-        ego_transform=ego_transform,
+        ego_pose=ego_pose,
         stop_target=updated,
     )
     if math.isfinite(float(forward_m)):
@@ -104,9 +104,8 @@ def stop_line_from_stop_target(
 
 def _fallback_signal_stop_target_from_ego(
     *,
-    world_map: Any,
-    carla: Any,
-    ego_transform: Any,
+    map_planner: Any,
+    ego_pose: Mapping[str, object],
     signal_context: Mapping[str, object] | None,
     search_distance_m: float,
     stop_buffer_m: float,
@@ -156,23 +155,26 @@ def _fallback_signal_stop_target_from_ego(
         return None
 
     try:
-        ego_waypoint = world_map.get_waypoint(
-            ego_transform.location,
-            project_to_road=True,
-            lane_type=carla.LaneType.Driving,
+        ego_waypoint = map_planner.get_waypoint(
+            {
+                "x": float(ego_pose["x"]),
+                "y": float(ego_pose["y"]),
+                "z": float(ego_pose.get("z", 0.0)),
+            }
         )
         if ego_waypoint is None:
             return None
         next_waypoints = ego_waypoint.next(float(forward_distance_m))
         stop_waypoint = next_waypoints[0] if next_waypoints else ego_waypoint
-        stop_transform = stop_waypoint.transform
         return {
-            "x_m": float(stop_transform.location.x),
-            "y_m": float(stop_transform.location.y),
-            "heading_rad": float(math.radians(stop_transform.rotation.yaw)),
-            "lane_id": int(getattr(stop_waypoint, "lane_id", 0)),
-            "road_id": int(getattr(stop_waypoint, "road_id", 0)),
-            "section_id": int(getattr(stop_waypoint, "section_id", 0)),
+            "x_m": float(stop_waypoint.position["x"]),
+            "y_m": float(stop_waypoint.position["y"]),
+            "heading_rad": float(world_heading_rad(stop_waypoint) or 0.0),
+            "lane_id": int(canonical_lane_id_for_waypoint(stop_waypoint)),
+            "ad_lane_id": int(stop_waypoint.ad_lane_id),
+            "opendrive_lane_id": int(stop_waypoint.lane_id or 0),
+            "road_id": int(stop_waypoint.road_id or 0),
+            "section_id": int(stop_waypoint.section_id or 0),
             "distance_m": float(forward_distance_m),
             "source": "fallback_signal_stop_target",
             "signal_distance_m": float(signal_distance_m),
@@ -192,7 +194,7 @@ def cp_traffic_control_from_signal_context(
     *,
     signal_context: Mapping[str, object] | None,
     stop_target: Mapping[str, object] | None,
-    ego_transform: Any,
+    ego_pose: Mapping[str, object],
     sim_time_s: float,
     valid_for_s: float = 0.5,
     search_distance_m: float = 100.0,
@@ -206,7 +208,7 @@ def cp_traffic_control_from_signal_context(
     valid_for_s = max(0.0, float(valid_for_s))
     stop_target_with_distance = (
         with_stop_target_distance_from_ego(
-            ego_transform=ego_transform,
+            ego_pose=ego_pose,
             stop_target=stop_target,
         )
         if isinstance(stop_target, Mapping)
@@ -214,7 +216,7 @@ def cp_traffic_control_from_signal_context(
     )
     stop_line = stop_line_from_stop_target(stop_target_with_distance)
     forward_m, lateral_m = stop_target_forward_lateral_m(
-        ego_transform=ego_transform,
+        ego_pose=ego_pose,
         stop_target=stop_target_with_distance,
     )
     ego_passed_stop_line = bool(math.isfinite(forward_m) and forward_m < -1.0)
@@ -284,10 +286,9 @@ def cp_traffic_control_from_signal_context(
 def build_carla_traffic_light_cp_message(
     *,
     world: Any,
-    world_map: Any,
-    carla: Any,
+    map_planner: Any,
     ego_vehicle: Any,
-    ego_transform: Any,
+    ego_pose: Mapping[str, object],
     global_route_points: Sequence[object],
     sim_time_s: float,
     search_distance_m: float,
@@ -300,18 +301,19 @@ def build_carla_traffic_light_cp_message(
 ) -> CarlaTrafficLightCPResult:
     """Read CARLA traffic-light data and expose it as a CP control message."""
 
-    ego_waypoint = world_map.get_waypoint(
-        ego_transform.location,
-        project_to_road=True,
-        lane_type=carla.LaneType.Driving,
+    ego_waypoint = map_planner.get_waypoint(
+        {
+            "x": float(ego_pose["x"]),
+            "y": float(ego_pose["y"]),
+            "z": float(ego_pose.get("z", 0.0)),
+        }
     )
-    ego_in_junction = bool(getattr(ego_waypoint, "is_junction", False))
+    ego_in_junction = bool(getattr(ego_waypoint, "is_intersection", False))
     stop_target = None
     if not ego_in_junction:
         stop_target = find_stop_target_from_ego(
-            world_map=world_map,
-            carla=carla,
-            ego_transform=ego_transform,
+            map_planner=map_planner,
+            ego_pose=ego_pose,
             global_route_points=global_route_points,
             search_distance_m=float(search_distance_m),
             query_key=str(query_key),
@@ -319,8 +321,9 @@ def build_carla_traffic_light_cp_message(
 
     signal_context = find_relevant_signal_context(
         world=world,
+        map_planner=map_planner,
         ego_vehicle=ego_vehicle,
-        ego_transform=ego_transform,
+        ego_pose=ego_pose,
         stop_target=stop_target,
         max_stop_waypoint_match_distance_m=float(max_stop_waypoint_match_distance_m),
         max_actor_position_match_distance_m=float(
@@ -337,9 +340,8 @@ def build_carla_traffic_light_cp_message(
         and signal_state_requires_stop(dict(signal_context or {}).get("signal_state", ""))
     ):
         stop_target = _fallback_signal_stop_target_from_ego(
-            world_map=world_map,
-            carla=carla,
-            ego_transform=ego_transform,
+            map_planner=map_planner,
+            ego_pose=ego_pose,
             signal_context=signal_context,
             search_distance_m=float(search_distance_m),
             stop_buffer_m=float(stop_buffer_m),
@@ -352,7 +354,7 @@ def build_carla_traffic_light_cp_message(
     control_message = cp_traffic_control_from_signal_context(
         signal_context=signal_context,
         stop_target=stop_target,
-        ego_transform=ego_transform,
+        ego_pose=ego_pose,
         sim_time_s=float(sim_time_s),
         valid_for_s=float(valid_for_s),
         search_distance_m=float(search_distance_m),

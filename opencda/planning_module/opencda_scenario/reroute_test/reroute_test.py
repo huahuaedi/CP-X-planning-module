@@ -1,4 +1,4 @@
-"""Standalone Town10 reroute test using the planning-module A* planner."""
+"""Standalone Town10 reroute test using the custom OpenDRIVE planner."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import platform
 import queue
 import sys
 import time
-from typing import Any, Iterable, List, Sequence, Tuple
+from typing import Any, Iterable, List, Mapping, Sequence, Tuple
 
 import numpy as np
 
@@ -22,10 +22,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from opencda.planning_module.utility import (  # noqa: E402
-    AStarGlobalPlanner,
-    build_lane_center_waypoints,
-    canonical_lane_id_for_waypoint,
+    CustomGlobalPlannerAdapter,
 )
+from opencda.planning_module.opencda_scenario.sumo_assets import resolve_xodr_path  # noqa: E402
 
 try:
     import pygame
@@ -54,7 +53,8 @@ class MarkerWaypointState:
     waypoint_position_xy: Tuple[float, float]
     road_id: int
     section_id: int
-    carla_lane_id: int
+    opendrive_lane_id: int
+    ad_lane_id: int
     waypoint_key: Tuple[int, int, int, float]
     waypoint: Any
 
@@ -189,17 +189,17 @@ def _waypoint_key(waypoint: Any) -> Tuple[int, int, int, float] | None:
     if waypoint is None:
         return None
     return (
-        int(getattr(waypoint, "road_id", 0)),
-        int(getattr(waypoint, "section_id", 0)),
-        int(getattr(waypoint, "lane_id", 0)),
-        round(float(getattr(waypoint, "s", 0.0)), 3),
+        int(waypoint.road_id or 0),
+        int(waypoint.section_id or 0),
+        int(waypoint.lane_id or 0),
+        round(float(waypoint.parametric_offset), 6),
     )
 
 
 def _resolve_marker_waypoint_state(
     *,
     world,
-    world_map,
+    map_planner,
     carla,
     marker_name: str,
 ) -> MarkerWaypointState | None:
@@ -213,19 +213,15 @@ def _resolve_marker_waypoint_state(
         return None
 
     try:
-        waypoint = world_map.get_waypoint(
-            location,
-            project_to_road=True,
-            lane_type=carla.LaneType.Driving,
+        waypoint = map_planner.get_waypoint(
+            {"x": float(location.x), "y": float(location.y), "z": float(location.z)}
         )
     except Exception:
         waypoint = None
     if waypoint is None:
         return None
 
-    waypoint_location = getattr(getattr(waypoint, "transform", None), "location", None)
-    if waypoint_location is None:
-        return None
+    waypoint_position = waypoint.position
 
     key = _waypoint_key(waypoint)
     if key is None:
@@ -235,10 +231,11 @@ def _resolve_marker_waypoint_state(
         marker_name=str(marker_name),
         matched_object_name=_matched_object_name(world_object, marker_name),
         marker_position_xy=(float(location.x), float(location.y)),
-        waypoint_position_xy=(float(waypoint_location.x), float(waypoint_location.y)),
-        road_id=int(getattr(waypoint, "road_id", 0)),
-        section_id=int(getattr(waypoint, "section_id", 0)),
-        carla_lane_id=int(getattr(waypoint, "lane_id", 0)),
+        waypoint_position_xy=(float(waypoint_position["x"]), float(waypoint_position["y"])),
+        road_id=int(waypoint.road_id or 0),
+        section_id=int(waypoint.section_id or 0),
+        opendrive_lane_id=int(waypoint.lane_id or 0),
+        ad_lane_id=int(waypoint.ad_lane_id),
         waypoint_key=key,
         waypoint=waypoint,
     )
@@ -253,30 +250,6 @@ def _marker_snapshot_signature(marker_states: Iterable[MarkerWaypointState]) -> 
             tuple(marker_state.waypoint_key),
         )
         for marker_state in marker_states
-    )
-
-
-def _blocked_segments_for_close_waypoint(
-    planner: AStarGlobalPlanner,
-    close_waypoint: Any,
-) -> List[Tuple[str, int]]:
-    if close_waypoint is None:
-        return []
-    raw_segment_keys = list(
-        planner.segment_keys_for_raw_carla_lane(
-            road_id=int(getattr(close_waypoint, "road_id", 0)),
-            section_id=int(getattr(close_waypoint, "section_id", 0)),
-            lane_id=int(getattr(close_waypoint, "lane_id", 0)),
-        )
-    )
-    if raw_segment_keys:
-        return raw_segment_keys
-
-    return list(
-        planner.segment_keys_for_road_and_lane(
-            road_id=f"{int(getattr(close_waypoint, 'road_id', 0))}:{int(getattr(close_waypoint, 'section_id', 0))}",
-            lane_id=int(canonical_lane_id_for_waypoint(close_waypoint)),
-        )
     )
 
 
@@ -708,96 +681,31 @@ def _camera_height_for_centered_focus_points(
 
 def _plan_initial_route(
     *,
-    planner: AStarGlobalPlanner,
+    planner: CustomGlobalPlannerAdapter,
     start_state: MarkerWaypointState,
     end_state: MarkerWaypointState,
     close_state: MarkerWaypointState,
-    planner_mode: str = "carla_grp",
 ):
-    start_location = getattr(getattr(start_state.waypoint, "transform", None), "location", None)
-    goal_location = getattr(getattr(end_state.waypoint, "transform", None), "location", None)
-    carla_route_failure_reason = ""
-    if planner_mode == "astar":
-        carla_blocked_edges: list = []
-    else:
-        carla_blocked_edges = list(
-            getattr(planner, "blocked_carla_graph_edges_for_waypoints", lambda _blocked_waypoints: [])(
-                [close_state.waypoint]
-            )
-        )
-    if planner_mode != "astar" and start_location is not None and goal_location is not None and len(carla_blocked_edges) > 0:
-        route_summary = planner.plan_route_from_locations_with_blocked_carla_waypoints(
-            start_location=start_location,
-            goal_location=goal_location,
-            blocked_waypoints=[close_state.waypoint],
-            fallback_start_xy=list(start_state.waypoint_position_xy),
-            fallback_goal_xy=list(end_state.waypoint_position_xy),
-        )
-        if bool(getattr(route_summary, "route_found", False)):
-            print("new path generated by global planner")
-            return (
-                route_summary,
-                [f"edge:{int(edge_start)}->{int(edge_end)}" for edge_start, edge_end in carla_blocked_edges],
-                "blocked_close_carla_edge",
-            )
-        carla_route_failure_reason = str(getattr(route_summary, "debug_reason", "") or "").strip()
-
-    start_query = planner.nearest_waypoint_query(
-        x_m=float(start_state.waypoint_position_xy[0]),
-        y_m=float(start_state.waypoint_position_xy[1]),
-    )
-    goal_query = planner.nearest_waypoint_query(
-        x_m=float(end_state.waypoint_position_xy[0]),
-        y_m=float(end_state.waypoint_position_xy[1]),
-    )
-    close_query = planner.nearest_waypoint_query(
-        x_m=float(close_state.waypoint_position_xy[0]),
-        y_m=float(close_state.waypoint_position_xy[1]),
-    )
-    if start_query is None or goal_query is None or close_query is None:
-        return (
-            type(
-                "RouteSummary",
-                (),
-                {
-                    "route_found": False,
-                    "route_waypoints": [],
-                    "debug_reason": "Could not resolve start, end, or close to a sampled graph waypoint.",
-                },
-            )(),
-            [f"node:{int(getattr(close_query, 'index', -1))}"] if close_query is not None else [],
-            "blocked_close_waypoint",
-        )
-
-    blocked_node_indices = {int(close_query.index)}
-    blocked_node_indices.discard(int(start_query.index))
-    blocked_node_indices.discard(int(goal_query.index))
-    route_summary = planner._route_with_endpoint_candidates(
-        start_x_m=float(start_state.waypoint_position_xy[0]),
-        start_y_m=float(start_state.waypoint_position_xy[1]),
-        goal_x_m=float(end_state.waypoint_position_xy[0]),
-        goal_y_m=float(end_state.waypoint_position_xy[1]),
-        start_query=start_query,
-        goal_query=goal_query,
-        blocked_node_indices=blocked_node_indices,
+    planner.block_ad_lane_id(int(close_state.ad_lane_id))
+    route_summary = planner.trace_route(
+        {
+            "x": float(start_state.marker_position_xy[0]),
+            "y": float(start_state.marker_position_xy[1]),
+            "z": float(start_state.waypoint.position.get("z", 0.0)),
+        },
+        {
+            "x": float(end_state.marker_position_xy[0]),
+            "y": float(end_state.marker_position_xy[1]),
+            "z": float(end_state.waypoint.position.get("z", 0.0)),
+        },
+        replace_stored_route=True,
     )
     if bool(getattr(route_summary, "route_found", False)):
         print("new path generated by global planner")
-    elif carla_route_failure_reason:
-        combined_reason = str(getattr(route_summary, "debug_reason", "") or "").strip()
-        setattr(
-            route_summary,
-            "debug_reason",
-            (
-                f"carla_edge: {carla_route_failure_reason}; internal_node: {combined_reason}"
-                if combined_reason
-                else f"carla_edge: {carla_route_failure_reason}"
-            ),
-        )
     return (
         route_summary,
-        [f"node:{int(node_index)}" for node_index in sorted(int(node_index) for node_index in blocked_node_indices)],
-        "blocked_close_waypoint",
+        [f"ad_lane:{int(close_state.ad_lane_id)}"],
+        "blocked_close_ad_lane",
     )
 
 
@@ -810,7 +718,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--sample-distance-m",
         default=2.0,
         type=float,
-        help="Lane-center waypoint sample distance used to build the A* graph",
+        help="Custom route sampling distance",
     )
     parser.add_argument(
         "--poll-interval-s",
@@ -848,7 +756,6 @@ def _runtime_cfg(scenario_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
                 planning_cfg.get("waypoint_sample_distance_m", DEFAULT_SAMPLE_DISTANCE_M),
             )
         ),
-        "planner_mode": str(planning_cfg.get("global_planner_mode", "carla_grp")).strip().lower(),
         "poll_interval_s": float(runtime_cfg.get("poll_interval_s", DEFAULT_POLL_INTERVAL_S)),
         "draw_life_s": float(runtime_cfg.get("draw_life_s", DEFAULT_DRAW_LIFE_S)),
         "camera_enabled": bool(camera_cfg.get("enabled", True)),
@@ -877,22 +784,29 @@ def _ensure_town10_world(client, *, load_if_needed: bool):
     return client.load_world(EXPECTED_TOWN10_MAP)
 
 
-def _build_planner(world, carla, sample_distance_m: float) -> Tuple[Any, AStarGlobalPlanner]:
+def _build_planner(
+    world,
+    scenario_cfg: Mapping[str, object],
+    sample_distance_m: float,
+) -> Tuple[Any, CustomGlobalPlannerAdapter]:
     world_map = world.get_map()
     print(
-        "[REROUTE_TEST] building A* waypoint graph for "
+        "[REROUTE_TEST] loading the custom OpenDRIVE planner for "
         f"{getattr(world_map, 'name', '<unknown>')} with sample_distance_m={float(sample_distance_m):.2f}"
     )
-    lane_center_waypoints, _ = build_lane_center_waypoints(
-        map_obj=world_map,
-        carla=carla,
-        sample_distance_m=float(sample_distance_m),
+    xodr_path = resolve_xodr_path(
+        scenario_cfg=scenario_cfg,
+        sumo_cfg=dict(scenario_cfg.get("sumo", {}) or {}),
     )
-    planner = AStarGlobalPlanner(
-        lane_center_waypoints=lane_center_waypoints,
-        world_map=world_map,
+    scenario_dir = str(
+        scenario_cfg.get("_scenario_dir", str(Path(__file__).resolve().parent))
+    )
+    planner = CustomGlobalPlannerAdapter(
+        xodr_path=xodr_path,
+        cache_root=os.path.join(scenario_dir, ".global_planner_cache"),
         route_sample_distance_m=float(sample_distance_m),
     )
+    planner.load()
     return world_map, planner
 
 
@@ -936,7 +850,7 @@ def run_loaded_world(client, world, scenario_cfg, carla) -> int:
     )
     world_map, planner = _build_planner(
         world,
-        carla,
+        scenario_cfg,
         sample_distance_m=float(runtime_cfg["sample_distance_m"]),
     )
     active_map_name = str(getattr(world_map, "name", ""))
@@ -1000,9 +914,10 @@ def run_loaded_world(client, world, scenario_cfg, carla) -> int:
                         last_status_key = status_key
                     time.sleep(float(runtime_cfg["poll_interval_s"]))
                     continue
+                planner.close()
                 world_map, planner = _build_planner(
                     world,
-                    carla,
+                    scenario_cfg,
                     sample_distance_m=float(runtime_cfg["sample_distance_m"]),
                 )
                 active_map_name = current_map_name
@@ -1036,7 +951,7 @@ def run_loaded_world(client, world, scenario_cfg, carla) -> int:
                 for marker_name in marker_names:
                     marker_state = _resolve_marker_waypoint_state(
                         world=world,
-                        world_map=world_map,
+                        map_planner=planner,
                         carla=carla,
                         marker_name=marker_name,
                     )
@@ -1069,7 +984,6 @@ def run_loaded_world(client, world, scenario_cfg, carla) -> int:
                     start_state=start_state,
                     end_state=end_state,
                     close_state=close_state,
-                    planner_mode=str(runtime_cfg["planner_mode"]),
                 )
                 route_found = bool(getattr(route_summary, "route_found", False))
                 cached_route_points = (
@@ -1134,11 +1048,7 @@ def run_loaded_world(client, world, scenario_cfg, carla) -> int:
                 time.sleep(float(runtime_cfg["poll_interval_s"]))
                 continue
             if topdown_camera is not None:
-                close_waypoint_location = getattr(
-                    getattr(getattr(close_state.waypoint, "transform", None), "location", None),
-                    "z",
-                    0.0,
-                )
+                close_waypoint_location = float(close_state.waypoint.position.get("z", 0.0))
                 topdown_camera.set_transform(
                     _topdown_camera_transform_from_target(
                         carla,
@@ -1161,7 +1071,7 @@ def run_loaded_world(client, world, scenario_cfg, carla) -> int:
                     hud_lines = [
                         f"route_points={int(len(cached_route_points))} found={bool(route_found)}",
                         f"method={str(route_method)}",
-                        f"close road={int(close_state.road_id)} section={int(close_state.section_id)} lane={int(close_state.carla_lane_id)} blocked={','.join(str(item) for item in blocked_segments) or 'n/a'}",
+                        f"close road={int(close_state.road_id)} section={int(close_state.section_id)} lane={int(close_state.opendrive_lane_id)} blocked={','.join(str(item) for item in blocked_segments) or 'n/a'}",
                         f"close xy=({float(close_state.marker_position_xy[0]):.1f}, {float(close_state.marker_position_xy[1]):.1f}) h={float(frozen_camera_height_m):.1f}m",
                     ]
                     if str(route_debug_reason).strip():
@@ -1196,6 +1106,7 @@ def run_loaded_world(client, world, scenario_cfg, carla) -> int:
         print("[REROUTE_TEST] stopped.")
         return 0
     finally:
+        planner.close()
         if topdown_camera is not None:
             try:
                 topdown_camera.stop()
@@ -1224,7 +1135,7 @@ def _print_route_status(
     if route_found:
         print(
             "[REROUTE_TEST] route updated "
-            f"blocking raw_lane={int(close_state.carla_lane_id)} "
+            f"blocking OpenDRIVE lane={int(close_state.opendrive_lane_id)} "
             f"on road={int(close_state.road_id)} section={int(close_state.section_id)} "
             f"segment_keys={list(blocked_segments)} "
             f"route_points={int(route_point_count)}"
@@ -1232,7 +1143,7 @@ def _print_route_status(
         return
     print(
         "[REROUTE_TEST] no route found "
-        f"blocking raw_lane={int(close_state.carla_lane_id)} "
+        f"blocking OpenDRIVE lane={int(close_state.opendrive_lane_id)} "
         f"on road={int(close_state.road_id)} section={int(close_state.section_id)}. "
         f"Reason: {str(route_reason or 'unknown')}"
     )
@@ -1256,6 +1167,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     scenario_cfg = {
         "name": "reroute_test",
+        "_scenario_dir": str(Path(__file__).resolve().parent),
+        "sumo": {
+            "xodr_path": "Global_Planner/maps/Town10HD_Opt.xodr",
+        },
         "planning": {
             "waypoint_sample_distance_m": float(args.sample_distance_m),
         },

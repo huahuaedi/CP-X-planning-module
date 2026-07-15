@@ -93,71 +93,43 @@ def resolve_xodr_path(
     scenario_cfg: Mapping[str, object] | None = None,
     sumo_cfg: Mapping[str, object] | None = None,
 ) -> str:
-    """
-    Resolve the OpenDRIVE path for the requested CARLA map.
-    """
+    """Resolve the scenario OpenDRIVE file without querying a CARLA map."""
 
     scenario_cfg = dict(scenario_cfg or {})
     sumo_cfg = dict(sumo_cfg or {})
-    configured = str(sumo_cfg.get("xodr_path", "")).strip()
+    configured = str(sumo_cfg.get("xodr_path", "") or "").strip()
     candidates: list[str] = []
     if configured:
-        candidates.append(configured)
+        expanded = os.path.expandvars(os.path.expanduser(configured))
+        if "$" in expanded:
+            raise ValueError(
+                f"Unresolved environment variable in sumo.xodr_path: {configured}"
+            )
+        if os.path.isabs(expanded):
+            candidates.append(expanded)
+        else:
+            scenario_path = str(scenario_cfg.get("_scenario_path", "") or "").strip()
+            if scenario_path:
+                candidates.append(os.path.join(os.path.dirname(scenario_path), expanded))
+            candidates.append(os.path.join(PROJECT_ROOT, expanded))
 
-    carla_cfg = dict(scenario_cfg.get("carla", {}))
     map_basename = resolve_map_basename(scenario_cfg=scenario_cfg, sumo_cfg=sumo_cfg)
-    carla_root = str(carla_cfg.get("carla_root", DEFAULT_CARLA_ROOT)).strip() or DEFAULT_CARLA_ROOT
-    open_drive_dir = os.path.join(
-        carla_root,
-        "Unreal",
-        "CarlaUE4",
-        "Content",
-        "Carla",
-        "Maps",
-        "OpenDrive",
-    )
-    candidates.append(os.path.join(open_drive_dir, f"{map_basename}.xodr"))
+    planner_maps_dir = os.path.join(PROJECT_ROOT, "Global_Planner", "maps")
+    candidates.append(os.path.join(planner_maps_dir, f"{map_basename}.xodr"))
     if map_basename.endswith("_Opt"):
-        candidates.append(os.path.join(open_drive_dir, f"{map_basename[:-4]}.xodr"))
+        candidates.append(os.path.join(planner_maps_dir, f"{map_basename[:-4]}.xodr"))
 
-    home_dir = os.path.expanduser("~")
-    cache_open_drive_dir = os.path.join(
-        home_dir,
-        "carlaCache",
-        "Carla",
-        "Maps",
-        "OpenDrive",
+    normalized_candidates = list(
+        dict.fromkeys(os.path.realpath(candidate) for candidate in candidates if candidate)
     )
-    candidates.append(os.path.join(cache_open_drive_dir, f"{map_basename}.xodr"))
-    if map_basename.endswith("_Opt"):
-        candidates.append(os.path.join(cache_open_drive_dir, f"{map_basename[:-4]}.xodr"))
-
-    for fallback_root in (
-        os.environ.get("CARLA_ROOT", "").strip(),
-        "/home/umd-user/Downloads/MDrive/carla912",
-        "/opt/carla-simulator",
-    ):
-        if not fallback_root:
-            continue
-        fallback_open_drive_dir = os.path.join(
-            fallback_root,
-            "CarlaUE4",
-            "Content",
-            "Carla",
-            "Maps",
-            "OpenDrive",
-        )
-        candidates.append(os.path.join(fallback_open_drive_dir, f"{map_basename}.xodr"))
-        if map_basename.endswith("_Opt"):
-            candidates.append(os.path.join(fallback_open_drive_dir, f"{map_basename[:-4]}.xodr"))
-
-    for candidate in candidates:
-        if candidate and os.path.isfile(candidate):
+    for candidate in normalized_candidates:
+        if os.path.isfile(candidate):
             return candidate
 
     raise FileNotFoundError(
-        "Could not resolve the OpenDRIVE file needed for SUMO asset generation. "
-        f"Tried: {candidates}"
+        "Could not resolve the OpenDRIVE file needed by the custom global planner. "
+        "Configure sumo.xodr_path or add the matching map under Global_Planner/maps. "
+        f"Tried: {normalized_candidates}"
     )
 
 

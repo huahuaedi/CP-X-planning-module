@@ -152,6 +152,13 @@ ready*
 carla_launch.log
 
 # Planning-module runtime artifacts
+
+# Custom Global Planner: generated AD-map workspace/runtime
+opencda/planning_module/Global_Planner/map_repo/source/
+opencda/planning_module/Global_Planner/map_repo/build/
+opencda/planning_module/Global_Planner/map_repo/log/
+opencda/planning_module/Global_Planner/map_repo/install/
+
 opencda/planning_module/checkpoints/
 opencda/planning_module/**/__pycache__/
 opencda/planning_module/**/mpc_cost_history.csv
@@ -163,8 +170,14 @@ opencda/planning_module/carla_launch.log
 opencda/planning_module/.env
 opencda/planning_module/.claude/
 opencda/planning_module/.codex
+opencda/planning_module/Global_Planner/map_repo/source/
+opencda/planning_module/Global_Planner/map_repo/build/
+opencda/planning_module/Global_Planner/map_repo/log/
+opencda/planning_module/Global_Planner/map_repo/install/
 
 # Local agent/editor state
 .agents/
 .claude/
 .codex/
+/opencda/planning_module/tests/
+
