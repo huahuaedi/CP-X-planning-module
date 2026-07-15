@@ -93,7 +93,7 @@ def initialize_runtime(
     *,
     scenario_cfg: Mapping[str, object],
     world,
-    world_map=None,
+    map_planner=None,
     carla,
     traffic_manager_port: int | None = None,
     **extras,
@@ -101,7 +101,7 @@ def initialize_runtime(
     runtime_state = base_scenario.initialize_runtime(
         scenario_cfg=scenario_cfg,
         world=world,
-        world_map=world_map,
+        map_planner=map_planner,
         carla=carla,
         traffic_manager_port=traffic_manager_port,
         **extras,
@@ -150,4 +150,3 @@ def maybe_replan_global_route(**kwargs):
 
 def filter_dynamic_obstacle_snapshots(**kwargs):
     return base_scenario.filter_dynamic_obstacle_snapshots(**kwargs)
-

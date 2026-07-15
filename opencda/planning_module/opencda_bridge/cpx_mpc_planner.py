@@ -1,8 +1,8 @@
 """Bridge from native OpenCDA vehicle managers to the CP-X MPC planner.
 
 The bridge is intentionally small: OpenCDA still owns simulation, localization,
-perception, V2X discovery, and global-route generation.  This class consumes
-those outputs and returns a CARLA ``VehicleControl`` directly, replacing both
+perception, and V2X discovery. This class consumes a custom map planner and
+returns a CARLA ``VehicleControl`` directly, replacing both
 OpenCDA's behavior agent and PID controller when enabled.
 """
 
@@ -21,9 +21,16 @@ import yaml
 class CPXMPCPlannerBridge:
     """Direct-control planner used inside ``VehicleManager.run_step``."""
 
-    def __init__(self, vehicle_manager: Any, config: Optional[Mapping[str, Any]] = None):
+    def __init__(
+        self,
+        vehicle_manager: Any,
+        config: Optional[Mapping[str, Any]] = None,
+        *,
+        map_planner: Any = None,
+    ):
         self.vehicle_manager = vehicle_manager
         self.config = dict(config or {})
+        self.map_planner = map_planner
         self.enabled = bool(self.config.get("enabled", True))
         self.target_speed_mps = float(self.config.get("target_speed_mps", 8.0))
         self.lookahead_m = float(self.config.get("lookahead_m", 18.0))
@@ -181,7 +188,9 @@ class CPXMPCPlannerBridge:
         ego_yaw_rad: float,
         speed_ref_mps: float,
     ):
-        samples = self._route_samples_from_opencda()
+        samples = self._route_samples_from_custom_planner(
+            ego_location=ego_location,
+        )
         if not samples:
             dest_x = float(ego_location.x + self.lookahead_m * math.cos(ego_yaw_rad))
             dest_y = float(ego_location.y + self.lookahead_m * math.sin(ego_yaw_rad))
@@ -195,39 +204,42 @@ class CPXMPCPlannerBridge:
             float(destination["heading_rad"]),
         ], samples
 
-    def _route_samples_from_opencda(self):
-        agent = getattr(self.vehicle_manager, "agent", None)
-        if agent is None or not hasattr(agent, "get_local_planner"):
+    def _route_samples_from_custom_planner(self, *, ego_location: carla.Location):
+        if self.map_planner is None:
             return []
-        planner = agent.get_local_planner()
-        waypoint_items = list(planner.get_waypoint_buffer() or [])
-        if len(waypoint_items) < 2:
-            waypoint_items = list(planner.get_waypoints_queue() or [])[:20]
-        if not waypoint_items:
+        waypoint = self.map_planner.get_waypoint(
+            {
+                "x": float(ego_location.x),
+                "y": float(ego_location.y),
+                "z": float(ego_location.z),
+            }
+        )
+        if waypoint is None:
             return []
+
+        from utility.global_planner import canonical_lane_id_for_waypoint, world_heading_rad
 
         samples: list[dict[str, float]] = []
         traveled_m = 0.0
-        last_loc = None
-        for item in waypoint_items:
-            waypoint = item[0] if isinstance(item, (list, tuple)) else item
-            transform = waypoint.transform
-            loc = transform.location
-            if last_loc is not None:
-                traveled_m += float(loc.distance(last_loc))
-            last_loc = loc
+        current = waypoint
+        step_m = max(1.0, min(3.0, float(self.lookahead_m)))
+        while current is not None and traveled_m <= float(self.lookahead_m):
+            lane_width_m = float(current.lane_width_m or 3.5)
             samples.append({
-                "x_ref_m": float(loc.x),
-                "y_ref_m": float(loc.y),
-                "heading_rad": math.radians(float(transform.rotation.yaw)),
-                "lane_id": int(getattr(waypoint, "lane_id", 0)),
-                "lane_width_m": float(getattr(waypoint, "lane_width", 3.5)),
+                "x_ref_m": float(current.position["x"]),
+                "y_ref_m": float(current.position["y"]),
+                "heading_rad": float(world_heading_rad(current) or 0.0),
+                "lane_id": int(canonical_lane_id_for_waypoint(current)),
+                "lane_width_m": lane_width_m,
                 "road_center_offset_m": 0.0,
-                "road_left_width_m": 0.5 * float(getattr(waypoint, "lane_width", 3.5)),
-                "road_right_width_m": 0.5 * float(getattr(waypoint, "lane_width", 3.5)),
+                "road_left_width_m": 0.5 * lane_width_m,
+                "road_right_width_m": 0.5 * lane_width_m,
             })
-            if traveled_m >= self.lookahead_m:
+            candidates = list(current.next(step_m) or [])
+            if not candidates:
                 break
+            current = candidates[0]
+            traveled_m += step_m
         return samples
 
     def _front_gap_m(

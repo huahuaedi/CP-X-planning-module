@@ -339,7 +339,7 @@ def initialize_runtime(
     *,
     scenario_cfg: Mapping[str, object],
     world,
-    world_map=None,
+    map_planner=None,
     carla,
     traffic_manager_port: int | None = None,
     **extras,
@@ -360,25 +360,25 @@ def initialize_runtime(
 
     vehicle_markers = base._records_by_indexed_names(
         world=world,
-        world_map=world_map,
+        map_planner=map_planner,
         carla=carla,
         prefix=vehicle_prefix,
     )
     vru_markers = base._records_by_indexed_names(
         world=world,
-        world_map=world_map,
+        map_planner=map_planner,
         carla=carla,
         prefix=vru_prefix,
     )
     stop_markers = base._records_by_prefix(
         world=world,
-        world_map=world_map,
+        map_planner=map_planner,
         carla=carla,
         prefix=stop_prefix,
     )
     intersection_markers = base._records_by_prefix(
         world=world,
-        world_map=world_map,
+        map_planner=map_planner,
         carla=carla,
         prefix=intersection_prefix,
     )
@@ -469,7 +469,7 @@ def maybe_replan_global_route(
     *,
     runtime_state,
     world,
-    world_map,
+    map_planner,
     carla,
     ego_transform,
     active_global_route_points: Sequence[Sequence[float]] | None = None,
@@ -485,6 +485,7 @@ def maybe_replan_global_route(
     base._maybe_register_intersection_control(
         runtime_state=next_state,
         world=world,
+        map_planner=map_planner,
         ego_transform=ego_transform,
         active_global_route_points=list(active_global_route_points or []),
         sim_time_s=float(sim_time_s),
@@ -509,8 +510,7 @@ def maybe_replan_global_route(
     next_state = world_messages.publish_obstacle_messages(
         runtime_state=next_state,
         world=world,
-        world_map=world_map,
-        carla=carla,
+        map_planner=map_planner,
         ego_vehicle=extras.get("ego_vehicle", None),
         sim_time_s=float(sim_time_s),
         sumo_bridge=extras.get("sumo_bridge", None),

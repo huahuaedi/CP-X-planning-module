@@ -48,7 +48,7 @@ from behavior_planner.reroute import reroute_from_lane_closure_messages
 from behavior_planner.cp_traffic_light_provider import build_carla_traffic_light_cp_message
 from opencda_bridge.cp_provider import OpenCDACPProvider
 from utility import (
-    AStarGlobalPlanner,
+    CustomGlobalPlannerAdapter,
     CP_MESSAGE_PATH,
     CPMessageContext,
     EgoPlanningState,
@@ -63,7 +63,6 @@ from utility import (
     TargetContext,
     Tracker,
     TrafficControlContext,
-    build_lane_center_waypoints,
     build_planning_debug_summary,
     write_dict_csv_artifact,
     write_json_artifact,
@@ -75,7 +74,7 @@ from utility import (
     upsert_cp_item,
     write_planning_metrics_artifacts,
 )
-from utility import canonical_lane_id_for_waypoint, canonical_lane_waypoint_for_lane_id
+from utility import canonical_lane_id_for_waypoint, canonical_lane_waypoint_for_lane_id, world_heading_rad
 from pipeline import build_prediction_frame, evaluate_behavior_candidates
 from behavior_planner.car_follow import idm_acceleration
 from utility.speed_profile import (
@@ -86,6 +85,7 @@ from utility.speed_profile import (
     summarize_speed_cap_history,
     stop_profile_speed_cap_mps,
 )
+from opencda_scenario.sumo_assets import resolve_xodr_path
 
 try:
     import pygame
@@ -751,15 +751,32 @@ def _print_anchor_lookup(world, carla, name: str) -> None:
     print(f"[CARLA SCENARIO] Anchor '{name}' was not found in the loaded world.")
 
 
-def _align_transform_to_lane(map_obj, carla, transform):
-    waypoint = map_obj.get_waypoint(
-        transform.location,
-        project_to_road=True,
-        lane_type=carla.LaneType.Driving,
+def _location_point(location) -> Dict[str, float]:
+    return {"x": float(location.x), "y": float(location.y), "z": float(location.z)}
+
+
+def _pose_point(transform) -> Dict[str, float]:
+    pose = _location_point(transform.location)
+    pose["heading_rad"] = math.radians(float(transform.rotation.yaw))
+    return pose
+
+
+def _transform_from_custom_waypoint(carla, waypoint):
+    return carla.Transform(
+        carla.Location(
+            x=float(waypoint.position["x"]),
+            y=float(waypoint.position["y"]),
+            z=float(waypoint.position.get("z", 0.0)),
+        ),
+        carla.Rotation(yaw=math.degrees(float(world_heading_rad(waypoint) or 0.0))),
     )
+
+
+def _align_transform_to_lane(map_planner, carla, transform):
+    waypoint = map_planner.get_waypoint(_location_point(transform.location))
     if waypoint is None:
         return transform, None
-    return waypoint.transform, waypoint
+    return _transform_from_custom_waypoint(carla, waypoint), waypoint
 
 
 def _vehicle_speed_mps(vehicle) -> float:
@@ -773,8 +790,7 @@ def _signal_state_requires_stop(signal_state: object) -> bool:
 
 def _fallback_signal_stop_target_from_ego(
     *,
-    world_map: Any,
-    carla: Any,
+    map_planner: Any,
     ego_transform: Any,
     signal_context: Mapping[str, object] | None,
     search_distance_m: float,
@@ -832,22 +848,17 @@ def _fallback_signal_stop_target_from_ego(
     if float(forward_distance_m) <= 0.0:
         return None
     try:
-        ego_waypoint = world_map.get_waypoint(
-            ego_transform.location,
-            project_to_road=True,
-            lane_type=carla.LaneType.Driving,
-        )
+        ego_waypoint = map_planner.get_waypoint(_location_point(ego_transform.location))
         if ego_waypoint is None:
             return None
         next_waypoints = ego_waypoint.next(float(forward_distance_m))
         stop_waypoint = next_waypoints[0] if next_waypoints else ego_waypoint
-        stop_transform = stop_waypoint.transform
         return {
-            "x_m": float(stop_transform.location.x),
-            "y_m": float(stop_transform.location.y),
-            "heading_rad": float(math.radians(stop_transform.rotation.yaw)),
-            "lane_id": int(getattr(stop_waypoint, "lane_id", 0)),
-            "road_id": int(getattr(stop_waypoint, "road_id", 0)),
+            "x_m": float(stop_waypoint.position["x"]),
+            "y_m": float(stop_waypoint.position["y"]),
+            "heading_rad": float(world_heading_rad(stop_waypoint) or 0.0),
+            "lane_id": int(canonical_lane_id_for_waypoint(stop_waypoint)),
+            "road_id": int(getattr(stop_waypoint, "road_id", 0) or 0),
             "section_id": int(getattr(stop_waypoint, "section_id", 0)),
             "distance_m": float(forward_distance_m),
             "source": "fallback_signal_stop_target",
@@ -1234,44 +1245,11 @@ def _route_distance_from_points(route_points: Sequence[Sequence[float]]) -> floa
 
 def _imported_route_summary(
     *,
-    global_planner: AStarGlobalPlanner,
+    global_planner: CustomGlobalPlannerAdapter,
     route_points: Sequence[Sequence[float]],
 ) -> RoutePlanSummary | None:
     normalized_points = _normalize_imported_route_points(route_points)
-    if len(normalized_points) < 2:
-        return None
-    per_waypoint_options, per_waypoint_lane_ids = global_planner._internal_metadata_from_route_waypoints(
-        route_waypoints=normalized_points,
-    )
-    start_query = global_planner.nearest_waypoint_query(
-        x_m=float(normalized_points[0][0]),
-        y_m=float(normalized_points[0][1]),
-    )
-    goal_query = global_planner.nearest_waypoint_query(
-        x_m=float(normalized_points[-1][0]),
-        y_m=float(normalized_points[-1][1]),
-    )
-    valid_lane_ids = [int(lane_id) for lane_id in per_waypoint_lane_ids if int(lane_id) != 0]
-    optimal_lane_id = int(valid_lane_ids[0]) if valid_lane_ids else 0
-    summary = RoutePlanSummary(
-        route_found=True,
-        start_road_id=str(getattr(start_query, "road_id", "imported_route")),
-        start_lane_id=int(getattr(start_query, "lane_id", optimal_lane_id)),
-        goal_road_id=str(getattr(goal_query, "road_id", "imported_route")),
-        goal_lane_id=int(getattr(goal_query, "lane_id", optimal_lane_id)),
-        optimal_lane_id=int(optimal_lane_id),
-        distance_to_destination_m=_route_distance_from_points(normalized_points),
-        next_macro_maneuver="Continue Straight",
-        route_waypoints=[list(point) for point in normalized_points],
-        road_options=list(per_waypoint_options),
-        debug_reason="imported_mdrive_route_waypoints",
-    )
-    global_planner.replace_stored_route(
-        summary=summary,
-        per_waypoint_options=per_waypoint_options,
-        per_waypoint_lane_ids=per_waypoint_lane_ids,
-    )
-    return summary
+    return global_planner.register_imported_route(normalized_points)
 
 
 def _resolved_route_lane_hint(
@@ -2417,6 +2395,7 @@ def _initialize_scenario_runtime_state(
     module,
     world,
     world_map,
+    map_planner,
     carla,
     scenario_cfg: Mapping[str, object],
     traffic_manager_port: int | None = None,
@@ -2434,6 +2413,7 @@ def _initialize_scenario_runtime_state(
         initialize_fn,
         world=world,
         world_map=world_map,
+        map_planner=map_planner,
         carla=carla,
         scenario_cfg=scenario_cfg,
         traffic_manager_port=traffic_manager_port,
@@ -2450,6 +2430,7 @@ def _apply_scenario_dynamic_obstacle_filter(
     runtime_state,
     world,
     world_map,
+    map_planner,
     carla,
     scenario_cfg: Mapping[str, object],
     object_snapshots: Sequence[Mapping[str, object]],
@@ -2468,6 +2449,7 @@ def _apply_scenario_dynamic_obstacle_filter(
         filter_fn,
         world=world,
         world_map=world_map,
+        map_planner=map_planner,
         carla=carla,
         scenario_cfg=scenario_cfg,
         runtime_state=runtime_state,
@@ -2492,7 +2474,7 @@ def _maybe_apply_scenario_global_route_update(
     world_map,
     carla,
     scenario_cfg: Mapping[str, object],
-    global_planner: AStarGlobalPlanner,
+    global_planner: CustomGlobalPlannerAdapter,
     ego_vehicle,
     sumo_bridge,
     ego_transform,
@@ -2518,6 +2500,7 @@ def _maybe_apply_scenario_global_route_update(
         scenario_cfg=scenario_cfg,
         runtime_state=runtime_state,
         global_planner=global_planner,
+        map_planner=global_planner,
         ego_vehicle=ego_vehicle,
         sumo_bridge=sumo_bridge,
         ego_transform=ego_transform,
@@ -2904,7 +2887,7 @@ def _static_obstacle_replan_candidate_lane_ids(
 
 def _replan_route_around_static_intersection_obstacle(
     *,
-    global_planner: AStarGlobalPlanner,
+    global_planner: CustomGlobalPlannerAdapter,
     ego_transform,
     goal_location,
     blocked_obstacle_snapshot: Mapping[str, object] | None,
@@ -2913,30 +2896,17 @@ def _replan_route_around_static_intersection_obstacle(
     if blocked_obstacle_snapshot is None:
         return None, []
 
-    start_xy = [
-        float(ego_transform.location.x),
-        float(ego_transform.location.y),
-    ]
-    goal_xy = [
-        float(goal_location.x),
-        float(goal_location.y),
-    ]
-    blocked_point_xy = [
-        float(blocked_obstacle_snapshot.get("x", 0.0)),
-        float(blocked_obstacle_snapshot.get("y", 0.0)),
-    ]
-    obstacle_length_m = max(0.0, float(blocked_obstacle_snapshot.get("length_m", 4.5)))
-    obstacle_width_m = max(0.0, float(blocked_obstacle_snapshot.get("width_m", 2.0)))
-    block_radius_m = max(
-        6.0,
-        0.5 * max(float(obstacle_length_m), float(obstacle_width_m)) + 4.0,
-    )
-    route_summary = global_planner.plan_route_astar_avoiding_points(
-        start_xy=start_xy,
-        goal_xy=goal_xy,
-        blocked_points_xy=[blocked_point_xy],
-        blocked_lane_ids=[int(blocked_lane_id)],
-        block_radius_m=float(block_radius_m),
+    del blocked_lane_id
+    blocked_position = {
+        "x": float(blocked_obstacle_snapshot.get("x", 0.0)),
+        "y": float(blocked_obstacle_snapshot.get("y", 0.0)),
+        "z": float(blocked_obstacle_snapshot.get("z", 0.0)),
+    }
+    if global_planner.block_lane_at_position(blocked_position) is None:
+        return None, []
+    route_summary = global_planner.trace_route(
+        _location_point(ego_transform.location),
+        _location_point(goal_location),
         replace_stored_route=True,
     )
     if not bool(getattr(route_summary, "route_found", False)):
@@ -3271,12 +3241,14 @@ def _walk_waypoint_forward_simple(
         if len(candidates) == 1:
             current_wp = candidates[0]
         else:
-            current_yaw = float(getattr(current_wp.transform.rotation, "yaw", 0.0))
+            current_yaw = float(world_heading_rad(current_wp) or 0.0)
 
             def _candidate_yaw_delta(candidate_wp) -> float:
-                candidate_yaw = float(getattr(candidate_wp.transform.rotation, "yaw", current_yaw))
-                delta_deg = (candidate_yaw - current_yaw + 180.0) % 360.0 - 180.0
-                return abs(float(delta_deg))
+                candidate_yaw = float(world_heading_rad(candidate_wp) or current_yaw)
+                return abs(math.atan2(
+                    math.sin(candidate_yaw - current_yaw),
+                    math.cos(candidate_yaw - current_yaw),
+                ))
 
             current_wp = min(candidates, key=_candidate_yaw_delta)
         traveled_m += float(step_distance_m)
@@ -3285,18 +3257,13 @@ def _walk_waypoint_forward_simple(
 
 def _lane_center_forward_destination_state(
     *,
-    world_map,
-    carla,
-    ego_transform,
+    map_planner,
+    ego_pose: Mapping[str, object],
     target_lane_id: int,
     base_destination_state: Sequence[float],
     forward_m: float,
 ) -> List[float] | None:
-    ego_wp = world_map.get_waypoint(
-        ego_transform.location,
-        project_to_road=True,
-        lane_type=carla.LaneType.Driving,
-    )
+    ego_wp = map_planner.get_waypoint(ego_pose)
     if ego_wp is None:
         return None
     lane_wp = canonical_lane_waypoint_for_lane_id(ego_wp, int(target_lane_id))
@@ -3311,9 +3278,9 @@ def _lane_center_forward_destination_state(
     target_state = list(base_destination_state)
     while len(target_state) < 8:
         target_state.append(0.0)
-    target_state[0] = float(target_wp.transform.location.x)
-    target_state[1] = float(target_wp.transform.location.y)
-    target_state[3] = float(math.radians(target_wp.transform.rotation.yaw))
+    target_state[0] = float(target_wp.position["x"])
+    target_state[1] = float(target_wp.position["y"])
+    target_state[3] = float(world_heading_rad(target_wp) or 0.0)
     target_state[4] = int(target_lane_id)
     target_state[6] = int(getattr(target_wp, "road_id", int(target_state[6])))
     return target_state
@@ -3321,9 +3288,8 @@ def _lane_center_forward_destination_state(
 
 def _keep_temporary_destination_ahead(
     *,
-    world_map=None,
-    carla=None,
-    ego_transform=None,
+    map_planner=None,
+    ego_pose: Mapping[str, object] | None = None,
     temporary_destination_state: Sequence[float] | None,
     previous_destination_state: Sequence[float] | None,
     ego_state: Sequence[float],
@@ -3389,15 +3355,13 @@ def _keep_temporary_destination_ahead(
             return repaired_state
 
     if (
-        world_map is not None
-        and carla is not None
-        and ego_transform is not None
+        map_planner is not None
+        and ego_pose is not None
         and target_lane_id is not None
     ):
         lane_center_state = _lane_center_forward_destination_state(
-            world_map=world_map,
-            carla=carla,
-            ego_transform=ego_transform,
+            map_planner=map_planner,
+            ego_pose=ego_pose,
             target_lane_id=int(target_lane_id),
             base_destination_state=destination_state,
             forward_m=max(float(min_forward_m), float(fallback_forward_m)),
@@ -3415,9 +3379,8 @@ def _keep_temporary_destination_ahead(
 
 def _lock_junction_lane_follow_destination(
     *,
-    world_map=None,
-    carla=None,
-    ego_transform=None,
+    map_planner=None,
+    ego_pose: Mapping[str, object] | None = None,
     temporary_destination_state: Sequence[float] | None,
     previous_destination_state: Sequence[float] | None,
     ego_state: Sequence[float],
@@ -3484,11 +3447,10 @@ def _lock_junction_lane_follow_destination(
                 repaired_state[7] = destination_state[7]
             return repaired_state
 
-    if world_map is not None and carla is not None and ego_transform is not None:
+    if map_planner is not None and ego_pose is not None:
         lane_center_state = _lane_center_forward_destination_state(
-            world_map=world_map,
-            carla=carla,
-            ego_transform=ego_transform,
+            map_planner=map_planner,
+            ego_pose=ego_pose,
             target_lane_id=int(target_lane_id),
             base_destination_state=destination_state,
             forward_m=max(3.0, float(fallback_forward_m)),
@@ -3671,9 +3633,8 @@ def _final_destination_stop_target_state(
 
 def _stop_target_state_from_behavior_output(
     *,
-    world_map: Any,
-    carla: Any,
-    ego_transform: Any,
+    map_planner: Any,
+    ego_pose: Mapping[str, object],
     stop_target: Mapping[str, object] | None,
     target_lane_id: object = None,
 ) -> List[float] | None:
@@ -3688,15 +3649,12 @@ def _stop_target_state_from_behavior_output(
         desired_lane_id = None
         if target_lane_id is not None:
             desired_lane_id = int(target_lane_id)
-        ego_z_m = float(getattr(ego_transform.location, "z", 0.0))
-        stop_waypoint = world_map.get_waypoint(
-            carla.Location(
-                x=float(stop_x_m),
-                y=float(stop_y_m),
-                z=float(ego_z_m),
-            ),
-            project_to_road=True,
-            lane_type=carla.LaneType.Driving,
+        stop_waypoint = map_planner.get_waypoint(
+            {
+                "x": float(stop_x_m),
+                "y": float(stop_y_m),
+                "z": float(ego_pose.get("z", 0.0)),
+            }
         )
         if stop_waypoint is not None:
             if desired_lane_id is not None:
@@ -3706,9 +3664,9 @@ def _stop_target_state_from_behavior_output(
                 )
                 if lane_waypoint is not None:
                     stop_waypoint = lane_waypoint
-            stop_x_m = float(stop_waypoint.transform.location.x)
-            stop_y_m = float(stop_waypoint.transform.location.y)
-            stop_heading_rad = float(math.radians(stop_waypoint.transform.rotation.yaw))
+            stop_x_m = float(stop_waypoint.position["x"])
+            stop_y_m = float(stop_waypoint.position["y"])
+            stop_heading_rad = float(world_heading_rad(stop_waypoint) or 0.0)
             stop_lane_id = int(canonical_lane_id_for_waypoint(stop_waypoint))
             stop_road_id = float(getattr(stop_waypoint, "road_id", int(stop_road_id)))
         elif desired_lane_id is not None:
@@ -3729,9 +3687,8 @@ def _stop_target_state_from_behavior_output(
 
 def _follow_target_state_from_behavior_output(
     *,
-    world_map: Any,
-    carla: Any,
-    ego_transform: Any,
+    map_planner: Any,
+    ego_pose: Mapping[str, object],
     follow_target: Mapping[str, object] | None,
 ) -> List[float] | None:
     if not isinstance(follow_target, Mapping):
@@ -3742,20 +3699,17 @@ def _follow_target_state_from_behavior_output(
         follow_heading_rad = float(follow_target.get("heading_rad", 0.0))
         follow_lane_id = float(follow_target.get("lane_id", 0))
         follow_road_id = float(follow_target.get("road_id", -1))
-        ego_z_m = float(getattr(ego_transform.location, "z", 0.0))
-        follow_waypoint = world_map.get_waypoint(
-            carla.Location(
-                x=float(follow_x_m),
-                y=float(follow_y_m),
-                z=float(ego_z_m),
-            ),
-            project_to_road=True,
-            lane_type=carla.LaneType.Driving,
+        follow_waypoint = map_planner.get_waypoint(
+            {
+                "x": float(follow_x_m),
+                "y": float(follow_y_m),
+                "z": float(ego_pose.get("z", 0.0)),
+            }
         )
         if follow_waypoint is not None:
-            follow_x_m = float(follow_waypoint.transform.location.x)
-            follow_y_m = float(follow_waypoint.transform.location.y)
-            follow_heading_rad = float(math.radians(follow_waypoint.transform.rotation.yaw))
+            follow_x_m = float(follow_waypoint.position["x"])
+            follow_y_m = float(follow_waypoint.position["y"])
+            follow_heading_rad = float(world_heading_rad(follow_waypoint) or 0.0)
             follow_lane_id = float(canonical_lane_id_for_waypoint(follow_waypoint))
             follow_road_id = float(getattr(follow_waypoint, "road_id", int(follow_road_id)))
         return [
@@ -3914,7 +3868,7 @@ def _collect_vehicle_snapshots(
     return [snapshot for _distance_sq, snapshot in ranked_snapshots]
 
 
-def _collect_environment_obstacle_snapshots(world, map_obj, carla, obstacle_prefix: str) -> List[dict]:
+def _collect_environment_obstacle_snapshots(world, map_planner, carla, obstacle_prefix: str) -> List[dict]:
     snapshots: List[dict] = []
     if not str(obstacle_prefix).strip():
         return snapshots
@@ -3922,14 +3876,12 @@ def _collect_environment_obstacle_snapshots(world, map_obj, carla, obstacle_pref
     for env_obj in _find_environment_objects_by_prefix(world, carla, obstacle_prefix):
         transform = env_obj.transform
         location = transform.location
-        nearest_waypoint = map_obj.get_waypoint(
-            location,
-            project_to_road=True,
-            lane_type=carla.LaneType.Driving,
+        nearest_waypoint = map_planner.get_waypoint(
+            {"x": float(location.x), "y": float(location.y), "z": float(location.z)}
         )
         heading_rad = float(math.radians(transform.rotation.yaw))
         if nearest_waypoint is not None:
-            heading_rad = float(math.radians(nearest_waypoint.transform.rotation.yaw))
+            heading_rad = float(world_heading_rad(nearest_waypoint) or heading_rad)
 
         half_length_m = 2.25
         half_width_m = 1.0
@@ -4199,6 +4151,7 @@ def _spawn_scenario_obstacles_from_module(
     client,
     world,
     map_obj,
+    map_planner,
     carla,
     blueprint_library,
     traffic_manager,
@@ -4233,6 +4186,7 @@ def _spawn_scenario_obstacles_from_module(
         client=client,
         world=world,
         world_map=map_obj,
+        map_planner=map_planner,
         carla=carla,
         blueprint_library=blueprint_library,
         traffic_manager=traffic_manager,
@@ -4295,17 +4249,13 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
     )
 
     sample_distance_m = float(planning_cfg.get("waypoint_sample_distance_m", 2.0))
-    global_planner_mode = str(planning_cfg.get("global_planner_mode", "carla_grp")).strip().lower()
-    lane_center_waypoints, road_cfg = build_lane_center_waypoints(
-        map_obj=world_map,
-        carla=carla,
-        sample_distance_m=float(sample_distance_m),
-    )
-    global_planner = AStarGlobalPlanner(
-        lane_center_waypoints=lane_center_waypoints,
-        world_map=world_map,
+    xodr_path = resolve_xodr_path(scenario_cfg=scenario_cfg, sumo_cfg=sumo_cfg)
+    global_planner = CustomGlobalPlannerAdapter(
+        xodr_path=xodr_path,
+        cache_root=os.path.join(PROJECT_ROOT, "Global_Planner", "cache"),
         route_sample_distance_m=float(sample_distance_m),
     )
+    global_planner.load()
 
     spawn_anchor, destination_anchor, ego_anchor_name, destination_anchor_name = _resolve_route_anchor_transforms(
         world=world,
@@ -4315,10 +4265,20 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
     )
     global_route_start_location = spawn_anchor.location
     global_route_goal_location = destination_anchor.location
-    aligned_spawn_transform, spawn_waypoint = _align_transform_to_lane(world_map, carla, spawn_anchor)
-    aligned_destination_transform, destination_waypoint = _align_transform_to_lane(world_map, carla, destination_anchor)
+    aligned_spawn_transform, spawn_waypoint = _align_transform_to_lane(global_planner, carla, spawn_anchor)
+    aligned_destination_transform, destination_waypoint = _align_transform_to_lane(global_planner, carla, destination_anchor)
     if spawn_waypoint is None or destination_waypoint is None:
         raise RuntimeError("Could not align the spawn or destination anchors to a driving lane.")
+    initial_lane_context = global_planner.get_local_lane_context(
+        x_m=float(aligned_spawn_transform.location.x),
+        y_m=float(aligned_spawn_transform.location.y),
+        heading_rad=float(math.radians(aligned_spawn_transform.rotation.yaw)),
+        z_m=float(aligned_spawn_transform.location.z),
+    )
+    road_cfg = {
+        "lane_count": max(1, int(initial_lane_context.get("lane_count", 1))),
+        "lane_width_m": float(initial_lane_context.get("lane_width_m", 3.5)),
+    }
 
     imported_route_points = _normalize_imported_route_points(
         planning_cfg.get("imported_route_waypoints", [])
@@ -4333,29 +4293,11 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
             "[CARLA GLOBAL ROUTE OUTPUT] Using imported route waypoints "
             f"({len(imported_route_points)} point(s)) from scenario YAML."
         )
-    elif global_planner_mode == "astar":
-        initial_global_route_summary = global_planner.plan_route_astar(
-            start_xy=[
-                float(global_route_start_location.x),
-                float(global_route_start_location.y),
-            ],
-            goal_xy=[
-                float(global_route_goal_location.x),
-                float(global_route_goal_location.y),
-            ],
-        )
     else:
         initial_global_route_summary = global_planner.plan_route_from_locations(
-            start_location=global_route_start_location,
-            goal_location=global_route_goal_location,
-            fallback_start_xy=[
-                float(global_route_start_location.x),
-                float(global_route_start_location.y),
-            ],
-            fallback_goal_xy=[
-                float(global_route_goal_location.x),
-                float(global_route_goal_location.y),
-            ],
+            start_location=_location_point(global_route_start_location),
+            goal_location=_location_point(global_route_goal_location),
+            replace_stored_route=True,
         )
     initial_route_points: List[List[float]] = []
     if bool(initial_global_route_summary.route_found):
@@ -4410,6 +4352,7 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
             client=client,
             world=world,
             map_obj=world_map,
+            map_planner=global_planner,
             carla=carla,
             blueprint_library=blueprint_library,
             traffic_manager=traffic_manager,
@@ -4646,12 +4589,6 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
         0.0,
         float(math.radians(aligned_destination_transform.rotation.yaw)),
     ]
-    initial_lane_context = global_planner.get_local_lane_context(
-        x_m=float(aligned_spawn_transform.location.x),
-        y_m=float(aligned_spawn_transform.location.y),
-        heading_rad=float(math.radians(aligned_spawn_transform.rotation.yaw)),
-        z_m=float(aligned_spawn_transform.location.z),
-    )
     initial_lane_count = int(initial_lane_context.get("lane_count", 0))
     if initial_lane_count > 0:
         road_cfg["lane_count"] = int(initial_lane_count)
@@ -5095,6 +5032,7 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
         module=scenario_runtime_module,
         world=world,
         world_map=world_map,
+        map_planner=global_planner,
         carla=carla,
         scenario_cfg=scenario_cfg,
         traffic_manager_port=int(traffic_manager_port),
@@ -5138,7 +5076,7 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
         if obstacle_prefix and not bool(use_cp_obstacle_pipeline):
             cached_static_environment_obstacles = _collect_environment_obstacle_snapshots(
                 world=world,
-                map_obj=world_map,
+                map_planner=global_planner,
                 carla=carla,
                 obstacle_prefix=obstacle_prefix,
             )
@@ -5269,8 +5207,7 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                 try:
                     opencda_cp_provider.publish(
                         world=world,
-                        world_map=world_map,
-                        carla=carla,
+                        map_planner=global_planner,
                         ego_vehicle=ego_vehicle,
                         sim_time_s=float(sim_time_s),
                     )
@@ -5284,6 +5221,7 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                     runtime_state=scenario_runtime_state,
                     world=world,
                     world_map=world_map,
+                    map_planner=global_planner,
                     carla=carla,
                     scenario_cfg=scenario_cfg,
                     object_snapshots=[],
@@ -5297,6 +5235,7 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                     runtime_state=scenario_runtime_state,
                     world=world,
                     world_map=world_map,
+                    map_planner=global_planner,
                     carla=carla,
                     scenario_cfg=scenario_cfg,
                     object_snapshots=_collect_vehicle_snapshots(
@@ -5363,14 +5302,14 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
             tick_traffic_signal_context = None
             tick_ego_in_junction = False
             tick_ego_transform = ego_vehicle.get_transform()
+            tick_ego_pose = _pose_point(tick_ego_transform)
             carla_cp_traffic_light = None
             if bool(traffic_light_stop_enabled):
                 carla_cp_traffic_light = build_carla_traffic_light_cp_message(
                     world=world,
-                    world_map=world_map,
-                    carla=carla,
+                    map_planner=global_planner,
                     ego_vehicle=ego_vehicle,
-                    ego_transform=tick_ego_transform,
+                    ego_pose=tick_ego_pose,
                     global_route_points=active_global_route_points,
                     sim_time_s=float(sim_time_s),
                     search_distance_m=float(traffic_light_stop_search_distance_m),
@@ -5833,17 +5772,14 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                     )
                     predicted_snapshots.extend(list(static_object_snapshots))
                 ego_transform = ego_vehicle.get_transform()
+                ego_pose = _pose_point(ego_transform)
                 ego_z_m = float(ego_transform.location.z)
                 # Determine junction status early — before the lane-context
                 # call — so we can freeze lane IDs while traversing an
                 # intersection (junction connectors have unique road_ids with
                 # no lane siblings, so canonical IDs would collapse to 1).
-                ego_waypoint = world_map.get_waypoint(
-                    ego_transform.location,
-                    project_to_road=True,
-                    lane_type=carla.LaneType.Driving,
-                )
-                ego_in_junction = bool(getattr(ego_waypoint, "is_junction", False))
+                ego_waypoint = global_planner.get_waypoint(ego_pose)
+                ego_in_junction = bool(getattr(ego_waypoint, "is_intersection", False))
                 if obstacle_height_filter_enabled:
                     predicted_snapshots = _filter_obstacle_snapshots_by_vertical_overlap(
                         ego_z_m=float(ego_z_m),
@@ -5929,9 +5865,10 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                 )
                 base_lookahead_distance_raw_m = compute_lane_lookahead_distance(
                     ego_state=ego_state,
-                    lane_center_waypoints=lane_center_waypoints,
+                    map_planner=global_planner,
                     target_lane_id=int(base_target_lane_id),
                     local_goal_cfg=local_goal_cfg,
+                    ego_z_m=float(ego_z_m),
                 )
                 rolling_target_distance_m = float(
                     max(
@@ -6065,7 +6002,7 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                 # ---- Ego lane offset for lane-change completion ------ #
                 # ego_waypoint and ego_in_junction were already computed above
                 # (before the lane-context call) so they are not repeated here.
-                ego_offset_info = compute_ego_lane_offset(world_map, carla, ego_transform)
+                ego_offset_info = compute_ego_lane_offset(global_planner, ego_pose)
 
                 # ---- Blue-dot route context and mode ----------------- #
                 previous_temporary_destination_state = (
@@ -6116,9 +6053,8 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                     pre_junction_route_lane_id=int(_pre_junction_optimal_lane_id),
                 )
                 raw_temp_mode_value, _temp_mode_road_id, _temp_mode_entered_intersection = compute_temp_destination_mode(
-                    world_map=world_map,
-                    carla=carla,
-                    ego_transform=ego_transform,
+                    map_planner=global_planner,
+                    ego_pose=ego_pose,
                     mode_reference_xy=_prev_dest_xy,
                     prev_mode=_prev_mode,
                     prev_road_id=_prev_road_id,
@@ -6712,9 +6648,8 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                     planner_output["traffic_light_debug"] = dict(traffic_light_debug)
 
                 stop_target_state = _stop_target_state_from_behavior_output(
-                    world_map=world_map,
-                    carla=carla,
-                    ego_transform=ego_transform,
+                    map_planner=global_planner,
+                    ego_pose=ego_pose,
                     stop_target=(
                         None
                         if str(current_applied_behavior) == "lane_follow" and bool(traffic_light_debug.get("stop_watchdog_released", False))
@@ -6727,9 +6662,8 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                     ),
                 )
                 follow_target_state = _follow_target_state_from_behavior_output(
-                    world_map=world_map,
-                    carla=carla,
-                    ego_transform=ego_transform,
+                    map_planner=global_planner,
+                    ego_pose=ego_pose,
                     follow_target=planner_output.get("follow_target", None),
                 )
                 stop_target_distance_m = None
@@ -6807,11 +6741,9 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                     )
                     reroute_result = reroute_from_lane_closure_messages(
                         messages=reroute_messages,
-                        world_map=world_map,
-                        carla=carla,
                         global_planner=global_planner,
-                        ego_transform=ego_transform,
-                        goal_location=global_route_goal_location,
+                        ego_position=ego_pose,
+                        goal_position=_location_point(global_route_goal_location),
                         current_route_points=active_global_route_points,
                     )
                     rerouted_route_summary = reroute_result.get("route_summary", None)
@@ -7056,9 +6988,8 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                             planner_selected_lane_id = int(current_lane_id)
                         reroute_route_follow_latched = False
                 temporary_destination_state = compute_temp_destination(
-                    world_map=world_map,
-                    carla=carla,
-                    ego_transform=ego_transform,
+                    map_planner=global_planner,
+                    ego_pose=ego_pose,
                     target_lane_id=int(selected_lane_id),
                     decision=str(temp_destination_decision),
                     lookahead_m=float(effective_rolling_target_distance_m),
@@ -7167,9 +7098,8 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                     stop_target_state = list(final_goal_stop_target_state or [])
                     stop_target_distance_m = float(final_stop_distance_m)
                     temporary_destination_state = compute_temp_destination(
-                        world_map=world_map,
-                        carla=carla,
-                        ego_transform=ego_transform,
+                        map_planner=global_planner,
+                        ego_pose=ego_pose,
                         target_lane_id=int(selected_lane_id),
                         decision=str(current_applied_behavior),
                         lookahead_m=float(rolling_target_distance_m),
@@ -7276,9 +7206,8 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                     final_goal_stop_active=bool(final_goal_stop_active),
                 )
                 temporary_destination_state = _lock_junction_lane_follow_destination(
-                    world_map=world_map,
-                    carla=carla,
-                    ego_transform=ego_transform,
+                    map_planner=global_planner,
+                    ego_pose=ego_pose,
                     temporary_destination_state=temporary_destination_state,
                     previous_destination_state=previous_temporary_destination_state,
                     ego_state=ego_state,
@@ -7294,9 +7223,8 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                     ),
                 )
                 temporary_destination_state = _keep_temporary_destination_ahead(
-                    world_map=world_map,
-                    carla=carla,
-                    ego_transform=ego_transform,
+                    map_planner=global_planner,
+                    ego_pose=ego_pose,
                     temporary_destination_state=temporary_destination_state,
                     previous_destination_state=previous_temporary_destination_state,
                     ego_state=ego_state,
@@ -7907,9 +7835,8 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                     float(lane_reference_speed_mps) * float(mpc.dt_s),
                 )
                 mpc_reference_context = MpcReferenceGenerationContext(
-                    world_map=world_map,
-                    carla=carla,
-                    ego_transform=ego_transform,
+                    map_planner=global_planner,
+                    ego_pose=ego_pose,
                     ego_state=ego_state,
                     active_global_route_points=active_global_route_points,
                     previous_lane_center_reference=previous_lane_center_reference,
@@ -8536,6 +8463,10 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                     hud_panel_height_px=int(hud_panel_height_px),
                 )
     finally:
+        try:
+            global_planner.close()
+        except Exception:
+            pass
         if traffic_manager is not None:
             try:
                 traffic_manager.set_synchronous_mode(False)

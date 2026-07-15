@@ -15,7 +15,9 @@ from behavior_planner.reroute import (
     remove_cp_messages_by_id,
     write_cp_messages,
 )
-from utility import canonical_lane_id_for_waypoint, raw_carla_lane_id_for_waypoint
+from utility import canonical_lane_id_for_waypoint, raw_opendrive_lane_id_for_waypoint
+
+
 def _best_partial_match(candidates: List[Tuple[int, Any]]) -> Any | None:
     if not candidates:
         return None
@@ -138,7 +140,7 @@ def _workzone_name_candidates(
 def _resolve_workzone_object(
     *,
     world,
-    world_map,
+    map_planner,
     carla,
     candidate_names: Sequence[object],
 ) -> Tuple[Any | None, str | None, Dict[str, object] | None]:
@@ -150,8 +152,7 @@ def _resolve_workzone_object(
             world_object,
             str(candidate_name),
             _nearest_driving_waypoint_info(
-                world_map=world_map,
-                carla=carla,
+                map_planner=map_planner,
                 world_object=world_object,
             ),
         )
@@ -185,33 +186,31 @@ def _object_transform(world_object: Any):
 
 def _nearest_driving_waypoint_info(
     *,
-    world_map,
-    carla,
+    map_planner,
     world_object: Any,
 ) -> Dict[str, object] | None:
     object_transform = getattr(world_object, "transform", None)
     if object_transform is None:
         object_transform = _object_transform(world_object)
     object_location = getattr(object_transform, "location", None)
-    if object_location is None or world_map is None or not hasattr(world_map, "get_waypoint"):
+    if object_location is None or map_planner is None:
         return None
     try:
-        waypoint = world_map.get_waypoint(
-            object_location,
-            project_to_road=True,
-            lane_type=carla.LaneType.Driving,
+        waypoint = map_planner.get_waypoint(
+            {"x": float(object_location.x), "y": float(object_location.y), "z": float(object_location.z)}
         )
     except Exception:
         waypoint = None
-    waypoint_location = getattr(getattr(waypoint, "transform", None), "location", None)
-    if waypoint_location is None:
+    if waypoint is None:
         return None
+    waypoint_position = waypoint.position
     return {
-        "position_xy": [float(waypoint_location.x), float(waypoint_location.y)],
-        "road_id": int(getattr(waypoint, "road_id", 0)),
-        "section_id": int(getattr(waypoint, "section_id", 0)),
+        "position_xy": [float(waypoint_position["x"]), float(waypoint_position["y"])],
+        "road_id": int(waypoint.road_id or 0),
+        "section_id": int(waypoint.section_id or 0),
         "lane_id": int(canonical_lane_id_for_waypoint(waypoint)),
-        "carla_lane_id": int(raw_carla_lane_id_for_waypoint(waypoint)),
+        "opendrive_lane_id": int(raw_opendrive_lane_id_for_waypoint(waypoint)),
+        "ad_lane_id": int(waypoint.ad_lane_id),
     }
 
 def _append_lane_closure_message(
@@ -222,7 +221,8 @@ def _append_lane_closure_message(
     road_id: object = None,
     section_id: object = None,
     lane_id: object = None,
-    carla_lane_id: object = None,
+    opendrive_lane_id: object = None,
+    ad_lane_id: object = None,
 ) -> None:
     ensure_cp_message_file_exists(message_path=message_path)
     current_messages = load_cp_messages(message_path=message_path)
@@ -240,7 +240,8 @@ def _append_lane_closure_message(
             **({"road_id": road_id} if road_id is not None else {}),
             **({"section_id": int(section_id)} if section_id is not None else {}),
             **({"lane_id": int(lane_id)} if lane_id is not None else {}),
-            **({"carla_lane_id": int(carla_lane_id)} if carla_lane_id is not None else {}),
+            **({"opendrive_lane_id": int(opendrive_lane_id)} if opendrive_lane_id is not None else {}),
+            **({"ad_lane_id": int(ad_lane_id)} if ad_lane_id is not None else {}),
         }
     )
     write_cp_messages(retained_messages, message_path=message_path)
@@ -480,6 +481,7 @@ def initialize_runtime(
     scenario_cfg: Mapping[str, object],
     world,
     world_map=None,
+    map_planner=None,
     carla,
     wall_time_s: float | None = None,
     **_,
@@ -503,7 +505,7 @@ def initialize_runtime(
         )
     workzone_object, resolved_workzone_name, workzone_waypoint_info = _resolve_workzone_object(
         world=world,
-        world_map=world_map,
+        map_planner=map_planner,
         carla=carla,
         candidate_names=workzone_name_candidates,
     )
@@ -534,7 +536,8 @@ def initialize_runtime(
         "workzone_road_id": None if workzone_waypoint_info is None else workzone_waypoint_info.get("road_id", None),
         "workzone_section_id": None if workzone_waypoint_info is None else workzone_waypoint_info.get("section_id", None),
         "workzone_lane_id": None if workzone_waypoint_info is None else workzone_waypoint_info.get("lane_id", None),
-        "workzone_carla_lane_id": None if workzone_waypoint_info is None else workzone_waypoint_info.get("carla_lane_id", None),
+        "workzone_opendrive_lane_id": None if workzone_waypoint_info is None else workzone_waypoint_info.get("opendrive_lane_id", None),
+        "workzone_ad_lane_id": None if workzone_waypoint_info is None else workzone_waypoint_info.get("ad_lane_id", None),
         "cooperative_message_trigger_longitudinal_distance_m": float(
             cooperative_message_trigger_longitudinal_distance_m
         ),
@@ -551,6 +554,7 @@ def maybe_replan_global_route(
     runtime_state,
     world,
     world_map=None,
+    map_planner=None,
     carla,
     sim_time_s: float,
     wall_time_s: float | None = None,
@@ -565,7 +569,7 @@ def maybe_replan_global_route(
     if not isinstance(workzone_position_xy, Sequence) or len(workzone_position_xy) < 2:
         _workzone_object, resolved_workzone_name, workzone_waypoint_info = _resolve_workzone_object(
             world=world,
-            world_map=world_map,
+            map_planner=map_planner,
             carla=carla,
             candidate_names=_workzone_name_candidates(runtime_state=next_runtime_state),
         )
@@ -584,8 +588,11 @@ def maybe_replan_global_route(
             next_runtime_state["workzone_lane_id"] = (
                 None if workzone_waypoint_info is None else workzone_waypoint_info.get("lane_id", None)
             )
-            next_runtime_state["workzone_carla_lane_id"] = (
-                None if workzone_waypoint_info is None else workzone_waypoint_info.get("carla_lane_id", None)
+            next_runtime_state["workzone_opendrive_lane_id"] = (
+                None if workzone_waypoint_info is None else workzone_waypoint_info.get("opendrive_lane_id", None)
+            )
+            next_runtime_state["workzone_ad_lane_id"] = (
+                None if workzone_waypoint_info is None else workzone_waypoint_info.get("ad_lane_id", None)
             )
             if str(resolved_workzone_name or "").strip():
                 next_runtime_state["workzone_object_name"] = str(resolved_workzone_name)
@@ -630,7 +637,8 @@ def maybe_replan_global_route(
         road_id=next_runtime_state.get("workzone_road_id", None),
         section_id=next_runtime_state.get("workzone_section_id", None),
         lane_id=next_runtime_state.get("workzone_lane_id", None),
-        carla_lane_id=next_runtime_state.get("workzone_carla_lane_id", None),
+        opendrive_lane_id=next_runtime_state.get("workzone_opendrive_lane_id", None),
+        ad_lane_id=next_runtime_state.get("workzone_ad_lane_id", None),
     )
     next_runtime_state["cp_message_inserted"] = True
     print(

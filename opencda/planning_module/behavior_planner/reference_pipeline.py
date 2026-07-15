@@ -533,9 +533,8 @@ class MpcReferenceResult:
 class MpcReferenceGenerationContext:
     """Inputs required to generate the MPC lateral reference for one tick."""
 
-    world_map: Any
-    carla: Any
-    ego_transform: Any
+    map_planner: Any
+    ego_pose: Mapping[str, object]
     ego_state: Sequence[float]
     active_global_route_points: Sequence[Sequence[float]]
     previous_lane_center_reference: Sequence[Mapping[str, object]] | None
@@ -572,9 +571,8 @@ class MpcReferenceGenerationContext:
 class MpcReferenceGenerationOutput:
     """Complete output of one behavior-to-MPC reference generation step.
 
-    The runner still owns CARLA waypoint generation for now, but this object
-    formalizes the handoff boundary so the call site no longer depends on a
-    loose dictionary of local variables.
+    The custom map planner owns waypoint generation; this object formalizes
+    the handoff boundary to MPC.
     """
 
     mpc_reference_result: MpcReferenceResult
@@ -727,9 +725,8 @@ def generate_mpc_reference(
 ) -> MpcReferenceGenerationOutput:
     """Generate the final MPC reference and package its diagnostics."""
 
-    world_map = context.world_map
-    carla = context.carla
-    ego_transform = context.ego_transform
+    map_planner = context.map_planner
+    ego_pose = context.ego_pose
     ego_state = context.ego_state
     active_global_route_points = context.active_global_route_points
     previous_lane_center_reference = context.previous_lane_center_reference
@@ -776,9 +773,8 @@ def generate_mpc_reference(
     )
     reference_stop_target_state = stop_target_state if bool(final_goal_stop_active) else None
     raw_reference = build_reference_samples(
-        world_map=world_map,
-        carla=carla,
-        ego_transform=ego_transform,
+        map_planner=map_planner,
+        ego_pose=ego_pose,
         target_lane_id=int(reference_target_lane_id),
         decision=str(current_applied_behavior),
         horizon_steps=int(mpc_horizon_steps),
@@ -930,9 +926,8 @@ def generate_mpc_reference(
 
     if bool(geometry_guard_active):
         reanchored_reference = build_reference_samples(
-            world_map=world_map,
-            carla=carla,
-            ego_transform=ego_transform,
+            map_planner=map_planner,
+            ego_pose=ego_pose,
             target_lane_id=int(current_lane_id),
             decision="lane_follow",
             horizon_steps=int(mpc_horizon_steps),
@@ -1003,9 +998,8 @@ def generate_mpc_reference(
         reanchored_reference = []
         if bool(is_fixed_stop_decision(current_applied_behavior)):
             reanchored_reference = build_reference_samples(
-                world_map=world_map,
-                carla=carla,
-                ego_transform=ego_transform,
+                map_planner=map_planner,
+                ego_pose=ego_pose,
                 target_lane_id=int(reference_target_lane_id),
                 decision=str(current_applied_behavior),
                 horizon_steps=int(mpc_horizon_steps),

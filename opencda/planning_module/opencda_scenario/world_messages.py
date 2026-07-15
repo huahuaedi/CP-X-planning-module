@@ -141,26 +141,23 @@ def _actor_bbox_dimensions(actor: object) -> Tuple[float, float, float]:
 
 def _road_lane_ids(
     *,
-    world_map,
-    carla,
+    map_planner,
     x_m: float,
     y_m: float,
     z_m: float,
 ) -> Tuple[int, int]:
-    if world_map is None or not hasattr(world_map, "get_waypoint"):
+    if map_planner is None:
         return -1, 0
     try:
-        waypoint = world_map.get_waypoint(
-            carla.Location(x=float(x_m), y=float(y_m), z=float(z_m)),
-            project_to_road=True,
-            lane_type=carla.LaneType.Driving,
+        waypoint = map_planner.get_waypoint(
+            {"x": float(x_m), "y": float(y_m), "z": float(z_m)}
         )
     except Exception:
         return -1, 0
     if waypoint is None:
         return -1, 0
     try:
-        road_id = int(getattr(waypoint, "road_id", -1))
+        road_id = int(waypoint.road_id or -1)
     except Exception:
         road_id = -1
     try:
@@ -174,8 +171,7 @@ def _actor_snapshot(
     *,
     actor,
     actor_type: str,
-    world_map,
-    carla,
+    map_planner,
     sumo_bridge=None,
 ) -> Dict[str, object] | None:
     get_transform_fn = getattr(actor, "get_transform", None)
@@ -227,8 +223,7 @@ def _actor_snapshot(
 
     length_m, width_m, height_m = _actor_bbox_dimensions(actor)
     road_id, lane_id = _road_lane_ids(
-        world_map=world_map,
-        carla=carla,
+        map_planner=map_planner,
         x_m=float(location.x),
         y_m=float(location.y),
         z_m=float(getattr(location, "z", 0.0)),
@@ -253,8 +248,7 @@ def _actor_snapshot(
 def _collect_obstacle_snapshots(
     *,
     world,
-    world_map,
-    carla,
+    map_planner,
     ego_vehicle,
     sumo_bridge,
     max_distance_m: float,
@@ -270,8 +264,7 @@ def _collect_obstacle_snapshots(
         snapshot = _actor_snapshot(
             actor=actor,
             actor_type=actor_type,
-            world_map=world_map,
-            carla=carla,
+            map_planner=map_planner,
             sumo_bridge=sumo_bridge,
         )
         if snapshot is None:
@@ -326,8 +319,7 @@ def publish_obstacle_messages(
     *,
     runtime_state: Mapping[str, object],
     world,
-    world_map,
-    carla,
+    map_planner,
     ego_vehicle,
     sim_time_s: float,
     sumo_bridge=None,
@@ -348,8 +340,7 @@ def publish_obstacle_messages(
 
     dynamic_snapshots = _collect_obstacle_snapshots(
         world=world,
-        world_map=world_map,
-        carla=carla,
+        map_planner=map_planner,
         ego_vehicle=ego_vehicle,
         sumo_bridge=sumo_bridge,
         max_distance_m=float(max_distance_m),

@@ -7,9 +7,17 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, Iterable, Mapping, Sequence
 
-from utility.carla_lane_graph import canonical_lane_id_for_waypoint
+from utility.global_planner import canonical_lane_id_for_waypoint, world_heading_rad
 
 _STOP_TARGET_QUERY_STATE: Dict[str, tuple[tuple[object, ...], float, float, float]] = {}
+
+
+def _pose_xyz(pose: Mapping[str, object]) -> tuple[float, float, float]:
+    return (
+        float(pose["x"]),
+        float(pose["y"]),
+        float(pose.get("z", 0.0)),
+    )
 
 
 def normalize_signal_state(signal_state: object) -> str:
@@ -101,73 +109,70 @@ def _iter_world_traffic_lights(world) -> Iterable[Any]:
             yield actor
 
 
-def _traffic_light_stop_waypoints(actor: Any) -> list[Any]:
-    stop_waypoints: list[Any] = []
-    for method_name in ("get_stop_waypoints", "get_affected_lane_waypoints"):
-        method = getattr(actor, method_name, None)
-        if not callable(method):
-            continue
-        try:
-            returned_waypoints = list(method() or [])
-        except Exception:
-            continue
-        for waypoint in returned_waypoints:
-            if waypoint is not None:
-                stop_waypoints.append(waypoint)
-        if len(stop_waypoints) > 0:
-            break
-    return stop_waypoints
+def _signal_position_from_actor(actor: Any) -> Dict[str, float] | None:
+    """Convert a CARLA actor/trigger transform to a primitive world point."""
 
-
-def _signal_distance_from_actor(
-    *,
-    ego_transform,
-    actor: Any,
-) -> float | None:
-    ego_location = getattr(ego_transform, "location", None)
     actor_transform = _actor_transform(actor)
     actor_location = getattr(actor_transform, "location", None)
-    if ego_location is None or actor_location is None:
+    if actor_location is None:
         return None
+
+    x_m = float(actor_location.x)
+    y_m = float(actor_location.y)
+    z_m = float(getattr(actor_location, "z", 0.0))
+    trigger_location = getattr(getattr(actor, "trigger_volume", None), "location", None)
+    if trigger_location is not None:
+        rotation = getattr(actor_transform, "rotation", None)
+        yaw_rad = math.radians(float(getattr(rotation, "yaw", 0.0)))
+        local_x_m = float(getattr(trigger_location, "x", 0.0))
+        local_y_m = float(getattr(trigger_location, "y", 0.0))
+        x_m += math.cos(yaw_rad) * local_x_m - math.sin(yaw_rad) * local_y_m
+        y_m += math.sin(yaw_rad) * local_x_m + math.cos(yaw_rad) * local_y_m
+        z_m += float(getattr(trigger_location, "z", 0.0))
+    return {"x": x_m, "y": y_m, "z": z_m}
+
+
+def _signal_distance_from_position(
+    *,
+    ego_pose: Mapping[str, object],
+    signal_position: Mapping[str, object] | None,
+) -> float | None:
+    if signal_position is None:
+        return None
+    ego_x_m, ego_y_m, _ = _pose_xyz(ego_pose)
     return float(
         math.hypot(
-            float(ego_location.x) - float(actor_location.x),
-            float(ego_location.y) - float(actor_location.y),
+            ego_x_m - float(signal_position["x"]),
+            ego_y_m - float(signal_position["y"]),
         )
     )
 
 
-def _signal_forward_from_actor(
+def _signal_forward_from_position(
     *,
-    ego_transform,
-    actor: Any,
+    ego_pose: Mapping[str, object],
+    signal_position: Mapping[str, object] | None,
 ) -> float | None:
-    ego_location = getattr(ego_transform, "location", None)
-    ego_rotation = getattr(ego_transform, "rotation", None)
-    actor_transform = _actor_transform(actor)
-    actor_location = getattr(actor_transform, "location", None)
-    if ego_location is None or ego_rotation is None or actor_location is None:
+    if signal_position is None:
         return None
-    ego_yaw_rad = math.radians(float(getattr(ego_rotation, "yaw", 0.0)))
-    dx_m = float(actor_location.x) - float(ego_location.x)
-    dy_m = float(actor_location.y) - float(ego_location.y)
+    ego_x_m, ego_y_m, _ = _pose_xyz(ego_pose)
+    ego_yaw_rad = float(ego_pose.get("heading_rad", 0.0))
+    dx_m = float(signal_position["x"]) - ego_x_m
+    dy_m = float(signal_position["y"]) - ego_y_m
     return float(math.cos(ego_yaw_rad) * dx_m + math.sin(ego_yaw_rad) * dy_m)
 
 
-def _signal_lateral_from_actor(
+def _signal_lateral_from_position(
     *,
-    ego_transform,
-    actor: Any,
+    ego_pose: Mapping[str, object],
+    signal_position: Mapping[str, object] | None,
 ) -> float | None:
-    ego_location = getattr(ego_transform, "location", None)
-    ego_rotation = getattr(ego_transform, "rotation", None)
-    actor_transform = _actor_transform(actor)
-    actor_location = getattr(actor_transform, "location", None)
-    if ego_location is None or ego_rotation is None or actor_location is None:
+    if signal_position is None:
         return None
-    ego_yaw_rad = math.radians(float(getattr(ego_rotation, "yaw", 0.0)))
-    dx_m = float(actor_location.x) - float(ego_location.x)
-    dy_m = float(actor_location.y) - float(ego_location.y)
+    ego_x_m, ego_y_m, _ = _pose_xyz(ego_pose)
+    ego_yaw_rad = float(ego_pose.get("heading_rad", 0.0))
+    dx_m = float(signal_position["x"]) - ego_x_m
+    dy_m = float(signal_position["y"]) - ego_y_m
     return float(-math.sin(ego_yaw_rad) * dx_m + math.cos(ego_yaw_rad) * dy_m)
 
 
@@ -233,29 +238,32 @@ def _clear_stop_target_query_state(query_key: str | None) -> None:
 
 def _stop_target_match_details(
     *,
-    stop_waypoint: Any,
+    map_planner: Any,
+    signal_position: Mapping[str, object],
     stop_target_xy: tuple[float, float],
     stop_target_lane_id: int | None,
     stop_target_road_id: int | None,
     stop_target_section_id: int | None,
 ) -> tuple[int, float] | None:
-    stop_location = getattr(
-        getattr(stop_waypoint, "transform", None),
-        "location",
-        None,
+    custom_waypoint = map_planner.get_waypoint(
+        {
+            "x": float(signal_position["x"]),
+            "y": float(signal_position["y"]),
+            "z": float(signal_position.get("z", 0.0)),
+        }
     )
-    if stop_location is None:
+    if custom_waypoint is None:
         return None
 
     match_distance_m = float(
         math.hypot(
-            float(stop_location.x) - float(stop_target_xy[0]),
-            float(stop_location.y) - float(stop_target_xy[1]),
+            float(signal_position["x"]) - float(stop_target_xy[0]),
+            float(signal_position["y"]) - float(stop_target_xy[1]),
         )
     )
-    stop_waypoint_road_id = int(getattr(stop_waypoint, "road_id", 0))
-    stop_waypoint_section_id = int(getattr(stop_waypoint, "section_id", 0))
-    stop_waypoint_lane_id = int(canonical_lane_id_for_waypoint(stop_waypoint))
+    stop_waypoint_road_id = int(custom_waypoint.road_id or 0)
+    stop_waypoint_section_id = int(custom_waypoint.section_id or 0)
+    stop_waypoint_lane_id = int(canonical_lane_id_for_waypoint(custom_waypoint))
 
     road_matches = (
         stop_target_road_id is not None
@@ -283,8 +291,9 @@ def _stop_target_match_details(
 def find_relevant_signal_context(
     *,
     world,
+    map_planner,
     ego_vehicle,
-    ego_transform,
+    ego_pose: Mapping[str, object],
     stop_target: Mapping[str, object] | None,
     max_stop_waypoint_match_distance_m: float = 12.0,
     max_actor_position_match_distance_m: float = 40.0,
@@ -397,53 +406,43 @@ def find_relevant_signal_context(
                     candidate_state = "unknown"
 
         actor_name = _traffic_light_actor_name(candidate_actor)
-        signal_distance_m = _signal_distance_from_actor(
-            ego_transform=ego_transform,
-            actor=candidate_actor,
+        signal_position = _signal_position_from_actor(candidate_actor)
+        signal_distance_m = _signal_distance_from_position(
+            ego_pose=ego_pose,
+            signal_position=signal_position,
         )
-        signal_forward_m = _signal_forward_from_actor(
-            ego_transform=ego_transform,
-            actor=candidate_actor,
+        signal_forward_m = _signal_forward_from_position(
+            ego_pose=ego_pose,
+            signal_position=signal_position,
         )
-        signal_lateral_m = _signal_lateral_from_actor(
-            ego_transform=ego_transform,
-            actor=candidate_actor,
+        signal_lateral_m = _signal_lateral_from_position(
+            ego_pose=ego_pose,
+            signal_position=signal_position,
         )
         match_distance_m = float("inf")
         signal_source = "actor_position_match"
-        stop_waypoint_match_rank = None
+        custom_position_match_rank = None
 
-        if stop_target_xy is not None:
-            stop_waypoints = _traffic_light_stop_waypoints(candidate_actor)
-            if len(stop_waypoints) > 0:
-                waypoint_match_details = []
-                for stop_waypoint in stop_waypoints:
-                    match_details = _stop_target_match_details(
-                        stop_waypoint=stop_waypoint,
-                        stop_target_xy=stop_target_xy,
-                        stop_target_lane_id=stop_target_lane_id,
-                        stop_target_road_id=stop_target_road_id,
-                        stop_target_section_id=stop_target_section_id,
-                    )
-                    if match_details is None:
-                        continue
-                    waypoint_match_details.append(match_details)
-                if len(waypoint_match_details) > 0:
-                    stop_waypoint_match_rank, match_distance_m = min(
-                        waypoint_match_details,
-                        key=lambda item: (int(item[0]), float(item[1])),
-                    )
-                    signal_source = "stop_waypoint_match"
+        if stop_target_xy is not None and signal_position is not None:
+            match_details = _stop_target_match_details(
+                map_planner=map_planner,
+                signal_position=signal_position,
+                stop_target_xy=stop_target_xy,
+                stop_target_lane_id=stop_target_lane_id,
+                stop_target_road_id=stop_target_road_id,
+                stop_target_section_id=stop_target_section_id,
+            )
+            if match_details is not None:
+                custom_position_match_rank, match_distance_m = match_details
+                if int(custom_position_match_rank) <= 2:
+                    signal_source = "custom_lane_match"
             if not math.isfinite(match_distance_m):
-                actor_transform = _actor_transform(candidate_actor)
-                actor_location = getattr(actor_transform, "location", None)
-                if actor_location is not None:
-                    match_distance_m = float(
-                        math.hypot(
-                            float(actor_location.x) - float(stop_target_xy[0]),
-                            float(actor_location.y) - float(stop_target_xy[1]),
-                        )
+                match_distance_m = float(
+                    math.hypot(
+                        float(signal_position["x"]) - float(stop_target_xy[0]),
+                        float(signal_position["y"]) - float(stop_target_xy[1]),
                     )
+                )
         elif signal_distance_m is not None:
             match_distance_m = float(signal_distance_m)
 
@@ -451,7 +450,7 @@ def find_relevant_signal_context(
         if (
             candidate_actor is ego_associated_actor
             and stop_target_xy is not None
-            and stop_waypoint_match_rank is None
+            and custom_position_match_rank is None
             and math.isfinite(match_distance_m)
         ):
             association_match_limit_m = float(max_actor_position_match_distance_m)
@@ -471,7 +470,7 @@ def find_relevant_signal_context(
             ):
                 match_distance_m = float(stop_target_distance_m)
 
-        if signal_source == "stop_waypoint_match":
+        if signal_source == "custom_lane_match":
             lane_aware_max_match_distance_m = max(
                 float(max_stop_waypoint_match_distance_m),
                 35.0,
@@ -480,10 +479,10 @@ def find_relevant_signal_context(
                 float(max_stop_waypoint_match_distance_m),
                 20.0,
             )
-            if stop_waypoint_match_rank in {0, 1}:
+            if custom_position_match_rank in {0, 1}:
                 if float(match_distance_m) > float(lane_aware_max_match_distance_m):
                     continue
-            elif stop_waypoint_match_rank == 2:
+            elif custom_position_match_rank == 2:
                 if float(match_distance_m) > float(section_aware_max_match_distance_m):
                     continue
             elif float(match_distance_m) > float(max_stop_waypoint_match_distance_m):
@@ -516,15 +515,15 @@ def find_relevant_signal_context(
             ),
             "signal_forward_m": signal_forward_m,
             "signal_lateral_m": signal_lateral_m,
-            "signal_match_rank": stop_waypoint_match_rank,
+            "signal_match_rank": custom_position_match_rank,
             "signal_actor": candidate_actor,
         }
         if best_candidate is None:
             best_candidate = candidate_context
             continue
 
-        # Prefer a stop-waypoint match when the ego-associated actor has no
-        # stop-line/lane evidence.  CARLA trigger volumes can be large around
+        # Prefer a custom-map lane match when the ego-associated actor has no
+        # stop-line/lane evidence. CARLA trigger volumes can be large around
         # dense junctions; blindly prioritising ego association lets a sibling
         # light keep a stale red after the route stop line has moved on.
         def source_priority(candidate: Mapping[str, object]) -> int:
@@ -533,7 +532,7 @@ def find_relevant_signal_context(
                 if stop_target_xy is not None and candidate.get("signal_match_rank", None) is None:
                     return 2
                 return 0
-            if source == "stop_waypoint_match":
+            if source == "custom_lane_match":
                 return 1
             if source == "actor_position_match":
                 return 3
@@ -693,9 +692,8 @@ def _project_to_route_arc(
 
 def find_stop_target_from_ego(
     *,
-    world_map,
-    carla,
-    ego_transform,
+    map_planner,
+    ego_pose: Mapping[str, object],
     global_route_points: Sequence[Sequence[float]],
     search_distance_m: float = 100.0,
     query_key: str | None = None,
@@ -709,13 +707,7 @@ def find_stop_target_from_ego(
         _clear_stop_target_query_state(query_key)
         return None
 
-    ego_location = getattr(ego_transform, "location", None)
-    if ego_location is None:
-        _clear_stop_target_query_state(query_key)
-        return None
-    ego_x_m = float(getattr(ego_location, "x", 0.0))
-    ego_y_m = float(getattr(ego_location, "y", 0.0))
-    ego_z_m = float(getattr(ego_location, "z", 0.0))
+    ego_x_m, ego_y_m, ego_z_m = _pose_xyz(ego_pose)
 
     route_cum_dists = _route_cum_dists(route_points)
     if len(route_cum_dists) != len(route_points):
@@ -739,35 +731,29 @@ def find_stop_target_from_ego(
         if float(forward_distance_m) > float(max_search_distance_m):
             break
 
-        route_waypoint = world_map.get_waypoint(
-            carla.Location(
-                x=float(route_point[0]),
-                y=float(route_point[1]),
-                z=float(ego_z_m),
-            ),
-            project_to_road=True,
-            lane_type=carla.LaneType.Driving,
+        route_waypoint = map_planner.get_waypoint(
+            {
+                "x": float(route_point[0]),
+                "y": float(route_point[1]),
+                "z": float(ego_z_m),
+            }
         )
         if route_waypoint is None:
             continue
 
-        if bool(getattr(route_waypoint, "is_junction", False)):
+        if bool(getattr(route_waypoint, "is_intersection", False)):
             if previous_waypoint is None or previous_arc_m is None:
                 return None
             stop_distance_m = float(previous_arc_m) - float(ego_arc_m)
             if stop_distance_m <= 1.0e-3:
                 return None
-            stop_location = getattr(getattr(previous_waypoint, "transform", None), "location", None)
-            stop_rotation = getattr(getattr(previous_waypoint, "transform", None), "rotation", None)
-            if stop_location is None:
-                return None
             return {
-                "x_m": float(getattr(stop_location, "x", 0.0)),
-                "y_m": float(getattr(stop_location, "y", 0.0)),
-                "heading_rad": float(
-                    math.radians(float(getattr(stop_rotation, "yaw", 0.0)))
-                ) if stop_rotation is not None else 0.0,
+                "x_m": float(previous_waypoint.position["x"]),
+                "y_m": float(previous_waypoint.position["y"]),
+                "heading_rad": float(world_heading_rad(previous_waypoint) or 0.0),
                 "lane_id": int(canonical_lane_id_for_waypoint(previous_waypoint)),
+                "ad_lane_id": int(previous_waypoint.ad_lane_id),
+                "opendrive_lane_id": int(previous_waypoint.lane_id or 0),
                 "road_id": int(getattr(previous_waypoint, "road_id", 0)),
                 "section_id": int(getattr(previous_waypoint, "section_id", 0)),
                 "distance_m": float(stop_distance_m),

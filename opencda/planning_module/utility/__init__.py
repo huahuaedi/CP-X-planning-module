@@ -1,13 +1,16 @@
 """Utility exports for the planning-only stack."""
 
-from .carla_lane_graph import (
-    build_lane_center_waypoints,
+from .global_planner import (
+    CustomGlobalPlannerAdapter,
+    INVALID_LANE_ID,
+    RoutePlanSummary,
+    WaypointQueryResult,
     canonical_lane_id_for_waypoint,
     canonical_lane_ids_for_waypoint,
     canonical_lane_waypoint_for_lane_id,
-    direction_key,
-    raw_carla_lane_id_for_waypoint,
-    round_xy,
+    canonical_lane_waypoints,
+    raw_opendrive_lane_id_for_waypoint,
+    world_heading_rad,
 )
 from .artifacts import ensure_artifact_dir, write_dict_csv_artifact, write_json_artifact
 from .config_loader import deep_merge_dicts, load_yaml_file
@@ -42,7 +45,6 @@ from .evaluation_metrics import (
     compute_pairwise_ttc_drac,
     write_planning_metrics_artifacts,
 )
-from .global_planner import AStarGlobalPlanner, RoutePlanSummary
 from .planning_context import (
     CPMessageContext,
     EgoPlanningState,
@@ -60,9 +62,9 @@ from .run_diagnostics import build_planning_debug_summary
 from .tracker import Tracker
 
 __all__ = [
-    "AStarGlobalPlanner",
     "CP_MESSAGE_PATH",
     "CPMessageContext",
+    "CustomGlobalPlannerAdapter",
     "EvaluationMetricsRecorder",
     "EgoPlanningState",
     "MapLaneContext",
@@ -75,15 +77,14 @@ __all__ = [
     "StopTargetContext",
     "TargetContext",
     "TrafficControlContext",
-    "build_lane_center_waypoints",
     "build_planning_debug_summary",
     "canonical_lane_id_for_waypoint",
     "canonical_lane_ids_for_waypoint",
     "canonical_lane_waypoint_for_lane_id",
+    "canonical_lane_waypoints",
     "control_messages",
     "compute_pairwise_ttc_drac",
     "deep_merge_dicts",
-    "direction_key",
     "empty_cp_payload",
     "ensure_artifact_dir",
     "ensure_cp_message_file_exists",
@@ -100,13 +101,12 @@ __all__ = [
     "obstacle_messages",
     "obstacle_messages_to_snapshots",
     "pop_lane_closure_messages",
-    "raw_carla_lane_id_for_waypoint",
+    "raw_opendrive_lane_id_for_waypoint",
     "remove_cp_item",
     "remove_cp_messages_by_id",
     "replace_cp_list",
     "replace_obstacle_messages",
     "reset_cp_message_payload",
-    "round_xy",
     "Tracker",
     "upsert_cp_item",
     "write_cp_message_payload",
@@ -114,4 +114,7 @@ __all__ = [
     "write_dict_csv_artifact",
     "write_json_artifact",
     "write_planning_metrics_artifacts",
+    "world_heading_rad",
+    "WaypointQueryResult",
+    "INVALID_LANE_ID",
 ]
