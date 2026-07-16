@@ -73,12 +73,11 @@ The planning runner also records evaluation metrics, including collision count/r
 
 Install or prepare:
 
-- A source checkout of CARLA 0.9.12.
-- CARLA's patched Unreal Engine 4.26.
+- CARLA 0.9.12 Linux package.
 - Conda or Miniforge.
-- The `carla307` environment with Python 3.7.10.
-- A source-built CARLA PythonAPI matching that interpreter.
-- Optional: SUMO and `traci` for SUMO-based scenarios.
+- Python 3.7 environment.
+- A working CARLA PythonAPI egg matching Python 3.7.
+- Optional: SUMO and traci for SUMO-based scenarios.
 
 The supported local layout is:
 
