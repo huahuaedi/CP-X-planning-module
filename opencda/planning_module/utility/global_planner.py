@@ -22,6 +22,13 @@ except ModuleNotFoundError:
 INVALID_LANE_ID = 0
 
 
+def _euclidean_distance(first_point: Sequence[float], second_point: Sequence[float]) -> float:
+    """Return Euclidean distance on Python 3.7 and newer."""
+    return math.sqrt(
+        sum((float(first) - float(second)) ** 2 for first, second in zip(first_point, second_point))
+    )
+
+
 @dataclass(frozen=True)
 class WaypointQueryResult:
     index: int
@@ -323,7 +330,7 @@ class CustomGlobalPlannerAdapter:
         query_z = 0.0 if z_m is None else float(z_m)
         with self._lane_context_lock:
             cached = self._lane_context_cache
-            if cached is not None and math.dist((x_m, y_m, query_z), cached[:3]) < 1.0:
+            if cached is not None and _euclidean_distance((x_m, y_m, query_z), cached[:3]) < 1.0:
                 return dict(cached[3])
 
         waypoint = self.get_waypoint({"x": x_m, "y": y_m, "z": query_z})
@@ -489,7 +496,7 @@ class CustomGlobalPlannerAdapter:
 
     @staticmethod
     def _polyline_length(points: Sequence[Sequence[float]]) -> float:
-        return sum(math.dist(a[:2], b[:2]) for a, b in zip(points, points[1:]))
+        return sum(_euclidean_distance(a[:2], b[:2]) for a, b in zip(points, points[1:]))
 
     @staticmethod
     def _route_cumulative_distances(route_xy: np.ndarray) -> np.ndarray:

@@ -8,14 +8,14 @@ carla:
   synchronous_mode: true
   launch_if_needed: true
   launch_timeout_s: 120.0
-  carla_root: /home/umd-user/carla_source/carla
+  carla_root: /home/umd-user/carla_source/carla_0.9.12
   launch_mode: ue4editor_map
   rhi: -vulkan
   launch_extra_args:
     - "-quality-level=Low"
     - "-ResX=800"
     - "-ResY=600"
-  map: /home/umd-user/carla_source/carla/Unreal/CarlaUE4/Content/Carla/Maps/Town06.umap
+  map: /home/umd-user/carla_source/carla_0.9.12/Unreal/CarlaUE4/Content/Carla/Maps/Town06.umap
 
 sumo:
   enabled: true
@@ -31,7 +31,7 @@ sumo:
   map_basename: Town06
   asset_root: opencda_scenario/assets
   auto_generate_assets: true
-  xodr_path: /home/umd-user/carla_source/carla/Unreal/CarlaUE4/Content/Carla/Maps/OpenDrive/Town06.xodr
+  xodr_path: /home/umd-user/carla_source/carla_0.9.12/Unreal/CarlaUE4/Content/Carla/Maps/OpenDrive/Town06.xodr
   route_generation:
     seed: 42
     period_s: 0.75

@@ -91,7 +91,7 @@ def _load_carla_api():
     except Exception:
         pass
 
-    carla_root = os.environ.get("CARLA_ROOT", "/home/umd-user/carla_source/carla")
+    carla_root = os.environ.get("CARLA_ROOT", "/home/umd-user/carla_source/carla_0.9.12")
     egg_matches = glob.glob(_get_carla_egg_glob(carla_root))
     if egg_matches:
         egg_path = egg_matches[0]

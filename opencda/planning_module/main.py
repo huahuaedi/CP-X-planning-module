@@ -7,6 +7,7 @@ from typing import Any, Dict, Mapping
 import glob
 import os
 import platform
+import re
 import socket
 import subprocess
 import sys
@@ -27,7 +28,8 @@ from utility import Tracker, load_yaml_file
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 MPC_CONFIG_PATH = os.path.join(PROJECT_ROOT, "MPC", "mpc.yaml")
 TRACKER_CONFIG_PATH = os.path.join(PROJECT_ROOT, "utility", "tracker.yaml")
-DEFAULT_CARLA_ROOT = os.environ.get("CARLA_ROOT", "/home/umd-user/carla_source/carla")
+DEFAULT_CARLA_ROOT = "/home/umd-user/carla_source/carla_0.9.12"
+EXPECTED_CARLA_VERSION = "0.9.12"
 
 
 def list_available_scenarios() -> list[str]:
@@ -181,12 +183,62 @@ def _is_tcp_port_open(host: str, port: int, timeout_s: float = 1.0) -> bool:
             return False
 
 
+def _read_carla_source_version(carla_root: str) -> str:
+    """Read the version embedded in a CARLA source checkout."""
+
+    version_files = (
+        os.path.join(carla_root, "LibCarla", "source", "carla", "Version.h"),
+        os.path.join(carla_root, "PythonAPI", "carla", "setup.py"),
+    )
+    version_pattern = re.compile(r"\b\d+\.\d+\.\d+(?:-[A-Za-z0-9._]+)?\b")
+    for version_file in version_files:
+        try:
+            with open(version_file, "r", encoding="utf-8") as file:
+                match = version_pattern.search(file.read())
+        except OSError:
+            continue
+        if match:
+            return match.group(0)
+    return ""
+
+
+def _resolve_carla_root(carla_cfg: Mapping[str, Any]) -> str:
+    """Select only a source checkout whose embedded release is CARLA 0.9.12."""
+
+    environment_root = os.environ.get("CARLA_ROOT", "").strip()
+    configured_root = str(carla_cfg.get("carla_root", "")).strip()
+    candidates = list(
+        dict.fromkeys(
+            os.path.abspath(os.path.expanduser(root))
+            for root in (environment_root, configured_root, DEFAULT_CARLA_ROOT)
+            if root
+        )
+    )
+    rejected = []
+    for candidate in candidates:
+        source_version = _read_carla_source_version(candidate)
+        if _carla_release_version(source_version) == EXPECTED_CARLA_VERSION:
+            if environment_root and os.path.abspath(os.path.expanduser(environment_root)) != candidate:
+                print(
+                    f"Ignoring incompatible CARLA_ROOT={environment_root!r}; "
+                    f"using CARLA {source_version} from {candidate}."
+                )
+            return candidate
+        rejected.append(f"{candidate} ({source_version or 'version not found'})")
+    raise RuntimeError(
+        f"No CARLA {EXPECTED_CARLA_VERSION} source checkout is available. "
+        f"Checked: {rejected}. Set CARLA_ROOT to the CARLA 0.9.12 source directory."
+    )
+
+
 def launch_carla_server(carla_cfg: Mapping[str, Any]) -> subprocess.Popen[bytes]:
     """
     Launch the CARLA server process for a source-build installation.
     """
 
-    carla_root = str(carla_cfg.get("carla_root", DEFAULT_CARLA_ROOT))
+    carla_root = str(carla_cfg.get("_resolved_carla_root", "")).strip()
+    if not carla_root:
+        carla_root = _resolve_carla_root(carla_cfg)
     launch_mode = str(carla_cfg.get("launch_mode", "make_launch_only"))
     map_name = str(carla_cfg.get("map", ""))
     if launch_mode == "ue4editor_map":
@@ -205,12 +257,14 @@ def launch_carla_server(carla_cfg: Mapping[str, Any]) -> subprocess.Popen[bytes]
         command = list(carla_cfg.get("launch_command", ["make", "launch-only"]))
     log_path = os.path.join(PROJECT_ROOT, "carla_launch.log")
     log_file = open(log_path, "ab")
+    process_env = os.environ.copy()
+    process_env["CARLA_ROOT"] = carla_root
     process = subprocess.Popen(
         command,
         cwd=carla_root,
         stdout=log_file,
         stderr=subprocess.STDOUT,
-        env=os.environ.copy(),
+        env=process_env,
         start_new_session=True,
     )
     print(f"Launching CARLA: {' '.join(command)}")
@@ -255,6 +309,31 @@ def _is_retriable_world_ready_error(exc: Exception) -> bool:
         if "color channel" in error_text and "overflow" in error_text:
             return True
     return False
+
+
+def _carla_release_version(version: object) -> str:
+    """Return the release portion of a CARLA version such as ``0.9.12-dirty``."""
+
+    return str(version or "").strip().partition("-")[0]
+
+
+def _validate_carla_versions(client) -> tuple[str, str]:
+    """Fail before world access when either CARLA side is not release 0.9.12."""
+
+    client_version = str(client.get_client_version())
+    server_version = str(client.get_server_version())
+    expected_release = _carla_release_version(EXPECTED_CARLA_VERSION)
+    client_release = _carla_release_version(client_version)
+    server_release = _carla_release_version(server_version)
+    if client_release != expected_release or server_release != expected_release:
+        raise RuntimeError(
+            "Incompatible CARLA client/server versions. "
+            f"This project requires CARLA {EXPECTED_CARLA_VERSION} on both sides, "
+            f"but the client is {client_version!r} and the simulator is {server_version!r}. "
+            "Stop the simulator currently listening on the configured CARLA port, then start "
+            "the source build under /home/umd-user/carla_source/carla_0.9.12."
+        )
+    return client_version, server_version
 
 
 def wait_for_carla_world_ready(client, world, timeout_s: float) -> Any:
@@ -352,7 +431,9 @@ def run_carla_scenario(name: str) -> int:
 
     scenario_cfg = load_any_scenario(name)
     carla_cfg = dict(scenario_cfg.get("carla", {}))
-    carla = import_carla()
+    carla_root = _resolve_carla_root(carla_cfg)
+    carla_cfg["_resolved_carla_root"] = carla_root
+    carla = import_carla(carla_root)
     host = str(carla_cfg.get("host", "127.0.0.1"))
     port = int(carla_cfg.get("port", 2000))
     request_timeout_s = float(carla_cfg.get("timeout_s", 10.0))
@@ -371,6 +452,9 @@ def run_carla_scenario(name: str) -> int:
             f"CARLA is not reachable at {host}:{port}. "
             "Start the server first or set launch_if_needed: true in the scenario."
         )
+
+    client_version, server_version = _validate_carla_versions(client)
+    print(f"CARLA client/server: {client_version} / {server_version}")
 
     requested_map = str(carla_cfg["map"])
     load_candidates = _build_map_load_candidates(requested_map)

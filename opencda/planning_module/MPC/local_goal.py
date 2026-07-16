@@ -13,6 +13,13 @@ from utility.global_planner import (
 )
 
 
+def _euclidean_distance(first_point: Sequence[float], second_point: Sequence[float]) -> float:
+    """Return Euclidean distance on Python 3.7 and newer."""
+    return math.sqrt(
+        sum((float(first) - float(second)) ** 2 for first, second in zip(first_point, second_point))
+    )
+
+
 def _point_xy(waypoint) -> tuple[float, float]:
     return float(waypoint.position["x"]), float(waypoint.position["y"])
 
@@ -56,7 +63,7 @@ def _sample_custom_lane_points(
         if next_waypoint is None:
             break
         next_point = _point_xy(next_waypoint)
-        if points and math.dist(points[-1], next_point) <= 1.0e-6:
+        if points and _euclidean_distance(points[-1], next_point) <= 1.0e-6:
             break
         points.append(next_point)
         current_waypoint = next_waypoint
@@ -68,9 +75,9 @@ def _curvature_from_three_points(
     p2: Sequence[float],
     p3: Sequence[float],
 ) -> float:
-    side_a = math.dist(p1[:2], p2[:2])
-    side_b = math.dist(p2[:2], p3[:2])
-    side_c = math.dist(p1[:2], p3[:2])
+    side_a = _euclidean_distance(p1[:2], p2[:2])
+    side_b = _euclidean_distance(p2[:2], p3[:2])
+    side_c = _euclidean_distance(p1[:2], p3[:2])
     if min(side_a, side_b, side_c) <= 1.0e-9:
         return 0.0
     twice_area = abs(

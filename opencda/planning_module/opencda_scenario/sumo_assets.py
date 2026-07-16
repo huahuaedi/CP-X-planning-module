@@ -47,7 +47,8 @@ OPENCDA_ROOT = _resolve_opencda_root()
 if OPENCDA_ROOT not in sys.path:
     sys.path.insert(0, OPENCDA_ROOT)
 DEFAULT_ASSET_ROOT = os.path.join(PROJECT_ROOT, "opencda_scenario", "assets")
-DEFAULT_CARLA_ROOT = os.environ.get("CARLA_ROOT", "/home/umd-user/carla_source/carla")
+DEFAULT_CARLA_ROOT = "/home/umd-user/carla_source/carla_0.9.12"
+EXPECTED_CARLA_VERSION = "0.9.12"
 DEFAULT_SUMO_HOME = os.environ.get("SUMO_HOME", "/usr/share/sumo")
 
 
@@ -146,7 +147,7 @@ def _get_carla_egg_glob(carla_root: str) -> str:
         "PythonAPI",
         "carla",
         "dist",
-        f"carla-*{sys.version_info.major}.{sys.version_info.minor}-{platform_tag}.egg",
+        f"carla-{EXPECTED_CARLA_VERSION}*{sys.version_info.major}.{sys.version_info.minor}-{platform_tag}.egg",
     )
 
 
@@ -156,6 +157,7 @@ def _sumo_env(scenario_cfg: Mapping[str, object] | None = None) -> dict[str, str
     scenario_cfg = dict(scenario_cfg or {})
     carla_cfg = dict(scenario_cfg.get("carla", {}))
     carla_root = str(carla_cfg.get("carla_root", DEFAULT_CARLA_ROOT)).strip() or DEFAULT_CARLA_ROOT
+    env["CARLA_ROOT"] = carla_root
     python_path_entries = list(sys.path)
     for egg_path in glob.glob(_get_carla_egg_glob(carla_root)):
         if egg_path not in python_path_entries:

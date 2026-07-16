@@ -8,7 +8,7 @@ carla:
   synchronous_mode: true
   launch_if_needed: true
   launch_timeout_s: 120.0
-  carla_root: /home/umd-user/carla_source/carla
+  carla_root: /home/umd-user/carla_source/carla_0.9.12
   launch_mode: ue4editor_map
   rhi: -vulkan
   launch_extra_args:
@@ -31,7 +31,7 @@ sumo:
   map_basename: Town10HD_Opt
   asset_root: opencda_scenario/assets
   auto_generate_assets: true
-  xodr_path: /home/umd-user/carlaCache/Carla/Maps/OpenDrive/Town10HD_Opt.xodr
+  xodr_path: Global_Planner/maps/Town10HD_Opt.xodr
   route_generation:
     seed: 42
     period_s: 0.75

@@ -4,7 +4,7 @@
 
     <input>
         <type-files value="/home/umd-user/Desktop/OpenCDA/scripts/data/opendrive_netconvert.typ.xml"/>
-        <opendrive-files value="/home/umd-user/carla_source/carla/Unreal/CarlaUE4/Content/Carla/Maps/OpenDrive/Town10HD_Opt.xodr"/>
+        <opendrive-files value="/home/umd-user/carla_source/carla_0.9.12/Unreal/CarlaUE4/Content/Carla/Maps/OpenDrive/Town10HD_Opt.xodr"/>
     </input>
 
     <output>

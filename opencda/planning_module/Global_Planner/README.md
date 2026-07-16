@@ -16,7 +16,7 @@ Global_Planner/
 - `global_planner/`
   The planner package itself.
 - `build_ad_map.sh`
-  Downloads the pinned AD-map v3.0.0 source and builds bindings for the active Python.
+  Downloads the pinned AD-map v2.3.0 source and builds bindings for Python 3.7.
 - `map_repo/install/`
   Generated locally by the build script; it is intentionally not committed.
 
@@ -24,13 +24,19 @@ Global_Planner/
 
 ## Build after cloning
 
-Activate the same Python environment that will run OpenCDA, then run from the repository root:
+Activate the `carla307` Python 3.7 environment that will run OpenCDA, then run from the repository root:
 
 ```bash
 PYTHON_BIN="$(command -v python)" opencda/planning_module/Global_Planner/build_ad_map.sh --clean
 ```
 
 The script checks the Python ABI and development headers, clones the pinned upstream source, builds the Python bindings, installs them under `map_repo/install`, and performs an import smoke test.
+
+`--clean` removes build/install output but preserves the downloaded
+`map_repo/source` checkout, so a rebuild does not depend on GitHub being
+available again. Use `--clean-all` only when that source checkout must also be
+deleted and downloaded again. If the first download reports `Could not resolve
+host: github.com`, restore DNS/network access and rerun the same command.
 
 Do not copy or commit `map_repo/source`, `build`, `log`, or `install`; those trees contain generated and machine-specific files.
 

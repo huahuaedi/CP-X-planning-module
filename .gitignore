@@ -137,6 +137,7 @@ dmypy.json
 cython_debug/
 .idea
 *.json
+!opencda/co_simulation/sumo_integration/vtypes.json
 *.csv
 output/
 outputs
@@ -180,4 +181,3 @@ opencda/planning_module/Global_Planner/map_repo/install/
 .claude/
 .codex/
 /opencda/planning_module/tests/
-

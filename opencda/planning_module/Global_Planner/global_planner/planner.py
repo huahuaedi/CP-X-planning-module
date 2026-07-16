@@ -8,7 +8,7 @@ from pathlib import Path
 
 from . import admap_backend as backend
 from .cache import CACHE_VERSION, compute_xodr_signature, get_cache_paths, load_metadata, load_pickle, metadata_matches, save_metadata, save_pickle
-from .geometry import as_carla_dict, normalize_position, points_are_close, to_carla_dict, to_enu_tuple
+from .geometry import as_carla_dict, euclidean_distance, normalize_position, points_are_close, to_carla_dict, to_enu_tuple
 from .route import Route
 from .waypoint import Waypoint
 
@@ -83,30 +83,37 @@ class GlobalPlanner:
         self._signature = compute_xodr_signature(self.xodr_path)
         self._cache_paths = get_cache_paths(self.xodr_path, self.cache_root, self._signature)
         metadata = load_metadata(self._cache_paths["metadata_file"])
-        use_saved_cache = (
+        planner_cache_is_valid = (
             not force_rebuild
-            and self._cache_paths["adm_config_file"].exists()
             and self._cache_paths["planner_cache_file"].exists()
             and metadata_matches(metadata, self._signature, self.centerline_spacing_m)
         )
+        use_saved_adm_cache = (
+            planner_cache_is_valid
+            and backend.supports_adm_cache()
+            and self._cache_paths["adm_config_file"].exists()
+        )
 
         backend.close_map()
-        if use_saved_cache:
+        if use_saved_adm_cache:
             backend.load_adm_map(self._cache_paths["adm_config_file"])
             self._lane_cache = load_pickle(self._cache_paths["planner_cache_file"])
         else:
             backend.load_open_drive_map(self.xodr_path, overlap_margin=self.overlap_margin)
-            self._lane_cache = self._build_lane_cache()
+            if planner_cache_is_valid:
+                self._lane_cache = load_pickle(self._cache_paths["planner_cache_file"])
+            else:
+                self._lane_cache = self._build_lane_cache()
+                save_pickle(self._cache_paths["planner_cache_file"], self._lane_cache)
+                save_metadata(
+                    self._cache_paths["metadata_file"],
+                    {
+                        "cache_version": CACHE_VERSION,
+                        "centerline_spacing_m": self.centerline_spacing_m,
+                        "xodr_signature": self._signature,
+                    },
+                )
             backend.save_adm_map(self._cache_paths["adm_file"])
-            save_pickle(self._cache_paths["planner_cache_file"], self._lane_cache)
-            save_metadata(
-                self._cache_paths["metadata_file"],
-                {
-                    "cache_version": CACHE_VERSION,
-                    "centerline_spacing_m": self.centerline_spacing_m,
-                    "xodr_signature": self._signature,
-                },
-            )
         self._loaded = True
 
     def close(self) -> None:
@@ -259,7 +266,7 @@ class GlobalPlanner:
 
         best_route_waypoint = min(
             route_waypoints,
-            key=lambda waypoint: math.dist(
+            key=lambda waypoint: euclidean_distance(
                 normalize_position(waypoint.position),
                 snapped_query_position,
             ),
@@ -345,7 +352,7 @@ class GlobalPlanner:
                     "lane_id": lane_id,
                     "parametric_offset": parametric_offset,
                     "center_point": center_point,
-                    "snap_distance": math.dist(raw_point, center_point),
+                    "snap_distance": euclidean_distance(raw_point, center_point),
                     "is_in_lane": backend.match_is_in_lane(match),
                     "probability": backend.get_match_probability(match),
                 }
@@ -693,8 +700,8 @@ class GlobalPlanner:
         transitions = []
         forward_location = backend.get_forward_contact_location(lane_id)
         lane = backend.get_lane(lane_id)
-        for contact_lane in lane.contact_lanes:
-            next_lane_id = int(backend.to_base_value(contact_lane.to_lane))
+        for contact_lane in backend.get_contact_lanes(lane):
+            next_lane_id = backend.get_contact_target_lane_id(contact_lane)
             if next_lane_id <= 0 or not backend.is_routeable_lane(next_lane_id):
                 continue
             if self._lane_is_blocked(next_lane_id):
@@ -845,7 +852,7 @@ class GlobalPlanner:
                 continue
             start_point = backend.sample_lane_center_at_offset(step["from_lane_id"], step["from_offset"])
             end_point = backend.sample_lane_center_at_offset(step["to_lane_id"], step["to_offset"])
-            total_length_m += math.dist(start_point, end_point)
+            total_length_m += euclidean_distance(start_point, end_point)
         return total_length_m
 
     def _get_lane_segment_length_m(self, lane_id: int, start_offset: float, end_offset: float) -> float:
@@ -956,7 +963,7 @@ class GlobalPlanner:
         input: connector endpoints (`tuple[float, float, float]`), `spacing` (`float`)
         output: interpolated connector points (`list[tuple[float, float, float]]`)
         """
-        connector_length_m = math.dist(first_point, second_point)
+        connector_length_m = euclidean_distance(first_point, second_point)
         connector_count = max(2, int(connector_length_m / spacing) + 1)
         return [
             tuple(
@@ -1047,7 +1054,7 @@ class GlobalPlanner:
         )
         if (
             not sampled_waypoints
-            or math.dist(sampled_waypoints[-1].enu_position, resolved_goal_tuple) > goal_append_distance_threshold_m
+            or euclidean_distance(sampled_waypoints[-1].enu_position, resolved_goal_tuple) > goal_append_distance_threshold_m
         ):
             sampled_waypoints.append(self._make_waypoint_from_enu_position(resolved_goal_tuple))
         return sampled_waypoints

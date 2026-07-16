@@ -8,7 +8,7 @@ carla:
   synchronous_mode: true
   launch_if_needed: true
   launch_timeout_s: 120.0
-  carla_root: /home/umd-user/carla_source/carla
+  carla_root: /home/umd-user/carla_source/carla_0.9.12
   launch_mode: ue4editor_map
   rhi: -vulkan
   launch_extra_args:
@@ -17,7 +17,7 @@ carla:
     - "-ResY=600"
 
   # Built-in CARLA map asset for:
-  # /home/umd-user/carla_source/carla/Unreal/CarlaUE4/Content/Carla/Maps/Town10HD_Opt.umap
+  # /home/umd-user/carla_source/carla_0.9.12/Unreal/CarlaUE4/Content/Carla/Maps/Town10HD_Opt.umap
   map: /Game/Carla/Maps/Town10HD_Opt
 
 anchors:

@@ -9,7 +9,7 @@ The main development target is CARLA 0.9.12 with Python 3.7 so that it can be al
 The module has been tested locally with:
 
 - CARLA 0.9.12
-- Python 3.7
+- Python 3.7.10 (`carla307` Conda environment)
 - `town10` CARLA scenario
 - MPC runtime loop generating `mpc_cost_history.csv` and `mpc_cost_plot.png`
 - behavior-planner tests for future trajectory risk and finite-state lane-change behavior
@@ -37,11 +37,17 @@ It reads the OpenDRIVE map and provides route, waypoint, and lane-context querie
 
 CARLA is still used for simulation, actor state, actuation, and visualization, but route search and lane-level planning context come from the custom planner.
 
-From project root run this command to build and installs the required AD-map Python bindings and native libraries for the active Python environment.
-```bash
-cd opencda/planning_module/Global_Planner && ./build_ad_map.sh
+From the project root, run this command to build and
+install the Python-3.7 AD-map v2.3 bindings and native libraries:
 
+```bash
+
+PYTHON_BIN="$(command -v python)" opencda/planning_module/Global_Planner/build_ad_map.sh --clean
 ```
+
+The `--clean` option preserves the cached AD-map source checkout and rebuilds
+the generated binaries. Use `--clean-all` only when a new source download is
+intentionally required.
 
 
 
@@ -67,27 +73,38 @@ The planning runner also records evaluation metrics, including collision count/r
 
 Install or prepare:
 
-- CARLA 0.9.12 Linux package.
+- A source checkout of CARLA 0.9.12.
+- CARLA's patched Unreal Engine 4.26.
 - Conda or Miniforge.
-- Python 3.7 environment.
-- A working CARLA PythonAPI egg matching Python 3.7.
+- The `carla307` environment with Python 3.7.10.
+- A source-built CARLA PythonAPI matching that interpreter.
 - Optional: SUMO and `traci` for SUMO-based scenarios.
 
-This project was developed against a local CARLA path like:
+The supported local layout is:
 
 ```bash
-$HOME/Downloads/MDrive/carla912
+/home/umd-user/carla_source/carla_0.9.12
+/home/umd-user/carla_source/UnrealEngine_4.26
 ```
 
-If your CARLA path is different, update `CARLA_ROOT` in the commands below.
+Keep other CARLA checkouts unchanged. If your paths differ, update
+`CARLA_ROOT` and `UE4_ROOT` below.
 
 ## Environment Setup
 
 Recommended environment:
 
 ```bash
-conda create -n opencda_planning python=3.7 -y
-conda activate opencda_planning
+conda create -n carla307 python=3.7.10 -y
+conda activate carla307
+```
+
+Create the isolated CARLA checkout without changing any other CARLA tree:
+
+```bash
+git clone --branch 0.9.12 --depth 1 \
+  https://github.com/carla-simulator/carla.git \
+  /home/umd-user/carla_source/carla_0.9.12
 ```
 
 Install dependencies:
@@ -98,11 +115,33 @@ pip install -r opencda/planning_module/requirements.txt
 pip install traci
 ```
 
-Set CARLA paths for CARLA 0.9.12:
+Install Git LFS and clone the matching editor-source assets. Do not extract the
+cooked packaged release into an editor checkout:
 
 ```bash
-export CARLA_ROOT="$HOME/Downloads/MDrive/carla912"
-export PYTHONPATH="$CARLA_ROOT/PythonAPI:$CARLA_ROOT/PythonAPI/carla:$CARLA_ROOT/PythonAPI/carla/dist/carla-0.9.12-py3.7-linux-x86_64.egg:$PYTHONPATH"
+git lfs install
+git clone --branch 0.9.12 --depth 1 \
+  https://bitbucket.org/carla-simulator/carla-content.git \
+  /home/umd-user/carla_source/carla_0.9.12/Unreal/CarlaUE4/Content/Carla
+```
+
+Build CARLA 0.9.12's Python API and editor with the active interpreter. Before
+starting, ensure at least 60--80 GB is free:
+
+```bash
+export UE4_ROOT=/home/umd-user/carla_source/UnrealEngine_4.26
+export CARLA_ROOT=/home/umd-user/carla_source/carla_0.9.12
+cd "$CARLA_ROOT"
+make PythonAPI.3
+python -m pip install PythonAPI/carla/dist/carla-0.9.12-cp37-cp37m-linux_x86_64.whl
+make CarlaUE4Editor
+```
+
+Set the runtime paths in each terminal:
+
+```bash
+export UE4_ROOT=/home/umd-user/carla_source/UnrealEngine_4.26
+export CARLA_ROOT=/home/umd-user/carla_source/carla_0.9.12
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 ```
 
@@ -118,19 +157,22 @@ ln -s "$CONDA_PREFIX/lib/libomp.so" "$CONDA_PREFIX/lib/libomp.so.5"
 Start CARLA in one terminal:
 
 ```bash
-conda activate opencda_planning
-export CARLA_ROOT="$HOME/Downloads/MDrive/carla912"
+conda activate carla307
+export UE4_ROOT=/home/umd-user/carla_source/UnrealEngine_4.26
+export CARLA_ROOT=/home/umd-user/carla_source/carla_0.9.12
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 cd "$CARLA_ROOT"
-./CarlaUE4.sh
+make launch
 ```
+
+In UEEditor, load the required map and start the simulation.
 
 Run a planning scenario in another terminal from the repository root:
 
 ```bash
-conda activate opencda_planning
-export CARLA_ROOT="$HOME/Downloads/MDrive/carla912"
-export PYTHONPATH="$CARLA_ROOT/PythonAPI:$CARLA_ROOT/PythonAPI/carla:$CARLA_ROOT/PythonAPI/carla/dist/carla-0.9.12-py3.7-linux-x86_64.egg:$PYTHONPATH"
+conda activate carla307
+export UE4_ROOT=/home/umd-user/carla_source/UnrealEngine_4.26
+export CARLA_ROOT=/home/umd-user/carla_source/carla_0.9.12
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 
 cd opencda/planning_module
@@ -252,7 +294,7 @@ Key metrics to watch:
 Run the lightweight tests used for the current cleanup:
 
 ```bash
-conda activate opencda_planning
+conda activate carla307
 cd <repo-root>
 python -m unittest \
   opencda/planning_module/tests/test_trajectory_risk.py \
