@@ -57,15 +57,44 @@ _cached_cum_dists: List[float] = []
 
 
 def _waypoint_xy(waypoint) -> tuple[float, float]:
-    return float(waypoint.position["x"]), float(waypoint.position["y"])
+    transform = getattr(waypoint, "transform", None)
+    location = getattr(transform, "location", None)
+    if location is not None:
+        return float(location.x), float(location.y)
+    position = getattr(waypoint, "position", None)
+    if isinstance(position, Mapping):
+        return float(position["x"]), float(position["y"])
+    raise AttributeError("Waypoint has neither CARLA transform nor custom position.")
 
 
 def _waypoint_xyz(waypoint) -> Dict[str, float]:
+    transform = getattr(waypoint, "transform", None)
+    location = getattr(transform, "location", None)
+    if location is not None:
+        return {
+            "x": float(location.x),
+            "y": float(location.y),
+            "z": float(location.z),
+        }
+    position = getattr(waypoint, "position", None)
+    if not isinstance(position, Mapping):
+        raise AttributeError("Waypoint has neither CARLA transform nor custom position.")
     return {
-        "x": float(waypoint.position["x"]),
-        "y": float(waypoint.position["y"]),
-        "z": float(waypoint.position["z"]),
+        "x": float(position["x"]),
+        "y": float(position["y"]),
+        "z": float(position.get("z", 0.0)),
     }
+
+
+def _waypoint_z(waypoint, default_z: float = 0.0) -> float:
+    transform = getattr(waypoint, "transform", None)
+    location = getattr(transform, "location", None)
+    if location is not None:
+        return float(location.z)
+    position = getattr(waypoint, "position", None)
+    if isinstance(position, Mapping):
+        return float(position.get("z", default_z))
+    return float(default_z)
 
 
 def _waypoint_heading_rad(waypoint) -> float:
@@ -317,9 +346,7 @@ def _snap_junction_waypoint_to_route(
         return waypoint
 
     route_x_m, route_y_m = _route_point_at_arc(route_points, cum_dists, route_arc_m)
-    snap_z_m = float(
-        anchor_wp.position.get("z", waypoint.position.get("z", 0.0))
-    )
+    snap_z_m = float(_waypoint_z(anchor_wp, _waypoint_z(waypoint, 0.0)))
     snapped_wp = map_planner.get_waypoint(
         {"x": float(route_x_m), "y": float(route_y_m), "z": snap_z_m}
     )

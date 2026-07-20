@@ -58,7 +58,9 @@ runtime:
   cp_message_schema_version: 1
   cp_message_prefix: town10_scenario_4
   reset_cp_message_file: true
-  debug_write_carla_cp_traffic_light: true
+  debug_write_carla_cp_traffic_light: false
+  allow_carla_cp_traffic_light_adapter: false
+  publish_world_obstacle_messages: false
   vehicle_marker_prefix: vehicle_
   vru_marker_prefix: vru_
   hazard_marker_prefix: hazard_

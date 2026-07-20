@@ -90,6 +90,12 @@ def _find_python_package_paths(install_root: Path) -> list[Path]:
     package_paths: list[Path] = []
 
     for package_name in ("ad_physics", "ad_map_access"):
+        # AD-map 2.x installs packages directly in ``lib/pythonX.Y`` while
+        # AD-map 3.x uses a conventional site-packages/dist-packages child.
+        legacy_path = install_root / package_name / "lib" / version_tag
+        if legacy_path.exists():
+            package_paths.append(legacy_path)
+
         for package_folder_name in ("site-packages", "dist-packages"):
             preferred_path = install_root / package_name / "lib" / version_tag / package_folder_name
             if preferred_path.exists():
@@ -116,6 +122,23 @@ def _preload_shared_libraries(install_root: Path) -> None:
             raise FileNotFoundError(f"Missing AD-map shared library: {library_path}")
         _prepend_unique_path("LD_LIBRARY_PATH", library_path.parent)
         ctypes.CDLL(str(library_path), mode=load_mode)
+
+    # AD-map 2.x installs the Boost.Python support libraries beside the C++
+    # libraries rather than embedding a relative runtime search path in the
+    # extension modules.  Preload them after their native dependencies so an
+    # already-running Python process can import the bindings without requiring
+    # callers to export LD_LIBRARY_PATH before startup.
+    for package_name in ("ad_physics", "ad_map_access"):
+        binding_libraries = sorted(
+            (install_root / package_name / "lib").glob(
+                f"lib{package_name}_python{sys.version_info.major}{sys.version_info.minor}.so*"
+            )
+        )
+        if not binding_libraries:
+            continue
+        binding_library = binding_libraries[0]
+        _prepend_unique_path("LD_LIBRARY_PATH", binding_library.parent)
+        ctypes.CDLL(str(binding_library), mode=load_mode)
 
 
 def prepare_ad_map_runtime(ad_map_install_root: str | Path | None = None) -> Path:

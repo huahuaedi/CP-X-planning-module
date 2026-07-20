@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import queue
 from typing import Any, Sequence
@@ -25,7 +26,7 @@ class OpenCDADebugViewer:
         ego_vehicle: Any,
         width_px: int = 640,
         height_px: int = 360,
-        hud_height_px: int = 220,
+        hud_height_px: int = 320,
         fov_deg: float = 90.0,
     ) -> None:
         if pygame is None:
@@ -37,6 +38,8 @@ class OpenCDADebugViewer:
         self.height_px = int(height_px)
         self.hud_height_px = int(hud_height_px)
         self.sensors = []
+        self._stable_route_points: list[list[float]] = []
+        self._stable_route_bounds: tuple[float, float, float, float] | None = None
 
         pygame.init()
         pygame.font.init()
@@ -107,7 +110,9 @@ class OpenCDADebugViewer:
         chase_image = self._latest_image(self.chase_queue)
         self.display.fill((0, 0, 0))
         if topdown_image is not None:
-            self.display.blit(self._surface_from_image(topdown_image), (0, 0))
+            topdown_surface = self._surface_from_image(topdown_image)
+            self._draw_topdown_planning_overlay(topdown_surface, vehicle_managers)
+            self.display.blit(topdown_surface, (0, 0))
         if chase_image is not None:
             self.display.blit(self._surface_from_image(chase_image), (self.width_px, 0))
 
@@ -134,6 +139,174 @@ class OpenCDADebugViewer:
         rgb = array[:, :, :3][:, :, ::-1]
         return pygame.surfarray.make_surface(rgb.swapaxes(0, 1))
 
+    def _draw_topdown_planning_overlay(self, surface: Any, vehicle_managers: Sequence[Any]) -> None:
+        if pygame is None or not vehicle_managers:
+            return
+        ego_vm = vehicle_managers[0]
+        cpx_debug = getattr(getattr(ego_vm, "cpx_planner", None), "last_debug", {}) or {}
+        if not cpx_debug:
+            return
+        try:
+            ego_transform = ego_vm.vehicle.get_transform()
+            ego_x = float(ego_transform.location.x)
+            ego_y = float(ego_transform.location.y)
+            ego_yaw = math.radians(float(ego_transform.rotation.yaw))
+            horizontal_span_m = 2.0 * 65.0 * math.tan(math.radians(90.0) * 0.5)
+            vertical_span_m = horizontal_span_m * float(self.height_px) / max(1.0, float(self.width_px))
+            px_per_m_x = float(self.width_px) / max(1.0, horizontal_span_m)
+            px_per_m_y = float(self.height_px) / max(1.0, vertical_span_m)
+
+            def project(point: Sequence[float]):
+                if point is None or len(point) < 2:
+                    return None
+                dx = float(point[0]) - ego_x
+                dy = float(point[1]) - ego_y
+                forward = dx * math.cos(ego_yaw) + dy * math.sin(ego_yaw)
+                right = dx * math.sin(ego_yaw) - dy * math.cos(ego_yaw)
+                px = int(round(0.5 * self.width_px + right * px_per_m_x))
+                py = int(round(0.5 * self.height_px - forward * px_per_m_y))
+                if px < -20 or px > self.width_px + 20 or py < -20 or py > self.height_px + 20:
+                    return None
+                return px, py
+
+            mpc_points = self._project_points(cpx_debug.get("mpc_trajectory_points", []), project)
+
+            self._draw_dotted_polyline(surface, mpc_points, color=(45, 185, 75), radius_px=3, dot_spacing_px=9)
+
+            destination = [
+                cpx_debug.get("destination_x", None),
+                cpx_debug.get("destination_y", None),
+            ]
+            destination_px = project(destination)
+            if destination_px is not None:
+                pygame.draw.circle(surface, (45, 145, 225), destination_px, 6)
+                pygame.draw.circle(surface, (15, 20, 24), destination_px, 6, width=1)
+            self._draw_stable_route_minimap(
+                surface=surface,
+                route_points=cpx_debug.get("global_route_points", []),
+                ego_xy=(ego_x, ego_y),
+            )
+        except Exception:
+            return
+
+    def _draw_stable_route_minimap(
+        self,
+        *,
+        surface: Any,
+        route_points: Sequence[Any],
+        ego_xy: tuple[float, float],
+    ) -> None:
+        normalized_route = [
+            [float(point[0]), float(point[1])]
+            for point in list(route_points or [])
+            if hasattr(point, "__len__") and len(point) >= 2
+        ]
+        if len(normalized_route) >= 2 and not self._stable_route_points:
+            self._stable_route_points = [list(point) for point in normalized_route]
+            xs = [float(point[0]) for point in self._stable_route_points]
+            ys = [float(point[1]) for point in self._stable_route_points]
+            pad_m = max(8.0, 0.08 * max(max(xs) - min(xs), max(ys) - min(ys), 1.0))
+            self._stable_route_bounds = (
+                min(xs) - pad_m,
+                max(xs) + pad_m,
+                min(ys) - pad_m,
+                max(ys) + pad_m,
+            )
+        if len(self._stable_route_points) < 2 or self._stable_route_bounds is None:
+            return
+
+        map_width = min(230, max(160, int(0.36 * self.width_px)))
+        map_height = min(150, max(110, int(0.34 * self.height_px)))
+        left = 12
+        top = 12
+        rect = pygame.Rect(left, top, map_width, map_height)
+        overlay = pygame.Surface((map_width, map_height), pygame.SRCALPHA)
+        overlay.fill((10, 12, 14, 135))
+        pygame.draw.rect(overlay, (230, 230, 230, 150), overlay.get_rect(), width=1)
+
+        min_x, max_x, min_y, max_y = self._stable_route_bounds
+        span_x = max(1.0, float(max_x) - float(min_x))
+        span_y = max(1.0, float(max_y) - float(min_y))
+
+        def project_world_xy(x_m: float, y_m: float):
+            px = int(round(8 + (float(x_m) - min_x) / span_x * (map_width - 16)))
+            py = int(round(map_height - 8 - (float(y_m) - min_y) / span_y * (map_height - 16)))
+            return px, py
+
+        route_px = [
+            project_world_xy(float(point[0]), float(point[1]))
+            for point in self._stable_route_points
+        ]
+        self._draw_solid_polyline(
+            overlay,
+            route_px,
+            color=(218, 186, 55),
+            width_px=3,
+        )
+        pygame.draw.circle(overlay, (218, 186, 55), route_px[0], 4)
+        pygame.draw.circle(overlay, (245, 235, 150), route_px[-1], 4)
+        ego_px = project_world_xy(float(ego_xy[0]), float(ego_xy[1]))
+        pygame.draw.circle(overlay, (45, 185, 255), ego_px, 5)
+        pygame.draw.circle(overlay, (5, 8, 10), ego_px, 5, width=1)
+        label = self.font.render("GLOBAL ROUTE", True, (235, 235, 235)) if self.font else None
+        if label is not None:
+            overlay.blit(label, (8, 6))
+        surface.blit(overlay, rect.topleft)
+
+    @staticmethod
+    def _project_points(points: Sequence[Any], project) -> list[tuple[int, int]]:
+        projected: list[tuple[int, int]] = []
+        for point in list(points or []):
+            try:
+                pixel = project(point)
+            except Exception:
+                pixel = None
+            if pixel is not None:
+                projected.append(pixel)
+        return projected
+
+    @staticmethod
+    def _draw_solid_polyline(
+        surface: Any,
+        points_px: Sequence[tuple[int, int]],
+        *,
+        color: tuple[int, int, int],
+        width_px: int,
+    ) -> None:
+        if pygame is None or len(points_px) < 2:
+            return
+        deduped: list[tuple[int, int]] = []
+        for point in list(points_px):
+            if not deduped or point != deduped[-1]:
+                deduped.append(point)
+        if len(deduped) >= 2:
+            pygame.draw.lines(surface, color, False, deduped, max(1, int(width_px)))
+
+    @staticmethod
+    def _draw_dotted_polyline(
+        surface: Any,
+        points_px: Sequence[tuple[int, int]],
+        *,
+        color: tuple[int, int, int],
+        radius_px: int,
+        dot_spacing_px: int,
+    ) -> None:
+        if pygame is None or len(points_px) < 2:
+            return
+        spacing = max(1.0, float(dot_spacing_px))
+        for start, end in zip(list(points_px)[:-1], list(points_px)[1:]):
+            dx = float(end[0]) - float(start[0])
+            dy = float(end[1]) - float(start[1])
+            length = math.hypot(dx, dy)
+            if length <= 1.0:
+                continue
+            count = max(1, int(length / spacing))
+            for index in range(count + 1):
+                ratio = float(index) / max(1.0, float(count))
+                x = int(round(float(start[0]) + ratio * dx))
+                y = int(round(float(start[1]) + ratio * dy))
+                pygame.draw.circle(surface, color, (x, y), int(radius_px))
+
     def _build_hud_lines(self, vehicle_managers: Sequence[Any]) -> list[str]:
         if not vehicle_managers:
             return ["OPEN-CDA + CP-X", "No vehicle manager available"]
@@ -148,26 +321,38 @@ class OpenCDADebugViewer:
             "OPEN-CDA + CP-X",
             f"vehicle_id={vehicle.id}  planner={'CP-X MPC' if getattr(ego_vm, 'cpx_planner', None) else 'OpenCDA default'}",
             f"speed={speed_mps:.2f} m/s  loc=({transform.location.x:.1f}, {transform.location.y:.1f}) yaw={transform.rotation.yaw:.1f}",
-            f"objects={len(objects.get('vehicles', []) or [])}  traffic_lights={len(objects.get('traffic_lights', []) or [])}",
-            f"v2x_nearby={len(getattr(ego_vm.v2x_manager, 'cav_nearby', {}) or {})}",
+            f"objects={len(objects.get('vehicles', []) or [])}  traffic_lights={len(objects.get('traffic_lights', []) or [])}  v2x_nearby={len(getattr(ego_vm.v2x_manager, 'cav_nearby', {}) or {})}",
+            f"cp_source={cpx_debug.get('cp_provider_source', '')}  native_cp={cpx_debug.get('native_opencda_available', '')}  cp_obs={cpx_debug.get('cp_obstacle_count', '')} cp_ctrl={cpx_debug.get('cp_control_count', '')}",
+            f"behavior={cpx_debug.get('behavior_decision', '')}  fsm={cpx_debug.get('behavior_fsm_state', '')}  target_lane={cpx_debug.get('behavior_target_lane_id', '')}",
+            f"lane current={cpx_debug.get('current_lane_id', '')}  dest_lane={cpx_debug.get('destination_lane_id', '')}",
+            f"ref={cpx_debug.get('reference_source', '')}  stage={cpx_debug.get('reference_pipeline_stage', '')}  intent={cpx_debug.get('reference_pipeline_intent', '')}",
+            f"ref_geom first_fwd={cpx_debug.get('reference_first_forward_m', '')} first_lat={cpx_debug.get('reference_first_lateral_m', '')} lane_pts={len(cpx_debug.get('lane_reference_points', []) or [])}",
+            f"ref_fallback={cpx_debug.get('reference_pipeline_fallback', '')}",
             f"front_gap={cpx_debug.get('front_gap_m', '')}  stop_goal={cpx_debug.get('stop_goal_active', '')}",
-            f"mpc_status={cpx_debug.get('mpc_status', '')}  solve_ms={cpx_debug.get('mpc_solve_time_ms', '')}",
+            f"traffic={cpx_debug.get('traffic_signal_state', '')} from_cp={cpx_debug.get('traffic_control_from_cp', '')}",
+            f"planner_input cp_ctrl={cpx_debug.get('planner_input_cp_traffic_control_count', '')} pred_risk={cpx_debug.get('planner_input_prediction_risky_lane_count', '')} objs={cpx_debug.get('planner_input_perception_planning_count', '')}",
+            f"mpc_status={cpx_debug.get('mpc_status', '')}  solve_ms={cpx_debug.get('mpc_solve_time_ms', '')} profile={cpx_debug.get('mpc_cost_profile', '')}",
+            f"cmd a={cpx_debug.get('accel_cmd_mps2', '')}  steer={cpx_debug.get('steer_cmd_rad', '')}",
             f"target=({cpx_debug.get('destination_x', '')}, {cpx_debug.get('destination_y', '')}) v_ref={cpx_debug.get('target_speed_mps', '')}",
-            f"fallback={cpx_debug.get('fallback_reason', '')}",
+            f"mpc_fallback={cpx_debug.get('mpc_fallback_reason', '')}",
         ]
 
     def _draw_hud_lines(self, lines: Sequence[str], rect: Any) -> None:
         if self.font is None:
             return
-        x = int(rect.x) + 12
-        y = int(rect.y) + 10
+        columns = 2 if int(rect.width) >= 1000 else 1
+        column_width = max(1, int((rect.width - 24) / columns))
         line_height = max(16, int(self.font.get_linesize()))
-        for line in lines:
-            if y + line_height > rect.y + rect.height:
+        max_lines_per_column = max(1, int((rect.height - 20) / line_height))
+        for index, line in enumerate(lines):
+            column = int(index / max_lines_per_column)
+            if column >= columns:
                 break
+            row = int(index % max_lines_per_column)
+            x = int(rect.x) + 12 + column * column_width
+            y = int(rect.y) + 10 + row * line_height
             surface = self.font.render(str(line), True, (235, 235, 235))
             self.display.blit(surface, (x, y))
-            y += line_height
 
     def destroy(self) -> None:
         for sensor in list(self.sensors):

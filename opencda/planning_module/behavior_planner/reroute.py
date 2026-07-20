@@ -19,9 +19,6 @@ from utility.cp_messages import (
     write_cp_message_payload,
     write_cp_messages,
 )
-from utility.global_planner import CustomGlobalPlannerAdapter
-
-
 def _message_position(message: Mapping[str, object]) -> Dict[str, float] | None:
     raw = message.get("position", None)
     try:
@@ -44,19 +41,31 @@ def _message_position(message: Mapping[str, object]) -> Dict[str, float] | None:
 
 def _resolve_blocked_ad_lane_id(
     message: Mapping[str, object],
-    global_planner: CustomGlobalPlannerAdapter,
+    global_planner,
 ) -> int | None:
     position = _message_position(message)
     if position is not None:
+        if hasattr(global_planner, "block_lane_at_position"):
+            try:
+                return global_planner.block_lane_at_position(position)
+            except Exception:
+                pass
         waypoint = global_planner.get_waypoint(position)
-        return None if waypoint is None else int(waypoint.ad_lane_id)
+        if waypoint is None:
+            return None
+        ad_lane_id = getattr(waypoint, "ad_lane_id", None)
+        if ad_lane_id is not None:
+            return int(ad_lane_id)
+        return int(getattr(waypoint, "lane_id", 0) or 0)
 
     raw_ad_lane_id = message.get("ad_lane_id", None)
     if raw_ad_lane_id is None:
         return None
     try:
         ad_lane_id = int(raw_ad_lane_id)
-        global_planner.core.get_lane_centerline(ad_lane_id)
+        core = getattr(global_planner, "core", None)
+        if core is not None:
+            core.get_lane_centerline(ad_lane_id)
         return ad_lane_id
     except Exception:
         return None
@@ -65,7 +74,7 @@ def _resolve_blocked_ad_lane_id(
 def reroute_from_lane_closure_messages(
     *,
     messages: Sequence[Mapping[str, object]],
-    global_planner: CustomGlobalPlannerAdapter,
+    global_planner,
     ego_position: Mapping[str, object] | Sequence[object],
     goal_position: Mapping[str, object] | Sequence[object],
     current_route_points: Sequence[Sequence[float]],
@@ -84,10 +93,12 @@ def reroute_from_lane_closure_messages(
         ad_lane_id = _resolve_blocked_ad_lane_id(message, global_planner)
         if ad_lane_id is None:
             continue
-        try:
-            global_planner.block_ad_lane_id(ad_lane_id)
-        except Exception:
-            continue
+        block_ad_lane = getattr(global_planner, "block_ad_lane_id", None)
+        if callable(block_ad_lane):
+            try:
+                block_ad_lane(ad_lane_id)
+            except Exception:
+                continue
         if ad_lane_id not in blocked_ad_lane_ids:
             blocked_ad_lane_ids.append(ad_lane_id)
         if message_id not in handled_ids:

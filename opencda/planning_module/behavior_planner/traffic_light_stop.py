@@ -12,6 +12,24 @@ from utility.global_planner import canonical_lane_id_for_waypoint, world_heading
 _STOP_TARGET_QUERY_STATE: Dict[str, tuple[tuple[object, ...], float, float, float]] = {}
 
 
+def _waypoint_xy(waypoint) -> tuple[float, float]:
+    transform = getattr(waypoint, "transform", None)
+    location = getattr(transform, "location", None)
+    if location is not None:
+        return float(location.x), float(location.y)
+    position = getattr(waypoint, "position", None)
+    if isinstance(position, Mapping):
+        return float(position["x"]), float(position["y"])
+    raise AttributeError("Waypoint has neither CARLA transform nor custom position.")
+
+
+def _waypoint_ad_lane_id(waypoint) -> int:
+    ad_lane_id = getattr(waypoint, "ad_lane_id", None)
+    if ad_lane_id is not None:
+        return int(ad_lane_id)
+    return int(getattr(waypoint, "lane_id", 0) or 0)
+
+
 def _pose_xyz(pose: Mapping[str, object]) -> tuple[float, float, float]:
     return (
         float(pose["x"]),
@@ -747,13 +765,14 @@ def find_stop_target_from_ego(
             stop_distance_m = float(previous_arc_m) - float(ego_arc_m)
             if stop_distance_m <= 1.0e-3:
                 return None
+            stop_x_m, stop_y_m = _waypoint_xy(previous_waypoint)
             return {
-                "x_m": float(previous_waypoint.position["x"]),
-                "y_m": float(previous_waypoint.position["y"]),
+                "x_m": float(stop_x_m),
+                "y_m": float(stop_y_m),
                 "heading_rad": float(world_heading_rad(previous_waypoint) or 0.0),
                 "lane_id": int(canonical_lane_id_for_waypoint(previous_waypoint)),
-                "ad_lane_id": int(previous_waypoint.ad_lane_id),
-                "opendrive_lane_id": int(previous_waypoint.lane_id or 0),
+                "ad_lane_id": int(_waypoint_ad_lane_id(previous_waypoint)),
+                "opendrive_lane_id": int(getattr(previous_waypoint, "lane_id", 0) or 0),
                 "road_id": int(getattr(previous_waypoint, "road_id", 0)),
                 "section_id": int(getattr(previous_waypoint, "section_id", 0)),
                 "distance_m": float(stop_distance_m),

@@ -9,7 +9,7 @@ each candidate lane receives a future-risk summary used by the behavior FSM.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Mapping, Sequence
+from typing import Any, Dict, List, Mapping, Sequence
 
 from behavior_planner.trajectory_risk import (
     lane_prediction_risk,
@@ -26,8 +26,8 @@ class PredictionFrame:
     """Prediction output consumed by behavior decision and trajectory planning."""
 
     ego_snapshot: Dict[str, float]
-    obstacle_snapshots: list[dict]
-    obstacle_future_trajectories: Dict[str, list[dict]] = field(default_factory=dict)
+    obstacle_snapshots: List[dict]
+    obstacle_future_trajectories: Dict[str, List[dict]] = field(default_factory=dict)
     lane_prediction_risks: Dict[int, Dict[str, object]] = field(default_factory=dict)
 
     def risk_for_lane(self, lane_id: int) -> Dict[str, object]:

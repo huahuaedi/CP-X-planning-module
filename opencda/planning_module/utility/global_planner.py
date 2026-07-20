@@ -18,6 +18,13 @@ except ModuleNotFoundError:
         Waypoint,
     )
 
+try:
+    from .legacy_global_planner import AStarGlobalPlanner, WaypointNode
+    from . import carla_lane_graph as _carla_lane_graph
+except ImportError:
+    from utility.legacy_global_planner import AStarGlobalPlanner, WaypointNode
+    from utility import carla_lane_graph as _carla_lane_graph
+
 
 INVALID_LANE_ID = 0
 
@@ -71,6 +78,8 @@ def _same_corridor(base: Waypoint, candidate: Waypoint | None) -> bool:
 def canonical_lane_waypoints(waypoint: Waypoint | None) -> List[Waypoint]:
     if waypoint is None:
         return []
+    if hasattr(waypoint, "get_left_lane") or hasattr(waypoint, "get_right_lane"):
+        return _carla_lane_graph.canonical_lane_waypoints(waypoint)
     rightmost = waypoint
     visited_right = {int(rightmost.ad_lane_id)}
     while True:
@@ -100,12 +109,18 @@ def canonical_lane_waypoints(waypoint: Waypoint | None) -> List[Waypoint]:
 
 
 def canonical_lane_ids_for_waypoint(waypoint: Waypoint | None) -> List[int]:
+    if waypoint is not None and (
+        hasattr(waypoint, "get_left_lane") or hasattr(waypoint, "get_right_lane")
+    ):
+        return _carla_lane_graph.canonical_lane_ids_for_waypoint(waypoint)
     return list(range(1, len(canonical_lane_waypoints(waypoint)) + 1))
 
 
 def canonical_lane_id_for_waypoint(waypoint: Waypoint | None) -> int:
     if waypoint is None:
         return INVALID_LANE_ID
+    if hasattr(waypoint, "get_left_lane") or hasattr(waypoint, "get_right_lane"):
+        return _carla_lane_graph.canonical_lane_id_for_waypoint(waypoint)
     for index, candidate in enumerate(canonical_lane_waypoints(waypoint), start=1):
         if int(candidate.ad_lane_id) == int(waypoint.ad_lane_id):
             return int(index)
@@ -116,6 +131,13 @@ def canonical_lane_waypoint_for_lane_id(
     waypoint: Waypoint | None,
     target_lane_id: int,
 ) -> Waypoint | None:
+    if waypoint is not None and (
+        hasattr(waypoint, "get_left_lane") or hasattr(waypoint, "get_right_lane")
+    ):
+        return _carla_lane_graph.canonical_lane_waypoint_for_lane_id(
+            waypoint,
+            target_lane_id,
+        )
     lanes = canonical_lane_waypoints(waypoint)
     index = int(target_lane_id) - 1
     if 0 <= index < len(lanes):
@@ -124,6 +146,10 @@ def canonical_lane_waypoint_for_lane_id(
 
 
 def raw_opendrive_lane_id_for_waypoint(waypoint: Waypoint | None) -> int:
+    if waypoint is not None and (
+        hasattr(waypoint, "get_left_lane") or hasattr(waypoint, "get_right_lane")
+    ):
+        return _carla_lane_graph.raw_carla_lane_id_for_waypoint(waypoint)
     return 0 if waypoint is None else int(waypoint.lane_id or 0)
 
 
@@ -131,10 +157,29 @@ def _wrap_angle(angle_rad: float) -> float:
     return math.atan2(math.sin(float(angle_rad)), math.cos(float(angle_rad)))
 
 
+def _distance_2d(first: Sequence[float], second: Sequence[float]) -> float:
+    return float(math.hypot(float(first[0]) - float(second[0]), float(first[1]) - float(second[1])))
+
+
+def _distance_3d(first: Sequence[float], second: Sequence[float]) -> float:
+    return float(
+        math.sqrt(
+            (float(first[0]) - float(second[0])) ** 2
+            + (float(first[1]) - float(second[1])) ** 2
+            + (float(first[2]) - float(second[2])) ** 2
+        )
+    )
+
+
 def world_heading_rad(waypoint: Waypoint | None) -> float | None:
-    if waypoint is None or waypoint.heading is None:
+    heading = None if waypoint is None else getattr(waypoint, "heading", None)
+    if waypoint is None or heading is None:
+        transform = getattr(waypoint, "transform", None)
+        rotation = getattr(transform, "rotation", None)
+        if rotation is not None and hasattr(rotation, "yaw"):
+            return _wrap_angle(math.radians(float(rotation.yaw)))
         return None
-    return _wrap_angle(-float(waypoint.heading))
+    return _wrap_angle(-float(heading))
 
 
 def _point_dict(point: Mapping[str, object] | Sequence[object]) -> Dict[str, float]:
@@ -143,6 +188,12 @@ def _point_dict(point: Mapping[str, object] | Sequence[object]) -> Dict[str, flo
             "x": float(point["x"]),
             "y": float(point["y"]),
             "z": float(point.get("z", 0.0)),
+        }
+    if hasattr(point, "x") and hasattr(point, "y"):
+        return {
+            "x": float(getattr(point, "x")),
+            "y": float(getattr(point, "y")),
+            "z": float(getattr(point, "z", 0.0)),
         }
     if isinstance(point, Sequence) and not isinstance(point, (str, bytes)):
         if len(point) < 2:
@@ -323,7 +374,7 @@ class CustomGlobalPlannerAdapter:
         query_z = 0.0 if z_m is None else float(z_m)
         with self._lane_context_lock:
             cached = self._lane_context_cache
-            if cached is not None and math.dist((x_m, y_m, query_z), cached[:3]) < 1.0:
+            if cached is not None and _distance_3d((x_m, y_m, query_z), cached[:3]) < 1.0:
                 return dict(cached[3])
 
         waypoint = self.get_waypoint({"x": x_m, "y": y_m, "z": query_z})
@@ -489,7 +540,7 @@ class CustomGlobalPlannerAdapter:
 
     @staticmethod
     def _polyline_length(points: Sequence[Sequence[float]]) -> float:
-        return sum(math.dist(a[:2], b[:2]) for a, b in zip(points, points[1:]))
+        return sum(_distance_2d(a, b) for a, b in zip(points, points[1:]))
 
     @staticmethod
     def _route_cumulative_distances(route_xy: np.ndarray) -> np.ndarray:

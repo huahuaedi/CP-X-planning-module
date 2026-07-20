@@ -18,6 +18,24 @@ from utility.global_planner import canonical_lane_id_for_waypoint, world_heading
 _STOP_SIGNAL_STATES = {"red", "yellow", "amber"}
 
 
+def _waypoint_xy(waypoint) -> Tuple[float, float]:
+    transform = getattr(waypoint, "transform", None)
+    location = getattr(transform, "location", None)
+    if location is not None:
+        return float(location.x), float(location.y)
+    position = getattr(waypoint, "position", None)
+    if isinstance(position, Mapping):
+        return float(position["x"]), float(position["y"])
+    raise AttributeError("Waypoint has neither CARLA transform nor custom position.")
+
+
+def _waypoint_ad_lane_id(waypoint) -> int:
+    ad_lane_id = getattr(waypoint, "ad_lane_id", None)
+    if ad_lane_id is not None:
+        return int(ad_lane_id)
+    return int(getattr(waypoint, "lane_id", 0) or 0)
+
+
 @dataclass
 class CarlaTrafficLightCPResult:
     """Output of one CARLA traffic-light CP adaptation tick."""
@@ -166,15 +184,16 @@ def _fallback_signal_stop_target_from_ego(
             return None
         next_waypoints = ego_waypoint.next(float(forward_distance_m))
         stop_waypoint = next_waypoints[0] if next_waypoints else ego_waypoint
+        stop_x_m, stop_y_m = _waypoint_xy(stop_waypoint)
         return {
-            "x_m": float(stop_waypoint.position["x"]),
-            "y_m": float(stop_waypoint.position["y"]),
+            "x_m": float(stop_x_m),
+            "y_m": float(stop_y_m),
             "heading_rad": float(world_heading_rad(stop_waypoint) or 0.0),
             "lane_id": int(canonical_lane_id_for_waypoint(stop_waypoint)),
-            "ad_lane_id": int(stop_waypoint.ad_lane_id),
-            "opendrive_lane_id": int(stop_waypoint.lane_id or 0),
-            "road_id": int(stop_waypoint.road_id or 0),
-            "section_id": int(stop_waypoint.section_id or 0),
+            "ad_lane_id": int(_waypoint_ad_lane_id(stop_waypoint)),
+            "opendrive_lane_id": int(getattr(stop_waypoint, "lane_id", 0) or 0),
+            "road_id": int(getattr(stop_waypoint, "road_id", 0) or 0),
+            "section_id": int(getattr(stop_waypoint, "section_id", 0) or 0),
             "distance_m": float(forward_distance_m),
             "source": "fallback_signal_stop_target",
             "signal_distance_m": float(signal_distance_m),

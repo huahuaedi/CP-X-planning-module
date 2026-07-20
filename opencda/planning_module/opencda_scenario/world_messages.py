@@ -22,6 +22,9 @@ def initialize_runtime_state(
     obstacle_filter_cfg = dict(obstacle_filter_cfg or {})
     configured_tracker_cfg = dict(tracker_cfg or {})
     next_state["obstacle_tracker"] = Tracker(tracker_cfg=configured_tracker_cfg)
+    next_state["publish_world_obstacle_messages"] = bool(
+        runtime_cfg.get("publish_world_obstacle_messages", False)
+    )
     next_state["obstacle_message_distance_m"] = max(
         0.0,
         float(
@@ -326,6 +329,8 @@ def publish_obstacle_messages(
 ) -> Dict[str, object]:
     next_state = dict(runtime_state or {})
     tracker = next_state.get("obstacle_tracker", None)
+    if not bool(next_state.get("publish_world_obstacle_messages", False)):
+        return next_state
     if ego_vehicle is None or tracker is None:
         return next_state
 

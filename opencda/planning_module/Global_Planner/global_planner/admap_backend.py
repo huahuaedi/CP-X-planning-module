@@ -9,6 +9,25 @@ from .runtime import import_ad_map_access
 ad = None
 
 
+def _get_compatible_attribute(value, *attribute_names):
+    """Read the first available AD-map 2.x/3.x binding attribute."""
+    for attribute_name in attribute_names:
+        if hasattr(value, attribute_name):
+            return getattr(value, attribute_name)
+    joined_names = ", ".join(attribute_names)
+    raise AttributeError(f"None of these AD-map attributes exist: {joined_names}")
+
+
+def _set_compatible_attribute(value, attribute_value, *attribute_names) -> None:
+    """Write the first available AD-map 2.x/3.x binding attribute."""
+    for attribute_name in attribute_names:
+        if hasattr(value, attribute_name):
+            setattr(value, attribute_name, attribute_value)
+            return
+    joined_names = ", ".join(attribute_names)
+    raise AttributeError(f"None of these AD-map attributes exist: {joined_names}")
+
+
 def ensure_runtime_ready(ad_map_install_root: str | Path | None = None):
     """Load the AD-map Python bindings on demand.
 
@@ -28,10 +47,19 @@ def to_base_value(value):
     input: `value` (`object`)
     output: unwrapped base value (`object`)
     """
-    base_value = getattr(value, "toBaseType", value)
+    base_value = getattr(value, "toBaseType", None)
     if callable(base_value):
-        base_value = base_value()
-    return base_value
+        return base_value()
+    if base_value is not None:
+        return base_value
+
+    # The AD-map 2.3 wrappers expose integral strong types (including LaneId)
+    # through Python 2's ``__long__`` hook, which Python 3 does not consult for
+    # ``int(value)``.  Calling the hook directly preserves the same base value.
+    legacy_long = getattr(value, "__long__", None)
+    if callable(legacy_long):
+        return legacy_long()
+    return value
 
 
 def distance_to_float(distance) -> float:
@@ -85,8 +113,13 @@ def create_para_point(lane_id: int, parametric_offset: float):
     output: lane parametric point (`ad.map.point.ParaPoint`)
     """
     para_point = ad.map.point.ParaPoint()
-    para_point.lane_id = lane_id
-    para_point.parametric_offset = ad.physics.ParametricValue(float(parametric_offset))
+    _set_compatible_attribute(para_point, lane_id, "lane_id", "laneId")
+    _set_compatible_attribute(
+        para_point,
+        ad.physics.ParametricValue(float(parametric_offset)),
+        "parametric_offset",
+        "parametricOffset",
+    )
     return para_point
 
 
@@ -100,7 +133,20 @@ def load_open_drive_map(xodr_path: str | Path, overlap_margin: float = 0.05) -> 
     if not path.exists():
         raise FileNotFoundError(path)
     map_content = path.read_text(encoding="utf-8")
-    if not ad.map.access.initFromOpenDriveContent(map_content, overlap_margin):
+    try:
+        initialized = ad.map.access.initFromOpenDriveContent(map_content, overlap_margin)
+    except TypeError:
+        intersection_type = _get_compatible_attribute(
+            ad.map.intersection.IntersectionType,
+            "TrafficLight",
+            "TRAFFIC_LIGHT",
+        )
+        initialized = ad.map.access.initFromOpenDriveContent(
+            map_content,
+            overlap_margin,
+            intersection_type,
+        )
+    if not initialized:
         raise RuntimeError(f"Failed to load map: {path}")
     return get_all_lane_ids()
 
@@ -125,11 +171,19 @@ def save_adm_map(adm_path: str | Path) -> bool:
     input: `adm_path` (`str | Path`)
     output: whether saving succeeded (`bool`)
     """
+    save_function = getattr(ad.map.access, "saveAsAdm", None)
+    if not callable(save_function):
+        return False
     path = Path(adm_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    if not ad.map.access.saveAsAdm(str(path), True):
+    if not save_function(str(path), True):
         raise RuntimeError(f"Failed to save AD-map cache: {path}")
     return True
+
+
+def supports_adm_cache() -> bool:
+    """Return whether this AD-map binding can save a reusable ADM cache."""
+    return callable(getattr(ad.map.access, "saveAsAdm", None))
 
 
 def close_map() -> None:
@@ -207,7 +261,9 @@ def get_match_distance(map_match) -> float:
     input: `map_match` (AD-map match object)
     output: distance in meters (`float`)
     """
-    return distance_to_float(map_match.matched_point_distance)
+    return distance_to_float(
+        _get_compatible_attribute(map_match, "matched_point_distance", "matchedPointDistance")
+    )
 
 
 def get_match_probability(map_match) -> float:
@@ -225,7 +281,9 @@ def get_match_lane_id(map_match) -> int:
     input: `map_match` (AD-map match object)
     output: lane id (`int`)
     """
-    return int(to_base_value(map_match.lane_point.para_point.lane_id))
+    lane_point = _get_compatible_attribute(map_match, "lane_point", "lanePoint")
+    para_point = _get_compatible_attribute(lane_point, "para_point", "paraPoint")
+    return int(to_base_value(_get_compatible_attribute(para_point, "lane_id", "laneId")))
 
 
 def get_match_parametric_offset(map_match) -> float:
@@ -234,7 +292,11 @@ def get_match_parametric_offset(map_match) -> float:
     input: `map_match` (AD-map match object)
     output: parametric offset (`float`)
     """
-    return parametric_value_to_float(map_match.lane_point.para_point.parametric_offset)
+    lane_point = _get_compatible_attribute(map_match, "lane_point", "lanePoint")
+    para_point = _get_compatible_attribute(lane_point, "para_point", "paraPoint")
+    return parametric_value_to_float(
+        _get_compatible_attribute(para_point, "parametric_offset", "parametricOffset")
+    )
 
 
 def match_is_in_lane(map_match) -> bool:
@@ -243,7 +305,10 @@ def match_is_in_lane(map_match) -> bool:
     input: `map_match` (AD-map match object)
     output: whether the match is in-lane (`bool`)
     """
-    return bool(ad.map.match.isActualWithinLaneMatch(map_match))
+    within_lane = getattr(ad.map.match, "isActualWithinLaneMatch", None)
+    if callable(within_lane):
+        return bool(within_lane(map_match))
+    return map_match.type == ad.map.match.MapMatchedPositionType.LANE_IN
 
 
 def sample_lane_center(para_point) -> tuple[float, float, float]:
@@ -392,16 +457,26 @@ def get_contact_lane_ids(
     """
     lane = get_lane(lane_id)
     connected_lane_ids = []
-    for contact_lane in lane.contact_lanes:
+    for contact_lane in get_contact_lanes(lane):
         if contact_lane.location != location:
             continue
-        next_lane_id = int(to_base_value(contact_lane.to_lane))
+        next_lane_id = get_contact_target_lane_id(contact_lane)
         if next_lane_id <= 0 or not is_routeable_lane(next_lane_id):
             continue
         if require_same_direction and not lanes_have_same_direction(lane_id, next_lane_id):
             continue
         connected_lane_ids.append(next_lane_id)
     return connected_lane_ids
+
+
+def get_contact_lanes(lane) -> list:
+    """Return lane contacts from either AD-map binding naming convention."""
+    return list(_get_compatible_attribute(lane, "contact_lanes", "contactLanes"))
+
+
+def get_contact_target_lane_id(contact_lane) -> int:
+    """Return a contact's target lane id on AD-map 2.x or 3.x."""
+    return int(to_base_value(_get_compatible_attribute(contact_lane, "to_lane", "toLane")))
 
 
 def get_same_direction_adjacent_lane_id(lane_id: int, side) -> int | None:

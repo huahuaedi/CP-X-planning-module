@@ -8,6 +8,13 @@ from typing import Mapping, Sequence
 CARLA_TO_ENU_Y_SIGN = -1.0
 
 
+def euclidean_distance(first_point: Sequence[float], second_point: Sequence[float]) -> float:
+    """Return Euclidean distance without relying on Python 3.8 ``math.dist``."""
+    return math.sqrt(
+        sum((float(first) - float(second)) ** 2 for first, second in zip(first_point, second_point))
+    )
+
+
 def normalize_position(position: Mapping[str, float] | Sequence[float]) -> tuple[float, float, float]:
     """Convert a CARLA-style point into a plain `(x, y, z)` tuple.
 
@@ -84,5 +91,5 @@ def path_length(points: Sequence[Mapping[str, float] | Sequence[float]]) -> floa
         return 0.0
     total_length = 0.0
     for first_point, second_point in zip(points, points[1:]):
-        total_length += math.dist(normalize_position(first_point), normalize_position(second_point))
+        total_length += euclidean_distance(normalize_position(first_point), normalize_position(second_point))
     return total_length
