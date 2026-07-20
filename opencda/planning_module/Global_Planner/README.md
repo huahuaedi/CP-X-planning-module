@@ -19,8 +19,30 @@ Global_Planner/
   Downloads the pinned AD-map v2.3.0 source and builds bindings for Python 3.7.
 - `map_repo/install/`
   Generated locally by the build script; it is intentionally not committed.
+- `map_repo/log/`
+  Colcon build logs; generated locally and intentionally not committed.
+- `map_repo/source/`
+  Downloaded third-party AD-map source checkout; generated locally and intentionally not committed.
 
 ## Not Included
+
+Do not push these directories:
+
+```text
+map_repo/install/
+map_repo/log/
+map_repo/source/
+```
+
+They are build/download artifacts, not repository source. `install/` contains
+native Python extensions and shared libraries tied to the local Python ABI,
+operating system, compiler, dependency versions, and absolute build paths.
+`log/` is disposable build output. `source/` is the pinned upstream AD-map
+checkout downloaded by `build_ad_map.sh`; preserving it locally makes rebuilds
+faster, but it should not be copied through this repository.
+
+After cloning this repository on a new machine, rebuild the runtime locally with
+the command below.
 
 ## Build after cloning
 

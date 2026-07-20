@@ -163,6 +163,9 @@ opencda/planning_module/carla_launch.log
 opencda/planning_module/.env
 opencda/planning_module/.claude/
 opencda/planning_module/.codex
+opencda/planning_module/Global_Planner/map_repo/install/
+opencda/planning_module/Global_Planner/map_repo/log/
+opencda/planning_module/Global_Planner/map_repo/source/
 
 # Local agent/editor state
 .agents/

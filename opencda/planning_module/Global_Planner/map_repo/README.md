@@ -1,8 +1,15 @@
 # AD Map Access runtime
 
-`install/` is generated locally and is intentionally not committed. Native
-Python extensions are tied to the active Python ABI, operating system, system
-libraries, and build paths.
+`install/`, `log/`, and `source/` are generated locally and are intentionally
+not committed or pushed.
+
+- `install/` contains native Python extensions and shared libraries tied to the
+  active Python ABI, operating system, compiler, system libraries, and build
+  paths.
+- `log/` contains disposable colcon build logs.
+- `source/` contains the downloaded pinned upstream AD-map checkout. Keeping it
+  locally avoids re-downloading source on `--clean` rebuilds, but it should not
+  be stored in this repository.
 
 From the repository root, build the pinned runtime with:
 
