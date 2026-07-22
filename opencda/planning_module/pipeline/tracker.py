@@ -5,10 +5,12 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
-from opencda.planning_module.pipeline.prediction import (
-    PredictionFrame,
-    build_prediction_frame,
-)
+# from opencda.planning_module.pipeline.prediction import (
+#     PredictionFrame,
+#     build_prediction_frame,
+# )
+
+from .prediction import (PredictionFrame,build_prediction_frame)
 
 
 class CPXObstacleTracker:

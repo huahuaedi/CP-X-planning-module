@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from opencda.planning_module.pipeline.output import PlannerOutput
+#from opencda.planning_module.pipeline.output import PlannerOutput
 
+from .output import PlannerOutput
 
 class CPXPlanningPipeline:
     """Run the full CP-X pipeline for one OpenCDA tick.
