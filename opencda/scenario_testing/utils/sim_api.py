@@ -331,7 +331,26 @@ class ScenarioManager:
                                              *cav_config['spawn_special'])
 
             cav_vehicle_bp.set_attribute('color', '0, 0, 255')
-            vehicle = self.world.spawn_actor(cav_vehicle_bp, spawn_transform)
+            try:
+                vehicle = self.world.spawn_actor(cav_vehicle_bp, spawn_transform)
+            except RuntimeError:
+                vehicle = None
+                for z_offset in (0.5, 1.0, 1.5, 2.0):
+                    retry_transform = carla.Transform(
+                        carla.Location(
+                            x=spawn_transform.location.x,
+                            y=spawn_transform.location.y,
+                            z=spawn_transform.location.z + z_offset),
+                        spawn_transform.rotation)
+                    vehicle = self.world.try_spawn_actor(
+                        cav_vehicle_bp, retry_transform)
+                    if vehicle is not None:
+                        print(
+                            "[OpenCDA ScenarioManager] Spawn retry succeeded "
+                            "with z offset %.1fm." % z_offset)
+                        break
+                if vehicle is None:
+                    raise
 
             # create vehicle manager for each cav
             vehicle_manager = VehicleManager(

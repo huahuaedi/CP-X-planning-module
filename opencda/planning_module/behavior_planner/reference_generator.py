@@ -52,9 +52,22 @@ def select_reference_intent(
     - Ordinary road lane-follow tracks the selected/current lane centerline.
     """
 
+    raw_decision = str(behavior_decision or "").strip().lower()
     normalized_decision = str(normalize_behavior_decision(behavior_decision))
     normalized_fsm = str(planner_fsm_state or "").strip().upper()
     target_lane_id = int(reference_target_lane_id or current_lane_id or route_optimal_lane_id or 0)
+
+    if raw_decision in {"intersection_turn_left", "intersection_turn_right"}:
+        return ReferenceIntent(
+            mode="intersection_turn",
+            target_lane_id=int(target_lane_id),
+            follow_global_route_lane=bool(global_route_reference_allowed),
+            reason=f"route_option_{raw_decision}",
+            lateral_reference_source="global_route_branch",
+            longitudinal_target_kind="speed_profile",
+            stop_target_role="none",
+            route_role="mpc_branch_constraint",
+        )
 
     if bool(is_fixed_stop_decision(normalized_decision)):
         return ReferenceIntent(

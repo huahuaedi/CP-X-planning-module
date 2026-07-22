@@ -96,6 +96,15 @@ class OpenCDAPlanningAdapter:
         if not lane_ids:
             lane_ids = [int(current_lane_id)]
 
+        # Keep the CARLA GRP route index synchronized throughout lane follow,
+        # so intersection reference generation never performs a late first
+        # lookup hundreds of metres into the route.
+        bridge.route_manager.sync_carla_route_progress(
+            ego_x_m=float(ego_location.x),
+            ego_y_m=float(ego_location.y),
+            ego_heading_rad=float(ego_yaw_rad),
+        )
+
         lane_assignments = bridge._assign_obstacles_to_lanes(object_snapshots)
         ego_snapshot = {
             "x": float(ego_location.x),
@@ -218,6 +227,7 @@ class OpenCDAPlanningAdapter:
                 route_summary.get("next_macro_maneuver", "Continue Straight")
             ),
             current_road_option=str(route_summary.get("current_road_option", "")),
+            remaining_distance_m=float(route_summary.get("remaining_distance_m", 0.0) or 0.0),
             remaining_points_count=len(route_points),
             route_found=bool(route_summary.get("route_found", False)),
         )

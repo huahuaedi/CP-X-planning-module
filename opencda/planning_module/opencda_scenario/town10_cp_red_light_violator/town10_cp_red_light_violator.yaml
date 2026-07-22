@@ -52,30 +52,41 @@ traffic_manager:
   synchronous_mode: true
 
 runtime:
-  module: opencda_scenario.cp_scenarios
-  cp_message_schema_version: 1
-  cp_message_prefix: town10_cp_red_light_violator
-  reset_cp_message_file: true
-  marker_vehicle_mode: autopilot
-  spawn_fallback_npc_when_no_markers: true
-  obstacle_message_distance_m: 140.0
-  obstacle_prediction_horizon_s: 5.0
-  traffic_light_stop:
-    enabled: true
-    search_distance_m: 90.0
-    stop_buffer_m: 2.0
-  vehicle_blueprint: vehicle.tesla.model3
-  vehicle_color_rgb: "40,80,180"
+  module: utility.coordinate_obstacle_spawner
+
+# NOTE (use case A fix): the vehicle below is spawned with follow_mode: literal,
+# which drives it along explicit waypoints via a simple point-to-point
+# controller that has no concept of traffic lights or right-of-way at all (see
+# `utility/coordinate_obstacle_spawner.py::_step_vehicle_along_waypoints`). It
+# therefore *actually* drives straight through the intersection regardless of
+# signal state -- a real red-light violation -- instead of the previous
+# `marker_vehicle_mode: autopilot` placement, which just made it a normal,
+# law-abiding CARLA Traffic Manager vehicle that would never run a light.
+# Waypoints/speed below are a best-effort placement based on the original
+# marker position (`-132.0, -4.5`, yaw 0 deg / +X) and were not verified
+# against a live CARLA session -- confirm the crossing geometry and re-tune
+# `speed_mps`/timing once run in the simulator.
+obstacles:
+  spawner_module: utility.coordinate_obstacle_spawner
+  cooperative_message_trigger_distance_m: 60.0
+  npc_vehicles:
+    - role_name: cp_cross_traffic_risk
+      blueprint: vehicle.tesla.model3
+      color_rgb: "40,80,180"
+      follow_mode: literal
+      speed_mps: 8.0
+      arrival_threshold_m: 3.0
+      waypoints:
+        - [-132.0, -4.5, 0.6, 0.0]
+        - [-92.0, -4.5, 0.6, 0.0]
 
 cp_scenario:
   use_case: A
-  description: Shared perception reports cross traffic that may violate a red light before ego has direct line-of-sight.
-  vehicles:
-    - index: 1
-      name: cp_cross_traffic_risk
-      type: potential_red_light_violator
-      description: Cross-traffic actor published through CP obstacle messages.
-      xyz_yaw: [-132.0, -4.5, 0.6, 0.0]
+  description: >-
+    A cross-traffic vehicle drives straight through the intersection
+    regardless of signal state, simulating a potential red-light violator
+    that shared perception can warn ego about before ego's own perception
+    would otherwise detect it.
 
 ego:
   blueprint: vehicle.tesla.model3

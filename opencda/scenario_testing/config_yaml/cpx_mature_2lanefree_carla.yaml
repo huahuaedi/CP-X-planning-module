@@ -1,0 +1,80 @@
+description: |-
+  CP-X integration on OpenCDA's mature single_2lanefree_carla layout.
+
+cpx_mature:
+  map_mode: 2lane_freeway_simplified
+  max_ticks: 1200
+  destination_tolerance_m: 10.0
+  run_opencda_evaluation: false
+
+vehicle_base:
+  sensing:
+    perception:
+      activate: false
+      camera:
+        visualize: 0
+        num: 0
+        positions: []
+      lidar:
+        visualize: false
+    localization:
+      activate: false
+      debug_helper:
+        show_animation: false
+  map_manager:
+    visualize: false
+    activate: false
+  behavior:
+    max_speed: 50
+    ignore_traffic_light: true
+    overtake_allowed: false
+    collision_time_ahead: 2.0
+    local_planner:
+      debug: true
+      debug_trajectory: true
+  planner:
+    enabled: true
+    type: cpx_mpc
+    mode: opencda_reference_mpc
+    fallback_policy: opencda
+    target_speed_mps: 6.0
+    lookahead_m: 22.0
+    min_front_gap_m: 8.0
+    max_mpc_obstacles: 4
+    mode2_use_opencda_trajectory_speed: true
+    mode2_min_tracking_speed_mps: 1.5
+    mode2_sort_reference_by_forward: true
+    mode2_min_reference_forward_spacing_m: 0.25
+    mode2_pid_hold_after_mpc_fail_s: 1.0
+    mode2_mpc_takeover_success_frames: 4
+    mode2_mpc_takeover_max_lateral_m: 1.2
+    mode2_mpc_takeover_max_steer_jump: 0.20
+    mode2_mpc_takeover_max_throttle_jump: 0.35
+    mode2_mpc_takeover_max_brake_jump: 0.35
+    record_debug: true
+    debug_output_dir: opencda/planning_module/opencda_bridge/debug_mature_2lane
+    debug: true
+
+carla_traffic_manager:
+  vehicle_list:
+    - spawn_position: [ -330, 8.3, 0.3, 0, 0, 0 ]
+      vehicle_speed_perc: 0
+    - spawn_position: [ -320, 4.8, 0.3, 0, 0, 0 ]
+      vehicle_speed_perc: -200
+    - spawn_position: [ -300, 8.3, 0.3, 0, 0, 0 ]
+      vehicle_speed_perc: -100
+    - spawn_position: [ -280, 4.8, 0.3, 0, 0, 0 ]
+      vehicle_speed_perc: -200
+
+scenario:
+  single_cav_list:
+    - name: cav1
+      spawn_position: [ -370, 8.3, 0.3, 0, 0, 0 ]
+      destination: [ 700, 8.3, 0.3 ]
+      v2x:
+        communication_range: 45
+      behavior:
+        local_planner:
+          debug_trajectory: true
+          debug: true
+

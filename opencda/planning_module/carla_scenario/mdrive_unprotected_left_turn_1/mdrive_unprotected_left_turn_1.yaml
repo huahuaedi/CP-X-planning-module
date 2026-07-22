@@ -50,11 +50,38 @@ planning:
   prompt_period_s: 1.0
   global_planner_mode: astar
 runtime:
+  module: utility.coordinate_obstacle_spawner
   traffic_light_stop:
     enabled: false
   traffic_light_stop_waypoint_match_distance_m: 8.0
   traffic_light_actor_position_match_distance_m: 28.0
   traffic_light_actor_position_lateral_m: 4.5
+# NOTE (use case B fix): this scenario previously had no `obstacles` block at
+# all -- ego drove the left-turn route with nothing to turn across, so the
+# "unprotected left turn" conflict the scenario name implies never actually
+# existed. The vehicle below drives the opposing direction (yaw 180 deg) past
+# ego's turn point using follow_mode: literal (see
+# `utility/coordinate_obstacle_spawner.py::_step_vehicle_along_waypoints`), so
+# ego has to judge a gap in real oncoming traffic before completing the turn.
+# The turn point is inferred from the ego anchors (roughly x=-124.5,
+# y=91.4, based on `final_destination_xyz_yaw`'s x combined with
+# `ego_spawn_xyz_yaw`'s y); the oncoming lane's exact lateral offset
+# (guessed here as +3.5 m from ego's approach y) and the timing/speed needed
+# for the two vehicles to actually meet at the intersection are NOT verified
+# against a live CARLA session -- confirm and retune once run in the
+# simulator.
+obstacles:
+  spawner_module: utility.coordinate_obstacle_spawner
+  npc_vehicles:
+    - role_name: oncoming_left_turn_traffic
+      blueprint: vehicle.tesla.model3
+      color_rgb: "40,40,180"
+      follow_mode: literal
+      speed_mps: 8.0
+      arrival_threshold_m: 3.0
+      waypoints:
+        - [-64.475, 94.868, 0.6, 180.0]
+        - [-160.0, 94.868, 0.6, 180.0]
 camera:
   enabled: true
   image_size_x: 640
