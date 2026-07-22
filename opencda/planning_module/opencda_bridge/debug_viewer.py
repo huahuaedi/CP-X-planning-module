@@ -332,6 +332,7 @@ class OpenCDADebugViewer:
             f"traffic={cpx_debug.get('traffic_signal_state', '')} from_cp={cpx_debug.get('traffic_control_from_cp', '')}",
             f"planner_input cp_ctrl={cpx_debug.get('planner_input_cp_traffic_control_count', '')} pred_risk={cpx_debug.get('planner_input_prediction_risky_lane_count', '')} objs={cpx_debug.get('planner_input_perception_planning_count', '')}",
             f"mpc_status={cpx_debug.get('mpc_status', '')}  solve_ms={cpx_debug.get('mpc_solve_time_ms', '')} profile={cpx_debug.get('mpc_cost_profile', '')}",
+            f"decision={cpx_debug.get('decision_final_action', '')} source={cpx_debug.get('decision_control_source', '')} veto={cpx_debug.get('decision_veto_count', '')}",
             f"cmd a={cpx_debug.get('accel_cmd_mps2', '')}  steer={cpx_debug.get('steer_cmd_rad', '')}",
             f"target=({cpx_debug.get('destination_x', '')}, {cpx_debug.get('destination_y', '')}) v_ref={cpx_debug.get('target_speed_mps', '')}",
             f"mpc_fallback={cpx_debug.get('mpc_fallback_reason', '')}",

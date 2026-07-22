@@ -18,7 +18,17 @@ from behavior_planner.trajectory_risk import (
 
 
 def _obstacle_id(snapshot: Mapping[str, object]) -> str:
-    return str(snapshot.get("vehicle_id", snapshot.get("id", ""))).strip()
+    for key in ("track_id", "object_id", "vehicle_id", "actor_id", "id"):
+        value = snapshot.get(key)
+        if value is not None and str(value).strip() != "":
+            return str(value).strip()
+    try:
+        return "xy:{:.1f}:{:.1f}".format(
+            float(snapshot.get("x", snapshot.get("x_m", 0.0))),
+            float(snapshot.get("y", snapshot.get("y_m", 0.0))),
+        )
+    except Exception:
+        return ""
 
 
 @dataclass

@@ -85,6 +85,11 @@ class MPCControlBuffer:
         self._last_reason = f"control_buffer_reuse_step:{int(index)}"
         return float(accel), float(steer), str(self._last_reason)
 
+    def reset(self, *, reason: str = "control_buffer_reset") -> None:
+        self._plan_time_s = None
+        self._sequence = []
+        self._last_reason = str(reason)
+
     @property
     def last_reason(self) -> str:
         return str(self._last_reason)
