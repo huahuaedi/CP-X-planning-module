@@ -52,35 +52,52 @@ traffic_manager:
   synchronous_mode: true
 
 runtime:
-  module: opencda_scenario.cp_scenarios
-  cp_message_schema_version: 1
-  cp_message_prefix: town10_cp_passing_merge
-  reset_cp_message_file: true
-  marker_vehicle_mode: autopilot
-  spawn_fallback_npc_when_no_markers: true
-  obstacle_message_distance_m: 140.0
-  obstacle_prediction_horizon_s: 5.0
-  traffic_light_stop:
-    enabled: true
-    search_distance_m: 80.0
-    stop_buffer_m: 2.0
-  vehicle_blueprint: vehicle.tesla.model3
-  vehicle_color_rgb: "80,80,180"
+  module: utility.coordinate_obstacle_spawner
+
+# NOTE (use case E fix): both vehicles below use follow_mode: literal (explicit
+# waypoints + a simple point-to-point controller, see
+# `utility/coordinate_obstacle_spawner.py::_step_vehicle_along_waypoints`)
+# instead of the previous `marker_vehicle_mode: autopilot`, so their relative
+# speed/timing is actually controlled and a real pass/merge conflict is
+# guaranteed to form:
+#  - cp_merge_lead_vehicle drives slowly in ego's own lane ahead of ego (the
+#    slow lead vehicle that gives ego a reason to consider passing).
+#  - cp_adjacent_approaching_vehicle drives at moderate speed in the adjacent
+#    lane ego would need to use to pass, forcing a real gap-acceptance
+#    decision instead of two independently-autopiloted cars that may never
+#    actually interact.
+# Positions reuse the original marker coordinates; waypoints/speeds are a
+# best-effort placement not verified against a live CARLA session -- retune
+# after visually checking lane geometry in the simulator.
+obstacles:
+  spawner_module: utility.coordinate_obstacle_spawner
+  cooperative_message_trigger_distance_m: 60.0
+  npc_vehicles:
+    - role_name: cp_adjacent_approaching_vehicle
+      blueprint: vehicle.tesla.model3
+      color_rgb: "80,80,180"
+      follow_mode: literal
+      speed_mps: 9.0
+      arrival_threshold_m: 3.0
+      waypoints:
+        - [-81.5, -32.0, 0.6, 90.0]
+        - [-81.5, 40.0, 0.6, 90.0]
+    - role_name: cp_merge_lead_vehicle
+      blueprint: vehicle.tesla.model3
+      color_rgb: "80,80,180"
+      follow_mode: literal
+      speed_mps: 3.0
+      arrival_threshold_m: 3.0
+      waypoints:
+        - [-84.8, -18.0, 0.6, 90.0]
+        - [-84.8, 40.0, 0.6, 90.0]
 
 cp_scenario:
   use_case: E
-  description: Shared perception reports adjacent-lane and merging vehicles so behavior planner can evaluate pass/merge gaps early.
-  vehicles:
-    - index: 1
-      name: cp_adjacent_approaching_vehicle
-      type: adjacent_lane_gap_vehicle
-      description: Vehicle in adjacent lane used for pass-gap awareness.
-      xyz_yaw: [-81.5, -32.0, 0.6, 90.0]
-    - index: 2
-      name: cp_merge_lead_vehicle
-      type: converging_lane_vehicle
-      description: Vehicle ahead near merge/passing target lane.
-      xyz_yaw: [-84.8, -18.0, 0.6, 90.0]
+  description: >-
+    A slow lead vehicle in ego's own lane gives ego a reason to pass; a second
+    vehicle moving at moderate speed in the adjacent (passing) lane means ego
+    must actually negotiate a real gap, informed early via shared perception.
 
 ego:
   blueprint: vehicle.tesla.model3

@@ -516,6 +516,38 @@ mpc:
       q_a: 8.0
       q_delta: 160.0
 
+    tracking:
+      w_attractive: 0.35
+      q_x: 0.4
+      q_y: 0.0
+      q_v: 2.5
+      q_psi: 0.0
+      lane_center_w0: 7.0
+      lane_center_xy_w0: 1.0
+      lane_center_q_psi: 1.0
+      road_boundary_w: 1500.0
+      road_boundary_margin_m: 0.45
+      road_boundary_max_slack_m: 0.20
+      w_control: 18.0
+      q_a: 18.0
+      q_delta: 260.0
+
+    tracking_stop:
+      w_attractive: 0.25
+      q_x: 0.3
+      q_y: 0.0
+      q_v: 4.0
+      q_psi: 0.0
+      lane_center_w0: 4.0
+      lane_center_xy_w0: 0.8
+      lane_center_q_psi: 0.8
+      road_boundary_w: 1000.0
+      road_boundary_margin_m: 0.45
+      road_boundary_max_slack_m: 0.25
+      w_control: 22.0
+      q_a: 24.0
+      q_delta: 320.0
+
     intersection_turn:
       w_attractive: 0.8
       q_x: 1.5

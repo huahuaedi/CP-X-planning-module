@@ -204,10 +204,15 @@ def _transform_xy(transform: Any) -> List[float] | None:
     return [float(location.x), float(location.y)]
 
 
-def _custom_waypoint_transform(waypoint, carla):
+def _map_waypoint_transform(waypoint, carla):
     if waypoint is None:
         return None
-    position = waypoint.position
+    carla_transform = getattr(waypoint, "transform", None)
+    if carla_transform is not None:
+        return carla_transform
+    position = getattr(waypoint, "position", None)
+    if not isinstance(position, Mapping):
+        return None
     return carla.Transform(
         carla.Location(
             x=float(position["x"]),
@@ -259,14 +264,15 @@ def _closest_driving_waypoint(map_planner, transform: Any):
 def _record_marker(*, map_planner, carla, marker_obj: Any, prefix: str = "") -> Dict[str, object]:
     transform = _object_transform(marker_obj)
     waypoint = _closest_driving_waypoint(map_planner, transform)
-    waypoint_transform = _custom_waypoint_transform(waypoint, carla)
+    waypoint_transform = _map_waypoint_transform(waypoint, carla)
     lane_id = None
     opendrive_lane_id = None
     ad_lane_id = None
     if waypoint is not None:
         lane_id = int(canonical_lane_id_for_waypoint(waypoint))
         opendrive_lane_id = int(raw_opendrive_lane_id_for_waypoint(waypoint))
-        ad_lane_id = int(waypoint.ad_lane_id)
+        raw_ad_lane_id = getattr(waypoint, "ad_lane_id", None)
+        ad_lane_id = None if raw_ad_lane_id is None else int(raw_ad_lane_id)
     return {
         "name": str(getattr(marker_obj, "name", "")).strip(),
         "index": _marker_index(str(getattr(marker_obj, "name", "")), prefix),

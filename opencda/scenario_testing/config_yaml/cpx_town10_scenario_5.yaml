@@ -1,0 +1,270 @@
+description: |-
+  Ported from opencda/planning_module/opencda_scenario/town10_scenario_5 so it runs
+  through the official `python opencda.py -t cpx_town10_scenario_5` entry point instead of the
+  standalone opencda/planning_module/main.py runner. World bootstrapping (obstacle/
+  marker spawning, SUMO co-simulation, scripted traffic lights, proactive CP messages)
+  is still provided by the original scenario module via
+  opencda.scenario_testing.utils.cpx_scenario_bridge -- only the drive loop now goes
+  through OpenCDA's native VehicleManager / CPXMPCPlannerBridge pipeline.
+
+# First define the basic parameters of the vehicle (defaults for any CAV that
+# does not override `planner` itself; kept in sync with the per-vehicle block
+# below since this scenario only has one CAV).
+vehicle_base:
+  sensing:
+    perception:
+      camera:
+        visualize: 0
+        num: 0
+        positions: []
+      lidar:
+        visualize: false
+  map_manager:
+    visualize: false
+    activate: false
+  behavior:
+    max_speed: 50
+    ignore_traffic_light: false
+    collision_time_ahead: 2.0
+  planner:
+    enabled: true
+    type: cpx_mpc
+    mode: full_cpx_mpc
+    fallback_policy: emergency_stop
+    safety_supervisor_enabled: true
+    safety_max_steer_delta: 0.25
+    safety_max_throttle_delta: 0.45
+    safety_max_brake_delta: 0.60
+    use_opencda_global_route: true
+    opencda_global_route_reference_allowed: true
+    global_planner_mode: astar
+    global_planner_strict: false
+    publish_cp_message: true
+    require_native_opencda_cp: true
+    target_speed_mps: 10.0
+    lookahead_m: 18.0
+    min_front_gap_m: 8.0
+    communication_range_m: 80.0
+    max_mpc_obstacles: 4
+    route_reached_distance_m: 3.0
+    tracker_max_stale_s: 0.5
+    tracker_max_speed_mps: 45.0
+    tracker_max_acceleration_mps2: 12.0
+    tracker_max_position_jump_m: 12.0
+    mpc_feedback_enabled: true
+    mpc_feedback_hold_s: 1.5
+    mpc_feedback_min_failures: 1
+    mpc_feedback_candidate_weight: 80.0
+    control_buffer_enabled: true
+    control_buffer_max_reuse_s: 0.35
+    full_reference_memory_enabled: true
+    full_reference_memory_max_first_jump_m: 0.85
+    full_reference_memory_max_destination_jump_m: 2.0
+    full_reference_memory_max_reuse_age_s: 0.8
+    full_trajectory_memory_enabled: true
+    full_trajectory_memory_max_accel_jump_mps2: 0.9
+    full_trajectory_memory_max_steer_jump_rad: 0.08
+    full_trajectory_memory_blend_alpha: 0.35
+    full_trajectory_memory_max_reuse_age_s: 0.5
+    overspeed_guard_enabled: true
+    overspeed_margin_mps: 0.5
+    overspeed_min_brake: 0.2
+    overspeed_max_brake: 0.65
+    low_speed_lateral_recovery_enabled: true
+    low_speed_lateral_recovery_speed_mps: 0.8
+    low_speed_lateral_recovery_threshold_m: 1.2
+    low_speed_lateral_recovery_target_speed_mps: 1.0
+    low_speed_lateral_recovery_max_steer_rad: 0.18
+    full_lane_change_start_lock_s: 8.0
+    full_dense_traffic_lane_change_lock_enabled: true
+    full_dense_traffic_object_count: 8
+    full_dense_traffic_risky_lane_count: 2
+    full_prepare_lane_change_reference_lock: true
+    full_allow_opportunistic_lane_change: false
+    route_lane_change_preparation_start_distance_m: 45.0
+    route_lane_change_latest_start_distance_m: 12.0
+    route_lane_change_target_safety_threshold: 0.65
+    route_lane_change_require_adjacent: true
+    full_lane_follow_max_destination_lateral_m: 1.2
+    full_lane_follow_max_reference_first_lateral_m: 0.65
+    full_stop_max_destination_lateral_m: 1.0
+    full_stop_max_reference_first_lateral_m: 0.55
+    full_stop_guard_destination_forward_m: 6.0
+    full_mpc_reference_stabilizer_enabled: true
+    full_reference_stabilizer_min_forward_m: -0.25
+    full_reference_stabilizer_min_spacing_m: 0.35
+    full_reference_stabilizer_max_heading_step_rad: 0.75
+    full_stop_reference_buffer_m: 1.5
+    full_stop_reference_decel_mps2: 2.0
+    full_stop_reference_speed_cap_mps: 2.0
+    reference_contract_lane_follow_min_first_forward_m: 0.5
+    reference_contract_lane_follow_max_first_lateral_abs_m: 0.75
+    reference_contract_lane_follow_max_destination_lane_error_m: 0.75
+    reference_contract_lane_follow_max_destination_body_lateral_abs_m: 1.5
+    reference_contract_stop_min_first_forward_m: 0.2
+    reference_contract_stop_max_first_lateral_abs_m: 0.75
+    reference_contract_stop_max_destination_lane_error_m: 0.75
+    reference_contract_stop_max_destination_body_lateral_abs_m: 1.5
+    opencda_reference_recovery_speed_mps: 1.2
+    mode2_use_opencda_trajectory_speed: false
+    mode2_min_tracking_speed_mps: 1.0
+    mode2_sort_reference_by_forward: true
+    mode2_min_reference_forward_spacing_m: 0.25
+    mode2_object_memory_alpha: 0.55
+    mode2_object_memory_max_stale_s: 0.4
+    mode2_traffic_unknown_hold_s: 0.8
+    mode2_reference_memory_max_first_jump_m: 2.0
+    mode2_reference_memory_max_destination_jump_m: 4.0
+    mode2_reference_memory_max_reuse_age_s: 1.0
+    mode2_trajectory_memory_max_accel_jump_mps2: 1.2
+    mode2_trajectory_memory_max_steer_jump_rad: 0.12
+    mode2_trajectory_memory_blend_alpha: 0.45
+    mode2_trajectory_memory_max_reuse_age_s: 0.5
+    mode2_stop_approach_distance_m: 8.0
+    mode2_stop_approach_speed_mps: 2.0
+    mode2_stop_approach_min_speed_mps: 0.8
+    mode2_green_release_reference_s: 1.2
+    mode2_green_release_speed_mps: 1.8
+    mode2_default_stop_reference_m: 4.0
+    mode2_stop_reference_max_lateral_m: 1.5
+    mode2_stop_mpc_max_speed_mps: 1.2
+    mode2_stop_mpc_max_lateral_m: 2.0
+    mode2_pid_hold_after_mpc_fail_s: 0.75
+    mode2_mpc_takeover_success_frames: 3
+    mode2_mpc_takeover_success_frames_stop: 6
+    mode2_mpc_takeover_max_lateral_m: 1.5
+    mode2_mpc_takeover_max_steer_jump: 0.25
+    mode2_mpc_takeover_max_throttle_jump: 0.45
+    mode2_mpc_takeover_max_brake_jump: 0.45
+    record_debug: true
+    debug_output_dir: opencda/planning_module/opencda_bridge/debug_cpx_town10_scenario_5
+    debug: true
+
+# define scenario. Single CAV; spawn_position/destination below are
+# placeholders overwritten at runtime by cpx_scenario_bridge from the legacy
+# scenario's own anchor markers (marker positions live in the CARLA map/level,
+# not in any yaml, so they cannot be resolved statically).
+scenario:
+  single_cav_list:
+    - name: cav1
+      spawn_position: [0.0, 0.0, 0.3, 0, 0, 0]
+      destination: [0.0, 0.0, 0.3]
+      v2x:
+        communication_range: 45
+      behavior:
+        local_planner:
+          debug_trajectory: true
+          debug: true
+      planner:
+        enabled: true
+        type: cpx_mpc
+        mode: full_cpx_mpc
+        fallback_policy: emergency_stop
+        safety_supervisor_enabled: true
+        safety_max_steer_delta: 0.25
+        safety_max_throttle_delta: 0.45
+        safety_max_brake_delta: 0.60
+        use_opencda_global_route: true
+        opencda_global_route_reference_allowed: true
+        global_planner_mode: astar
+        global_planner_strict: false
+        publish_cp_message: true
+        require_native_opencda_cp: true
+        target_speed_mps: 10.0
+        lookahead_m: 18.0
+        min_front_gap_m: 8.0
+        communication_range_m: 80.0
+        max_mpc_obstacles: 4
+        route_reached_distance_m: 3.0
+        tracker_max_stale_s: 0.5
+        tracker_max_speed_mps: 45.0
+        tracker_max_acceleration_mps2: 12.0
+        tracker_max_position_jump_m: 12.0
+        mpc_feedback_enabled: true
+        mpc_feedback_hold_s: 1.5
+        mpc_feedback_min_failures: 1
+        mpc_feedback_candidate_weight: 80.0
+        control_buffer_enabled: true
+        control_buffer_max_reuse_s: 0.35
+        full_reference_memory_enabled: true
+        full_reference_memory_max_first_jump_m: 0.85
+        full_reference_memory_max_destination_jump_m: 2.0
+        full_reference_memory_max_reuse_age_s: 0.8
+        full_trajectory_memory_enabled: true
+        full_trajectory_memory_max_accel_jump_mps2: 0.9
+        full_trajectory_memory_max_steer_jump_rad: 0.08
+        full_trajectory_memory_blend_alpha: 0.35
+        full_trajectory_memory_max_reuse_age_s: 0.5
+        overspeed_guard_enabled: true
+        overspeed_margin_mps: 0.5
+        overspeed_min_brake: 0.2
+        overspeed_max_brake: 0.65
+        low_speed_lateral_recovery_enabled: true
+        low_speed_lateral_recovery_speed_mps: 0.8
+        low_speed_lateral_recovery_threshold_m: 1.2
+        low_speed_lateral_recovery_target_speed_mps: 1.0
+        low_speed_lateral_recovery_max_steer_rad: 0.18
+        full_lane_change_start_lock_s: 8.0
+        full_dense_traffic_lane_change_lock_enabled: true
+        full_dense_traffic_object_count: 8
+        full_dense_traffic_risky_lane_count: 2
+        full_prepare_lane_change_reference_lock: true
+        full_allow_opportunistic_lane_change: false
+        route_lane_change_preparation_start_distance_m: 45.0
+        route_lane_change_latest_start_distance_m: 12.0
+        route_lane_change_target_safety_threshold: 0.65
+        route_lane_change_require_adjacent: true
+        full_lane_follow_max_destination_lateral_m: 1.2
+        full_lane_follow_max_reference_first_lateral_m: 0.65
+        full_stop_max_destination_lateral_m: 1.0
+        full_stop_max_reference_first_lateral_m: 0.55
+        full_stop_guard_destination_forward_m: 6.0
+        full_mpc_reference_stabilizer_enabled: true
+        full_reference_stabilizer_min_forward_m: -0.25
+        full_reference_stabilizer_min_spacing_m: 0.35
+        full_reference_stabilizer_max_heading_step_rad: 0.75
+        full_stop_reference_buffer_m: 1.5
+        full_stop_reference_decel_mps2: 2.0
+        full_stop_reference_speed_cap_mps: 2.0
+        reference_contract_lane_follow_min_first_forward_m: 0.5
+        reference_contract_lane_follow_max_first_lateral_abs_m: 0.75
+        reference_contract_lane_follow_max_destination_lane_error_m: 0.75
+        reference_contract_lane_follow_max_destination_body_lateral_abs_m: 1.5
+        reference_contract_stop_min_first_forward_m: 0.2
+        reference_contract_stop_max_first_lateral_abs_m: 0.75
+        reference_contract_stop_max_destination_lane_error_m: 0.75
+        reference_contract_stop_max_destination_body_lateral_abs_m: 1.5
+        opencda_reference_recovery_speed_mps: 1.2
+        mode2_use_opencda_trajectory_speed: false
+        mode2_min_tracking_speed_mps: 1.0
+        mode2_sort_reference_by_forward: true
+        mode2_min_reference_forward_spacing_m: 0.25
+        mode2_object_memory_alpha: 0.55
+        mode2_object_memory_max_stale_s: 0.4
+        mode2_traffic_unknown_hold_s: 0.8
+        mode2_reference_memory_max_first_jump_m: 2.0
+        mode2_reference_memory_max_destination_jump_m: 4.0
+        mode2_reference_memory_max_reuse_age_s: 1.0
+        mode2_trajectory_memory_max_accel_jump_mps2: 1.2
+        mode2_trajectory_memory_max_steer_jump_rad: 0.12
+        mode2_trajectory_memory_blend_alpha: 0.45
+        mode2_trajectory_memory_max_reuse_age_s: 0.5
+        mode2_stop_approach_distance_m: 8.0
+        mode2_stop_approach_speed_mps: 2.0
+        mode2_stop_approach_min_speed_mps: 0.8
+        mode2_green_release_reference_s: 1.2
+        mode2_green_release_speed_mps: 1.8
+        mode2_default_stop_reference_m: 4.0
+        mode2_stop_reference_max_lateral_m: 1.5
+        mode2_stop_mpc_max_speed_mps: 1.2
+        mode2_stop_mpc_max_lateral_m: 2.0
+        mode2_pid_hold_after_mpc_fail_s: 0.75
+        mode2_mpc_takeover_success_frames: 3
+        mode2_mpc_takeover_success_frames_stop: 6
+        mode2_mpc_takeover_max_lateral_m: 1.5
+        mode2_mpc_takeover_max_steer_jump: 0.25
+        mode2_mpc_takeover_max_throttle_jump: 0.45
+        mode2_mpc_takeover_max_brake_jump: 0.45
+        record_debug: true
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_cpx_town10_scenario_5
+        debug: true

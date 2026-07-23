@@ -12,6 +12,15 @@ from .global_planner import (
     raw_opendrive_lane_id_for_waypoint,
     world_heading_rad,
 )
+from .carla_lane_graph import build_lane_center_waypoints
+from .global_planner_factory import (
+    ASTAR_GLOBAL_PLANNER_MODES,
+    CUSTOM_GLOBAL_PLANNER_MODES,
+    GlobalPlannerBackendSelection,
+    create_global_planner_backend,
+    normalize_global_planner_mode,
+)
+from .legacy_global_planner import AStarGlobalPlanner
 from .artifacts import ensure_artifact_dir, write_dict_csv_artifact, write_json_artifact
 from .config_loader import deep_merge_dicts, load_yaml_file
 from .cp_messages import (
@@ -64,6 +73,9 @@ from .tracker import Tracker
 __all__ = [
     "CP_MESSAGE_PATH",
     "CPMessageContext",
+    "AStarGlobalPlanner",
+    "ASTAR_GLOBAL_PLANNER_MODES",
+    "CUSTOM_GLOBAL_PLANNER_MODES",
     "CustomGlobalPlannerAdapter",
     "EvaluationMetricsRecorder",
     "EgoPlanningState",
@@ -77,6 +89,8 @@ __all__ = [
     "StopTargetContext",
     "TargetContext",
     "TrafficControlContext",
+    "GlobalPlannerBackendSelection",
+    "build_lane_center_waypoints",
     "build_planning_debug_summary",
     "canonical_lane_id_for_waypoint",
     "canonical_lane_ids_for_waypoint",
@@ -84,6 +98,7 @@ __all__ = [
     "canonical_lane_waypoints",
     "control_messages",
     "compute_pairwise_ttc_drac",
+    "create_global_planner_backend",
     "deep_merge_dicts",
     "empty_cp_payload",
     "ensure_artifact_dir",
@@ -97,6 +112,7 @@ __all__ = [
     "load_obstacle_messages",
     "load_obstacle_snapshots",
     "normalize_cp_payload",
+    "normalize_global_planner_mode",
     "obstacle_message_to_snapshot",
     "obstacle_messages",
     "obstacle_messages_to_snapshots",

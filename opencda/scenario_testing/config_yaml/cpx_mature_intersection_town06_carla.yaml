@@ -1,0 +1,78 @@
+description: |-
+  CP-X integration on OpenCDA's mature single_intersection_town06_carla layout.
+
+cpx_mature:
+  map_mode: town
+  town: Town06
+  max_ticks: 900
+  destination_tolerance_m: 6.0
+  run_opencda_evaluation: false
+
+vehicle_base:
+  sensing:
+    perception:
+      activate: false
+      camera:
+        visualize: 0
+        num: 0
+        positions: []
+      lidar:
+        visualize: false
+    localization:
+      activate: false
+      debug_helper:
+        show_animation: false
+  map_manager:
+    visualize: false
+    activate: false
+  behavior:
+    max_speed: 30
+    ignore_traffic_light: false
+    overtake_allowed: false
+    collision_time_ahead: 2.0
+    local_planner:
+      debug: true
+      debug_trajectory: true
+  planner:
+    enabled: true
+    type: cpx_mpc
+    mode: opencda_reference_mpc
+    fallback_policy: opencda
+    target_speed_mps: 3.5
+    lookahead_m: 18.0
+    min_front_gap_m: 8.0
+    max_mpc_obstacles: 4
+    mode2_use_opencda_trajectory_speed: true
+    mode2_min_tracking_speed_mps: 1.0
+    mode2_sort_reference_by_forward: true
+    mode2_min_reference_forward_spacing_m: 0.25
+    mode2_stop_approach_distance_m: 8.0
+    mode2_stop_approach_speed_mps: 2.0
+    mode2_green_release_reference_s: 1.2
+    mode2_pid_hold_after_mpc_fail_s: 1.0
+    mode2_mpc_takeover_success_frames: 4
+    mode2_mpc_takeover_success_frames_stop: 6
+    mode2_mpc_takeover_max_lateral_m: 1.2
+    mode2_mpc_takeover_max_steer_jump: 0.20
+    record_debug: true
+    debug_output_dir: opencda/planning_module/opencda_bridge/debug_mature_intersection
+    debug: true
+
+carla_traffic_manager:
+  random: true
+  vehicle_list: ~
+  range:
+    - [ 2, 10, 0, 200, 3.5, 25, 30]
+
+scenario:
+  single_cav_list:
+    - name: cav1
+      spawn_position: [6.31, 125.03, 0.3, 0, -92, 0]
+      destination: [-12.51, 110.31, 0.3]
+      v2x:
+        communication_range: 45
+      behavior:
+        local_planner:
+          debug_trajectory: true
+          debug: true
+

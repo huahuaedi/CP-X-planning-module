@@ -10,7 +10,7 @@ solve rather than solving a full MPC problem for every candidate.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, Mapping, Sequence
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 
 _DECISION_FOLLOW = "lane_follow"
@@ -31,7 +31,7 @@ class BehaviorCandidate:
 
 @dataclass
 class CandidateEvaluationFrame:
-    candidates: list[BehaviorCandidate]
+    candidates: List[BehaviorCandidate]
     selected: BehaviorCandidate
 
     def summary(self) -> str:
@@ -44,7 +44,7 @@ class CandidateEvaluationFrame:
 
 
 def _risk_for_lane(
-    lane_prediction_risks: Mapping[int, Mapping[str, object]] | None,
+    lane_prediction_risks: Optional[Mapping[int, Mapping[str, object]]],
     lane_id: int,
 ) -> dict:
     if lane_prediction_risks is None:
@@ -72,17 +72,24 @@ def _candidate_cost(
     *,
     target_lane_id: int,
     source_lane_id: int,
-    route_optimal_lane_id: int | None,
+    route_optimal_lane_id: Optional[int],
     lane_safety_scores: Mapping[int, float],
-    lane_prediction_risks: Mapping[int, Mapping[str, object]] | None,
+    lane_prediction_risks: Optional[Mapping[int, Mapping[str, object]]],
+    mpc_feedback_blocked_lane_ids: Optional[Sequence[int]],
     safety_weight: float,
     prediction_risk_weight: float,
     route_deviation_weight: float,
     lane_change_weight: float,
-) -> tuple[bool, Dict[str, float], str]:
+    mpc_feedback_weight: float,
+) -> Tuple[bool, Dict[str, float], str]:
     lane_score = max(0.0, min(1.0, float(lane_safety_scores.get(int(target_lane_id), 0.0))))
     prediction_risk = _risk_for_lane(lane_prediction_risks, int(target_lane_id))
     prediction_blocked = bool(prediction_risk.get("risk", False))
+    mpc_feedback_blocked = (
+        int(target_lane_id) != int(source_lane_id)
+        and int(target_lane_id)
+        in {int(lane_id) for lane_id in list(mpc_feedback_blocked_lane_ids or [])}
+    )
     route_lane_id = int(route_optimal_lane_id or 0)
     route_distance = 0.0 if route_lane_id == 0 else abs(int(target_lane_id) - int(route_lane_id))
     lane_change_distance = 0.0 if int(target_lane_id) == int(source_lane_id) else abs(int(target_lane_id) - int(source_lane_id))
@@ -91,25 +98,33 @@ def _candidate_cost(
         "prediction_risk_cost": float(prediction_risk_weight) if prediction_blocked else 0.0,
         "route_deviation_cost": float(route_deviation_weight) * float(route_distance),
         "lane_change_cost": float(lane_change_weight) * float(lane_change_distance),
+        "mpc_feedback_cost": float(mpc_feedback_weight) if bool(mpc_feedback_blocked) else 0.0,
     }
-    feasible = not bool(prediction_blocked)
-    reason = str(prediction_risk.get("reason", "prediction_risk") or "prediction_risk") if prediction_blocked else ""
+    feasible = not bool(prediction_blocked or mpc_feedback_blocked)
+    if prediction_blocked:
+        reason = str(prediction_risk.get("reason", "prediction_risk") or "prediction_risk")
+    elif mpc_feedback_blocked:
+        reason = "recent_mpc_infeasible"
+    else:
+        reason = ""
     return bool(feasible), cost_terms, reason
 
 
 def evaluate_behavior_candidates(
     *,
     lane_safety_scores: Mapping[int, float],
-    lane_prediction_risks: Mapping[int, Mapping[str, object]] | None,
+    lane_prediction_risks: Optional[Mapping[int, Mapping[str, object]]],
     ego_lane_id: int,
     selected_lane_id: int,
     available_lane_ids: Sequence[int],
-    route_optimal_lane_id: int | None = None,
+    route_optimal_lane_id: Optional[int] = None,
     mode: str = "NORMAL",
     safety_weight: float = 10.0,
     prediction_risk_weight: float = 100.0,
     route_deviation_weight: float = 2.0,
     lane_change_weight: float = 1.0,
+    mpc_feedback_blocked_lane_ids: Optional[Sequence[int]] = None,
+    mpc_feedback_weight: float = 80.0,
 ) -> CandidateEvaluationFrame:
     """Evaluate lane-level behavior candidates for one planning tick."""
 
@@ -131,7 +146,7 @@ def evaluate_behavior_candidates(
     if source_index < len(lanes) - 1:
         candidate_lane_ids.add(int(lanes[source_index + 1]))
 
-    candidates: list[BehaviorCandidate] = []
+    candidates: List[BehaviorCandidate] = []
     for target_lane_id in sorted(candidate_lane_ids, key=lambda lane_id: (abs(int(lane_id) - int(source_lane_id)), int(lane_id))):
         decision = _lane_change_decision(
             source_lane_id=int(source_lane_id),
@@ -145,10 +160,12 @@ def evaluate_behavior_candidates(
             route_optimal_lane_id=route_optimal_lane_id,
             lane_safety_scores=lane_safety_scores,
             lane_prediction_risks=lane_prediction_risks,
+            mpc_feedback_blocked_lane_ids=mpc_feedback_blocked_lane_ids,
             safety_weight=float(safety_weight),
             prediction_risk_weight=float(prediction_risk_weight),
             route_deviation_weight=float(route_deviation_weight),
             lane_change_weight=float(lane_change_weight),
+            mpc_feedback_weight=float(mpc_feedback_weight),
         )
         total_cost = float(sum(float(value) for value in cost_terms.values()))
         candidates.append(

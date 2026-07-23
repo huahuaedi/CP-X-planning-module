@@ -146,6 +146,7 @@ class RouteContext:
     optimal_lane_id: int = 0
     next_macro_maneuver: str = "straight"
     current_road_option: str = ""
+    remaining_distance_m: float = 0.0
     remaining_points_count: int = 0
     route_found: bool = False
 
@@ -160,6 +161,7 @@ class RouteContext:
             optimal_lane_id=_to_int(getattr(route_summary, "optimal_lane_id", 0)),
             next_macro_maneuver=str(getattr(route_summary, "next_macro_maneuver", "straight")),
             current_road_option=str(getattr(route_summary, "current_road_option", "")),
+            remaining_distance_m=_to_float(getattr(route_summary, "remaining_distance_m", 0.0)),
             remaining_points_count=len(list(route_points or [])),
             route_found=bool(getattr(route_summary, "route_found", False)),
         )

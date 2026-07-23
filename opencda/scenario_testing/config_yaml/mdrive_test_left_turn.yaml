@@ -1,0 +1,218 @@
+description: |-
+  Manual validation scenario for MDrive -> native OpenCDA (real perception +
+  CP-X MPC bridge) import. Ego route is the full literal polyline from
+  MDrive's scenarioset/interaction/Unprotected_Left_Turn/1 (town05_vehicle_1_0.xml),
+  used to test overriding vehicle_manager.agent.initial_global_route after
+  create_vehicle_manager() instead of relying on OpenCDA's own two-point
+  GlobalRoutePlanner trace.
+
+world:
+  client_port: 2000
+  sync_mode: true
+  fixed_delta_seconds: 0.05
+  seed: 11
+  weather:
+    sun_altitude_angle: -15.0
+    cloudiness: 20.0
+    precipitation: 0.0
+    precipitation_deposits: 0.0
+    wind_intensity: 5.0
+    fog_density: 5.0
+    fog_distance: 80.0
+    fog_falloff: 2.0
+    wetness: 10.0
+
+# The literal MDrive ego polyline (x, y, z, yaw_deg per waypoint), consumed by
+# mdrive_test_left_turn.py to overwrite vehicle_manager.agent.initial_global_route
+# after create_vehicle_manager() runs its own two-point route trace.
+mdrive:
+  route_waypoints:
+    - [-173.802, 91.368, 0.000, 0.057296]
+    - [-171.802, 91.370, 0.000, 0.057296]
+    - [-167.802, 91.375, 0.000, 0.057296]
+    - [-163.802, 91.379, 0.000, 0.057296]
+    - [-159.802, 91.384, 0.000, 0.057296]
+    - [-157.802, 91.386, 0.000, 0.057296]
+    - [-153.802, 91.391, 0.000, 0.057296]
+    - [-149.802, 91.395, 0.000, 0.057296]
+    - [-145.802, 91.400, 0.000, 0.057296]
+    - [-141.802, 91.404, 0.000, 0.057296]
+    - [-140.057, 91.359, 0.000, -7.170340]
+    - [-137.879, 91.085, 0.000, -7.170340]
+    - [-135.746, 90.570, 0.000, -7.170340]
+    - [-133.683, 89.819, 0.000, -7.170340]
+    - [-131.717, 88.842, 0.000, -7.170340]
+    - [-128.144, 86.187, 0.000, -7.170340]
+    - [-126.661, 84.448, 0.000, -7.170340]
+    - [-125.484, 82.490, 0.000, -7.170340]
+    - [-124.643, 80.365, 0.000, -7.170340]
+    - [-124.047, 75.892, 0.000, -7.170340]
+    - [-124.082, 71.892, 0.000, -90.515734]
+    - [-124.136, 65.893, 0.000, -90.515734]
+    - [-124.189, 59.893, 0.000, -90.515734]
+    - [-124.225, 55.893, 0.000, -90.515734]
+    - [-124.279, 49.893, 0.000, -90.515734]
+    - [-124.332, 43.893, 0.000, -90.515734]
+    - [-124.368, 39.894, 0.000, -90.515734]
+    - [-124.421, 33.894, 0.000, -90.515734]
+    - [-124.475, 27.894, 0.000, -90.515734]
+
+vehicle_base:
+  behavior: &mdrive_behavior
+    collision_time_ahead: 1.5
+    emergency_param: 0.4
+    ignore_traffic_light: true
+    local_planner:
+      buffer_size: 12
+      debug: false
+      debug_trajectory: false
+      min_dist: 3
+      trajectory_dt: 0.2
+      trajectory_update_freq: 15
+      waypoint_update_freq: 9
+    max_speed: 81
+    overtake_allowed: true
+    overtake_counter_recover: 35
+    safety_time: 4
+    sample_resolution: 4.5
+    speed_decrease: 15
+    speed_lim_dist: 3
+    tailgate_speed: 91
+  controller: &mdrive_controller
+    type: pid_controller
+    args:
+      dt: 0.05
+      dynamic: false
+      lat:
+        k_p: 0.75
+        k_d: 0.02
+        k_i: 0.4
+      lon:
+        k_p: 0.37
+        k_d: 0.024
+        k_i: 0.032
+      max_brake: 1.0
+      max_throttle: 1.0
+      max_steering: 0.3
+  map_manager: &mdrive_map_manager
+    pixels_per_meter: 2
+    raster_size: [224, 224]
+    lane_sample_resolution: 0.1
+    visualize: false
+    activate: false
+  sensing:
+    perception:
+      activate: true
+      coperception: true
+      enable_communicate: true
+      enable_show_gt: true
+      camera_num: 1
+      camera_visualize: 0
+      camera:
+        visualize: 0
+        num: 1
+        positions:
+          - [2.5, 0, 1.0, 0]
+      lidar:
+        channels: 64
+        dropoff_general_rate: 0.1
+        dropoff_intensity_limit: 0.7
+        dropoff_zero_intensity: 0.15
+        lower_fov: -25
+        noise_stddev: 0.02
+        points_per_second: 1300000
+        range: 120
+        rotation_frequency: 20
+        upper_fov: 2
+        visualize: false
+      lidar_visualize: false
+    localization:
+      activate: true
+      dt: 0.05
+      gnss:
+        heading_direction_stddev: 0.1
+        noise_alt_stddev: 0.005
+        noise_lat_stddev: 1.0e-06
+        noise_lon_stddev: 1.0e-06
+        speed_stddev: 0.2
+      debug_helper:
+        show_animation: false
+        x_scale: 1.0
+        y_scale: 100.0
+  v2x:
+    communication_range: 45
+    enabled: true
+    lag: 0
+    loc_noise: 0.0
+    speed_noise: 0.0
+    yaw_noise: 0.0
+
+scenario:
+  single_cav_list:
+    - name: mdrive_ego
+      spawn_position: [-173.802, 91.368, 0.3, 0, 0.057296, 0]
+      destination: [-124.475, 27.894, 0.3]
+      behavior: *mdrive_behavior
+      controller: *mdrive_controller
+      map_manager: *mdrive_map_manager
+      sensing:
+        perception:
+          activate: true
+          coperception: true
+          enable_communicate: true
+          enable_show_gt: true
+          camera_num: 1
+          camera_visualize: 0
+          camera:
+            visualize: 0
+            num: 1
+            positions:
+              - [2.5, 0, 1.0, 0]
+          lidar:
+            channels: 64
+            dropoff_general_rate: 0.1
+            dropoff_intensity_limit: 0.7
+            dropoff_zero_intensity: 0.15
+            lower_fov: -25
+            noise_stddev: 0.02
+            points_per_second: 1300000
+            range: 120
+            rotation_frequency: 20
+            upper_fov: 2
+            visualize: false
+          lidar_visualize: false
+        localization:
+          activate: true
+          dt: 0.05
+          gnss:
+            heading_direction_stddev: 0.1
+            noise_alt_stddev: 0.005
+            noise_lat_stddev: 1.0e-06
+            noise_lon_stddev: 1.0e-06
+            speed_stddev: 0.2
+          debug_helper:
+            show_animation: false
+            x_scale: 1.0
+            y_scale: 100.0
+      v2x:
+        communication_range: 45
+        enabled: true
+        lag: 0
+        loc_noise: 0.0
+        speed_noise: 0.0
+        yaw_noise: 0.0
+      planner:
+        enabled: true
+        type: cpx_mpc
+        publish_cp_message: true
+        require_native_opencda_cp: true
+        target_speed_mps: 4.0
+        lookahead_m: 18.0
+        min_front_gap_m: 8.0
+        ignore_traffic_control: false
+        lane_follow_reference_source: global_route
+        communication_range_m: 80.0
+        max_mpc_obstacles: 4
+        record_debug: true
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_mdrive_test
+        debug: true

@@ -282,6 +282,12 @@ class EvaluationMetricsRecorder:
         fsm_state: str = "",
         blocking_obstacle_id: str = "",
         decision_reason: str = "",
+        collision_count: int = 0,
+        last_collision_actor_type: str = "",
+        cp_provider_source: str = "",
+        native_opencda_available: bool = False,
+        native_opencda_required: bool = False,
+        cp_obstacle_count: int | None = None,
     ) -> None:
         ego_x, ego_y, ego_v, ego_psi = _state_xyvpsi(ego_state)
         if self._last_ego_xy is not None:
@@ -381,6 +387,16 @@ class EvaluationMetricsRecorder:
                 "fsm_state": str(fsm_state),
                 "blocking_obstacle_id": str(blocking_obstacle_id),
                 "decision_reason": str(decision_reason),
+                "collision_count": int(collision_count),
+                "last_collision_actor_type": str(last_collision_actor_type),
+                "cp_provider_source": str(cp_provider_source),
+                "native_opencda_available": int(bool(native_opencda_available)),
+                "native_opencda_required": int(bool(native_opencda_required)),
+                "cp_obstacle_count": (
+                    int(len(list(obstacle_snapshots or [])))
+                    if cp_obstacle_count is None
+                    else int(cp_obstacle_count)
+                ),
                 # MPC diagnostic fields — filled in by record_mpc_extras() on replan ticks
                 "lateral_offset_m": None,
                 "heading_error_rad": None,
@@ -485,6 +501,12 @@ def write_planning_metrics_artifacts(
         "fsm_state",
         "blocking_obstacle_id",
         "decision_reason",
+        "collision_count",
+        "last_collision_actor_type",
+        "cp_provider_source",
+        "native_opencda_available",
+        "native_opencda_required",
+        "cp_obstacle_count",
         "lateral_offset_m",
         "heading_error_rad",
         "Cost_ref",

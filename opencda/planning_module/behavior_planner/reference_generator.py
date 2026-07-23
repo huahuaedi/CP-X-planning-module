@@ -52,9 +52,22 @@ def select_reference_intent(
     - Ordinary road lane-follow tracks the selected/current lane centerline.
     """
 
+    raw_decision = str(behavior_decision or "").strip().lower()
     normalized_decision = str(normalize_behavior_decision(behavior_decision))
     normalized_fsm = str(planner_fsm_state or "").strip().upper()
     target_lane_id = int(reference_target_lane_id or current_lane_id or route_optimal_lane_id or 0)
+
+    if raw_decision in {"intersection_turn_left", "intersection_turn_right"}:
+        return ReferenceIntent(
+            mode="intersection_turn",
+            target_lane_id=int(target_lane_id),
+            follow_global_route_lane=bool(global_route_reference_allowed),
+            reason=f"route_option_{raw_decision}",
+            lateral_reference_source="global_route_branch",
+            longitudinal_target_kind="speed_profile",
+            stop_target_role="none",
+            route_role="mpc_branch_constraint",
+        )
 
     if bool(is_fixed_stop_decision(normalized_decision)):
         return ReferenceIntent(
@@ -97,12 +110,18 @@ def select_reference_intent(
             route_role="mission_hint",
         )
 
-    # The global route is a mission-level path, not a directly trackable MPC
-    # horizon.  Its first sample can legitimately be behind the ego or on a
-    # different junction connector after projection, which previously caused
-    # temp_des/reference jumps and heading fallbacks.  Keep lane-follow local;
-    # the runner still uses route context to choose maneuvers and lanes.
     if bool(global_route_reference_allowed) and int(route_optimal_lane_id) != 0:
+        if bool(ego_in_junction):
+            return ReferenceIntent(
+                mode="route_branch_follow",
+                target_lane_id=int(target_lane_id),
+                follow_global_route_lane=True,
+                reason="junction_follow_global_route_branch",
+                lateral_reference_source="global_route_branch",
+                longitudinal_target_kind="speed_profile",
+                stop_target_role="none",
+                route_role="mpc_branch_constraint",
+            )
         return ReferenceIntent(
             mode="lane_follow",
             target_lane_id=int(target_lane_id),

@@ -37,17 +37,28 @@ It reads the OpenDRIVE map and provides route, waypoint, and lane-context querie
 
 CARLA is still used for simulation, actor state, actuation, and visualization, but route search and lane-level planning context come from the custom planner.
 
-From the project root, run this command to build and
-install the Python-3.7 AD-map v2.3 bindings and native libraries:
-
+From project root run this command to build and installs the required AD-map Python bindings and native libraries for the active Python environment.
 ```bash
+PYTHON_BIN="$(command -v python)" \
+  opencda/planning_module/Global_Planner/build_ad_map.sh --clean
 
-PYTHON_BIN="$(command -v python)" opencda/planning_module/Global_Planner/build_ad_map.sh --clean
 ```
 
-The `--clean` option preserves the cached AD-map source checkout and rebuilds
-the generated binaries. Use `--clean-all` only when a new source download is
-intentionally required.
+The AD-map runtime is built locally under:
+
+```text
+opencda/planning_module/Global_Planner/map_repo/install
+```
+
+The following directories are local build/download artifacts and are intentionally not committed or pushed:
+
+```text
+opencda/planning_module/Global_Planner/map_repo/install
+opencda/planning_module/Global_Planner/map_repo/log
+opencda/planning_module/Global_Planner/map_repo/source
+```
+
+`install/` contains native Python extensions and shared libraries tied to the active Python ABI, operating system, compiler, system libraries, and local paths. `log/` is build output. `source/` is the downloaded third-party AD-map checkout. Rebuild them on each machine with `build_ad_map.sh` instead of copying them through git.
 
 
 
