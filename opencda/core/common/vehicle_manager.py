@@ -28,7 +28,7 @@ from opencda.planning_module.opencda_bridge.cpx_mpc_planner import (
     CPXMPCPlannerBridge,
     cpx_planner_enabled,
 )
-
+from opencda import data_transmitter
 
 DEFAULT_SAFETY_MANAGER_CONFIG = {
     'print_message': True,
@@ -265,6 +265,16 @@ class VehicleManager(object):
 
         # object detection
         objects = self.perception_manager.detect(ego_pos)
+        
+        #===================== sending data to ros ================================
+        transmission_result = data_transmitter.send(
+        localization_transform=ego_pos,
+        localization_speed_kmh=ego_spd,
+        perception_objects=objects)
+
+        print("[OpenCDA-to-ROS]", transmission_result)
+        
+        #==========================================================================
 
         # update the ego pose for map manager
         self.map_manager.update_information(ego_pos)

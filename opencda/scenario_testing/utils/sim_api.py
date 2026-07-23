@@ -192,7 +192,7 @@ class ScenarioManager:
 
         self.client = \
             carla.Client('localhost', simulation_config['client_port'])
-        self.client.set_timeout(10.0)
+        self.client.set_timeout(60.0)
 
         if xodr_path:
             self.world = load_customized_world(xodr_path, self.client)
