@@ -381,11 +381,7 @@ class CustomGlobalPlannerAdapter:
         query_z = 0.0 if z_m is None else float(z_m)
         with self._lane_context_lock:
             cached = self._lane_context_cache
-<<<<<<< HEAD
-            if cached is not None and _euclidean_distance((x_m, y_m, query_z), cached[:3]) < 1.0:
-=======
             if cached is not None and _distance_3d((x_m, y_m, query_z), cached[:3]) < 1.0:
->>>>>>> test
                 return dict(cached[3])
 
         waypoint = self.get_waypoint({"x": x_m, "y": y_m, "z": query_z})
@@ -551,11 +547,7 @@ class CustomGlobalPlannerAdapter:
 
     @staticmethod
     def _polyline_length(points: Sequence[Sequence[float]]) -> float:
-<<<<<<< HEAD
-        return sum(_euclidean_distance(a[:2], b[:2]) for a, b in zip(points, points[1:]))
-=======
         return sum(_distance_2d(a, b) for a, b in zip(points, points[1:]))
->>>>>>> test
 
     @staticmethod
     def _route_cumulative_distances(route_xy: np.ndarray) -> np.ndarray:
