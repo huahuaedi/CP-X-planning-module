@@ -1,4 +1,4 @@
-"""Transmit OpenCDA localization and perception outputs to ROS 2."""
+"""Transmit OpenCDA localization, perception, and V2X outputs to ROS 2."""
 
 import atexit
 import json
@@ -15,12 +15,14 @@ STREAM_PORTS = {
     "localization": 5051,
     "perception": 5052,
     "traffic_light": 5053,
+    "v2x": 5054,
 }
 
 _connections = {
     "localization": None,
     "perception": None,
     "traffic_light": None,
+    "v2x": None,
 }
 
 _sequence = 0
@@ -31,12 +33,13 @@ def send(
     localization_transform,
     localization_speed_kmh,
     perception_objects,
+    v2x_manager=None,
     timestamp_s=None,
     timeout_s=1.0,
     raise_on_error=False,
 ):
     """
-    Send actual OpenCDA localization and perception outputs to ROS.
+    Send actual OpenCDA localization, perception, and V2X outputs to ROS.
 
     Parameters
     ----------
@@ -57,6 +60,11 @@ def send(
             "vehicles": [...],
             "traffic_lights": [...]
         }
+
+    v2x_manager
+        The vehicle's updated OpenCDA V2XManager. Its ``cav_nearby``
+        dictionary contains the other OpenCDA-managed CAVs currently within
+        communication range.
 
     timestamp_s
         Optional timestamp. The current computer time is used if omitted.
@@ -94,11 +102,6 @@ def send(
             "v": float(localization_speed_kmh) / 3.6,
             "psi": math.radians(float(rotation.yaw)),
         },
-        "units": {
-            "position": "m",
-            "speed": "m/s",
-            "heading": "rad",
-        },
     }
 
     # ------------------------------------------------------------------
@@ -130,7 +133,6 @@ def send(
                     + float(velocity.z) ** 2
                 )
 
-            # Sensor-detected objects may not have a known heading.
             heading_rad = None
             if transform is not None:
                 heading_rad = math.radians(
@@ -185,12 +187,6 @@ def send(
 
     perception_data = {
         "objects": nearby_objects,
-        "units": {
-            "position": "m",
-            "speed": "m/s",
-            "heading": "rad",
-            "dimensions": "m",
-        },
     }
 
     # ------------------------------------------------------------------
@@ -239,15 +235,85 @@ def send(
 
     traffic_light_data = {
         "traffic_lights": traffic_lights,
-        "units": {
-            "position": "m",
-        },
+    }
+
+    # ------------------------------------------------------------------
+    # Convert nearby CAV states reported by OpenCDA's V2X manager.
+    # ------------------------------------------------------------------
+    nearby_cavs = []
+    v2x_neighbors = getattr(v2x_manager, "cav_nearby", {}) or {}
+
+    for cav_id, nearby_vehicle_manager in dict(v2x_neighbors).items():
+        try:
+            nearby_v2x = nearby_vehicle_manager.v2x_manager
+            nearby_transform = nearby_v2x.get_ego_pos()
+            nearby_speed_kmh = nearby_v2x.get_ego_speed()
+
+            if nearby_transform is None:
+                continue
+
+            nearby_location = nearby_transform.location
+            nearby_rotation = nearby_transform.rotation
+            nearby_actor = getattr(
+                nearby_vehicle_manager,
+                "vehicle",
+                None,
+            )
+            bounding_box = getattr(nearby_actor, "bounding_box", None)
+            extent = getattr(bounding_box, "extent", None)
+
+            length_m = None
+            width_m = None
+            height_m = None
+            if extent is not None:
+                length_m = 2.0 * float(extent.x)
+                width_m = 2.0 * float(extent.y)
+                height_m = 2.0 * float(extent.z)
+
+            nearby_cavs.append({
+                "id": str(cav_id),
+                "vehicle_id": str(
+                    getattr(nearby_actor, "id", cav_id)
+                ),
+                "type": str(
+                    getattr(nearby_actor, "type_id", "vehicle")
+                ),
+                "source": "opencda_v2x",
+                "x": float(nearby_location.x),
+                "y": float(nearby_location.y),
+                "z": float(nearby_location.z),
+                "v": float(nearby_speed_kmh or 0.0) / 3.6,
+                "psi": math.radians(float(nearby_rotation.yaw)),
+                "length_m": length_m,
+                "width_m": width_m,
+                "height_m": height_m,
+                "confidence": 1.0,
+            })
+
+        except (
+            AttributeError,
+            IndexError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as error:
+            print(
+                "[Data Transmitter] Could not convert V2X CAV "
+                "{}: {}".format(cav_id, error)
+            )
+
+    v2x_data = {
+        "nearby_cavs": nearby_cavs,
+        "communication_range_m": float(
+            getattr(v2x_manager, "communication_range", 0.0) or 0.0
+        ),
     }
 
     stream_data = {
         "localization": localization_data,
         "perception": perception_data,
         "traffic_light": traffic_light_data,
+        "v2x": v2x_data,
     }
 
     results = {}

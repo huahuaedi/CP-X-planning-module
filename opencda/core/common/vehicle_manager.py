@@ -265,16 +265,6 @@ class VehicleManager(object):
 
         # object detection
         objects = self.perception_manager.detect(ego_pos)
-        
-        #===================== sending data to ros ================================
-        transmission_result = data_transmitter.send(
-        localization_transform=ego_pos,
-        localization_speed_kmh=ego_spd,
-        perception_objects=objects)
-
-        print("[OpenCDA-to-ROS]", transmission_result)
-        
-        #==========================================================================
 
         # update the ego pose for map manager
         self.map_manager.update_information(ego_pos)
@@ -294,6 +284,16 @@ class VehicleManager(object):
         # update ego position and speed to v2x manager,
         # and then v2x manager will search the nearby cavs
         self.v2x_manager.update_info(ego_pos, ego_spd)
+
+        # Send the updated OpenCDA localization, perception, traffic-light,
+        # and native V2X outputs to their ROS publisher nodes.
+        transmission_result = data_transmitter.send(
+            localization_transform=ego_pos,
+            localization_speed_kmh=ego_spd,
+            perception_objects=objects,
+            v2x_manager=self.v2x_manager,
+        )
+        print("[OpenCDA-to-ROS]", transmission_result)
 
         if self.cpx_planner is not None:
             self.cpx_planner.update_information(

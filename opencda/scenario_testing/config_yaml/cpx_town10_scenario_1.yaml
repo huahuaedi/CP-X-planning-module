@@ -150,7 +150,8 @@ scenario:
       spawn_position: [0.0, 0.0, 0.3, 0, 0, 0]
       destination: [0.0, 0.0, 0.3]
       v2x:
-        communication_range: 45
+        enabled: true
+        communication_range: 100
       behavior:
         local_planner:
           debug_trajectory: true
@@ -268,3 +269,14 @@ scenario:
         record_debug: true
         debug_output_dir: opencda/planning_module/opencda_bridge/debug_cpx_town10_scenario_1
         debug: true
+
+
+    - name: cav2
+      spawn_position: [-110.6, 107.0, 0.9, 0.0, 0.0, 0.0]
+
+      # Format: [x, y, z]
+      destination: [-72.1, -58.3, 0.7]
+
+      v2x:
+        enabled: true
+        communication_range: 100
