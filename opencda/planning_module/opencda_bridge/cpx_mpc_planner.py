@@ -1084,6 +1084,10 @@ class CPXMPCPlannerBridge:
                 world_map=self.map_planner,
                 route_sample_distance_m=float(route_sample_distance_m),
             )
+            
+        # self.reference_map = self.global_planner
+        # self.input_adapter = OpenCDAPlanningAdapter(self)
+        
         self.route_manager = CPXRouteManager(
             global_planner=self.global_planner,
             carla_map=self.map_planner,
@@ -1313,7 +1317,27 @@ class CPXMPCPlannerBridge:
             except Exception as exc:
                 if self.debug:
                     print(f"[CP-X OpenCDA Bridge] native CP publish failed: {exc}")
+                    
+                    
+        # In ROS mode, v2x_manager contains the ROS V2X obstacle list.
+        ros_v2x_data = latest_update.get("v2x_manager")
+        
+        
+        # An actual OpenCDA V2XManager is an object. The ROS version is a list.
+        if isinstance(ros_v2x_data, (list, tuple)):
+            from opencda.planning_module.utility.cp_messages import (
+                replace_cp_list,
+            )
+
+            replace_cp_list(
+                message_path=self.cp_message_path,
+                schema_version=1,
+                list_name="obstacles",
+                items=ros_v2x_data,
+                timestamp_s=sim_time_s,
+            )
         cp_payload = self._load_cp_message_payload()
+            
         object_snapshots = self._fused_planning_object_snapshots(
             local_object_snapshots=local_object_snapshots,
             cp_obstacles=list(cp_payload.get("obstacles", []) or []),

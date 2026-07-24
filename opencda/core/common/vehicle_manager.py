@@ -29,6 +29,11 @@ from opencda.planning_module.opencda_bridge.cpx_mpc_planner import (
     cpx_planner_enabled,
 )
 from opencda import data_transmitter
+from opencda.data_receiver import DataReceiver
+# Start the TCP receiver once in the background.
+
+USE_DATA_FROM_ROS= True
+ros_receiver = DataReceiver().start()
 
 DEFAULT_SAFETY_MANAGER_CONFIG = {
     'print_message': True,
@@ -294,16 +299,34 @@ class VehicleManager(object):
             v2x_manager=self.v2x_manager,
         )
         print("[OpenCDA-to-ROS]", transmission_result)
-
+        
+        received_data = ros_receiver.get_received_data(timeout=2.0)
         if self.cpx_planner is not None:
-            self.cpx_planner.update_information(
-                ego_transform=ego_pos,
-                ego_speed_kmh=ego_spd,
-                detected_objects=objects,
-                v2x_manager=self.v2x_manager,
-                safety_manager=self.safety_manager,
-                map_manager=self.map_manager,
-            )
+            
+            if USE_DATA_FROM_ROS:
+                self.cpx_planner.update_information(
+                    # ego_transform=ego_pos,
+                    # ego_speed_kmh=ego_spd,
+                    # detected_objects=objects,
+                    ego_transform = received_data["ego_pos"],
+                    ego_speed_kmh = received_data["ego_spd"],
+                    detected_objects = received_data["objects"],
+                    #this v2x manager is not used by the planner, that is why v2x obstacle
+                    #list is sent through here to be written in cp_message.json file
+                    v2x_manager=received_data["cp_payload"]["obstacles"],
+                    safety_manager=self.safety_manager,
+                    map_manager=self.map_manager,
+                )
+            else:
+                    self.cpx_planner.update_information(
+                    ego_transform=ego_pos,
+                    ego_speed_kmh=ego_spd,
+                    detected_objects=objects,
+                    v2x_manager=self.v2x_manager,
+                    safety_manager=self.safety_manager,
+                    map_manager=self.map_manager,
+                    )
+                
 
         cpx_mode = str(getattr(self.cpx_planner, 'mode', '')).strip().lower()
         cpx_full_pipeline_active = (

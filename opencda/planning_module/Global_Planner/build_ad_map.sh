@@ -167,8 +167,6 @@ if ! grep -Fq "compiler_path = \"${CASTXML_CXX}\"" "${WRAPPER_HELPER}"; then
   exit 1
 fi
 
-<<<<<<< HEAD
-=======
 # CMake 4 removed support for CMP0022's OLD behavior. The bundled PROJ 4.9.3
 # explicitly selects OLD even though its targets also configure successfully
 # with the required NEW link-interface behavior. Patch only the ignored,
@@ -182,15 +180,11 @@ if grep -Fq 'cmake_policy(SET CMP0022 OLD)' "${PROJ_POLICIES_FILE}"; then
   exit 1
 fi
 
->>>>>>> test
 # AD-map 2.3 bundles the legacy PROJ 4.9 source required by its OpenDRIVE
 # reader, but that submodule is not a colcon package. Build it first so the
 # reader does not accidentally pick a newer system PROJ without proj_api.h.
 cmake -S "${SOURCE_DIR}/dependencies/PROJ" -B "${PROJ_BUILD_DIR}" \
-<<<<<<< HEAD
-=======
   -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
->>>>>>> test
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX="${PROJ_INSTALL_DIR}" \
   -DBUILD_LIBPROJ_SHARED=ON \
