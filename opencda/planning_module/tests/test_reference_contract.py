@@ -57,6 +57,51 @@ class ReferenceContractTest(unittest.TestCase):
         self.assertFalse(result.valid)
         self.assertIn("destination_lane_error_out_of_contract", result.violations)
 
+    def test_lane_follow_allows_longitudinal_successor_lane_renumbering(self):
+        contract = self._lane_follow_contract()
+        reference = [
+            {"x_ref_m": 1.0, "y_ref_m": 0.0, "lane_id": 1, "speed_ref_mps": 2.0},
+            {
+                "x_ref_m": 2.0,
+                "y_ref_m": 0.0,
+                "lane_id": 2,
+                "lane_transition_kind": "longitudinal_successor",
+                "speed_ref_mps": 2.0,
+            },
+            {
+                "x_ref_m": 3.0,
+                "y_ref_m": 0.0,
+                "lane_id": 2,
+                "lane_transition_kind": "longitudinal_successor",
+                "speed_ref_mps": 2.0,
+            },
+        ]
+        result = validate_reference_contract(
+            reference_samples=reference,
+            destination_state=[3.0, 0.0, 2.0, 0.0, 2],
+            ego_state=[0.0, 0.0, 0.0, 0.0],
+            contract=contract,
+            check_destination_body_lateral=True,
+        )
+        self.assertTrue(result.valid, result.reason())
+
+    def test_lane_follow_still_blocks_unmarked_lateral_lane_transition(self):
+        contract = self._lane_follow_contract()
+        reference = [
+            {"x_ref_m": 1.0, "y_ref_m": 0.0, "lane_id": 1, "speed_ref_mps": 2.0},
+            {"x_ref_m": 2.0, "y_ref_m": 0.0, "lane_id": 2, "speed_ref_mps": 2.0},
+            {"x_ref_m": 3.0, "y_ref_m": 0.0, "lane_id": 2, "speed_ref_mps": 2.0},
+        ]
+        result = validate_reference_contract(
+            reference_samples=reference,
+            destination_state=[3.0, 0.0, 2.0, 0.0, 2],
+            ego_state=[0.0, 0.0, 0.0, 0.0],
+            contract=contract,
+            check_destination_body_lateral=True,
+        )
+        self.assertFalse(result.valid)
+        self.assertIn("lane_id_transition_not_allowed", result.violations)
+
     def test_stop_requires_zero_terminal_speed(self):
         contract = contract_from_config(
             mode="stop",

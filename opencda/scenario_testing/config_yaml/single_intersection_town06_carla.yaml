@@ -65,8 +65,13 @@ vehicle_base:
     full_trajectory_memory_max_reuse_age_s: 0.5
     overspeed_guard_enabled: true
     overspeed_margin_mps: 0.5
-    overspeed_min_brake: 0.2
-    overspeed_max_brake: 0.65
+    overspeed_release_margin_mps: 0.1
+    overspeed_decel_gain: 0.8
+    overspeed_max_decel_mps2: 0.8
+    lane_follow_negative_accel_release_enabled: true
+    lane_follow_negative_accel_release_error_mps: 0.05
+    lane_follow_negative_accel_release_min_front_gap_m: 12.0
+    full_traffic_green_confirm_s: 0.15
     low_speed_lateral_recovery_enabled: true
     low_speed_lateral_recovery_speed_mps: 0.8
     low_speed_lateral_recovery_threshold_m: 1.2
@@ -136,6 +141,8 @@ vehicle_base:
     mode2_mpc_takeover_max_throttle_jump: 0.45
     mode2_mpc_takeover_max_brake_jump: 0.45
     record_debug: true
+    record_evaluation_metrics: true
+    record_collision_sensor: true
     debug_output_dir: opencda/planning_module/opencda_bridge/debug_intersection
     debug: true
 
@@ -203,8 +210,13 @@ scenario:
         full_trajectory_memory_max_reuse_age_s: 0.5
         overspeed_guard_enabled: true
         overspeed_margin_mps: 0.5
-        overspeed_min_brake: 0.2
-        overspeed_max_brake: 0.65
+        overspeed_release_margin_mps: 0.1
+        overspeed_decel_gain: 0.8
+        overspeed_max_decel_mps2: 0.8
+        lane_follow_negative_accel_release_enabled: true
+        lane_follow_negative_accel_release_error_mps: 0.05
+        lane_follow_negative_accel_release_min_front_gap_m: 12.0
+        full_traffic_green_confirm_s: 0.15
         low_speed_lateral_recovery_enabled: true
         low_speed_lateral_recovery_speed_mps: 0.8
         low_speed_lateral_recovery_threshold_m: 1.2
@@ -274,5 +286,7 @@ scenario:
         mode2_mpc_takeover_max_throttle_jump: 0.45
         mode2_mpc_takeover_max_brake_jump: 0.45
         record_debug: true
+        record_evaluation_metrics: true
+        record_collision_sensor: true
         debug_output_dir: opencda/planning_module/opencda_bridge/debug_intersection
         debug: true

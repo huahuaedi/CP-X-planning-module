@@ -4,12 +4,40 @@ from opencda.planning_module.pipeline.scenario_manager import (
     CPXScenarioManager,
     INTERSECTION_TURN,
     LANE_FOLLOW,
+    PREPARE_TURN,
     TRAFFIC_LIGHT_APPROACH,
     TRAFFIC_LIGHT_STOP,
 )
 
 
 class CPXScenarioManagerTests(unittest.TestCase):
+    def test_carla_turn_lookahead_enters_prepare_turn(self):
+        manager = CPXScenarioManager({
+            "full_intersection_turn_speed_cap_mps": 2.2,
+            "scenario_turn_prepare_speed_cap_mps": 2.8,
+        })
+
+        decision = manager.update(
+            traffic_state="unknown",
+            stop_target=None,
+            stop_forward_m=0.0,
+            stop_target_reliable=False,
+            ego_speed_mps=3.0,
+            ego_in_junction=False,
+            current_road_option="LANEFOLLOW",
+            next_macro_maneuver="straight",
+            sim_time_s=1.0,
+            upcoming_turn_direction="right",
+            upcoming_turn_distance_m=12.0,
+        )
+
+        self.assertEqual(decision.state, PREPARE_TURN)
+        self.assertEqual(
+            decision.behavior_override_decision,
+            "intersection_turn_right",
+        )
+        self.assertEqual(decision.speed_cap_mps, 2.8)
+
     def test_red_far_is_approach_not_stop(self):
         manager = CPXScenarioManager({
             "target_speed_mps": 8.0,

@@ -73,12 +73,34 @@ class SafetySupervisor:
                 self.max_steer_delta,
             ),
         )
+        rate_limited = (
+            abs(
+                float(getattr(filtered, "throttle", 0.0))
+                - float(getattr(control, "throttle", 0.0))
+            )
+            > 1.0e-6
+            or abs(
+                float(getattr(filtered, "brake", 0.0))
+                - float(getattr(control, "brake", 0.0))
+            )
+            > 1.0e-6
+            or abs(
+                float(getattr(filtered, "steer", 0.0))
+                - float(getattr(control, "steer", 0.0))
+            )
+            > 1.0e-6
+        )
+        requested_throttle = float(getattr(control, "throttle", 0.0))
+        requested_brake = float(getattr(control, "brake", 0.0))
+        if float(getattr(filtered, "throttle", 0.0)) > 1.0e-6 and float(
+            getattr(filtered, "brake", 0.0)
+        ) > 1.0e-6:
+            if requested_brake > 1.0e-6 and requested_throttle <= 1.0e-6:
+                filtered.throttle = 0.0
+            else:
+                filtered.brake = 0.0
         self._last_control = filtered
-        if (
-            abs(float(getattr(filtered, "throttle", 0.0)) - float(getattr(control, "throttle", 0.0))) > 1.0e-6
-            or abs(float(getattr(filtered, "brake", 0.0)) - float(getattr(control, "brake", 0.0))) > 1.0e-6
-            or abs(float(getattr(filtered, "steer", 0.0)) - float(getattr(control, "steer", 0.0))) > 1.0e-6
-        ):
+        if bool(rate_limited):
             return filtered, "safety_supervisor_rate_limit"
         return filtered, ""
 
@@ -138,6 +160,15 @@ class SafetySupervisor:
             "intersection_turn_left",
             "intersection_turn_right",
         }
+        if "ran_light" in hazards:
+            if (
+                normalized_signal in {"green", "unknown"}
+                and (normalized_behavior == "lane_follow" or bool(turn_like))
+                and not bool(stop_like)
+            ):
+                hazards.discard("ran_light")
+            elif bool(stop_like) or normalized_signal in {"red", "yellow"}:
+                return "ran_light"
         if "stuck" in hazards:
             if (
                 normalized_signal in {"green", "unknown"}

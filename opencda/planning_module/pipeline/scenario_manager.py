@@ -16,6 +16,7 @@ from typing import Mapping, Optional
 LANE_FOLLOW = "LANE_FOLLOW"
 TRAFFIC_LIGHT_APPROACH = "TRAFFIC_LIGHT_APPROACH"
 TRAFFIC_LIGHT_STOP = "TRAFFIC_LIGHT_STOP"
+PREPARE_TURN = "PREPARE_TURN"
 INTERSECTION_TURN = "INTERSECTION_TURN"
 CREEP = "CREEP"
 RECOVERY = "RECOVERY"
@@ -80,6 +81,10 @@ class CPXScenarioManager:
         self.turn_speed_cap_mps = max(
             0.1, float(cfg.get("full_intersection_turn_speed_cap_mps", 2.2))
         )
+        self.turn_prepare_speed_cap_mps = max(
+            self.turn_speed_cap_mps,
+            float(cfg.get("scenario_turn_prepare_speed_cap_mps", 2.8)),
+        )
         self.creep_speed_cap_mps = max(
             0.1, float(cfg.get("scenario_creep_speed_cap_mps", 0.9))
         )
@@ -116,6 +121,8 @@ class CPXScenarioManager:
         current_road_option: str,
         next_macro_maneuver: str,
         sim_time_s: float,
+        upcoming_turn_direction: str = "",
+        upcoming_turn_distance_m: float = float("inf"),
         reference_geometry_bad: bool = False,
         collision_hazard: bool = False,
     ) -> CPXScenarioDecision:
@@ -151,6 +158,8 @@ class CPXScenarioManager:
             current_road_option=str(current_road_option),
             next_macro_maneuver=str(next_macro_maneuver),
             sim_time_s=float(sim_time_s),
+            upcoming_turn_direction=str(upcoming_turn_direction),
+            upcoming_turn_distance_m=float(upcoming_turn_distance_m),
             reference_geometry_bad=bool(reference_geometry_bad),
         )
         if turn_decision is not None:
@@ -244,11 +253,38 @@ class CPXScenarioManager:
         current_road_option: str,
         next_macro_maneuver: str,
         sim_time_s: float,
+        upcoming_turn_direction: str,
+        upcoming_turn_distance_m: float,
         reference_geometry_bad: bool,
     ) -> Optional[CPXScenarioDecision]:
         direction = self._turn_direction_from_route_option(
             current_road_option=str(current_road_option)
         )
+        prepare_direction = str(upcoming_turn_direction or "").strip().lower()
+        if prepare_direction not in {"left", "right"}:
+            prepare_direction = ""
+        if not direction and prepare_direction and not bool(ego_in_junction):
+            self._state = PREPARE_TURN
+            self._turn_direction = str(prepare_direction)
+            self._turn_latch_until_s = (
+                float(sim_time_s) + float(self.turn_exit_hold_s)
+            )
+            return CPXScenarioDecision(
+                state=PREPARE_TURN,
+                behavior_signal_state="unknown",
+                behavior_stop_target=None,
+                behavior_override_decision=f"intersection_turn_{prepare_direction}",
+                behavior_override_lc_state=(
+                    f"INTERSECTION_TURN_{prepare_direction.upper()}"
+                ),
+                speed_cap_mps=float(self.turn_prepare_speed_cap_mps),
+                reason=(
+                    f"prepare_turn_{prepare_direction}:"
+                    f"distance={float(upcoming_turn_distance_m):.2f}"
+                ),
+                turn_direction=str(prepare_direction),
+                turn_latched=True,
+            )
         if not direction and bool(ego_in_junction):
             direction = self._turn_direction_from_macro(
                 next_macro_maneuver=str(next_macro_maneuver)
@@ -257,7 +293,7 @@ class CPXScenarioManager:
             self._turn_direction = str(direction)
             self._turn_latch_until_s = float(sim_time_s) + float(self.turn_exit_hold_s)
         elif (
-            self._state == INTERSECTION_TURN
+            self._state in {PREPARE_TURN, INTERSECTION_TURN}
             and (bool(ego_in_junction) or float(sim_time_s) <= float(self._turn_latch_until_s))
             and self._turn_direction
         ):

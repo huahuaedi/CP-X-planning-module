@@ -35,6 +35,10 @@ class CPXRouteManager:
         carla_map: Any = None,
         carla_api: Any = None,
         carla_route_sampling_resolution_m: float = 1.0,
+        carla_reference_smoothing_passes: int = 3,
+        carla_rejoin_min_lateral_m: float = 0.35,
+        carla_rejoin_max_lateral_m: float = 3.0,
+        carla_rejoin_distance_m: float = 8.0,
         reached_distance_m: float = 3.0,
         stale_route_lateral_m: float = 12.0,
     ) -> None:
@@ -43,6 +47,19 @@ class CPXRouteManager:
         self.carla_api = carla_api
         self.carla_route_sampling_resolution_m = max(
             0.25, float(carla_route_sampling_resolution_m)
+        )
+        self.carla_reference_smoothing_passes = max(
+            0, int(carla_reference_smoothing_passes)
+        )
+        self.carla_rejoin_min_lateral_m = max(
+            0.0, float(carla_rejoin_min_lateral_m)
+        )
+        self.carla_rejoin_max_lateral_m = max(
+            self.carla_rejoin_min_lateral_m,
+            float(carla_rejoin_max_lateral_m),
+        )
+        self.carla_rejoin_distance_m = max(
+            1.0, float(carla_rejoin_distance_m)
         )
         self.reached_distance_m = max(0.1, float(reached_distance_m))
         self.stale_route_lateral_m = max(1.0, float(stale_route_lateral_m))
@@ -187,6 +204,88 @@ class CPXRouteManager:
             return route_points
         return [list(point) for point in list(self._fallback_route_points or [])]
 
+    def geometry_route_points(
+        self,
+        *,
+        x_m: Optional[float] = None,
+        y_m: Optional[float] = None,
+        query_key: str = "",
+    ) -> List[List[float]]:
+        """Return the route geometry shared by reference generation and debug.
+
+        The custom global planner remains responsible for route topology and
+        maneuver semantics.  When available, CARLA GRP waypoints are the
+        geometric source of truth because they follow the simulator lane
+        center and include the selected junction connector.
+        """
+
+        nodes = self._carla_route_nodes()
+        if len(nodes) >= 2:
+            points: List[List[float]] = []
+            for index, node in enumerate(nodes):
+                if index + 1 < len(nodes):
+                    next_node = nodes[index + 1]
+                    heading_rad = math.atan2(
+                        float(next_node[1]) - float(node[1]),
+                        float(next_node[0]) - float(node[0]),
+                    )
+                elif points:
+                    heading_rad = float(points[-1][3])
+                else:
+                    heading_rad = 0.0
+                points.append([
+                    float(node[0]),
+                    float(node[1]),
+                    float(node[2]),
+                    float(heading_rad),
+                ])
+            return points
+        return self.route_points(x_m=x_m, y_m=y_m, query_key=query_key)
+
+    def upcoming_turn(
+        self,
+        *,
+        ego_x_m: float,
+        ego_y_m: float,
+        ego_heading_rad: float,
+        lookahead_m: float,
+    ) -> Tuple[str, float, str]:
+        """Return the first CARLA GRP turn option within the lookahead."""
+
+        sync_reason = self.sync_carla_route_progress(
+            ego_x_m=float(ego_x_m),
+            ego_y_m=float(ego_y_m),
+            ego_heading_rad=float(ego_heading_rad),
+        )
+        nodes = self._carla_route_nodes()
+        if len(nodes) < 2 or self._carla_route_projection is None:
+            return "", float("inf"), str(sync_reason)
+
+        segment_index, projection_x_m, projection_y_m, _, lateral_m = (
+            self._carla_route_projection
+        )
+        if float(lateral_m) > float(self.stale_route_lateral_m):
+            return "", float("inf"), str(sync_reason)
+
+        distance_m = 0.0
+        previous_xy = (float(projection_x_m), float(projection_y_m))
+        limit_m = max(0.0, float(lookahead_m))
+        for node in nodes[int(segment_index) + 1 :]:
+            current_xy = (float(node[0]), float(node[1]))
+            distance_m += math.hypot(
+                current_xy[0] - previous_xy[0],
+                current_xy[1] - previous_xy[1],
+            )
+            option = str(node[4] or "").strip().upper()
+            if option in {"LEFT", "RIGHT"}:
+                if float(distance_m) <= float(limit_m):
+                    return option.lower(), float(distance_m), "carla_route_turn_ahead"
+                break
+            if float(distance_m) > float(limit_m):
+                break
+            previous_xy = current_xy
+        return "", float("inf"), "carla_route_no_turn_in_lookahead"
+
     def carla_waypoint_reference(
         self,
         *,
@@ -278,6 +377,12 @@ class CPXRouteManager:
                 y_m = node_b[1] + extra_m * math.sin(heading_rad)
                 waypoint = node_b[3]
                 option = node_b[4]
+            normalized_option = str(option or "").strip().upper().replace("_", "")
+            lane_transition_kind = (
+                "lateral_lane_change"
+                if normalized_option in {"CHANGELANELEFT", "CHANGELANERIGHT"}
+                else "longitudinal_successor"
+            )
             samples.append({
                 "x_ref_m": float(x_m),
                 "y_ref_m": float(y_m),
@@ -288,11 +393,31 @@ class CPXRouteManager:
                 "lane_width_m": float(getattr(waypoint, "lane_width", 3.5) or 3.5),
                 "road_id": int(getattr(waypoint, "road_id", 0) or 0),
                 "road_option": str(option),
+                "lane_transition_kind": str(lane_transition_kind),
                 "speed_ref_mps": max(0.0, float(target_speed_mps)),
                 "v_ref_mps": max(0.0, float(target_speed_mps)),
                 "speed_mps": max(0.0, float(target_speed_mps)),
             })
-        return samples, "carla_grp_waypoint_chain"
+        samples = _smooth_carla_reference_samples(
+            samples,
+            passes=int(self.carla_reference_smoothing_passes),
+        )
+        reason = "carla_grp_waypoint_chain_smoothed"
+        if (
+            float(lateral_distance_m) >= float(self.carla_rejoin_min_lateral_m)
+            and float(lateral_distance_m) <= float(self.carla_rejoin_max_lateral_m)
+        ):
+            samples = _apply_route_rejoin_offset(
+                samples,
+                ego_x_m=float(ego_x_m),
+                ego_y_m=float(ego_y_m),
+                projection_x_m=float(projection_x_m),
+                projection_y_m=float(projection_y_m),
+                step_distance_m=float(step_m),
+                rejoin_distance_m=float(self.carla_rejoin_distance_m),
+            )
+            reason += ":route_rejoin"
+        return samples, reason
 
     def sync_carla_route_progress(
         self,
@@ -653,6 +778,91 @@ def _deduplicate_carla_nodes(
         if result and math.hypot(node[0] - result[-1][0], node[1] - result[-1][1]) < 1.0e-3:
             continue
         result.append(node)
+    return result
+
+
+def _smooth_carla_reference_samples(
+    samples: Sequence[Mapping[str, object]],
+    *,
+    passes: int,
+) -> List[Dict[str, object]]:
+    """Smooth a resampled CARLA connector without changing its route branch."""
+
+    result = [dict(sample) for sample in list(samples or [])]
+    if len(result) < 3:
+        return _recompute_reference_headings(result)
+
+    for _ in range(max(0, int(passes))):
+        previous = [dict(sample) for sample in result]
+        for index in range(1, len(result) - 1):
+            before = previous[index - 1]
+            current = previous[index]
+            after = previous[index + 1]
+            result[index]["x_ref_m"] = (
+                float(before["x_ref_m"])
+                + 2.0 * float(current["x_ref_m"])
+                + float(after["x_ref_m"])
+            ) / 4.0
+            result[index]["y_ref_m"] = (
+                float(before["y_ref_m"])
+                + 2.0 * float(current["y_ref_m"])
+                + float(after["y_ref_m"])
+            ) / 4.0
+            result[index]["x"] = float(result[index]["x_ref_m"])
+            result[index]["y"] = float(result[index]["y_ref_m"])
+    return _recompute_reference_headings(result)
+
+
+def _apply_route_rejoin_offset(
+    samples: Sequence[Mapping[str, object]],
+    *,
+    ego_x_m: float,
+    ego_y_m: float,
+    projection_x_m: float,
+    projection_y_m: float,
+    step_distance_m: float,
+    rejoin_distance_m: float,
+) -> List[Dict[str, object]]:
+    """Decay the ego-to-route offset while retaining the selected connector."""
+
+    result = [dict(sample) for sample in list(samples or [])]
+    offset_x_m = float(ego_x_m) - float(projection_x_m)
+    offset_y_m = float(ego_y_m) - float(projection_y_m)
+    merge_distance_m = max(1.0, float(rejoin_distance_m))
+    step_m = max(0.1, float(step_distance_m))
+    for index, sample in enumerate(result):
+        progress = min(
+            1.0,
+            max(0.0, float(index + 1) * float(step_m) / float(merge_distance_m)),
+        )
+        smooth_progress = progress * progress * (3.0 - 2.0 * progress)
+        residual = 1.0 - float(smooth_progress)
+        sample["x_ref_m"] = float(sample["x_ref_m"]) + residual * float(offset_x_m)
+        sample["y_ref_m"] = float(sample["y_ref_m"]) + residual * float(offset_y_m)
+        sample["x"] = float(sample["x_ref_m"])
+        sample["y"] = float(sample["y_ref_m"])
+    return _recompute_reference_headings(result)
+
+
+def _recompute_reference_headings(
+    samples: Sequence[Mapping[str, object]],
+) -> List[Dict[str, object]]:
+    result = [dict(sample) for sample in list(samples or [])]
+    for index, sample in enumerate(result):
+        if len(result) < 2:
+            break
+        if index + 1 < len(result):
+            first = sample
+            second = result[index + 1]
+        else:
+            first = result[index - 1]
+            second = sample
+        dx_m = float(second["x_ref_m"]) - float(first["x_ref_m"])
+        dy_m = float(second["y_ref_m"]) - float(first["y_ref_m"])
+        if math.hypot(dx_m, dy_m) > 1.0e-6:
+            sample["heading_rad"] = math.atan2(dy_m, dx_m)
+        sample["x"] = float(sample["x_ref_m"])
+        sample["y"] = float(sample["y_ref_m"])
     return result
 
 

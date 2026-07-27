@@ -54,9 +54,13 @@ class _Mode2TrafficLightMemory:
         self,
         *,
         hold_unknown_s: float = 0.8,
+        hold_green_unknown_s: float = 0.2,
         green_confirm_s: float = 0.0,
     ) -> None:
         self.hold_unknown_s = max(0.0, float(hold_unknown_s))
+        self.hold_green_unknown_s = max(
+            0.0, float(hold_green_unknown_s)
+        )
         self.green_confirm_s = max(0.0, float(green_confirm_s))
         self._last_stop_state = "unknown"
         self._last_stop_target: dict[str, object] | None = None
@@ -85,10 +89,16 @@ class _Mode2TrafficLightMemory:
                 self._last_stop_state in {"red", "yellow"}
                 and float(sim_time_s) - float(self._green_since_s) < float(self.green_confirm_s)
             ):
+                self._hold_until_s = max(
+                    float(self._hold_until_s),
+                    float(sim_time_s) + float(self.hold_unknown_s),
+                )
                 return str(self._last_stop_state), self._last_stop_target, "traffic_memory_wait_green_confirm"
             self._last_stop_state = "green"
             self._last_stop_target = None
-            self._hold_until_s = -float("inf")
+            self._hold_until_s = (
+                float(sim_time_s) + float(self.hold_green_unknown_s)
+            )
             return "green", None, "traffic_memory_green_release" if float(self.green_confirm_s) > 0.0 else ""
         if (
             normalized_state == "unknown"
@@ -97,6 +107,12 @@ class _Mode2TrafficLightMemory:
         ):
             reason = f"traffic_memory_hold_{self._last_stop_state}"
             return str(self._last_stop_state), self._last_stop_target, reason
+        if (
+            normalized_state == "unknown"
+            and float(sim_time_s) <= float(self._hold_until_s)
+            and self._last_stop_state == "green"
+        ):
+            return "green", None, "traffic_memory_hold_green"
         if normalized_state == "unknown":
             self._green_since_s = None
         return str(normalized_state), None, reason
@@ -673,11 +689,17 @@ class CPXMPCPlannerBridge:
         self._full_latched_stop_target: dict[str, object] | None = None
         self._full_latched_stop_state = "unknown"
         self._mode2_traffic_memory = _Mode2TrafficLightMemory(
-            hold_unknown_s=float(self.config.get("mode2_traffic_unknown_hold_s", 0.8))
+            hold_unknown_s=float(self.config.get("mode2_traffic_unknown_hold_s", 1.5)),
+            hold_green_unknown_s=float(
+                self.config.get("mode2_traffic_green_unknown_hold_s", 0.25)
+            ),
         )
         self._full_traffic_memory = _Mode2TrafficLightMemory(
-            hold_unknown_s=float(self.config.get("full_traffic_unknown_hold_s", 0.25)),
-            green_confirm_s=float(self.config.get("full_traffic_green_confirm_s", 0.5)),
+            hold_unknown_s=float(self.config.get("full_traffic_unknown_hold_s", 1.5)),
+            hold_green_unknown_s=float(
+                self.config.get("full_traffic_green_unknown_hold_s", 0.25)
+            ),
+            green_confirm_s=float(self.config.get("full_traffic_green_confirm_s", 0.15)),
         )
         self._mode2_object_memory = _Mode2ObjectTrackMemory(
             alpha=float(self.config.get("mode2_object_memory_alpha", 0.55)),
@@ -730,6 +752,43 @@ class CPXMPCPlannerBridge:
         self.overspeed_brake_gain = float(self.config.get("overspeed_brake_gain", 0.10))
         self.overspeed_min_brake = float(self.config.get("overspeed_min_brake", 0.15))
         self.overspeed_max_brake = float(self.config.get("overspeed_max_brake", 0.55))
+        self.overspeed_release_margin_mps = max(
+            0.0,
+            min(
+                float(self.overspeed_margin_mps),
+                float(self.config.get("overspeed_release_margin_mps", 0.10)),
+            ),
+        )
+        self.overspeed_decel_gain = max(
+            0.0,
+            float(self.config.get("overspeed_decel_gain", 0.8)),
+        )
+        self.overspeed_max_decel_mps2 = max(
+            0.0,
+            float(self.config.get("overspeed_max_decel_mps2", 0.8)),
+        )
+        self._overspeed_guard_active = False
+        self.lane_follow_negative_accel_release_enabled = bool(
+            self.config.get("lane_follow_negative_accel_release_enabled", True)
+        )
+        self.lane_follow_negative_accel_release_error_mps = max(
+            0.0,
+            float(
+                self.config.get(
+                    "lane_follow_negative_accel_release_error_mps",
+                    0.05,
+                )
+            ),
+        )
+        self.lane_follow_negative_accel_release_max_lateral_m = max(
+            0.0,
+            float(
+                self.config.get(
+                    "lane_follow_negative_accel_release_max_lateral_m",
+                    0.50,
+                )
+            ),
+        )
         self.low_speed_lateral_recovery_enabled = bool(
             self.config.get("low_speed_lateral_recovery_enabled", False)
         )
@@ -847,6 +906,7 @@ class CPXMPCPlannerBridge:
             "cp_control_count",
             "v2x_nearby_count",
             "reference_source",
+            "final_reference_geometry_source",
             "reference_pipeline_stage",
             "reference_pipeline_intent",
             "reference_pipeline_fallback",
@@ -909,6 +969,9 @@ class CPXMPCPlannerBridge:
             "fallback_active",
             "local_object_count",
             "traffic_signal_state",
+            "traffic_signal_raw_state",
+            "traffic_signal_filtered_state",
+            "traffic_signal_behavior_state",
             "traffic_control_from_cp",
             "candidate_evaluation_summary",
             "candidate_selected_decision",
@@ -971,6 +1034,9 @@ class CPXMPCPlannerBridge:
             "carla_route_debug_reason",
             "carla_route_sync_reason",
             "carla_route_progress_index",
+            "carla_upcoming_turn_direction",
+            "carla_upcoming_turn_distance_m",
+            "carla_upcoming_turn_reason",
             "turn_latch_reason",
             "opencda_style_reference_conditioning_reason",
             "reference_lateral_guard_reason",
@@ -981,6 +1047,36 @@ class CPXMPCPlannerBridge:
             "stop_approach_speed_mps",
             "green_release_reference_active",
             "lane_safety_scores",
+            "evaluation_metrics_available",
+            "collision_sensor_available",
+            "collision_sensor_error",
+            "collision_event_this_frame",
+            "collision_count",
+            "collision_rate_per_km",
+            "last_collision_actor_type",
+            "last_collision_impulse",
+            "nearest_ttc_s",
+            "min_ttc_s",
+            "nearest_ttc_obstacle_id",
+            "nearest_ttc_reason",
+            "nearest_ttc_longitudinal_gap_m",
+            "nearest_ttc_lateral_gap_m",
+            "nearest_ttc_bumper_gap_m",
+            "nearest_ttc_closing_speed_mps",
+            "tick_max_drac_mps2",
+            "max_drac_mps2",
+            "min_pet_s",
+            "distance_traveled_m",
+            "road_boundary_sample_valid",
+            "road_boundary_lateral_offset_m",
+            "road_boundary_lane_width_m",
+            "road_boundary_ego_half_width_m",
+            "road_boundary_clearance_m",
+            "road_boundary_breach",
+            "road_boundary_breach_count",
+            "road_boundary_sample_count",
+            "road_boundary_breach_rate",
+            "Cost_RoadBoundary",
         ]
 
         self._ensure_planning_module_import_path()
@@ -996,6 +1092,10 @@ class CPXMPCPlannerBridge:
         from opencda.planning_module.pipeline.safety_supervisor import SafetySupervisor
         from opencda.planning_module.pipeline.tracker import CPXObstacleTracker
         from opencda.planning_module.utility.carla_lane_graph import build_lane_center_waypoints
+        from opencda.planning_module.utility.evaluation_metrics import (
+            EvaluationMetricsRecorder,
+            write_planning_metrics_artifacts,
+        )
         from opencda.planning_module.utility.global_planner import CustomGlobalPlannerAdapter
         from opencda.planning_module.utility.legacy_global_planner import AStarGlobalPlanner
 
@@ -1091,6 +1191,18 @@ class CPXMPCPlannerBridge:
             carla_route_sampling_resolution_m=float(
                 self.config.get("carla_route_sampling_resolution_m", 1.0)
             ),
+            carla_reference_smoothing_passes=int(
+                self.config.get("carla_reference_smoothing_passes", 3)
+            ),
+            carla_rejoin_min_lateral_m=float(
+                self.config.get("carla_rejoin_min_lateral_m", 0.35)
+            ),
+            carla_rejoin_max_lateral_m=float(
+                self.config.get("carla_rejoin_max_lateral_m", 3.0)
+            ),
+            carla_rejoin_distance_m=float(
+                self.config.get("carla_rejoin_distance_m", 8.0)
+            ),
             reached_distance_m=float(self.config.get("route_reached_distance_m", 3.0)),
             stale_route_lateral_m=float(self.config.get("route_stale_lateral_m", 12.0)),
         )
@@ -1145,6 +1257,29 @@ class CPXMPCPlannerBridge:
         self.mpc_cost_profile_switch_reason = "initial"
         self._latest_opencda_update: dict[str, Any] = {}
         self.last_output = None
+        self._write_planning_metrics_artifacts = write_planning_metrics_artifacts
+        self.evaluation_metrics = EvaluationMetricsRecorder(
+            ego_length_m=float(self.config.get("metrics_ego_length_m", 4.5)),
+            lateral_conflict_width_m=float(
+                self.config.get("metrics_lateral_conflict_width_m", 2.5)
+            ),
+            min_ego_speed_for_ttc_mps=float(
+                self.config.get("metrics_min_ego_speed_for_ttc_mps", 0.5)
+            ),
+            pet_conflict_radius_m=float(
+                self.config.get("metrics_pet_conflict_radius_m", 3.0)
+            ),
+            pet_bin_size_m=float(self.config.get("metrics_pet_bin_size_m", 3.0)),
+        )
+        self._metrics_collision_sensor = None
+        self._metrics_collision_sensor_available = False
+        self._metrics_collision_sensor_error = ""
+        self._metrics_last_emitted_collision_count = 0
+        self._metrics_boundary_breach_count = 0
+        self._metrics_boundary_sample_count = 0
+        self._metrics_last_collision_actor_type = ""
+        self._metrics_last_collision_impulse = ""
+        self._spawn_metrics_collision_sensor()
 
     @staticmethod
     def _ensure_planning_module_import_path() -> None:
@@ -1426,6 +1561,46 @@ class CPXMPCPlannerBridge:
             reference_debug["mpc_reference_stabilizer_reason"] = str(
                 mpc_reference_stabilizer_reason
             )
+            if "rebuilt_carla_route_turn_reference" in str(mpc_reference_stabilizer_reason):
+                reference_debug["reference_source"] = "carla_grp_waypoint_turn_final"
+            elif "rebuilt_route_geometry_turn_reference" in str(mpc_reference_stabilizer_reason):
+                reference_debug["reference_source"] = "carla_route_geometry_turn_final"
+            elif "stop_hard_lock_ego_heading_emergency_reference" in str(
+                mpc_reference_stabilizer_reason
+            ):
+                reference_debug["reference_source"] = "ego_heading_emergency_stop_final"
+            elif "emergency_stop_direct_reference" in str(
+                mpc_reference_stabilizer_reason
+            ):
+                reference_debug["reference_source"] = "ego_heading_emergency_stop_direct"
+
+            turn_active = str(behavior_debug.get("decision", "")) in {
+                "intersection_turn_left",
+                "intersection_turn_right",
+            }
+            if bool(turn_active) and "strict_reference_veto" in str(
+                mpc_reference_stabilizer_reason
+            ):
+                lane_center_reference, destination_state = (
+                    self._build_ego_heading_emergency_stop_reference(
+                        ego_location=ego_location,
+                        ego_yaw_rad=float(ego_yaw_rad),
+                        current_lane_id=int(behavior_debug.get("current_lane_id", 0) or 0),
+                        horizon_steps=int(self.mpc.horizon_steps),
+                        step_distance_m=max(0.5, float(self.mpc.dt_s) * 0.8),
+                    )
+                )
+                behavior_debug["decision"] = "emergency_brake"
+                speed_ref_mps = 0.0
+                mpc_stop_goal_active = True
+                reference_debug["reference_source"] = "turn_contract_veto_emergency_stop_final"
+                reference_debug["candidate_pipeline_selected_status"] = "infeasible_hard_stop"
+                reference_debug["candidate_pipeline_selected_reason"] = (
+                    "final_turn_reference_contract_veto"
+                )
+        reference_debug["final_reference_geometry_source"] = str(
+            reference_debug.get("reference_source", "unknown")
+        )
         destination_forward_m, destination_lateral_m = self._body_frame_xy(
             origin_x_m=float(ego_location.x),
             origin_y_m=float(ego_location.y),
@@ -1458,6 +1633,13 @@ class CPXMPCPlannerBridge:
             behavior_decision=str(behavior_debug.get("decision", "")),
             stop_goal_active=bool(mpc_stop_goal_active),
         )
+        if str(candidate_hard_gate_reason):
+            self.control_buffer.reset(reason="control_buffer_reference_hard_veto")
+            reset_trajectory_memory = getattr(
+                self._full_trajectory_memory, "reset", None
+            )
+            if callable(reset_trajectory_memory):
+                reset_trajectory_memory()
         try:
             if str(candidate_hard_gate_reason):
                 raise RuntimeError(str(candidate_hard_gate_reason))
@@ -1559,7 +1741,16 @@ class CPXMPCPlannerBridge:
                     )
                     accel_mps2 = self._last_accel_mps2
                     steer_rad = self._last_steer_rad
-            mpc_status = "candidate_hard_gate" if bool(hard_gate_active) else str(getattr(self.mpc, "_last_status", str(exc)))
+            if bool(hard_gate_active) and str(
+                behavior_debug.get("decision", "")
+            ) == "emergency_brake":
+                mpc_status = "emergency_brake_direct"
+            else:
+                mpc_status = (
+                    "candidate_hard_gate"
+                    if bool(hard_gate_active)
+                    else str(getattr(self.mpc, "_last_status", str(exc)))
+                )
             if not self._warned:
                 print(f"[CP-X OpenCDA Bridge] MPC fallback active: {fallback_reason}")
                 self._warned = True
@@ -1586,6 +1777,7 @@ class CPXMPCPlannerBridge:
             behavior_decision=str(behavior_debug.get("decision", "")),
             behavior_fsm_state=str(behavior_debug.get("lc_state", "")),
             traffic_signal_state=str(behavior_debug.get("traffic_signal_state", "")),
+            front_gap_m=front_gap_m,
             sim_time_s=float(sim_time_s),
         )
         pre_supervisor_accel_mps2 = float(accel_mps2)
@@ -1629,6 +1821,16 @@ class CPXMPCPlannerBridge:
             "current_lane_id": behavior_debug.get("current_lane_id", ""),
             "behavior_target_lane_id": behavior_debug.get("target_lane_id", ""),
             "traffic_signal_state": behavior_debug.get("traffic_signal_state", ""),
+            "traffic_signal_raw_state": behavior_debug.get(
+                "traffic_signal_raw_state", ""
+            ),
+            "traffic_signal_filtered_state": behavior_debug.get(
+                "traffic_signal_filtered_state", ""
+            ),
+            "traffic_signal_behavior_state": behavior_debug.get(
+                "traffic_signal_behavior_state",
+                behavior_debug.get("traffic_signal_state", ""),
+            ),
             "traffic_control_from_cp": behavior_debug.get("traffic_control_from_cp", ""),
             "lane_safety_scores": json.dumps(behavior_debug.get("lane_safety_scores", {}), default=str),
             "reference_pipeline_stage": str(reference_debug.get("stage", "")),
@@ -1726,6 +1928,15 @@ class CPXMPCPlannerBridge:
             "carla_route_progress_index": int(
                 self.route_manager.carla_route_progress_index
             ),
+            "carla_upcoming_turn_direction": str(
+                reference_debug.get("carla_upcoming_turn_direction", "")
+            ),
+            "carla_upcoming_turn_distance_m": reference_debug.get(
+                "carla_upcoming_turn_distance_m", ""
+            ),
+            "carla_upcoming_turn_reason": str(
+                reference_debug.get("carla_upcoming_turn_reason", "")
+            ),
             "reference_lateral_guard_reason": str(reference_debug.get("reference_lateral_guard_reason", "")),
             "mpc_reference_stabilizer_reason": str(reference_debug.get("mpc_reference_stabilizer_reason", "")),
             "pipeline_error": str(reference_debug.get("pipeline_error", behavior_debug.get("pipeline_error", ""))),
@@ -1753,6 +1964,12 @@ class CPXMPCPlannerBridge:
                 "reference_source",
                 "map_lane_center" if lane_center_reference else "straight_fallback",
             )),
+            "final_reference_geometry_source": str(
+                reference_debug.get(
+                    "final_reference_geometry_source",
+                    reference_debug.get("reference_source", "unknown"),
+                )
+            ),
             "fallback_reason": fallback_reason,
             "mpc_fallback_reason": fallback_reason,
             "control_guard_reason": str(control_guard_reason),
@@ -1772,6 +1989,18 @@ class CPXMPCPlannerBridge:
             "fallback_policy_warning": str(self.fallback_policy_warning),
             "safety_supervisor_reason": str(safety_supervisor_reason),
         }
+        diagnostics.update(
+            self._update_evaluation_metrics(
+                ego_location=ego_location,
+                ego_speed_mps=float(ego_speed_mps),
+                ego_yaw_rad=float(ego_yaw_rad),
+                object_snapshots=object_snapshots,
+                behavior_decision=str(behavior_debug.get("decision", "")),
+                behavior_fsm_state=str(behavior_debug.get("lc_state", "")),
+                mpc_replan_executed=bool(mpc_replan_executed),
+                cp_summary=cp_summary,
+            )
+        )
         decision_record = self._build_decision_record(
             scenario_state=diagnostics.get("scenario_fsm_state", ""),
             behavior_decision=diagnostics.get("behavior_decision", ""),
@@ -2221,6 +2450,9 @@ class CPXMPCPlannerBridge:
             "planner_input_perception_planning_count": len(object_snapshots),
             "planner_input_cp_obstacle_count": len(list(cp_payload.get("obstacles", []) or [])),
             "traffic_signal_state": str(traffic_state),
+            "traffic_signal_raw_state": str(raw_traffic_state),
+            "traffic_signal_filtered_state": str(traffic_state),
+            "traffic_signal_behavior_state": str(traffic_state),
             "traffic_control_from_cp": bool(signal_context.get("from_cp", False)),
             "object_memory_reason": str(object_memory_reason),
             "traffic_memory_reason": str(traffic_memory_reason),
@@ -2240,6 +2472,22 @@ class CPXMPCPlannerBridge:
                 for sample in list(lane_center_reference or [])
             ],
         }
+        self.last_debug.update(
+            self._update_evaluation_metrics(
+                ego_location=ego_location,
+                ego_speed_mps=float(ego_speed_mps),
+                ego_yaw_rad=float(ego_yaw_rad),
+                object_snapshots=object_snapshots,
+                behavior_decision=str(self.last_debug.get("behavior_decision", "")),
+                behavior_fsm_state=str(
+                    self.last_debug.get("behavior_fsm_state", "")
+                ),
+                mpc_replan_executed=bool(
+                    self.last_debug.get("mpc_feasibility_checked", False)
+                ),
+                cp_summary=cp_summary,
+            )
+        )
         mode2_decision_record = self._build_decision_record(
             scenario_state="OPENCDA_REFERENCE_MPC",
             behavior_decision=self.last_debug.get("behavior_decision", ""),
@@ -2929,7 +3177,307 @@ class CPXMPCPlannerBridge:
             if self.debug:
                 print(f"[CP-X OpenCDA Bridge] debug record failed: {exc}")
 
+    def _spawn_metrics_collision_sensor(self) -> None:
+        """Attach one dedicated collision sensor for formal run metrics."""
+
+        if not bool(self.config.get("record_evaluation_metrics", True)):
+            return
+        if not bool(self.config.get("record_collision_sensor", True)):
+            self._metrics_collision_sensor_error = "disabled_by_config"
+            return
+        vehicle = getattr(self.vehicle_manager, "vehicle", None)
+        try:
+            world = vehicle.get_world()
+            blueprint = world.get_blueprint_library().find("sensor.other.collision")
+            sensor = world.spawn_actor(
+                blueprint,
+                self.carla.Transform(),
+                attach_to=vehicle,
+                attachment_type=self.carla.AttachmentType.Rigid,
+            )
+            sensor.listen(self._on_metrics_collision)
+            self._metrics_collision_sensor = sensor
+            self._metrics_collision_sensor_available = True
+        except Exception as exc:
+            self._metrics_collision_sensor_error = str(exc)
+            if self.debug:
+                print(
+                    "[CP-X OpenCDA Bridge] collision metrics sensor unavailable: "
+                    f"{exc}"
+                )
+
+    def _on_metrics_collision(self, event: Any) -> None:
+        """Convert a CARLA collision event into a de-duplicated metric event."""
+
+        vehicle = getattr(self.vehicle_manager, "vehicle", None)
+        other_actor = getattr(event, "other_actor", None)
+        other_actor_type = str(
+            getattr(other_actor, "type_id", type(other_actor).__name__ or "unknown")
+        )
+        impulse = getattr(event, "normal_impulse", None)
+        impulse_magnitude = None
+        if impulse is not None:
+            try:
+                impulse_magnitude = math.sqrt(
+                    float(impulse.x) ** 2
+                    + float(impulse.y) ** 2
+                    + float(impulse.z) ** 2
+                )
+            except Exception:
+                impulse_magnitude = None
+        ego_x = ego_y = ego_speed_mps = None
+        try:
+            location = vehicle.get_location()
+            velocity = vehicle.get_velocity()
+            ego_x = float(location.x)
+            ego_y = float(location.y)
+            ego_speed_mps = math.sqrt(
+                float(velocity.x) ** 2
+                + float(velocity.y) ** 2
+                + float(velocity.z) ** 2
+            )
+        except Exception:
+            pass
+        event_frame = getattr(event, "frame", "")
+        other_actor_id = getattr(other_actor, "id", "")
+        event_id = f"{event_frame}:{other_actor_id}"
+        self.evaluation_metrics.record_collision(
+            event_id,
+            sim_time_s=float(self._sim_time_s()),
+            ego_x=ego_x,
+            ego_y=ego_y,
+            ego_speed_mps=ego_speed_mps,
+            other_actor_type=other_actor_type,
+            impulse_magnitude=impulse_magnitude,
+        )
+        self._metrics_last_collision_actor_type = other_actor_type
+        self._metrics_last_collision_impulse = (
+            "" if impulse_magnitude is None else float(impulse_magnitude)
+        )
+
+    def _road_boundary_metrics(self, ego_location: Any) -> dict[str, object]:
+        """Measure the ego footprint against the current CARLA lane envelope."""
+
+        result: dict[str, object] = {
+            "road_boundary_sample_valid": False,
+            "road_boundary_lateral_offset_m": "",
+            "road_boundary_lane_width_m": "",
+            "road_boundary_ego_half_width_m": "",
+            "road_boundary_clearance_m": "",
+            "road_boundary_breach": "",
+        }
+        try:
+            waypoint = self.map_planner.get_waypoint(ego_location)
+            transform = waypoint.transform
+            center = transform.location
+            yaw_rad = math.radians(float(transform.rotation.yaw))
+            dx = float(ego_location.x) - float(center.x)
+            dy = float(ego_location.y) - float(center.y)
+            lateral_offset_m = -math.sin(yaw_rad) * dx + math.cos(yaw_rad) * dy
+            lane_width_m = float(getattr(waypoint, "lane_width", 0.0))
+            bounding_box = getattr(self.vehicle_manager.vehicle, "bounding_box", None)
+            extent = getattr(bounding_box, "extent", None)
+            ego_half_width_m = float(
+                getattr(
+                    extent,
+                    "y",
+                    self.config.get("metrics_ego_half_width_m", 1.0),
+                )
+            )
+            if lane_width_m <= 0.0:
+                return result
+            clearance_m = (
+                0.5 * lane_width_m
+                - abs(float(lateral_offset_m))
+                - float(ego_half_width_m)
+            )
+            breach = bool(clearance_m < 0.0)
+            self._metrics_boundary_sample_count += 1
+            if breach:
+                self._metrics_boundary_breach_count += 1
+            result.update(
+                {
+                    "road_boundary_sample_valid": True,
+                    "road_boundary_lateral_offset_m": float(lateral_offset_m),
+                    "road_boundary_lane_width_m": float(lane_width_m),
+                    "road_boundary_ego_half_width_m": float(ego_half_width_m),
+                    "road_boundary_clearance_m": float(clearance_m),
+                    "road_boundary_breach": bool(breach),
+                }
+            )
+        except Exception:
+            pass
+        return result
+
+    def _update_evaluation_metrics(
+        self,
+        *,
+        ego_location: Any,
+        ego_speed_mps: float,
+        ego_yaw_rad: float,
+        object_snapshots: Sequence[Mapping[str, Any]],
+        behavior_decision: str,
+        behavior_fsm_state: str,
+        mpc_replan_executed: bool,
+        cp_summary: Mapping[str, Any],
+    ) -> dict[str, object]:
+        """Update run metrics and return fields for the unified debug row."""
+
+        if not bool(self.config.get("record_evaluation_metrics", True)):
+            return {
+                "evaluation_metrics_available": False,
+                "collision_sensor_available": bool(
+                    self._metrics_collision_sensor_available
+                ),
+            }
+        sim_time_s = float(self._sim_time_s())
+        self.evaluation_metrics.update(
+            ego_state={
+                "x": float(ego_location.x),
+                "y": float(ego_location.y),
+                "v": float(ego_speed_mps),
+                "psi": float(ego_yaw_rad),
+            },
+            obstacle_snapshots=list(object_snapshots or []),
+            sim_time_s=sim_time_s,
+            behavior_decision=str(behavior_decision),
+            fsm_state=str(behavior_fsm_state),
+            collision_count=int(self.evaluation_metrics.collision_count),
+            last_collision_actor_type=str(
+                self._metrics_last_collision_actor_type
+            ),
+            cp_provider_source=str(cp_summary.get("provider_source", "")),
+            native_opencda_available=bool(
+                cp_summary.get("native_opencda_available", False)
+            ),
+            native_opencda_required=bool(
+                cp_summary.get("native_opencda_required", False)
+            ),
+            cp_obstacle_count=int(cp_summary.get("obstacle_count", 0) or 0),
+        )
+        if bool(mpc_replan_executed):
+            self.evaluation_metrics.record_mpc_status(self.mpc.get_runtime_status())
+            self.evaluation_metrics.record_mpc_extras(
+                lateral_offset_m=None,
+                heading_error_rad=None,
+                cost_terms=self.mpc.get_last_cost_terms(),
+            )
+        sample = dict(self.evaluation_metrics.samples[-1])
+        boundary = self._road_boundary_metrics(ego_location)
+        self.evaluation_metrics.record_road_boundary(
+            sample_valid=bool(boundary["road_boundary_sample_valid"]),
+            lateral_offset_m=(
+                boundary["road_boundary_lateral_offset_m"]
+                if boundary["road_boundary_lateral_offset_m"] != ""
+                else None
+            ),
+            lane_width_m=(
+                boundary["road_boundary_lane_width_m"]
+                if boundary["road_boundary_lane_width_m"] != ""
+                else None
+            ),
+            ego_half_width_m=(
+                boundary["road_boundary_ego_half_width_m"]
+                if boundary["road_boundary_ego_half_width_m"] != ""
+                else None
+            ),
+            clearance_m=(
+                boundary["road_boundary_clearance_m"]
+                if boundary["road_boundary_clearance_m"] != ""
+                else None
+            ),
+            breach=bool(boundary["road_boundary_breach"]),
+        )
+        summary = self.evaluation_metrics.summary()
+        boundary_sample_count = int(self._metrics_boundary_sample_count)
+        collision_count = int(self.evaluation_metrics.collision_count)
+        collision_this_frame = (
+            collision_count > int(self._metrics_last_emitted_collision_count)
+        )
+        self._metrics_last_emitted_collision_count = collision_count
+        cost_terms = dict(self.mpc.get_last_cost_terms())
+        return {
+            "evaluation_metrics_available": True,
+            "collision_sensor_available": bool(
+                self._metrics_collision_sensor_available
+            ),
+            "collision_sensor_error": str(self._metrics_collision_sensor_error),
+            "collision_event_this_frame": bool(collision_this_frame),
+            "collision_count": collision_count,
+            "collision_rate_per_km": summary.get("collision_rate_per_km", ""),
+            "last_collision_actor_type": str(
+                self._metrics_last_collision_actor_type
+            ),
+            "last_collision_impulse": self._metrics_last_collision_impulse,
+            "nearest_ttc_s": sample.get("nearest_ttc_s", ""),
+            "min_ttc_s": summary.get("min_ttc_s", ""),
+            "nearest_ttc_obstacle_id": sample.get(
+                "nearest_ttc_obstacle_id", ""
+            ),
+            "nearest_ttc_reason": sample.get("nearest_ttc_reason", ""),
+            "nearest_ttc_longitudinal_gap_m": sample.get(
+                "nearest_ttc_longitudinal_gap_m", ""
+            ),
+            "nearest_ttc_lateral_gap_m": sample.get(
+                "nearest_ttc_lateral_gap_m", ""
+            ),
+            "nearest_ttc_bumper_gap_m": sample.get(
+                "nearest_ttc_bumper_gap_m", ""
+            ),
+            "nearest_ttc_closing_speed_mps": sample.get(
+                "nearest_ttc_closing_speed_mps", ""
+            ),
+            "tick_max_drac_mps2": sample.get("max_drac_mps2", ""),
+            "max_drac_mps2": summary.get("max_drac_mps2", ""),
+            "min_pet_s": summary.get("min_pet_s", ""),
+            "distance_traveled_m": summary.get("distance_traveled_m", ""),
+            **boundary,
+            "road_boundary_breach_count": int(
+                self._metrics_boundary_breach_count
+            ),
+            "road_boundary_sample_count": boundary_sample_count,
+            "road_boundary_breach_rate": (
+                float(self._metrics_boundary_breach_count)
+                / float(boundary_sample_count)
+                if boundary_sample_count > 0
+                else ""
+            ),
+            "Cost_RoadBoundary": cost_terms.get("Cost_RoadBoundary", ""),
+        }
+
     def destroy(self) -> None:
+        sensor = getattr(self, "_metrics_collision_sensor", None)
+        if sensor is not None:
+            try:
+                sensor.stop()
+            except Exception:
+                pass
+            try:
+                sensor.destroy()
+            except Exception:
+                pass
+            self._metrics_collision_sensor = None
+        if bool(self.config.get("record_evaluation_metrics", True)):
+            try:
+                debug_dir = Path(
+                    self.config.get(
+                        "debug_output_dir",
+                        Path(__file__).resolve().parent / "debug",
+                    )
+                )
+                self._write_planning_metrics_artifacts(
+                    artifact_dir=str(debug_dir),
+                    recorder=self.evaluation_metrics,
+                    scenario_name=str(
+                        self.config.get("scenario_name", "opencda_scenario")
+                    ),
+                )
+            except Exception as exc:
+                if self.debug:
+                    print(
+                        "[CP-X OpenCDA Bridge] metrics artifact write failed: "
+                        f"{exc}"
+                    )
         for handle_name in ("_debug_csv_file", "_debug_jsonl_file"):
             handle = getattr(self, handle_name, None)
             if handle is not None:
@@ -3089,6 +3637,18 @@ class CPXMPCPlannerBridge:
             ),
             fallback_destination_state=[],
         )
+        (
+            upcoming_turn_direction,
+            upcoming_turn_distance_m,
+            upcoming_turn_reason,
+        ) = self.route_manager.upcoming_turn(
+            ego_x_m=float(ego_location.x),
+            ego_y_m=float(ego_location.y),
+            ego_heading_rad=float(ego_yaw_rad),
+            lookahead_m=float(
+                self.config.get("scenario_turn_prepare_lookahead_m", 15.0)
+            ),
+        )
         scenario_decision = self._scenario_manager.update(
             traffic_state=str(filtered_traffic_state),
             stop_target=(
@@ -3103,6 +3663,8 @@ class CPXMPCPlannerBridge:
             current_road_option=str(route_context.current_road_option),
             next_macro_maneuver=str(route_context.next_macro_maneuver),
             sim_time_s=float(sim_time_s),
+            upcoming_turn_direction=str(upcoming_turn_direction),
+            upcoming_turn_distance_m=float(upcoming_turn_distance_m),
         )
         behavior_traffic_state = str(scenario_decision.behavior_signal_state)
         behavior_stop_target = (
@@ -3127,6 +3689,17 @@ class CPXMPCPlannerBridge:
         filtered_signal_context["behavior_signal_state"] = str(behavior_traffic_state)
         filtered_signal_context["traffic_stop_forward_m"] = float(traffic_stop_forward_m)
         filtered_signal_context["traffic_stop_commit_distance_m"] = float(traffic_stop_commit_distance_m)
+        filtered_signal_context["carla_upcoming_turn_direction"] = str(
+            upcoming_turn_direction
+        )
+        filtered_signal_context["carla_upcoming_turn_distance_m"] = (
+            ""
+            if not math.isfinite(float(upcoming_turn_distance_m))
+            else float(upcoming_turn_distance_m)
+        )
+        filtered_signal_context["carla_upcoming_turn_reason"] = str(
+            upcoming_turn_reason
+        )
         if str(traffic_stop_approach_reason):
             filtered_signal_context["traffic_stop_approach_reason"] = str(traffic_stop_approach_reason)
         if str(full_traffic_memory_reason):
@@ -3485,6 +4058,11 @@ class CPXMPCPlannerBridge:
             "route_current_road_option": str(route_context.current_road_option),
             "route_next_macro_maneuver": str(route_context.next_macro_maneuver),
             "traffic_memory_reason": str(full_traffic_memory_reason),
+            "traffic_signal_raw_state": str(
+                planner_input_frame.planning.traffic_control.signal_state
+            ),
+            "traffic_signal_filtered_state": str(filtered_traffic_state),
+            "traffic_signal_behavior_state": str(behavior_traffic_state),
             "traffic_stop_forward_m": float(traffic_stop_forward_m),
             "traffic_stop_commit_distance_m": float(traffic_stop_commit_distance_m),
             "traffic_stop_approach_reason": str(traffic_stop_approach_reason),
@@ -3505,6 +4083,15 @@ class CPXMPCPlannerBridge:
             ),
         })
         reference_debug.update(scenario_decision.as_debug_fields())
+        reference_debug.update({
+            "carla_upcoming_turn_direction": str(upcoming_turn_direction),
+            "carla_upcoming_turn_distance_m": (
+                ""
+                if not math.isfinite(float(upcoming_turn_distance_m))
+                else float(upcoming_turn_distance_m)
+            ),
+            "carla_upcoming_turn_reason": str(upcoming_turn_reason),
+        })
         reference_debug.update(source_quality)
         if bool(self.full_candidate_pipeline_enabled):
             traffic_stop_active = bool(scenario_decision.stop_goal_active)
@@ -3667,7 +4254,53 @@ class CPXMPCPlannerBridge:
             ego_yaw_rad=float(ego_yaw_rad),
         )
         if str(lateral_guard_reason):
-            if bool(self.strict_reference_validator_veto_enabled):
+            # Treat the lateral guard as a request for an independent lane-centre
+            # reference, not as an immediate hard stop.  A curved lane naturally
+            # puts the first look-ahead point farther to the side in ego
+            # coordinates; the rebuilt reference is still contract-validated by
+            # _stabilize_mpc_reference_input before it reaches MPC.
+            step_distance_m = max(
+                0.5,
+                float(self.mpc.dt_s)
+                * max(1.0, min(float(speed_ref_mps), float(self.target_speed_mps))),
+            )
+            guarded_reference = self._current_lane_center_reference_samples(
+                start_waypoint=ego_waypoint,
+                current_lane_id=int(current_lane_id),
+                horizon_steps=int(self.mpc.horizon_steps),
+                step_distance_m=float(step_distance_m),
+                route_points=route_points,
+            )
+            if guarded_reference:
+                from opencda.planning_module.behavior_planner.reference_pipeline import (
+                    lane_center_destination_from_reference,
+                )
+
+                local_lane_center_reference = list(guarded_reference)
+                target_forward_m = float(
+                    self.config.get(
+                        "full_stop_guard_destination_forward_m"
+                        if bool(stop_goal_active)
+                        else "full_lane_follow_guard_destination_forward_m",
+                        6.0 if bool(stop_goal_active) else 8.0,
+                    )
+                )
+                self._temporary_destination_state = lane_center_destination_from_reference(
+                    destination_state=self._temporary_destination_state,
+                    lane_center_reference=local_lane_center_reference,
+                    ego_state=current_state,
+                    target_forward_m=float(target_forward_m),
+                )
+                self._lane_reference_freeze_count = 0
+                reference_debug["reference_source"] = "current_lane_center_lateral_guard"
+                reference_debug["fallback_reason"] = (
+                    f"{reference_debug.get('fallback_reason', '')}:"
+                    if str(reference_debug.get("fallback_reason", ""))
+                    else ""
+                ) + str(lateral_guard_reason)
+                reference_debug["stage"] = "lateral_guard"
+                reference_debug["reference_pipeline_follow_global_route_lane"] = 0
+            elif bool(self.strict_reference_validator_veto_enabled):
                 reference_debug["candidate_pipeline_selected_status"] = "infeasible"
                 reference_debug["candidate_pipeline_selected_reason"] = (
                     str(reference_debug.get("candidate_pipeline_selected_reason", "")) + ";"
@@ -3678,47 +4311,7 @@ class CPXMPCPlannerBridge:
                     f"{reference_debug.get('fallback_reason', '')}:"
                     if str(reference_debug.get("fallback_reason", ""))
                     else ""
-                ) + "strict_reference_veto:" + str(lateral_guard_reason)
-            else:
-                step_distance_m = max(
-                    0.5,
-                    float(self.mpc.dt_s)
-                    * max(1.0, min(float(speed_ref_mps), float(self.target_speed_mps))),
-                )
-                guarded_reference = self._current_lane_center_reference_samples(
-                    start_waypoint=ego_waypoint,
-                    current_lane_id=int(current_lane_id),
-                    horizon_steps=int(self.mpc.horizon_steps),
-                    step_distance_m=float(step_distance_m),
-                    route_points=route_points,
-                )
-                if guarded_reference:
-                    from opencda.planning_module.behavior_planner.reference_pipeline import (
-                        lane_center_destination_from_reference,
-                    )
-
-                    local_lane_center_reference = list(guarded_reference)
-                    target_forward_m = float(
-                        self.config.get(
-                            "full_stop_guard_destination_forward_m",
-                            6.0 if bool(stop_goal_active) else 8.0,
-                        )
-                    )
-                    self._temporary_destination_state = lane_center_destination_from_reference(
-                        destination_state=self._temporary_destination_state,
-                        lane_center_reference=local_lane_center_reference,
-                        ego_state=current_state,
-                        target_forward_m=float(target_forward_m),
-                    )
-                    self._lane_reference_freeze_count = 0
-                    reference_debug["reference_source"] = "current_lane_center_lateral_guard"
-                    reference_debug["fallback_reason"] = (
-                        f"{reference_debug.get('fallback_reason', '')}:"
-                        if str(reference_debug.get("fallback_reason", ""))
-                        else ""
-                    ) + str(lateral_guard_reason)
-                    reference_debug["stage"] = "lateral_guard"
-                    reference_debug["reference_pipeline_follow_global_route_lane"] = 0
+                ) + "strict_reference_veto:lateral_guard_rebuild_failed:" + str(lateral_guard_reason)
         reference_debug["reference_lateral_guard_reason"] = str(lateral_guard_reason)
         opencda_conditioning_reason = ""
         if local_lane_center_reference:
@@ -3810,6 +4403,11 @@ class CPXMPCPlannerBridge:
                 "current_lane_id": int(current_lane_id),
                 "lane_safety_scores": dict(lane_safety_scores),
                 "traffic_signal_state": str(behavior_traffic_state),
+                "traffic_signal_raw_state": str(
+                    planner_input_frame.planning.traffic_control.signal_state
+                ),
+                "traffic_signal_filtered_state": str(filtered_traffic_state),
+                "traffic_signal_behavior_state": str(behavior_traffic_state),
                 "traffic_control_from_cp": bool(planner_input_frame.planning.traffic_control.from_cp),
                 "stop_target": (
                     dict(behavior_stop_target)
@@ -4059,39 +4657,6 @@ class CPXMPCPlannerBridge:
                         else None
                     ),
                 )
-            if (
-                candidate_decision in {"intersection_turn_left", "intersection_turn_right"}
-                and "drop_duplicate_sample" in str(stabilizer_reason)
-            ):
-                turn_direction = "left" if candidate_decision.endswith("_left") else "right"
-                creep_reference = self._creep_turn_reference_samples(
-                    ego_location=ego_location,
-                    ego_heading_rad=float(ego_yaw_rad),
-                    current_lane_id=int(current_lane_id),
-                    horizon_steps=int(self.mpc.horizon_steps),
-                    turn_direction=str(turn_direction),
-                )
-                if creep_reference:
-                    from opencda.planning_module.behavior_planner.reference_pipeline import (
-                        lane_center_destination_from_reference,
-                    )
-
-                    reference = [dict(sample) for sample in creep_reference]
-                    aligned_destination = lane_center_destination_from_reference(
-                        destination_state=destination_state,
-                        lane_center_reference=reference,
-                        ego_state=current_state,
-                        target_forward_m=float(
-                            self.config.get("full_turn_creep_destination_forward_m", 7.0)
-                        ),
-                    )
-                    if aligned_destination is not None:
-                        destination_state = list(aligned_destination)
-                    stabilizer_reason = (
-                        str(stabilizer_reason) + ";"
-                        if str(stabilizer_reason)
-                        else ""
-                    ) + "creep_turn_reference_after_duplicate"
             contract_result = self._validate_candidate_reference_contract(
                 decision=str(candidate_decision),
                 lc_state=str(candidate_lc_state),
@@ -4248,6 +4813,10 @@ class CPXMPCPlannerBridge:
             "intersection_turn_left",
             "intersection_turn_right",
         }
+        hard_safety_veto = any(
+            "collision_risk" in str(getattr(candidate, "feasibility_reason", ""))
+            for candidate in list(candidate_results or [])
+        )
         selected_lane_id = int(current_lane_id)
         turn_reference_reason = ""
         if bool(stop_like):
@@ -4276,13 +4845,44 @@ class CPXMPCPlannerBridge:
                 destination_state=None,
             )
             turn_reference_reason = str(turn_reason)
+            turn_contract = None
             if reference:
+                turn_contract = self._validate_candidate_reference_contract(
+                    decision=str(baseline_decision),
+                    lc_state=(
+                        "INTERSECTION_TURN_LEFT"
+                        if str(baseline_decision).endswith("_left")
+                        else "INTERSECTION_TURN_RIGHT"
+                    ),
+                    current_lane_id=int(current_lane_id),
+                    speed_ref_mps=float(fallback_turn_speed_mps),
+                    stop_goal_active=False,
+                    current_state=current_state,
+                    destination_state=destination,
+                    lane_center_reference=reference,
+                )
+            if (
+                reference
+                and turn_contract is not None
+                and bool(turn_contract.valid)
+                and not bool(hard_safety_veto)
+            ):
                 decision = str(baseline_decision)
                 speed_mps = float(fallback_turn_speed_mps)
                 selected_lane_id = int(baseline_target_lane_id or current_lane_id)
                 selected_name = "explicit_fallback_carla_route_turn"
                 source = "explicit_fallback_carla_grp_waypoint_turn"
             else:
+                if bool(hard_safety_veto):
+                    turn_reference_reason = (
+                        str(turn_reference_reason) + ":candidate_collision_risk_veto"
+                    )
+                if turn_contract is not None and not bool(turn_contract.valid):
+                    turn_reference_reason = (
+                        str(turn_reference_reason)
+                        + ":contract_invalid:"
+                        + str(turn_contract.reason())
+                    )
                 reference, destination = self._build_ego_heading_emergency_stop_reference(
                     ego_location=ego_location,
                     ego_yaw_rad=float(ego_yaw_rad),
@@ -4677,11 +5277,15 @@ class CPXMPCPlannerBridge:
         combined_reason = ";".join(
             item for item in [reason, stabilizer_reason] if str(item)
         )
+        normalized_behavior = str(behavior_decision or "").strip().lower()
+        if normalized_behavior == "emergency_brake":
+            return f"candidate_hard_gate:{selected}:emergency_brake_direct_control"
         if "stop_missing_target_hard_lock" in combined_reason:
+            return f"candidate_hard_gate:{selected}:{combined_reason}"
+        if "strict_reference_veto" in combined_reason:
             return f"candidate_hard_gate:{selected}:{combined_reason}"
         if status != "infeasible":
             return ""
-        normalized_behavior = str(behavior_decision or "").strip().lower()
         stop_like = bool(stop_goal_active) or normalized_behavior in {
             "stop_at_intersection",
             "stop_sign",
@@ -5482,6 +6086,7 @@ class CPXMPCPlannerBridge:
                 "y": float(xy_heading[1]),
                 "heading_rad": float(heading_rad),
                 "lane_id": int(lane_id),
+                "lane_transition_kind": "longitudinal_successor",
                 "lane_width_m": float(lane_width_m),
                 "road_center_offset_m": 0.0,
                 "road_left_width_m": 0.5 * float(lane_width_m),
@@ -5670,60 +6275,6 @@ class CPXMPCPlannerBridge:
             step_distance_m=float(step_m),
             fallback_heading_rad=float(ego_heading_rad),
         )
-
-    def _creep_turn_reference_samples(
-        self,
-        *,
-        ego_location: carla.Location,
-        ego_heading_rad: float,
-        current_lane_id: int,
-        horizon_steps: int,
-        turn_direction: str,
-    ) -> list[dict[str, float]]:
-        direction = str(turn_direction or "").strip().lower()
-        sign = 1.0 if direction == "left" else -1.0 if direction == "right" else 0.0
-        if abs(float(sign)) < 1.0e-6:
-            return self._build_ego_heading_reference_samples(
-                ego_location=ego_location,
-                ego_yaw_rad=float(ego_heading_rad),
-                current_lane_id=int(current_lane_id),
-                horizon_steps=int(horizon_steps),
-                step_distance_m=float(self.config.get("full_turn_creep_step_m", 0.65)),
-                speed_mps=float(self.config.get("full_turn_creep_speed_mps", 0.9)),
-            )
-        radius_m = max(4.0, float(self.config.get("full_turn_creep_radius_m", 10.0)))
-        step_m = max(0.35, float(self.config.get("full_turn_creep_step_m", 0.65)))
-        speed_mps = max(0.2, float(self.config.get("full_turn_creep_speed_mps", 0.9)))
-        samples: list[dict[str, float]] = []
-        for index in range(max(2, int(horizon_steps))):
-            s_m = float(index + 1) * float(step_m)
-            theta = min(float(s_m) / float(radius_m), float(self.config.get("full_turn_creep_max_theta_rad", 1.15)))
-            local_x = float(radius_m) * math.sin(float(theta))
-            local_y = float(sign) * float(radius_m) * (1.0 - math.cos(float(theta)))
-            world_x = (
-                float(ego_location.x)
-                + math.cos(float(ego_heading_rad)) * float(local_x)
-                - math.sin(float(ego_heading_rad)) * float(local_y)
-            )
-            world_y = (
-                float(ego_location.y)
-                + math.sin(float(ego_heading_rad)) * float(local_x)
-                + math.cos(float(ego_heading_rad)) * float(local_y)
-            )
-            heading_rad = self._wrap_angle(float(ego_heading_rad) + float(sign) * float(theta))
-            samples.append({
-                "x_ref_m": float(world_x),
-                "y_ref_m": float(world_y),
-                "x": float(world_x),
-                "y": float(world_y),
-                "heading_rad": float(heading_rad),
-                "lane_id": int(current_lane_id),
-                "lane_width_m": 3.5,
-                "speed_ref_mps": float(speed_mps),
-                "v_ref_mps": float(speed_mps),
-                "speed_mps": float(speed_mps),
-            })
-        return samples
 
     def _build_ego_heading_reference_samples(
         self,
@@ -6168,18 +6719,18 @@ class CPXMPCPlannerBridge:
             )
 
     def _active_global_route_points(self) -> list[list[float]]:
-        """Return the active Planning Module global route polyline."""
+        """Return the geometry used by both local references and visualization."""
 
         latest_update = dict(getattr(self, "_latest_opencda_update", {}) or {})
         ego_transform = latest_update.get("ego_transform")
         if ego_transform is not None:
             loc = ego_transform.location
-            return self.route_manager.route_points(
+            return self.route_manager.geometry_route_points(
                 x_m=float(loc.x),
                 y_m=float(loc.y),
                 query_key=f"vehicle_{int(getattr(self.vehicle_manager.vehicle, 'id', 0))}_polyline",
             )
-        route_points = self.route_manager.route_points()
+        route_points = self.route_manager.geometry_route_points()
         if route_points:
             return route_points
 
@@ -6474,7 +7025,17 @@ class CPXMPCPlannerBridge:
             if bool(turn_active)
             else "lane_follow"
         )
-        if bool(stop_like):
+        if normalized_behavior == "emergency_brake":
+            reference, destination = self._build_ego_heading_emergency_stop_reference(
+                ego_location=ego_location,
+                ego_yaw_rad=float(ego_yaw_rad),
+                current_lane_id=int(current_lane_id),
+                horizon_steps=int(self.mpc.horizon_steps),
+                step_distance_m=max(0.5, float(self.mpc.dt_s) * 0.8),
+            )
+            stop_target = None
+            reasons.append("emergency_stop_direct_reference")
+        elif bool(stop_like):
             stop_reference, stop_destination, stop_reason = self._build_independent_stop_reference(
                 ego_location=ego_location,
                 ego_yaw_rad=float(ego_yaw_rad),
@@ -6493,6 +7054,14 @@ class CPXMPCPlannerBridge:
         last_xy: tuple[float, float] | None = None
         min_forward_m = float(self.full_reference_stabilizer_min_forward_m)
         min_spacing_m = float(self.full_reference_stabilizer_min_spacing_m)
+        if bool(turn_active):
+            min_spacing_m = min(
+                float(min_spacing_m),
+                max(
+                    1.0e-3,
+                    float(self.config.get("full_turn_reference_duplicate_spacing_m", 0.05)),
+                ),
+            )
         for sample in reference:
             try:
                 x_m = float(sample.get("x_ref_m", sample.get("x", ego_location.x)))
@@ -6624,36 +7193,96 @@ class CPXMPCPlannerBridge:
                 )
                 if not bool(validation.valid):
                     reasons.append("emergency_reference_contract_violation:" + str(validation.reason()))
-            elif bool(self.strict_reference_validator_veto_enabled):
-                reasons.append("strict_reference_veto")
-                compact_reasons = []
-                for reason in reasons:
-                    if reason not in compact_reasons:
-                        compact_reasons.append(reason)
-                return list(destination), list(reference), ";".join(compact_reasons)
+            elif bool(lane_follow_like):
+                # A route-derived reference may contain a duplicate sample or a
+                # locally sharp join while the underlying CARLA lane centre is
+                # perfectly driveable.  In strict mode we used to veto here
+                # before reaching the generic lane-centre rebuild below.  That
+                # made the veto self-sustaining: the stationary ego received
+                # the same invalid reference forever and the safety supervisor
+                # kept full brake applied.  Rebuild from the map first and only
+                # retain the hard veto if that independent reference also fails
+                # its contract.
+                start_waypoint = self._map_waypoint_from_location(ego_location)
+                step_distance_m = max(
+                    0.5,
+                    float(self.mpc.dt_s)
+                    * max(1.0, min(float(speed_ref_mps), float(self.target_speed_mps))),
+                )
+                rebuilt_reference = self._current_lane_center_reference_samples(
+                    start_waypoint=start_waypoint,
+                    current_lane_id=int(current_lane_id),
+                    horizon_steps=int(self.mpc.horizon_steps),
+                    step_distance_m=float(step_distance_m),
+                    route_points=self._active_global_route_points(),
+                )
+                if rebuilt_reference:
+                    from opencda.planning_module.behavior_planner.reference_pipeline import (
+                        lane_center_destination_from_reference,
+                    )
+
+                    rebuilt_destination = lane_center_destination_from_reference(
+                        destination_state=destination,
+                        lane_center_reference=rebuilt_reference,
+                        ego_state=current_state,
+                        target_forward_m=float(
+                            self.config.get(
+                                "full_lane_follow_guard_destination_forward_m",
+                                8.0,
+                            )
+                        ),
+                    )
+                    reference = [dict(sample) for sample in rebuilt_reference]
+                    if rebuilt_destination is not None:
+                        destination = list(rebuilt_destination)
+                    rebuilt_validation = validate_reference_contract(
+                        reference_samples=reference,
+                        destination_state=destination,
+                        ego_state=current_state,
+                        contract=contract,
+                        check_destination_body_lateral=True,
+                    )
+                    if bool(rebuilt_validation.valid):
+                        reasons.append("rebuilt_current_lane_reference_after_contract_veto")
+                        validation = rebuilt_validation
+                    else:
+                        reasons.append(
+                            "rebuilt_current_lane_reference_contract_violation:"
+                            + str(rebuilt_validation.reason())
+                        )
+                else:
+                    reasons.append("current_lane_reference_rebuild_failed")
+
+                if (
+                    not bool(validation.valid)
+                    and bool(self.strict_reference_validator_veto_enabled)
+                ):
+                    reasons.append("strict_reference_veto")
+                    compact_reasons = []
+                    for reason in reasons:
+                        if reason not in compact_reasons:
+                            compact_reasons.append(reason)
+                    return list(destination), list(reference), ";".join(compact_reasons)
             elif bool(turn_active):
                 step_distance_m = max(
                     0.5,
                     float(self.mpc.dt_s)
                     * max(1.0, min(float(speed_ref_mps), float(self.target_speed_mps))),
                 )
-                turn_direction = (
-                    "left"
-                    if normalized_behavior.endswith("_left") or normalized_fsm.endswith("_LEFT")
-                    else "right"
-                    if normalized_behavior.endswith("_right") or normalized_fsm.endswith("_RIGHT")
-                    else ""
-                )
-                rebuilt_reference = self._ego_anchored_turn_reference_samples(
-                    ego_location=ego_location,
-                    ego_heading_rad=float(ego_yaw_rad),
-                    current_lane_id=int(current_lane_id),
-                    horizon_steps=int(self.mpc.horizon_steps),
-                    step_distance_m=float(step_distance_m),
-                    turn_direction=str(turn_direction),
-                    route_points=self._active_global_route_points(),
-                )
-                rebuild_source = "rebuilt_ego_anchored_turn_reference"
+                rebuilt_reference = []
+                rebuild_reason = "carla_route_manager_unavailable"
+                route_manager = getattr(self, "route_manager", None)
+                if route_manager is not None:
+                    rebuilt_reference, rebuild_reason = route_manager.carla_waypoint_reference(
+                        ego_x_m=float(ego_location.x),
+                        ego_y_m=float(ego_location.y),
+                        ego_heading_rad=float(ego_yaw_rad),
+                        horizon_steps=int(self.mpc.horizon_steps),
+                        step_distance_m=float(step_distance_m),
+                        target_speed_mps=max(0.4, min(float(speed_ref_mps), 2.2)),
+                        fallback_lane_id=int(current_lane_id),
+                    )
+                rebuild_source = "rebuilt_carla_route_turn_reference:" + str(rebuild_reason)
                 if not rebuilt_reference:
                     rebuilt_reference = self._route_aligned_reference_samples(
                         ego_location=ego_location,
@@ -6663,7 +7292,7 @@ class CPXMPCPlannerBridge:
                         step_distance_m=float(step_distance_m),
                         route_points=self._active_global_route_points(),
                     )
-                    rebuild_source = "rebuilt_global_route_turn_reference"
+                    rebuild_source = "rebuilt_route_geometry_turn_reference"
                 if rebuilt_reference:
                     from opencda.planning_module.behavior_planner.reference_pipeline import (
                         lane_center_destination_from_reference,
@@ -6690,61 +7319,26 @@ class CPXMPCPlannerBridge:
                     )
                     if not bool(validation.valid):
                         reasons.append("turn_route_reference_contract_violation:" + str(validation.reason()))
-                        creep_reference = self._creep_turn_reference_samples(
-                            ego_location=ego_location,
-                            ego_heading_rad=float(ego_yaw_rad),
-                            current_lane_id=int(current_lane_id),
-                            horizon_steps=int(self.mpc.horizon_steps),
-                            turn_direction=str(turn_direction),
-                        )
-                        if creep_reference:
-                            reference = [dict(sample) for sample in creep_reference]
-                            aligned_destination = lane_center_destination_from_reference(
-                                destination_state=destination,
-                                lane_center_reference=reference,
-                                ego_state=current_state,
-                                target_forward_m=float(
-                                    self.config.get("full_turn_creep_destination_forward_m", 7.0)
-                                ),
-                            )
-                            if aligned_destination is not None:
-                                destination = list(aligned_destination)
-                            reasons.append("creep_turn_reference")
-                            validation = validate_reference_contract(
-                                reference_samples=reference,
-                                destination_state=destination,
-                                ego_state=current_state,
-                                contract=contract,
-                                check_destination_body_lateral=False,
-                            )
-                            if not bool(validation.valid):
-                                reasons.append("creep_turn_reference_contract_violation:" + str(validation.reason()))
                 else:
-                    reasons.append("turn_route_rebuild_failed")
-                    creep_reference = self._creep_turn_reference_samples(
-                        ego_location=ego_location,
-                        ego_heading_rad=float(ego_yaw_rad),
-                        current_lane_id=int(current_lane_id),
-                        horizon_steps=int(self.mpc.horizon_steps),
-                        turn_direction=str(turn_direction),
-                    )
-                    if creep_reference:
-                        from opencda.planning_module.behavior_planner.reference_pipeline import (
-                            lane_center_destination_from_reference,
-                        )
+                    reasons.append("turn_route_rebuild_failed:" + str(rebuild_reason))
 
-                        reference = [dict(sample) for sample in creep_reference]
-                        aligned_destination = lane_center_destination_from_reference(
-                            destination_state=destination,
-                            lane_center_reference=reference,
-                            ego_state=current_state,
-                            target_forward_m=float(
-                                self.config.get("full_turn_creep_destination_forward_m", 7.0)
-                            ),
-                        )
-                        if aligned_destination is not None:
-                            destination = list(aligned_destination)
-                        reasons.append("creep_turn_reference")
+                if (
+                    not bool(validation.valid)
+                    and bool(self.strict_reference_validator_veto_enabled)
+                ):
+                    reasons.append("strict_reference_veto")
+                    compact_reasons = []
+                    for reason in reasons:
+                        if reason not in compact_reasons:
+                            compact_reasons.append(reason)
+                    return list(destination), list(reference), ";".join(compact_reasons)
+            elif bool(self.strict_reference_validator_veto_enabled):
+                reasons.append("strict_reference_veto")
+                compact_reasons = []
+                for reason in reasons:
+                    if reason not in compact_reasons:
+                        compact_reasons.append(reason)
+                return list(destination), list(reference), ";".join(compact_reasons)
 
         needs_rebuild = (
             bool(reasons)
@@ -7168,6 +7762,7 @@ class CPXMPCPlannerBridge:
         behavior_decision: str,
         behavior_fsm_state: str,
         traffic_signal_state: str = "",
+        front_gap_m: Optional[float] = None,
         sim_time_s: float = 0.0,
     ) -> tuple[carla.VehicleControl, float, float, str]:
         """Apply last-mile control guards before sending commands to CARLA.
@@ -7182,8 +7777,14 @@ class CPXMPCPlannerBridge:
         max_steer = max(1.0e-6, float(self.mpc.constraints.max_steer_rad))
         normalized_signal = str(traffic_signal_state or "").strip().lower()
         normalized_behavior = str(behavior_decision or "").strip().lower()
+        normalized_fsm = str(behavior_fsm_state or "").strip().upper()
+        lane_follow_like = (
+            normalized_behavior == "lane_follow"
+            and normalized_fsm in {"", "IDLE", "LANE_KEEP"}
+        )
 
         if bool(stop_goal_active):
+            self._overspeed_guard_active = False
             if normalized_signal in {"red", "yellow"}:
                 stop_distance_m = 1.0
                 if destination_state is not None and len(destination_state) >= 2:
@@ -7244,36 +7845,77 @@ class CPXMPCPlannerBridge:
 
         if bool(self.overspeed_guard_enabled) and float(speed_ref_mps) > 0.1:
             overspeed_mps = float(ego_speed_mps) - float(speed_ref_mps)
-            if overspeed_mps > float(self.overspeed_margin_mps):
-                brake = min(
-                    float(self.overspeed_max_brake),
+            if (
+                not bool(self._overspeed_guard_active)
+                and overspeed_mps > float(self.overspeed_margin_mps)
+            ):
+                self._overspeed_guard_active = True
+            elif (
+                bool(self._overspeed_guard_active)
+                and overspeed_mps <= float(self.overspeed_release_margin_mps)
+            ):
+                self._overspeed_guard_active = False
+            if bool(self._overspeed_guard_active):
+                desired_decel_mps2 = min(
+                    float(self.overspeed_max_decel_mps2),
                     max(
-                        float(self.overspeed_min_brake),
-                        float(self.overspeed_min_brake)
-                        + float(self.overspeed_brake_gain)
-                        * (overspeed_mps - float(self.overspeed_margin_mps)),
+                        0.0,
+                        float(self.overspeed_decel_gain)
+                        * max(0.0, float(overspeed_mps)),
                     ),
                 )
                 guarded_steer_rad = min(
                     max_steer,
                     max(-max_steer, float(steer_rad)),
                 )
+                guarded_accel_mps2 = min(
+                    float(accel_mps2),
+                    -float(desired_decel_mps2),
+                )
                 guarded_control = self._control_from_mpc(
-                    -float(brake) * max_brake_accel,
+                    float(guarded_accel_mps2),
                     guarded_steer_rad,
                 )
                 return (
                     guarded_control,
-                    -float(brake) * max_brake_accel,
+                    float(guarded_accel_mps2),
                     float(guarded_steer_rad),
-                    "overspeed_guard",
+                    "overspeed_guard_hysteresis",
                 )
+        else:
+            self._overspeed_guard_active = False
 
-        normalized_fsm = str(behavior_fsm_state or "").strip().upper()
-        lane_follow_like = (
-            normalized_behavior == "lane_follow"
-            and normalized_fsm in {"", "IDLE", "LANE_KEEP"}
+        front_gap_clear = (
+            front_gap_m is None
+            or float(front_gap_m)
+            >= max(
+                float(self.min_front_gap_m) + 3.0,
+                float(
+                    self.config.get(
+                        "lane_follow_negative_accel_release_min_front_gap_m",
+                        12.0,
+                    )
+                ),
+            )
         )
+        if (
+            bool(self.lane_follow_negative_accel_release_enabled)
+            and bool(lane_follow_like)
+            and normalized_signal in {"green", "unknown", ""}
+            and float(speed_ref_mps) - float(ego_speed_mps)
+            > float(self.lane_follow_negative_accel_release_error_mps)
+            and float(accel_mps2) < -0.05
+            and abs(float(destination_lateral_m))
+            <= float(self.lane_follow_negative_accel_release_max_lateral_m)
+            and bool(front_gap_clear)
+        ):
+            return (
+                self._control_from_mpc(0.0, float(steer_rad)),
+                0.0,
+                float(steer_rad),
+                "lane_follow_negative_accel_release",
+            )
+
         launch_guard_reason = self._low_speed_launch_ramp_reason(
             lane_follow_like=bool(lane_follow_like),
             ego_transform=ego_transform,

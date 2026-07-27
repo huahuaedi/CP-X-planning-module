@@ -104,6 +104,7 @@ def validate_reference_contract(
         violations.append("horizon_too_short")
 
     points: list[tuple[float, float]] = []
+    point_samples: list[Mapping[str, object]] = []
     speeds: list[float] = []
     lane_ids: list[int] = []
     progress_values: list[float] = []
@@ -118,6 +119,7 @@ def validate_reference_contract(
             violations.append(f"sample_{index}_not_finite")
             continue
         points.append((x_m, y_m))
+        point_samples.append(sample)
         lane_ids.append(_to_int(sample.get("lane_id", contract.expected_lane_id), contract.expected_lane_id))
         speed = _sample_speed_mps(sample)
         if speed is not None:
@@ -150,8 +152,12 @@ def validate_reference_contract(
     ):
         bad_lanes = [
             lane_id
-            for lane_id in lane_ids
-            if int(lane_id) != 0 and int(lane_id) != int(contract.expected_lane_id)
+            for lane_id, sample in zip(lane_ids, point_samples)
+            if (
+                int(lane_id) != 0
+                and int(lane_id) != int(contract.expected_lane_id)
+                and not _is_longitudinal_lane_successor(sample)
+            )
         ]
         if bad_lanes:
             violations.append("lane_id_transition_not_allowed")
@@ -199,6 +205,7 @@ def validate_reference_contract(
                 y_m=dest_y,
                 reference_points=points,
                 reference_lane_ids=lane_ids,
+                reference_samples=point_samples,
                 expected_lane_id=(
                     0
                     if bool(contract.allow_route_branch)
@@ -228,6 +235,13 @@ def validate_reference_contract(
     result.violations = list(dict.fromkeys(violations))
     result.valid = not bool(result.violations)
     return result
+
+
+def _is_longitudinal_lane_successor(sample: Mapping[str, object]) -> bool:
+    """Return whether a lane-id change is a trusted CARLA topology successor."""
+
+    transition_kind = str(sample.get("lane_transition_kind", "")).strip().lower()
+    return transition_kind == "longitudinal_successor"
 
 
 def _mode_defaults(mode: str) -> Mapping[str, object]:
@@ -300,12 +314,22 @@ def _nearest_lane_error_m(
     y_m: float,
     reference_points: Sequence[tuple[float, float]],
     reference_lane_ids: Sequence[int],
+    reference_samples: Sequence[Mapping[str, object]],
     expected_lane_id: int,
 ) -> float:
     candidates = [
         point
-        for point, lane_id in zip(reference_points, reference_lane_ids)
-        if int(expected_lane_id) == 0 or int(lane_id) == 0 or int(lane_id) == int(expected_lane_id)
+        for point, lane_id, sample in zip(
+            reference_points,
+            reference_lane_ids,
+            reference_samples,
+        )
+        if (
+            int(expected_lane_id) == 0
+            or int(lane_id) == 0
+            or int(lane_id) == int(expected_lane_id)
+            or _is_longitudinal_lane_successor(sample)
+        )
     ]
     if not candidates:
         candidates = list(reference_points)

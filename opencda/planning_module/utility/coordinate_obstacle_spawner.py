@@ -28,16 +28,33 @@ from utility.global_planner import world_heading_rad
 
 
 def _custom_waypoint_transform(waypoint, carla):
+    """Build a `carla.Transform` from either of the two waypoint shapes this
+    project's `map_planner.get_waypoint(...)` can return: the custom
+    AD-map-backed adapter's waypoint (a `.position` dict, used when
+    `planning.global_planner_mode` selects the custom Dijkstra/A* backend)
+    or a raw `carla.Waypoint` (`.transform.location`, returned by the legacy
+    CARLA-native `astar` backend). `world_heading_rad` already handles both
+    shapes; only the position lookup needs the same fallback.
+    """
+
     if waypoint is None:
         return None
-    position = waypoint.position
+    position = getattr(waypoint, "position", None)
     heading_rad = world_heading_rad(waypoint)
+    if position is not None:
+        x_m = float(position["x"])
+        y_m = float(position["y"])
+        z_m = float(position.get("z", 0.0))
+    else:
+        transform = getattr(waypoint, "transform", None)
+        location = getattr(transform, "location", None)
+        if location is None:
+            return None
+        x_m = float(location.x)
+        y_m = float(location.y)
+        z_m = float(location.z)
     return carla.Transform(
-        carla.Location(
-            x=float(position["x"]),
-            y=float(position["y"]),
-            z=float(position.get("z", 0.0)),
-        ),
+        carla.Location(x=x_m, y=y_m, z=z_m),
         carla.Rotation(yaw=math.degrees(float(heading_rad or 0.0))),
     )
 

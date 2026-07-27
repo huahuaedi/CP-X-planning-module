@@ -248,7 +248,7 @@ class OpenCDADebugViewer:
         ego_px = project_world_xy(float(ego_xy[0]), float(ego_xy[1]))
         pygame.draw.circle(overlay, (45, 185, 255), ego_px, 5)
         pygame.draw.circle(overlay, (5, 8, 10), ego_px, 5, width=1)
-        label = self.font.render("GLOBAL ROUTE", True, (235, 235, 235)) if self.font else None
+        label = self.font.render("CARLA ROUTE GEOMETRY", True, (235, 235, 235)) if self.font else None
         if label is not None:
             overlay.blit(label, (8, 6))
         surface.blit(overlay, rect.topleft)
@@ -324,12 +324,13 @@ class OpenCDADebugViewer:
             f"objects={len(objects.get('vehicles', []) or [])}  traffic_lights={len(objects.get('traffic_lights', []) or [])}  v2x_nearby={len(getattr(ego_vm.v2x_manager, 'cav_nearby', {}) or {})}",
             f"cp_source={cpx_debug.get('cp_provider_source', '')}  native_cp={cpx_debug.get('native_opencda_available', '')}  cp_obs={cpx_debug.get('cp_obstacle_count', '')} cp_ctrl={cpx_debug.get('cp_control_count', '')}",
             f"behavior={cpx_debug.get('behavior_decision', '')}  fsm={cpx_debug.get('behavior_fsm_state', '')}  target_lane={cpx_debug.get('behavior_target_lane_id', '')}",
+            f"scenario={cpx_debug.get('scenario_fsm_state', '')}  turn_ahead={cpx_debug.get('carla_upcoming_turn_direction', '')} dist={cpx_debug.get('carla_upcoming_turn_distance_m', '')}",
             f"lane current={cpx_debug.get('current_lane_id', '')}  dest_lane={cpx_debug.get('destination_lane_id', '')}",
-            f"ref={cpx_debug.get('reference_source', '')}  stage={cpx_debug.get('reference_pipeline_stage', '')}  intent={cpx_debug.get('reference_pipeline_intent', '')}",
+            f"ref={cpx_debug.get('final_reference_geometry_source', cpx_debug.get('reference_source', ''))}  stage={cpx_debug.get('reference_pipeline_stage', '')}  intent={cpx_debug.get('reference_pipeline_intent', '')}",
             f"ref_geom first_fwd={cpx_debug.get('reference_first_forward_m', '')} first_lat={cpx_debug.get('reference_first_lateral_m', '')} lane_pts={len(cpx_debug.get('lane_reference_points', []) or [])}",
             f"ref_fallback={cpx_debug.get('reference_pipeline_fallback', '')}",
             f"front_gap={cpx_debug.get('front_gap_m', '')}  stop_goal={cpx_debug.get('stop_goal_active', '')}",
-            f"traffic={cpx_debug.get('traffic_signal_state', '')} from_cp={cpx_debug.get('traffic_control_from_cp', '')}",
+            f"traffic raw={cpx_debug.get('traffic_signal_raw_state', '')} memory={cpx_debug.get('traffic_signal_filtered_state', '')} behavior={cpx_debug.get('traffic_signal_behavior_state', cpx_debug.get('traffic_signal_state', ''))} from_cp={cpx_debug.get('traffic_control_from_cp', '')}",
             f"planner_input cp_ctrl={cpx_debug.get('planner_input_cp_traffic_control_count', '')} pred_risk={cpx_debug.get('planner_input_prediction_risky_lane_count', '')} objs={cpx_debug.get('planner_input_perception_planning_count', '')}",
             f"mpc_status={cpx_debug.get('mpc_status', '')}  solve_ms={cpx_debug.get('mpc_solve_time_ms', '')} profile={cpx_debug.get('mpc_cost_profile', '')}",
             f"decision={cpx_debug.get('decision_final_action', '')} source={cpx_debug.get('decision_control_source', '')} veto={cpx_debug.get('decision_veto_count', '')}",

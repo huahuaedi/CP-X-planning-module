@@ -119,6 +119,48 @@ class SafetySupervisorTest(unittest.TestCase):
         self.assertEqual(control.throttle, 0.35)
         self.assertEqual(control.brake, 0.0)
 
+    def test_stale_ran_light_releases_after_lane_follow_resume(self):
+        supervisor = SafetySupervisor()
+        control, reason = supervisor.filter_control(
+            control=_Control(throttle=0.4),
+            carla_module=_Carla,
+            safety_manager=_SafetyManager({"ran_light": True}),
+            behavior_decision="lane_follow",
+            traffic_signal_state="unknown",
+            stop_goal_active=False,
+            planner_accel_mps2=1.0,
+        )
+        self.assertEqual(reason, "safety_supervisor_release:ran_light")
+        self.assertEqual(control.throttle, 0.4)
+        self.assertEqual(control.brake, 0.0)
+
+    def test_ran_light_still_stops_during_active_red_stop(self):
+        supervisor = SafetySupervisor()
+        control, reason = supervisor.filter_control(
+            control=_Control(throttle=0.4),
+            carla_module=_Carla,
+            safety_manager=_SafetyManager({"ran_light": True}),
+            behavior_decision="stop_at_intersection",
+            traffic_signal_state="red",
+            stop_goal_active=True,
+            planner_accel_mps2=0.5,
+        )
+        self.assertEqual(reason, "safety_supervisor_emergency_stop:ran_light")
+        self.assertEqual(control.brake, 1.0)
+
+    def test_rate_limit_does_not_mix_throttle_and_brake(self):
+        supervisor = SafetySupervisor(max_throttle_delta=0.45)
+        supervisor._last_control = _Control(throttle=0.5)
+
+        control, reason = supervisor.filter_control(
+            control=_Control(brake=0.2),
+            carla_module=_Carla,
+        )
+
+        self.assertEqual(reason, "safety_supervisor_rate_limit")
+        self.assertEqual(control.throttle, 0.0)
+        self.assertAlmostEqual(control.brake, 0.2)
+
 
 if __name__ == "__main__":
     unittest.main()

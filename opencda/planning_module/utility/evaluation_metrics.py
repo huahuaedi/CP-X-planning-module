@@ -179,6 +179,8 @@ class EvaluationMetricsRecorder:
     min_ttc_s: float = float("inf")
     max_drac_mps2: float = 0.0
     min_pet_s: float = float("inf")
+    road_boundary_breach_count: int = 0
+    road_boundary_sample_count: int = 0
     _last_ego_xy: Tuple[float, float] | None = None
     _last_ego_bin: Tuple[int, int] | None = None
     _last_ego_bin_time_s: float | None = None
@@ -248,6 +250,47 @@ class EvaluationMetricsRecorder:
         for key in ("Cost_ref", "Cost_LaneCenter", "Cost_RoadBoundary", "Cost_Repulsive", "Cost_Control"):
             raw = terms.get(key)
             sample[key] = None if raw is None or not math.isfinite(float(raw)) else float(raw)
+
+    def record_road_boundary(
+        self,
+        *,
+        sample_valid: bool,
+        lateral_offset_m: float | None = None,
+        lane_width_m: float | None = None,
+        ego_half_width_m: float | None = None,
+        clearance_m: float | None = None,
+        breach: bool = False,
+    ) -> None:
+        """Patch the latest sample and accumulate physical lane-envelope breaches."""
+
+        if not self.samples:
+            return
+        sample = self.samples[-1]
+        sample["road_boundary_sample_valid"] = bool(sample_valid)
+        if not bool(sample_valid):
+            return
+        self.road_boundary_sample_count += 1
+        if bool(breach):
+            self.road_boundary_breach_count += 1
+        sample.update(
+            {
+                "road_boundary_lateral_offset_m": lateral_offset_m,
+                "road_boundary_lane_width_m": lane_width_m,
+                "road_boundary_ego_half_width_m": ego_half_width_m,
+                "road_boundary_clearance_m": clearance_m,
+                "road_boundary_breach": bool(breach),
+                "road_boundary_breach_count": int(
+                    self.road_boundary_breach_count
+                ),
+                "road_boundary_sample_count": int(
+                    self.road_boundary_sample_count
+                ),
+                "road_boundary_breach_rate": (
+                    float(self.road_boundary_breach_count)
+                    / float(self.road_boundary_sample_count)
+                ),
+            }
+        )
 
     def record_planned_trajectory(
         self,
@@ -455,6 +498,14 @@ class EvaluationMetricsRecorder:
             "min_ttc_s": None if not math.isfinite(self.min_ttc_s) else float(self.min_ttc_s),
             "min_pet_s": None if not math.isfinite(self.min_pet_s) else float(self.min_pet_s),
             "max_drac_mps2": None if not math.isfinite(self.max_drac_mps2) else float(self.max_drac_mps2),
+            "road_boundary_breach_count": int(self.road_boundary_breach_count),
+            "road_boundary_sample_count": int(self.road_boundary_sample_count),
+            "road_boundary_breach_rate": (
+                float(self.road_boundary_breach_count)
+                / float(self.road_boundary_sample_count)
+                if int(self.road_boundary_sample_count) > 0
+                else None
+            ),
             "mpc_plan_attempts": int(self.mpc_plan_attempts),
             "mpc_plan_successes": int(self.mpc_plan_successes),
             "mpc_plan_success_rate": float(success_rate),
@@ -514,6 +565,15 @@ def write_planning_metrics_artifacts(
         "Cost_RoadBoundary",
         "Cost_Repulsive",
         "Cost_Control",
+        "road_boundary_sample_valid",
+        "road_boundary_lateral_offset_m",
+        "road_boundary_lane_width_m",
+        "road_boundary_ego_half_width_m",
+        "road_boundary_clearance_m",
+        "road_boundary_breach",
+        "road_boundary_breach_count",
+        "road_boundary_sample_count",
+        "road_boundary_breach_rate",
     ]
     with open(csv_path, "w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)

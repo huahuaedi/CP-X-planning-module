@@ -113,6 +113,14 @@ class EvaluationMetricsTests(unittest.TestCase):
         recorder.record_collision(event_id="1:42")
         recorder.record_mpc_status({"solver_status": "solved"})
         recorder.record_mpc_status({"solver_status": "maximum iterations reached"})
+        recorder.record_road_boundary(
+            sample_valid=True,
+            lateral_offset_m=1.0,
+            lane_width_m=3.5,
+            ego_half_width_m=1.0,
+            clearance_m=-0.25,
+            breach=True,
+        )
 
         summary = recorder.summary()
         self.assertEqual(summary["collision_count"], 1)
@@ -123,6 +131,9 @@ class EvaluationMetricsTests(unittest.TestCase):
         self.assertAlmostEqual(summary["mpc_plan_success_rate"], 0.5)
         self.assertIsNotNone(summary["min_ttc_s"])
         self.assertIsNotNone(summary["max_drac_mps2"])
+        self.assertEqual(summary["road_boundary_breach_count"], 1)
+        self.assertEqual(summary["road_boundary_sample_count"], 1)
+        self.assertAlmostEqual(summary["road_boundary_breach_rate"], 1.0)
 
     def test_write_artifacts_outputs_json_summary_and_timeseries_csv(self):
         recorder = EvaluationMetricsRecorder()
@@ -150,6 +161,7 @@ class EvaluationMetricsTests(unittest.TestCase):
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["sample_index"], "0")
             self.assertIn("nearest_ttc_obstacle_id", rows[0])
+            self.assertIn("road_boundary_breach_rate", rows[0])
 
     def test_writer_includes_nearest_ttc_debug_columns(self):
         recorder = EvaluationMetricsRecorder(ego_length_m=4.0)
