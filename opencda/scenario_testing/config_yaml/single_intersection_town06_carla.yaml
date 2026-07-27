@@ -72,7 +72,9 @@ vehicle_base:
     lane_follow_negative_accel_release_error_mps: 0.05
     lane_follow_negative_accel_release_min_front_gap_m: 12.0
     full_traffic_green_confirm_s: 0.15
-    full_traffic_hold_stop_unknown_until_green: true
+    full_traffic_hold_stop_unknown_until_green: false
+    full_stop_hold_speed_mps: 0.10
+    full_stop_hold_brake: 0.60
     lane_follow_speed_recovery_enabled: true
     lane_follow_speed_recovery_enter_error_mps: 0.20
     lane_follow_speed_recovery_release_error_mps: 0.05
@@ -223,7 +225,9 @@ scenario:
         lane_follow_negative_accel_release_error_mps: 0.05
         lane_follow_negative_accel_release_min_front_gap_m: 12.0
         full_traffic_green_confirm_s: 0.15
-        full_traffic_hold_stop_unknown_until_green: true
+        full_traffic_hold_stop_unknown_until_green: false
+        full_stop_hold_speed_mps: 0.10
+        full_stop_hold_brake: 0.60
         lane_follow_speed_recovery_enabled: true
         lane_follow_speed_recovery_enter_error_mps: 0.20
         lane_follow_speed_recovery_release_error_mps: 0.05

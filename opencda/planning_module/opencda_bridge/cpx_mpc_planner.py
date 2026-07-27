@@ -703,6 +703,7 @@ class CPXMPCPlannerBridge:
         self._full_launch_start_xy: tuple[float, float] | None = None
         self._full_latched_stop_target: dict[str, object] | None = None
         self._full_latched_stop_state = "unknown"
+        self._full_signal_actor_id = ""
         self._mode2_traffic_memory = _Mode2TrafficLightMemory(
             hold_unknown_s=float(self.config.get("mode2_traffic_unknown_hold_s", 1.5)),
             hold_green_unknown_s=float(
@@ -718,7 +719,7 @@ class CPXMPCPlannerBridge:
             hold_stop_unknown_until_green=bool(
                 self.config.get(
                     "full_traffic_hold_stop_unknown_until_green",
-                    True,
+                    False,
                 )
             ),
         )
@@ -1034,6 +1035,7 @@ class CPXMPCPlannerBridge:
             "local_object_count",
             "traffic_signal_state",
             "traffic_signal_raw_state",
+            "traffic_signal_resolved_state",
             "traffic_signal_filtered_state",
             "traffic_signal_behavior_state",
             "traffic_control_from_cp",
@@ -1697,8 +1699,32 @@ class CPXMPCPlannerBridge:
             behavior_decision=str(behavior_debug.get("decision", "")),
             stop_goal_active=bool(mpc_stop_goal_active),
         )
+        stationary_traffic_stop_hold = (
+            not bool(candidate_hard_gate_reason)
+            and bool(mpc_stop_goal_active)
+            and float(ego_speed_mps)
+            <= max(
+                0.0,
+                float(self.config.get("full_stop_hold_speed_mps", 0.10)),
+            )
+            and str(behavior_debug.get("decision", "")).strip().lower()
+            in {"stop_at_intersection", "stop_sign"}
+            and str(behavior_debug.get("traffic_signal_state", "")).strip().lower()
+            in {"red", "yellow"}
+        )
         if str(candidate_hard_gate_reason):
             self.control_buffer.reset(reason="control_buffer_reference_hard_veto")
+            reset_trajectory_memory = getattr(
+                self._full_trajectory_memory, "reset", None
+            )
+            if callable(reset_trajectory_memory):
+                reset_trajectory_memory()
+        elif bool(stationary_traffic_stop_hold):
+            self.control_buffer.update_from_solution(
+                u_solution=[[0.0, 0.0]],
+                plan_time_s=float(sim_time_s),
+                dt_s=float(self.mpc.dt_s),
+            )
             reset_trajectory_memory = getattr(
                 self._full_trajectory_memory, "reset", None
             )
@@ -1707,15 +1733,21 @@ class CPXMPCPlannerBridge:
         try:
             if str(candidate_hard_gate_reason):
                 raise RuntimeError(str(candidate_hard_gate_reason))
-            force_replan = bool(mpc_stop_goal_active) or str(
-                behavior_debug.get("decision", "")
-            ) in {
-                "stop_at_intersection",
-                "stop_sign",
-                "emergency_brake",
-                "intersection_turn_left",
-                "intersection_turn_right",
-            } or bool(mode_transition_guard_reason)
+            force_replan = (
+                not bool(stationary_traffic_stop_hold)
+                and (
+                    bool(mpc_stop_goal_active)
+                    or str(behavior_debug.get("decision", ""))
+                    in {
+                        "stop_at_intersection",
+                        "stop_sign",
+                        "emergency_brake",
+                        "intersection_turn_left",
+                        "intersection_turn_right",
+                    }
+                    or bool(mode_transition_guard_reason)
+                )
+            )
             mpc_replan_executed = bool(
                 self.control_buffer.should_replan(
                     sim_time_s=float(sim_time_s),
@@ -1750,9 +1782,16 @@ class CPXMPCPlannerBridge:
                 if buffered is None:
                     raise RuntimeError("MPC control buffer empty")
                 accel_mps2, steer_rad, _buffer_reason = buffered
-                mpc_status = "buffer_reuse"
+                mpc_status = (
+                    "stop_hold_direct"
+                    if bool(stationary_traffic_stop_hold)
+                    else "buffer_reuse"
+                )
             control = self._control_from_mpc(accel_mps2, steer_rad)
-            if bool(self.config.get("full_trajectory_memory_enabled", True)):
+            if (
+                bool(self.config.get("full_trajectory_memory_enabled", True))
+                and not bool(stationary_traffic_stop_hold)
+            ):
                 (
                     control,
                     accel_mps2,
@@ -1887,6 +1926,9 @@ class CPXMPCPlannerBridge:
             "traffic_signal_state": behavior_debug.get("traffic_signal_state", ""),
             "traffic_signal_raw_state": behavior_debug.get(
                 "traffic_signal_raw_state", ""
+            ),
+            "traffic_signal_resolved_state": behavior_debug.get(
+                "traffic_signal_resolved_state", ""
             ),
             "traffic_signal_filtered_state": behavior_debug.get(
                 "traffic_signal_filtered_state", ""
@@ -2829,6 +2871,63 @@ class CPXMPCPlannerBridge:
         self._full_latched_stop_state = str(state)
         return dict(latched), "stop_target_latch_create"
 
+    def _resolve_full_traffic_state_from_carla_actor(
+        self,
+        *,
+        raw_state: str,
+        signal_context: Mapping[str, object] | None,
+    ) -> tuple[str, str]:
+        """Resolve a temporarily missing CP signal from its latched CARLA actor."""
+
+        state = str(raw_state or "unknown").strip().lower()
+        context = dict(signal_context or {})
+        actor_id = str(
+            context.get(
+                "signal_actor_id",
+                context.get("control_id", context.get("cp_control_id", "")),
+            )
+            or ""
+        ).strip()
+        if actor_id and state in {"red", "yellow", "green"}:
+            self._full_signal_actor_id = str(actor_id)
+
+        should_query_latched_actor = (
+            state == "unknown"
+            and bool(self._full_signal_actor_id)
+            and (
+                self._full_latched_stop_target is not None
+                or str(self._full_latched_stop_state) in {"red", "yellow"}
+            )
+        )
+        if not bool(should_query_latched_actor):
+            return str(state), ""
+
+        try:
+            numeric_actor_id = int(float(self._full_signal_actor_id))
+            world = self.vehicle_manager.vehicle.get_world()
+            actor = world.get_actor(numeric_actor_id)
+            if actor is None:
+                return str(state), (
+                    f"latched_carla_signal_actor_missing:{numeric_actor_id}"
+                )
+            actor_state = actor.get_state()
+            live_state = str(
+                getattr(actor_state, "name", actor_state) or "unknown"
+            ).split(".")[-1].strip().lower()
+            if live_state in {"red", "yellow", "green"}:
+                return (
+                    str(live_state),
+                    f"latched_carla_signal_actor:{numeric_actor_id}:{live_state}",
+                )
+            return str(state), (
+                f"latched_carla_signal_actor_invalid:{numeric_actor_id}:{live_state}"
+            )
+        except Exception as exc:
+            return str(state), (
+                "latched_carla_signal_actor_error:"
+                f"{type(exc).__name__}"
+            )
+
     def _opencda_local_planner_reference_samples(
         self,
         *,
@@ -3662,6 +3761,15 @@ class CPXMPCPlannerBridge:
             lane_change_gate_reason = "opportunistic_lane_change_suppressed:" + "+".join(reasons)
         signal_context = dict(adapter_output.signal_context)
         source_quality = dict(adapter_output.source_quality)
+        raw_traffic_state = str(
+            planner_input_frame.planning.traffic_control.signal_state
+        )
+        resolved_traffic_state, signal_actor_resolution_reason = (
+            self._resolve_full_traffic_state_from_carla_actor(
+                raw_state=str(raw_traffic_state),
+                signal_context=signal_context,
+            )
+        )
         raw_stop_target = (
             planner_input_frame.planning.traffic_control.stop_target.as_dict()
             if planner_input_frame.planning.traffic_control.stop_target.active
@@ -3669,11 +3777,17 @@ class CPXMPCPlannerBridge:
         )
         filtered_traffic_state, filtered_stop_target, full_traffic_memory_reason = (
             self._full_traffic_memory.update(
-                state=str(planner_input_frame.planning.traffic_control.signal_state),
+                state=str(resolved_traffic_state),
                 stop_target=raw_stop_target,
                 sim_time_s=float(sim_time_s),
             )
         )
+        if str(signal_actor_resolution_reason):
+            full_traffic_memory_reason = (
+                f"{signal_actor_resolution_reason};{full_traffic_memory_reason}"
+                if str(full_traffic_memory_reason)
+                else str(signal_actor_resolution_reason)
+            )
         filtered_stop_target, stop_latch_reason = self._full_latched_stop_target_for_signal(
             traffic_state=str(filtered_traffic_state),
             stop_target=(
@@ -3746,8 +3860,9 @@ class CPXMPCPlannerBridge:
         )
         traffic_stop_approach_reason = str(scenario_decision.reason)
         filtered_signal_context = dict(signal_context or {})
-        filtered_signal_context["raw_signal_state"] = str(
-            planner_input_frame.planning.traffic_control.signal_state
+        filtered_signal_context["raw_signal_state"] = str(raw_traffic_state)
+        filtered_signal_context["resolved_signal_state"] = str(
+            resolved_traffic_state
         )
         filtered_signal_context["signal_state"] = str(filtered_traffic_state)
         filtered_signal_context["behavior_signal_state"] = str(behavior_traffic_state)
@@ -4125,6 +4240,7 @@ class CPXMPCPlannerBridge:
             "traffic_signal_raw_state": str(
                 planner_input_frame.planning.traffic_control.signal_state
             ),
+            "traffic_signal_resolved_state": str(resolved_traffic_state),
             "traffic_signal_filtered_state": str(filtered_traffic_state),
             "traffic_signal_behavior_state": str(behavior_traffic_state),
             "traffic_stop_forward_m": float(traffic_stop_forward_m),
@@ -4470,6 +4586,7 @@ class CPXMPCPlannerBridge:
                 "traffic_signal_raw_state": str(
                     planner_input_frame.planning.traffic_control.signal_state
                 ),
+                "traffic_signal_resolved_state": str(resolved_traffic_state),
                 "traffic_signal_filtered_state": str(filtered_traffic_state),
                 "traffic_signal_behavior_state": str(behavior_traffic_state),
                 "traffic_control_from_cp": bool(planner_input_frame.planning.traffic_control.from_cp),
@@ -5500,6 +5617,15 @@ class CPXMPCPlannerBridge:
             "source": str(selected_control.get("source", "opencda_cp")),
             "cp_control_id": str(selected_control.get("control_id", selected_control.get("id", ""))),
             "control_id": str(selected_control.get("control_id", selected_control.get("id", ""))),
+            "signal_actor_id": str(
+                selected_control.get(
+                    "signal_actor_id",
+                    selected_control.get(
+                        "control_id",
+                        selected_control.get("id", ""),
+                    ),
+                )
+            ),
             "cp_provider_source": str(selected_control.get("provider_source", "")),
             "provider_source": str(selected_control.get("provider_source", "")),
             "from_cp": True,
@@ -7851,6 +7977,28 @@ class CPXMPCPlannerBridge:
             self._overspeed_guard_active = False
             self._lane_follow_speed_recovery_active = False
             if normalized_signal in {"red", "yellow"}:
+                stop_hold_speed_mps = max(
+                    0.0,
+                    float(self.config.get("full_stop_hold_speed_mps", 0.10)),
+                )
+                if float(ego_speed_mps) <= float(stop_hold_speed_mps):
+                    hold_brake = min(
+                        1.0,
+                        max(
+                            0.0,
+                            float(self.config.get("full_stop_hold_brake", 0.60)),
+                        ),
+                    )
+                    return (
+                        carla.VehicleControl(
+                            throttle=0.0,
+                            brake=float(hold_brake),
+                            steer=0.0,
+                        ),
+                        -float(hold_brake) * float(max_brake_accel),
+                        0.0,
+                        "red_yellow_stop_stationary_hold",
+                    )
                 stop_distance_m = 1.0
                 if destination_state is not None and len(destination_state) >= 2:
                     stop_forward_m, _ = self._body_frame_xy(

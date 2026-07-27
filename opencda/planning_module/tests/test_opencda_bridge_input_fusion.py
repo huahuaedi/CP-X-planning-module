@@ -13,7 +13,10 @@ if "carla" not in sys.modules:
             self.z = z
 
     class _VehicleControl:
-        pass
+        def __init__(self, throttle=0.0, brake=0.0, steer=0.0):
+            self.throttle = throttle
+            self.brake = brake
+            self.steer = steer
 
     fake_carla.Location = _Location
     fake_carla.VehicleControl = _VehicleControl
@@ -135,6 +138,43 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         )
         self.assertEqual(reason, "")
         self.assertAlmostEqual(accel, 0.4)
+
+    def test_red_light_stationary_stop_uses_direct_brake_hold(self):
+        bridge = self._longitudinal_guard_bridge()
+        bridge.config.update(
+            {
+                "full_stop_hold_speed_mps": 0.10,
+                "full_stop_hold_brake": 0.60,
+            }
+        )
+        transform = types.SimpleNamespace(
+            location=types.SimpleNamespace(x=0.0, y=0.0),
+            rotation=types.SimpleNamespace(yaw=0.0),
+        )
+
+        control, accel, steer, reason = bridge._apply_control_safety_guards(
+            control=bridge._control_from_mpc(0.5, 0.2),
+            accel_mps2=0.5,
+            steer_rad=0.2,
+            ego_transform=transform,
+            ego_speed_mps=0.05,
+            speed_ref_mps=0.0,
+            destination_state=[1.5, 0.0, 0.0, 0.0, 1],
+            destination_lateral_m=0.0,
+            stop_goal_active=True,
+            behavior_decision="stop_at_intersection",
+            behavior_fsm_state="IDLE",
+            traffic_signal_state="red",
+            front_gap_m=None,
+            sim_time_s=1.0,
+        )
+
+        self.assertEqual(reason, "red_yellow_stop_stationary_hold")
+        self.assertAlmostEqual(control.throttle, 0.0)
+        self.assertAlmostEqual(control.brake, 0.60)
+        self.assertAlmostEqual(control.steer, 0.0)
+        self.assertAlmostEqual(accel, -1.8)
+        self.assertAlmostEqual(steer, 0.0)
 
     def test_lane_follow_releases_unexplained_brake_below_target(self):
         bridge = self._longitudinal_guard_bridge()
@@ -844,6 +884,53 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
             reason,
             "traffic_memory_fail_safe_hold_red_until_green",
         )
+
+    def test_full_mode_resolves_unknown_from_latched_carla_signal_actor(self):
+        signal_actor = types.SimpleNamespace(
+            get_state=lambda: types.SimpleNamespace(name="Green")
+        )
+        world = types.SimpleNamespace(
+            get_actor=lambda actor_id: signal_actor if actor_id == 42 else None
+        )
+        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
+        bridge.vehicle_manager = types.SimpleNamespace(
+            vehicle=types.SimpleNamespace(get_world=lambda: world)
+        )
+        bridge._full_signal_actor_id = ""
+        bridge._full_latched_stop_target = {"x_m": 10.0, "y_m": 0.0}
+        bridge._full_latched_stop_state = "red"
+
+        state, reason = bridge._resolve_full_traffic_state_from_carla_actor(
+            raw_state="red",
+            signal_context={"signal_actor_id": "42"},
+        )
+        self.assertEqual(state, "red")
+        self.assertEqual(reason, "")
+        self.assertEqual(bridge._full_signal_actor_id, "42")
+
+        state, reason = bridge._resolve_full_traffic_state_from_carla_actor(
+            raw_state="unknown",
+            signal_context={},
+        )
+        self.assertEqual(state, "green")
+        self.assertEqual(reason, "latched_carla_signal_actor:42:green")
+
+    def test_full_mode_keeps_unknown_when_latched_signal_actor_is_missing(self):
+        world = types.SimpleNamespace(get_actor=lambda _actor_id: None)
+        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
+        bridge.vehicle_manager = types.SimpleNamespace(
+            vehicle=types.SimpleNamespace(get_world=lambda: world)
+        )
+        bridge._full_signal_actor_id = "42"
+        bridge._full_latched_stop_target = {"x_m": 10.0, "y_m": 0.0}
+        bridge._full_latched_stop_state = "red"
+
+        state, reason = bridge._resolve_full_traffic_state_from_carla_actor(
+            raw_state="unknown",
+            signal_context={},
+        )
+        self.assertEqual(state, "unknown")
+        self.assertEqual(reason, "latched_carla_signal_actor_missing:42")
 
     def test_mode2_object_memory_smooths_and_temporarily_holds_tracks(self):
         memory = _Mode2ObjectTrackMemory(alpha=0.5, max_stale_s=0.4)
