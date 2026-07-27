@@ -72,6 +72,12 @@ vehicle_base:
     lane_follow_negative_accel_release_error_mps: 0.05
     lane_follow_negative_accel_release_min_front_gap_m: 12.0
     full_traffic_green_confirm_s: 0.15
+    full_traffic_hold_stop_unknown_until_green: true
+    lane_follow_speed_recovery_enabled: true
+    lane_follow_speed_recovery_enter_error_mps: 0.20
+    lane_follow_speed_recovery_release_error_mps: 0.05
+    lane_follow_speed_recovery_min_accel_mps2: 0.80
+    lane_follow_speed_recovery_max_lateral_m: 0.50
     low_speed_lateral_recovery_enabled: true
     low_speed_lateral_recovery_speed_mps: 0.8
     low_speed_lateral_recovery_threshold_m: 1.2
@@ -217,6 +223,12 @@ scenario:
         lane_follow_negative_accel_release_error_mps: 0.05
         lane_follow_negative_accel_release_min_front_gap_m: 12.0
         full_traffic_green_confirm_s: 0.15
+        full_traffic_hold_stop_unknown_until_green: true
+        lane_follow_speed_recovery_enabled: true
+        lane_follow_speed_recovery_enter_error_mps: 0.20
+        lane_follow_speed_recovery_release_error_mps: 0.05
+        lane_follow_speed_recovery_min_accel_mps2: 0.80
+        lane_follow_speed_recovery_max_lateral_m: 0.50
         low_speed_lateral_recovery_enabled: true
         low_speed_lateral_recovery_speed_mps: 0.8
         low_speed_lateral_recovery_threshold_m: 1.2

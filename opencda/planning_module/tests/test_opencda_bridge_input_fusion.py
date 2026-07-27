@@ -54,6 +54,12 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         bridge.lane_follow_negative_accel_release_enabled = True
         bridge.lane_follow_negative_accel_release_error_mps = 0.05
         bridge.lane_follow_negative_accel_release_max_lateral_m = 0.5
+        bridge.lane_follow_speed_recovery_enabled = True
+        bridge.lane_follow_speed_recovery_enter_error_mps = 0.20
+        bridge.lane_follow_speed_recovery_release_error_mps = 0.05
+        bridge.lane_follow_speed_recovery_min_accel_mps2 = 0.80
+        bridge.lane_follow_speed_recovery_max_lateral_m = 0.50
+        bridge._lane_follow_speed_recovery_active = False
         bridge.full_low_speed_launch_enabled = False
         bridge.full_low_speed_launch_speed_mps = 0.35
         bridge.full_low_speed_launch_min_accel_mps2 = 0.8
@@ -183,6 +189,80 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
 
         self.assertEqual(reason, "")
         self.assertAlmostEqual(accel, -0.35)
+
+    def test_lane_follow_speed_recovery_holds_minimum_acceleration(self):
+        bridge = self._longitudinal_guard_bridge()
+        transform = types.SimpleNamespace(
+            location=types.SimpleNamespace(x=0.0, y=0.0),
+            rotation=types.SimpleNamespace(yaw=0.0),
+        )
+
+        _, accel, _, reason = bridge._apply_control_safety_guards(
+            control=bridge._control_from_mpc(0.1, 0.0),
+            accel_mps2=0.1,
+            steer_rad=0.0,
+            ego_transform=transform,
+            ego_speed_mps=2.7,
+            speed_ref_mps=3.0,
+            destination_state=[8.0, 0.0, 3.0, 0.0, 1],
+            destination_lateral_m=0.0,
+            stop_goal_active=False,
+            behavior_decision="lane_follow",
+            behavior_fsm_state="IDLE",
+            traffic_signal_state="unknown",
+            front_gap_m=18.0,
+            sim_time_s=1.0,
+        )
+
+        self.assertEqual(reason, "lane_follow_speed_recovery")
+        self.assertAlmostEqual(accel, 0.8)
+
+        _, accel, _, reason = bridge._apply_control_safety_guards(
+            control=bridge._control_from_mpc(0.2, 0.0),
+            accel_mps2=0.2,
+            steer_rad=0.0,
+            ego_transform=transform,
+            ego_speed_mps=2.96,
+            speed_ref_mps=3.0,
+            destination_state=[8.0, 0.0, 3.0, 0.0, 1],
+            destination_lateral_m=0.0,
+            stop_goal_active=False,
+            behavior_decision="lane_follow",
+            behavior_fsm_state="IDLE",
+            traffic_signal_state="unknown",
+            front_gap_m=18.0,
+            sim_time_s=1.1,
+        )
+
+        self.assertEqual(reason, "")
+        self.assertAlmostEqual(accel, 0.2)
+
+    def test_lane_follow_speed_recovery_does_not_override_close_gap(self):
+        bridge = self._longitudinal_guard_bridge()
+        transform = types.SimpleNamespace(
+            location=types.SimpleNamespace(x=0.0, y=0.0),
+            rotation=types.SimpleNamespace(yaw=0.0),
+        )
+
+        _, accel, _, reason = bridge._apply_control_safety_guards(
+            control=bridge._control_from_mpc(0.1, 0.0),
+            accel_mps2=0.1,
+            steer_rad=0.0,
+            ego_transform=transform,
+            ego_speed_mps=2.5,
+            speed_ref_mps=3.0,
+            destination_state=[8.0, 0.0, 3.0, 0.0, 1],
+            destination_lateral_m=0.0,
+            stop_goal_active=False,
+            behavior_decision="lane_follow",
+            behavior_fsm_state="IDLE",
+            traffic_signal_state="green",
+            front_gap_m=8.0,
+            sim_time_s=1.0,
+        )
+
+        self.assertEqual(reason, "")
+        self.assertAlmostEqual(accel, 0.1)
 
     def test_road_boundary_metrics_uses_vehicle_footprint(self):
         bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
@@ -741,6 +821,29 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         self.assertEqual(state, "green")
         self.assertIsNone(target)
         self.assertEqual(reason, "traffic_memory_green_release")
+
+    def test_full_mode_holds_red_through_long_unknown_until_green(self):
+        memory = _Mode2TrafficLightMemory(
+            hold_unknown_s=1.5,
+            hold_green_unknown_s=0.25,
+            green_confirm_s=0.15,
+            hold_stop_unknown_until_green=True,
+        )
+        stop_target = {"x_m": 10.0, "y_m": 0.0}
+        memory.update(state="red", stop_target=stop_target, sim_time_s=1.0)
+
+        state, target, reason = memory.update(
+            state="unknown",
+            stop_target=None,
+            sim_time_s=5.0,
+        )
+
+        self.assertEqual(state, "red")
+        self.assertEqual(target, stop_target)
+        self.assertEqual(
+            reason,
+            "traffic_memory_fail_safe_hold_red_until_green",
+        )
 
     def test_mode2_object_memory_smooths_and_temporarily_holds_tracks(self):
         memory = _Mode2ObjectTrackMemory(alpha=0.5, max_stale_s=0.4)

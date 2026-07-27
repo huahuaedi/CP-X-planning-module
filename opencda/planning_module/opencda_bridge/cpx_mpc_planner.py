@@ -56,12 +56,16 @@ class _Mode2TrafficLightMemory:
         hold_unknown_s: float = 0.8,
         hold_green_unknown_s: float = 0.2,
         green_confirm_s: float = 0.0,
+        hold_stop_unknown_until_green: bool = False,
     ) -> None:
         self.hold_unknown_s = max(0.0, float(hold_unknown_s))
         self.hold_green_unknown_s = max(
             0.0, float(hold_green_unknown_s)
         )
         self.green_confirm_s = max(0.0, float(green_confirm_s))
+        self.hold_stop_unknown_until_green = bool(
+            hold_stop_unknown_until_green
+        )
         self._last_stop_state = "unknown"
         self._last_stop_target: dict[str, object] | None = None
         self._hold_until_s = -float("inf")
@@ -107,6 +111,17 @@ class _Mode2TrafficLightMemory:
         ):
             reason = f"traffic_memory_hold_{self._last_stop_state}"
             return str(self._last_stop_state), self._last_stop_target, reason
+        if (
+            normalized_state == "unknown"
+            and bool(self.hold_stop_unknown_until_green)
+            and self._last_stop_state in {"red", "yellow"}
+            and self._last_stop_target is not None
+        ):
+            return (
+                str(self._last_stop_state),
+                self._last_stop_target,
+                f"traffic_memory_fail_safe_hold_{self._last_stop_state}_until_green",
+            )
         if (
             normalized_state == "unknown"
             and float(sim_time_s) <= float(self._hold_until_s)
@@ -700,6 +715,12 @@ class CPXMPCPlannerBridge:
                 self.config.get("full_traffic_green_unknown_hold_s", 0.25)
             ),
             green_confirm_s=float(self.config.get("full_traffic_green_confirm_s", 0.15)),
+            hold_stop_unknown_until_green=bool(
+                self.config.get(
+                    "full_traffic_hold_stop_unknown_until_green",
+                    True,
+                )
+            ),
         )
         self._mode2_object_memory = _Mode2ObjectTrackMemory(
             alpha=float(self.config.get("mode2_object_memory_alpha", 0.55)),
@@ -789,6 +810,49 @@ class CPXMPCPlannerBridge:
                 )
             ),
         )
+        self.lane_follow_speed_recovery_enabled = bool(
+            self.config.get("lane_follow_speed_recovery_enabled", True)
+        )
+        self.lane_follow_speed_recovery_enter_error_mps = max(
+            0.0,
+            float(
+                self.config.get(
+                    "lane_follow_speed_recovery_enter_error_mps",
+                    0.20,
+                )
+            ),
+        )
+        self.lane_follow_speed_recovery_release_error_mps = max(
+            0.0,
+            min(
+                float(self.lane_follow_speed_recovery_enter_error_mps),
+                float(
+                    self.config.get(
+                        "lane_follow_speed_recovery_release_error_mps",
+                        0.05,
+                    )
+                ),
+            ),
+        )
+        self.lane_follow_speed_recovery_min_accel_mps2 = max(
+            0.0,
+            float(
+                self.config.get(
+                    "lane_follow_speed_recovery_min_accel_mps2",
+                    0.80,
+                )
+            ),
+        )
+        self.lane_follow_speed_recovery_max_lateral_m = max(
+            0.0,
+            float(
+                self.config.get(
+                    "lane_follow_speed_recovery_max_lateral_m",
+                    0.50,
+                )
+            ),
+        )
+        self._lane_follow_speed_recovery_active = False
         self.low_speed_lateral_recovery_enabled = bool(
             self.config.get("low_speed_lateral_recovery_enabled", False)
         )
@@ -7785,6 +7849,7 @@ class CPXMPCPlannerBridge:
 
         if bool(stop_goal_active):
             self._overspeed_guard_active = False
+            self._lane_follow_speed_recovery_active = False
             if normalized_signal in {"red", "yellow"}:
                 stop_distance_m = 1.0
                 if destination_state is not None and len(destination_state) >= 2:
@@ -7856,6 +7921,7 @@ class CPXMPCPlannerBridge:
             ):
                 self._overspeed_guard_active = False
             if bool(self._overspeed_guard_active):
+                self._lane_follow_speed_recovery_active = False
                 desired_decel_mps2 = min(
                     float(self.overspeed_max_decel_mps2),
                     max(
@@ -7898,6 +7964,47 @@ class CPXMPCPlannerBridge:
                 ),
             )
         )
+        speed_recovery_context_valid = (
+            bool(self.lane_follow_speed_recovery_enabled)
+            and bool(lane_follow_like)
+            and normalized_signal in {"green", "unknown", ""}
+            and abs(float(destination_lateral_m))
+            <= float(self.lane_follow_speed_recovery_max_lateral_m)
+            and bool(front_gap_clear)
+        )
+        speed_error_mps = float(speed_ref_mps) - float(ego_speed_mps)
+        if not bool(speed_recovery_context_valid):
+            self._lane_follow_speed_recovery_active = False
+        elif (
+            bool(self._lane_follow_speed_recovery_active)
+            and float(speed_error_mps)
+            <= float(self.lane_follow_speed_recovery_release_error_mps)
+        ):
+            self._lane_follow_speed_recovery_active = False
+        elif (
+            not bool(self._lane_follow_speed_recovery_active)
+            and float(speed_error_mps)
+            > float(self.lane_follow_speed_recovery_enter_error_mps)
+        ):
+            self._lane_follow_speed_recovery_active = True
+        if (
+            bool(self._lane_follow_speed_recovery_active)
+            and float(accel_mps2)
+            < float(self.lane_follow_speed_recovery_min_accel_mps2)
+        ):
+            recovery_accel_mps2 = min(
+                float(self.mpc.constraints.max_acceleration_mps2),
+                float(self.lane_follow_speed_recovery_min_accel_mps2),
+            )
+            return (
+                self._control_from_mpc(
+                    float(recovery_accel_mps2),
+                    float(steer_rad),
+                ),
+                float(recovery_accel_mps2),
+                float(steer_rad),
+                "lane_follow_speed_recovery",
+            )
         if (
             bool(self.lane_follow_negative_accel_release_enabled)
             and bool(lane_follow_like)
