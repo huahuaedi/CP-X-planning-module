@@ -1,0 +1,29 @@
+# Saved cav2/cav3 blocks removed from
+# single_intersection_town06_carla.yaml for single-CAV testing.
+# To restore multi-CAV: paste this content back at the end of
+# `scenario.single_cav_list` in that file (same indentation level
+# as `- name: cav1`).
+    - name: cav2
+      # Snap each added CAV to its own CARLA lane centre. Reusing cav1's x
+      # coordinate at another route station starts the controller off-centre.
+      spawn_position: [5.936, 105.033, 0.3, 0, -92, 0]
+      # CARLA GRP verified route:
+      # LANEFOLLOW -> CHANGELANERIGHT -> LANEFOLLOW -> RIGHT -> LANEFOLLOW.
+      destination: [50.0, 52.38, 0.3]
+      v2x:
+        communication_range: 60
+      behavior:
+        local_planner:
+          debug_trajectory: true
+          debug: true
+    - name: cav3
+      spawn_position: [8.636, 144.726, 0.3, 0, -79.7, 0]
+      # CARLA GRP verified route:
+      # LANEFOLLOW -> CHANGELANERIGHT -> LANEFOLLOW -> RIGHT -> LANEFOLLOW.
+      destination: [50.0, 52.38, 0.3]
+      v2x:
+        communication_range: 60
+      behavior:
+        local_planner:
+          debug_trajectory: true
+          debug: true

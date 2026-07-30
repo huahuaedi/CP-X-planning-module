@@ -91,6 +91,27 @@ class RouteAuthorizationTest(unittest.TestCase):
         self.assertFalse(auth.allowed)
         self.assertEqual(auth.reason, "target_lane_prediction_risk")
 
+    def test_explicit_route_lane_change_uses_grp_trigger_not_destination_distance(self):
+        auth = authorize_route_lane_change(
+            route_lane_change_allowed=True,
+            current_lane_id=2,
+            route_required_lane_id=1,
+            next_macro_maneuver="Lane Change Right",
+            current_road_option="LANEFOLLOW",
+            remaining_distance_m=120.0,
+            available_lane_ids=[1, 2],
+            lane_safety_scores={1: 0.95},
+            lane_prediction_risks={},
+            preparation_start_distance_m=45.0,
+            latest_start_distance_m=12.0,
+            target_safety_threshold=0.65,
+        )
+
+        self.assertTrue(auth.allowed)
+        self.assertTrue(auth.required_by_route)
+        self.assertEqual(auth.direction, "right")
+        self.assertEqual(auth.target_lane_id, 1)
+
     def test_normalize_straight(self):
         self.assertEqual(normalize_route_maneuver("Continue Straight"), RouteManeuver.GO_STRAIGHT)
 

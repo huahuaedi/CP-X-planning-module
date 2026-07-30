@@ -129,8 +129,11 @@ def run_smoke_scenario(opt, scenario_params, *, town, script_name):
         destination_tolerance_m = float(runtime_cfg.get("destination_tolerance_m", 5.0))
         destination = scenario_params["scenario"]["single_cav_list"][0]["destination"]
         spectator = scenario_manager.world.get_spectator()
+        termination_reason = "max_ticks_reached"
+        completed_ticks = 0
 
         for tick_index in range(max(1, max_ticks)):
+            completed_ticks = int(tick_index) + 1
             _apply_traffic_light_schedule(scenario_manager.world, runtime_cfg, tick_index)
             scenario_manager.tick()
             ego_vehicle = single_cav_list[0].vehicle
@@ -142,7 +145,18 @@ def run_smoke_scenario(opt, scenario_params, *, town, script_name):
             if debug_viewer is not None:
                 debug_viewer.render(single_cav_list)
             if _distance_to_destination(ego_vehicle, destination) <= destination_tolerance_m:
+                termination_reason = "destination_reached"
                 break
+        print(
+            "[CP-X smoke] Scenario finished: reason=%s ticks=%d/%d "
+            "distance_to_destination_m=%.2f"
+            % (
+                str(termination_reason),
+                int(completed_ticks),
+                int(max_ticks),
+                float(_distance_to_destination(ego_vehicle, destination)),
+            )
+        )
 
     finally:
         if eval_manager is not None and bool(

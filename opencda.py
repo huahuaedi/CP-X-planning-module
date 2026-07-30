@@ -16,6 +16,22 @@ from omegaconf import OmegaConf
 from opencda.version import __version__
 
 
+def _load_scenario_config(config_yaml):
+    """Load a scenario YAML with an optional local ``base_config`` overlay."""
+
+    scene_dict = OmegaConf.load(config_yaml)
+    base_config = scene_dict.pop("base_config", None)
+    if not base_config:
+        return scene_dict
+    config_dir = os.path.dirname(config_yaml)
+    base_path = os.path.join(config_dir, str(base_config))
+    if not os.path.isfile(base_path):
+        raise FileNotFoundError(
+            "Scenario base_config not found: %s" % os.path.abspath(base_path)
+        )
+    return OmegaConf.merge(_load_scenario_config(base_path), scene_dict)
+
+
 def arg_parse():
     # create an argument parser
     parser = argparse.ArgumentParser(description="OpenCDA scenario runner.")
@@ -54,9 +70,17 @@ def main():
                                'opencda/scenario_testing/config_yaml/%s.yaml' % opt.test_scenario)
     # load the default yaml file and the scenario yaml file as dictionaries
     default_dict = OmegaConf.load(default_yaml)
-    scene_dict = OmegaConf.load(config_yaml)
+    scene_dict = _load_scenario_config(config_yaml)
     # merge the dictionaries
     scene_dict = OmegaConf.merge(default_dict, scene_dict)
+
+    # PyTorch 1.10/MKL must initialize the YOLO model before Open3D is
+    # imported by the scenario stack. Reversing this order can stall CPU
+    # inference indefinitely in the legacy OpenCDA runtime.
+    if opt.apply_ml:
+        ml_manager_cls = getattr(importlib.import_module(
+            "opencda.customize.ml_libs.ml_manager"), "MLManager")
+        ml_manager_cls()
 
     # import the testing script
     testing_scenario = importlib.import_module(

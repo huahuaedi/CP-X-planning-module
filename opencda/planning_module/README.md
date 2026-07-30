@@ -1,10 +1,20 @@
 # Planning Module
 
-This directory contains the standalone planning stack used by the CARLA scenarios in this repository.
+This directory contains the CP-X planning stack used by OpenCDA and the
+standalone CARLA development scenarios. The authoritative integrated
+architecture and decision ownership table are in
+[`docs/planning_architecture.md`](docs/planning_architecture.md).
 
 ## Entry Point
 
-Run from this directory:
+The supported OpenCDA integration entrypoint is run from the repository root:
+
+```bash
+python opencda.py -t <scenario_name> -v 0.9.12
+```
+
+`main.py` remains available for standalone planner development scenarios. Run
+it from this directory:
 
 ```bash
 python main.py <scenario_name>

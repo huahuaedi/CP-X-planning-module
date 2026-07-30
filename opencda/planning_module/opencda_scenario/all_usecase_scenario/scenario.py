@@ -437,6 +437,25 @@ def _stopping_point(marker: Mapping[str, object]) -> List[float]:
 def _traffic_light_actor_point(actor: Any) -> Dict[str, float] | None:
     """Convert a CARLA signal/trigger transform to a primitive world point."""
 
+    get_stop_waypoints = getattr(actor, "get_stop_waypoints", None)
+    if callable(get_stop_waypoints):
+        try:
+            stop_waypoints = list(get_stop_waypoints() or [])
+        except Exception:
+            stop_waypoints = []
+        if stop_waypoints:
+            stop_location = getattr(
+                getattr(stop_waypoints[0], "transform", None),
+                "location",
+                None,
+            )
+            if stop_location is not None:
+                return {
+                    "x": float(stop_location.x),
+                    "y": float(stop_location.y),
+                    "z": float(getattr(stop_location, "z", 0.0)),
+                }
+
     actor_transform = _object_transform(actor)
     actor_location = getattr(actor_transform, "location", None)
     if actor_location is None:
@@ -539,7 +558,9 @@ def _intersection_signal_state_for_marker(
 
         actor_point = _traffic_light_actor_point(actor)
         signal_waypoint = (
-            None if actor_point is None else map_planner.get_waypoint(actor_point)
+            None
+            if actor_point is None or map_planner is None
+            else map_planner.get_waypoint(actor_point)
         )
         match_details = (
             None
@@ -1256,7 +1277,7 @@ def _maybe_register_intersection_control(
     *,
     runtime_state: Dict[str, object],
     world,
-    map_planner,
+    map_planner=None,
     ego_transform,
     active_global_route_points: Sequence[Sequence[float]],
     sim_time_s: float,

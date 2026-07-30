@@ -122,6 +122,114 @@ def canonical_lane_id_for_waypoint(waypoint) -> int:
     return int(INVALID_LANE_ID)
 
 
+def _lane_identity_key(waypoint) -> tuple[int, int]:
+    return (
+        int(getattr(waypoint, "road_id", 0)),
+        int(getattr(waypoint, "lane_id", 0)),
+    )
+
+
+def lane_hop_offset(from_waypoint, to_waypoint, max_hops: int = 8) -> int | None:
+    """Count the signed ``get_left_lane()``/``get_right_lane()`` hops from
+    ``from_waypoint`` to the same physical lane as ``to_waypoint``.
+
+    ``canonical_lane_id_for_waypoint`` numbers lanes by counting how many
+    driving lanes exist AT THE QUERIED POINT (rightmost = 1, increasing
+    leftward). That count is only meaningful locally: wherever the total
+    lane count changes along a road (a lane merges away, a turn-only lane
+    appears/disappears), the same physical lane a vehicle never left gets a
+    different number before and after. Comparing two such numbers computed
+    at different points along a route -- e.g. "is the vehicle's current
+    lane the same as the lane the route requires it to reach?" -- silently
+    breaks in that case: the numbers can differ, or coincidentally match,
+    without either reflecting whether the vehicle actually changed lanes.
+
+    This instead proves the relationship by walking real lane adjacency, so
+    it stays correct regardless of how the lane count changes in between.
+    Matching is by ``(road_id, lane_id)`` rather than waypoint identity or
+    position, since ``get_left_lane()``/``get_right_lane()`` neighbours can
+    land at a different ``section_id``/longitudinal offset than the target
+    waypoint (see ``_same_lane_group``).
+
+    Returns ``None`` if the two waypoints are not connected within
+    ``max_hops`` lane-to-lane steps (e.g. they are on different roads, such
+    as across a turn onto a cross street, or a respawn/teleport) -- callers
+    should fall back to a fresh, position-only lane count in that case,
+    since there is no meaningful lane identity to carry across an
+    unconnected jump.
+    """
+
+    if from_waypoint is None or to_waypoint is None:
+        return None
+    target_key = _lane_identity_key(to_waypoint)
+    if target_key == _lane_identity_key(from_waypoint):
+        return 0
+
+    left_cursor = from_waypoint
+    for hop in range(1, int(max_hops) + 1):
+        get_left_lane = getattr(left_cursor, "get_left_lane", None)
+        if not callable(get_left_lane):
+            break
+        candidate = get_left_lane()
+        if not _same_lane_group(from_waypoint, candidate):
+            break
+        left_cursor = candidate
+        if _lane_identity_key(candidate) == target_key:
+            return int(hop)
+
+    right_cursor = from_waypoint
+    for hop in range(1, int(max_hops) + 1):
+        get_right_lane = getattr(right_cursor, "get_right_lane", None)
+        if not callable(get_right_lane):
+            break
+        candidate = get_right_lane()
+        if not _same_lane_group(from_waypoint, candidate):
+            break
+        right_cursor = candidate
+        if _lane_identity_key(candidate) == target_key:
+            return -int(hop)
+
+    return None
+
+
+class StableLaneIdTracker:
+    """Track a vehicle's canonical lane id continuously across ticks.
+
+    See ``lane_hop_offset`` for why a freshly recomputed
+    ``canonical_lane_id_for_waypoint`` on every tick is unstable. This
+    tracker only changes its reported id when it can prove, via real lane
+    adjacency, that the vehicle's raw lane actually changed -- so the id
+    stays a stable identity for the whole time the vehicle occupies the
+    same physical lane, independent of how many lanes exist locally.
+    """
+
+    def __init__(self) -> None:
+        self._lane_id: int | None = None
+        self._waypoint = None
+
+    def update(self, waypoint) -> int:
+        if waypoint is None:
+            return int(self._lane_id or 1)
+        if self._waypoint is not None and self._lane_id is not None:
+            hop = lane_hop_offset(self._waypoint, waypoint)
+            if hop is not None:
+                self._lane_id = int(self._lane_id) + int(hop)
+                self._waypoint = waypoint
+                return int(self._lane_id)
+        # First update, or the vehicle's raw lane is not connected to the
+        # previously tracked one within a few hops (e.g. it just completed
+        # a turn onto a cross street, or was respawned/teleported): there is
+        # no continuity to preserve, so start fresh from a local count.
+        fresh_id = int(canonical_lane_id_for_waypoint(waypoint)) or 1
+        self._lane_id = int(fresh_id)
+        self._waypoint = waypoint
+        return int(self._lane_id)
+
+    def reset(self) -> None:
+        self._lane_id = None
+        self._waypoint = None
+
+
 def canonical_lane_waypoint_for_lane_id(waypoint, target_lane_id: int):
     lane_waypoints = canonical_lane_waypoints(waypoint)
     if len(lane_waypoints) == 0:

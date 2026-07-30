@@ -1,0 +1,23 @@
+# Saved cav2/cav3 blocks removed from
+# cpx_lane_change_2lanefree.yaml for single-CAV testing.
+# To restore multi-CAV: paste this content back at the end of
+# `scenario.single_cav_list` in that file (same indentation level
+# as `- name: cav1`).
+    - name: cav2
+      spawn_position: [ -230, 8.3, 0.3, 0, 0, 0 ]
+      destination: [ 700, 8.3, 0.3 ]
+      v2x:
+        communication_range: 60
+      behavior:
+        local_planner:
+          debug_trajectory: true
+          debug: true
+    - name: cav3
+      spawn_position: [ -300, 8.3, 0.3, 0, 0, 0 ]
+      destination: [ 700, 8.3, 0.3 ]
+      v2x:
+        communication_range: 60
+      behavior:
+        local_planner:
+          debug_trajectory: true
+          debug: true

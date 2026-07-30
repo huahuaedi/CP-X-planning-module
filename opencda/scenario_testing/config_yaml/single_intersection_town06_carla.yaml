@@ -1,18 +1,23 @@
 description: |-
-  Copyright 2021 <UCLA Mobility Lab>
-  Author: Runsheng Xu <rxx3386@ucla.edu>
-  Content: This is the scenario testing configuration file for single vehicle perception/localization/behavior/control
-           testing in high speed in the customized 2lanefree simple version.
+  Town06 single-CAV intersection test. The ego approaches the first
+  intersection southbound, changes to the route-required lane, turns right,
+  and continues east on the outgoing road.
 
 # First define the basic parameters of the vehicles
 vehicle_base:
   sensing:
     perception:
+      # --apply_ml enables YOLOv5 detection. One frontal RGB camera is fused
+      # with LiDAR to produce 3D obstacle states for the CP-X planner.
+      activate: true
       camera:
+        # Keep the CP-X HUD as the only window. Set this to 1 temporarily when
+        # the detector image itself needs to be inspected.
         visualize: 0
-        num: 0 # how many cameras are mounted on the vehicle. Maximum 3(frontal, left and right cameras)
+        num: 1
         # relative positions (x,y,z,yaw) of the camera. len(positions) should be equal to camera num
-        positions: []
+        positions:
+          - [2.5, 0, 1.0, 0]
       lidar:
         visualize: false
   map_manager:
@@ -26,14 +31,27 @@ vehicle_base:
     enabled: true
     type: cpx_mpc
     mode: full_cpx_mpc
+    architecture_profile: unified_full_v2
     fallback_policy: emergency_stop
     safety_supervisor_enabled: true
     safety_max_steer_delta: 0.25
     safety_max_throttle_delta: 0.45
     safety_max_brake_delta: 0.60
+    safety_stuck_release_min_accel_mps2: 0.01
     use_opencda_global_route: true
     opencda_global_route_reference_allowed: true
-    global_planner_mode: dij
+    # CARLA-native GlobalRoutePlanner (route_manager.py's _build_carla_route)
+    # is already the primary source for road-option/macro-maneuver lookups
+    # and reference geometry whenever it has a route (geometry_route_points()
+    # prefers it explicitly) -- self.global_planner (this setting) only
+    # matters as a fallback and for its road_cfg_from_map lane-width output.
+    # "dij" (AD-map) parses the xodr independently of CARLA's own map, which
+    # can disagree with CARLA's topology exactly at junctions/lane-change
+    # boundaries -- that mismatch was the root cause behind three separate
+    # stuck-vehicle bugs this session (lane-change reference, route-point
+    # gap, lane-id renumbering). "astar" builds its fallback lane geometry
+    # directly from the loaded CARLA map, so it can't disagree with it.
+    global_planner_mode: astar
     global_planner_xodr_path: Global_Planner/maps/Town06.xodr
     global_planner_strict: false
     publish_cp_message: true
@@ -41,9 +59,9 @@ vehicle_base:
     target_speed_mps: 3.0
     lookahead_m: 18.0
     min_front_gap_m: 8.0
-    communication_range_m: 80.0
+    communication_range_m: 60.0
     max_mpc_obstacles: 4
-    route_reached_distance_m: 3.0
+    route_reached_distance_m: 1.0
     tracker_max_stale_s: 0.5
     tracker_max_speed_mps: 45.0
     tracker_max_acceleration_mps2: 12.0
@@ -54,39 +72,44 @@ vehicle_base:
     mpc_feedback_candidate_weight: 80.0
     control_buffer_enabled: true
     control_buffer_max_reuse_s: 0.35
-    full_reference_memory_enabled: true
+    full_reference_memory_enabled: false
     full_reference_memory_max_first_jump_m: 0.85
     full_reference_memory_max_destination_jump_m: 2.0
     full_reference_memory_max_reuse_age_s: 0.8
-    full_trajectory_memory_enabled: true
+    full_trajectory_memory_enabled: false
     full_trajectory_memory_max_accel_jump_mps2: 0.9
     full_trajectory_memory_max_steer_jump_rad: 0.08
     full_trajectory_memory_blend_alpha: 0.35
     full_trajectory_memory_max_reuse_age_s: 0.5
-    overspeed_guard_enabled: true
+    overspeed_guard_enabled: false
     overspeed_margin_mps: 0.5
     overspeed_release_margin_mps: 0.1
     overspeed_decel_gain: 0.8
     overspeed_max_decel_mps2: 0.8
-    lane_follow_negative_accel_release_enabled: true
+    lane_follow_negative_accel_release_enabled: false
     lane_follow_negative_accel_release_error_mps: 0.05
     lane_follow_negative_accel_release_min_front_gap_m: 12.0
     full_traffic_green_confirm_s: 0.15
     full_traffic_hold_stop_unknown_until_green: false
     full_stop_hold_speed_mps: 0.10
     full_stop_hold_brake: 0.60
-    lane_follow_speed_recovery_enabled: true
+    lane_follow_speed_recovery_enabled: false
     lane_follow_speed_recovery_enter_error_mps: 0.20
     lane_follow_speed_recovery_release_error_mps: 0.05
     lane_follow_speed_recovery_min_accel_mps2: 0.80
     lane_follow_speed_recovery_max_lateral_m: 0.50
-    low_speed_lateral_recovery_enabled: true
+    # Disabled: steers toward destination_state while nearly stationary, but
+    # that steering input itself perturbs destination_state (noisy at low
+    # speed), producing a positive-feedback oscillation -- confirmed via
+    # yaw_deg swinging +/-15 deg and speed cycling 0-4 m/s in debug CSVs.
+    # Matches cpx_profile_full_default.yaml's setting for the same reason.
+    low_speed_lateral_recovery_enabled: false
     low_speed_lateral_recovery_speed_mps: 0.8
     low_speed_lateral_recovery_threshold_m: 1.2
     low_speed_lateral_recovery_target_speed_mps: 1.0
     low_speed_lateral_recovery_max_steer_rad: 0.18
     full_lane_change_start_lock_s: 8.0
-    full_dense_traffic_lane_change_lock_enabled: true
+    full_dense_traffic_lane_change_lock_enabled: false
     full_dense_traffic_object_count: 8
     full_dense_traffic_risky_lane_count: 2
     full_prepare_lane_change_reference_lock: true
@@ -102,7 +125,60 @@ vehicle_base:
     full_stop_guard_destination_forward_m: 6.0
     full_mpc_reference_stabilizer_enabled: true
     full_candidate_pipeline_enabled: true
+    route_tracking_baseline_enabled: false
+    route_tracking_rejoin_distance_m: 7.0
+    route_tracking_destination_arc_m: 8.0
+    route_tracking_destination_horizon_fraction: 0.9
+    route_tracking_min_step_m: 0.10
+    route_tracking_lane_change_duration_s: 4.0
+    route_tracking_recovery_heading_error_deg: 25.0
+    route_tracking_recovery_speed_mps: 1.0
+    route_tracking_recovery_rejoin_distance_m: 10.0
+    route_tracking_lane_change_max_curvature_1pm: 0.35
+    route_tracking_lane_change_max_heading_jump_rad: 0.35
+    route_tracking_lane_change_max_lane_center_fraction: 0.70
+    route_tracking_lane_change_max_boundary_failures: 1
+    full_lane_change_reference_duplicate_spacing_m: 0.05
+    route_tracking_turn_activation_distance_m: 18.0
+    route_tracking_obstacle_additional_buffer_m: 3.0
     full_candidate_reference_min_object_distance_m: 2.0
+    candidate_lane_change_defer_cost: 10.0
+    full_intersection_turn_prepare_enabled: true
+    full_intersection_turn_prepare_lookahead_m: 22.0
+    full_intersection_turn_prepare_min_m: 3.0
+    full_intersection_turn_speed_cap_mps: 2.0
+    full_intersection_turn_prepare_speed_cap_mps: 2.0
+    carla_waypoint_turn_speed_cap_mps: 2.0
+    carla_waypoint_turn_min_step_m: 0.35
+    carla_waypoint_turn_connector_distance_m: 7.0
+    carla_waypoint_turn_anchor_to_ego_heading: false
+    carla_waypoint_turn_destination_arc_m: 4.5
+    carla_turn_connector_smoothing_passes: 16
+    reference_contract_intersection_turn_max_curvature_1pm: 0.55
+    reference_contract_turn_vehicle_footprint_enabled: true
+    reference_contract_turn_boundary_margin_m: 0.15
+    reference_contract_turn_max_boundary_failures: 1
+    road_boundary_projection_max_heading_step_rad: 0.04
+    road_boundary_projection_reset_distance_m: 2.5
+    road_boundary_carla_drivable_footprint_enabled: true
+    lane_change_target_lane_entry_min_progress: 0.50
+    lane_change_stabilization_duration_s: 2.5
+    lane_change_stabilization_speed_mps: 1.5
+    lane_change_stabilization_timeout_frames: 100
+    reference_vehicle_half_width_m: 1.07
+    reference_vehicle_half_length_m: 2.45
+    turn_swept_footprint_correction_padding_m: 0.05
+    carla_reference_boundary_aware: true
+    carla_reference_tracking_reserve_m: 0.20
+    control_buffer_max_reference_anchor_jump_m: 0.75
+    lane_change_completion_footprint_margin_m: 0.05
+    # Keep the turn reference through the outgoing-lane connector. Switching
+    # to the stricter lane-follow contract after only 1 s exposed a local
+    # curvature spike at the right-turn/straight-line join.
+    scenario_turn_exit_hold_s: 3.0
+    scenario_turn_exit_max_heading_error_rad: 0.15
+    scenario_turn_exit_max_lateral_m: 0.75
+    scenario_turn_exit_heading_lookahead_m: 5.0
     full_reference_stabilizer_min_forward_m: -0.25
     full_reference_stabilizer_min_spacing_m: 0.35
     full_reference_stabilizer_max_heading_step_rad: 0.75
@@ -165,12 +241,16 @@ carla_traffic_manager:
 
 # define scenario. In this scenario, a 4-vehicle platoon already exists.
 scenario:
+  max_ticks: 3600
+  destination_tolerance_m: 1.0
   single_cav_list: # this is for merging vehicle or single cav without v2x
     - name: cav1
       spawn_position: [6.31, 125.03, 0.3, 0, -92, 0]
-      destination: [-12.51, 110.31, 0.3]
+      # CARLA GRP verified route:
+      # LANEFOLLOW -> CHANGELANERIGHT -> LANEFOLLOW -> RIGHT -> LANEFOLLOW.
+      destination: [50.0, 52.38, 0.3]
       v2x:
-        communication_range: 45
+        communication_range: 60
       behavior:
         local_planner:
           debug_trajectory: true
@@ -184,9 +264,10 @@ scenario:
         safety_max_steer_delta: 0.25
         safety_max_throttle_delta: 0.45
         safety_max_brake_delta: 0.60
+        safety_stuck_release_min_accel_mps2: 0.01
         use_opencda_global_route: true
         opencda_global_route_reference_allowed: true
-        global_planner_mode: dij
+        global_planner_mode: astar
         global_planner_xodr_path: Global_Planner/maps/Town06.xodr
         global_planner_strict: false
         publish_cp_message: true
@@ -194,9 +275,9 @@ scenario:
         target_speed_mps: 3.0
         lookahead_m: 18.0
         min_front_gap_m: 8.0
-        communication_range_m: 80.0
+        communication_range_m: 60.0
         max_mpc_obstacles: 4
-        route_reached_distance_m: 3.0
+        route_reached_distance_m: 1.0
         tracker_max_stale_s: 0.5
         tracker_max_speed_mps: 45.0
         tracker_max_acceleration_mps2: 12.0
@@ -207,11 +288,11 @@ scenario:
         mpc_feedback_candidate_weight: 80.0
         control_buffer_enabled: true
         control_buffer_max_reuse_s: 0.35
-        full_reference_memory_enabled: true
+        full_reference_memory_enabled: false
         full_reference_memory_max_first_jump_m: 0.85
         full_reference_memory_max_destination_jump_m: 2.0
         full_reference_memory_max_reuse_age_s: 0.8
-        full_trajectory_memory_enabled: true
+        full_trajectory_memory_enabled: false
         full_trajectory_memory_max_accel_jump_mps2: 0.9
         full_trajectory_memory_max_steer_jump_rad: 0.08
         full_trajectory_memory_blend_alpha: 0.35
@@ -221,19 +302,19 @@ scenario:
         overspeed_release_margin_mps: 0.1
         overspeed_decel_gain: 0.8
         overspeed_max_decel_mps2: 0.8
-        lane_follow_negative_accel_release_enabled: true
+        lane_follow_negative_accel_release_enabled: false
         lane_follow_negative_accel_release_error_mps: 0.05
         lane_follow_negative_accel_release_min_front_gap_m: 12.0
         full_traffic_green_confirm_s: 0.15
         full_traffic_hold_stop_unknown_until_green: false
         full_stop_hold_speed_mps: 0.10
         full_stop_hold_brake: 0.60
-        lane_follow_speed_recovery_enabled: true
+        lane_follow_speed_recovery_enabled: false
         lane_follow_speed_recovery_enter_error_mps: 0.20
         lane_follow_speed_recovery_release_error_mps: 0.05
         lane_follow_speed_recovery_min_accel_mps2: 0.80
         lane_follow_speed_recovery_max_lateral_m: 0.50
-        low_speed_lateral_recovery_enabled: true
+        low_speed_lateral_recovery_enabled: false
         low_speed_lateral_recovery_speed_mps: 0.8
         low_speed_lateral_recovery_threshold_m: 1.2
         low_speed_lateral_recovery_target_speed_mps: 1.0
@@ -255,7 +336,39 @@ scenario:
         full_stop_guard_destination_forward_m: 6.0
         full_mpc_reference_stabilizer_enabled: true
         full_candidate_pipeline_enabled: true
+        route_tracking_baseline_enabled: false
+        route_tracking_rejoin_distance_m: 7.0
+        route_tracking_destination_arc_m: 8.0
+        route_tracking_destination_horizon_fraction: 0.9
+        route_tracking_min_step_m: 0.10
+        route_tracking_lane_change_duration_s: 4.0
+        route_tracking_recovery_heading_error_deg: 25.0
+        route_tracking_recovery_speed_mps: 1.0
+        route_tracking_recovery_rejoin_distance_m: 10.0
+        route_tracking_lane_change_max_curvature_1pm: 0.35
+        route_tracking_lane_change_max_heading_jump_rad: 0.35
+        route_tracking_lane_change_max_lane_center_fraction: 0.70
+        route_tracking_lane_change_max_boundary_failures: 1
+        full_lane_change_reference_duplicate_spacing_m: 0.05
+        route_tracking_turn_activation_distance_m: 18.0
+        route_tracking_obstacle_additional_buffer_m: 3.0
         full_candidate_reference_min_object_distance_m: 2.0
+        full_intersection_turn_prepare_enabled: true
+        full_intersection_turn_prepare_lookahead_m: 22.0
+        full_intersection_turn_prepare_min_m: 3.0
+        full_intersection_turn_speed_cap_mps: 2.0
+        full_intersection_turn_prepare_speed_cap_mps: 2.0
+        carla_waypoint_turn_speed_cap_mps: 2.0
+        carla_waypoint_turn_min_step_m: 0.35
+        carla_waypoint_turn_connector_distance_m: 7.0
+        carla_waypoint_turn_anchor_to_ego_heading: false
+        carla_waypoint_turn_destination_arc_m: 4.5
+        carla_turn_connector_smoothing_passes: 16
+        reference_contract_intersection_turn_max_curvature_1pm: 0.55
+        scenario_turn_exit_hold_s: 3.0
+        scenario_turn_exit_max_heading_error_rad: 0.15
+        scenario_turn_exit_max_lateral_m: 0.75
+        scenario_turn_exit_heading_lookahead_m: 5.0
         full_reference_stabilizer_min_forward_m: -0.25
         full_reference_stabilizer_min_spacing_m: 0.35
         full_reference_stabilizer_max_heading_step_rad: 0.75

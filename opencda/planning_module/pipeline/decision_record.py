@@ -85,14 +85,18 @@ def build_decision_record(
     scenario_state: object = "",
     behavior_decision: object = "",
     behavior_fsm_state: object = "",
+    candidate_selected_name: object = "",
     candidate_selected_decision: object = "",
     candidate_selected_status: object = "",
     candidate_selected_reason: object = "",
+    candidate_pipeline_summary: object = "",
+    candidate_mpc_probe_summary: object = "",
     reference_source: object = "",
     reference_stage: object = "",
     reference_fallback_reason: object = "",
     reference_lateral_guard_reason: object = "",
     reference_stabilizer_reason: object = "",
+    final_reference_gate_reason: object = "",
     lane_change_authorized: object = "",
     lane_change_gate_reason: object = "",
     route_lane_change_required: object = "",
@@ -126,10 +130,60 @@ def build_decision_record(
     candidate_status = str(candidate_selected_status or "").strip().lower()
     if candidate_status and candidate_status not in {"feasible", "mpc_probe_solved", "baseline_no_candidates"}:
         add("CandidateEvaluator", candidate_selected_reason or candidate_selected_status, "candidate_not_clean")
+    selected_name = str(candidate_selected_name or "").strip()
+    for row in _candidate_rows(candidate_pipeline_summary):
+        name = str(row.get("name", "") or "").strip()
+        if selected_name and name == selected_name:
+            continue
+        status = str(row.get("feasibility_status", "") or "").strip().lower()
+        reason = str(
+            row.get("feasibility_reason", "")
+            or row.get("contract_reason", "")
+            or status
+        ).strip()
+        if status == "mpc_probe_infeasible":
+            add(
+                "CandidateMPCFeasibility",
+                f"{name}:{reason}",
+                "reject_candidate",
+            )
+        elif status == "mpc_probe_skipped":
+            add(
+                "CandidateMPCFeasibility",
+                f"{name}:outside_top_k",
+                "prune_candidate",
+            )
+        elif status == "infeasible":
+            add(
+                "CandidateEvaluator",
+                f"{name}:{reason}",
+                "reject_candidate",
+            )
+    probe_text = str(candidate_mpc_probe_summary or "").strip()
+    if probe_text and probe_text not in {
+        "mpc_probe_not_applicable",
+        "mpc_probe_no_feasible_top_k",
+    }:
+        failed_probes = [
+            token
+            for token in probe_text.split("|")
+            if token and not token.lower().endswith((":solved", ":solved inaccurate"))
+        ]
+        if failed_probes and not any(
+            row.owner == "CandidateMPCFeasibility"
+            and row.effect == "reject_candidate"
+            for row in vetoes
+        ):
+            add(
+                "CandidateMPCFeasibility",
+                "|".join(failed_probes),
+                "reject_candidate",
+            )
 
     add("ReferencePipeline", reference_fallback_reason, "fallback_reference")
     add("ReferenceValidator", reference_lateral_guard_reason, "guard_reference")
     add("ReferenceStabilizer", reference_stabilizer_reason, "stabilize_or_rebuild_reference")
+    add("FinalReferenceGate", final_reference_gate_reason, "reject_reference")
 
     normalized_mpc_status = str(mpc_status or "").strip().lower()
     if normalized_mpc_status and normalized_mpc_status not in {
@@ -174,6 +228,21 @@ def _truthy(value: object) -> bool:
         return bool(value)
     text = str(value or "").strip().lower()
     return text in {"true", "1", "yes", "y"}
+
+
+def _candidate_rows(value: object) -> list[Mapping[str, object]]:
+    if isinstance(value, list):
+        return [row for row in value if isinstance(row, Mapping)]
+    text = str(value or "").strip()
+    if not text:
+        return []
+    try:
+        rows = json.loads(text)
+    except Exception:
+        return []
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, Mapping)]
 
 
 def _is_routine_reason(reason: str) -> bool:

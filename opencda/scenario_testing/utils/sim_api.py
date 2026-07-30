@@ -845,8 +845,10 @@ class ScenarioManager:
         else:
             bg_list = self.spawn_vehicle_by_range(tm, traffic_config, bg_list)
 
-        print('CARLA traffic flow generated on Traffic Manager port %d.'
-              % int(traffic_manager_port))
+        print(
+            'CARLA traffic flow generated on Traffic Manager port %d '
+            '(%d background vehicles).'
+            % (int(traffic_manager_port), len(bg_list)))
         return tm, bg_list
 
     def tick(self):

@@ -9,11 +9,15 @@ import time
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 from utility.global_planner import world_heading_rad
+from utility.map_api import coerce_map_planner
 
 
 def _custom_waypoint_transform(waypoint, carla):
     if waypoint is None:
         return None
+    native_transform = getattr(waypoint, "transform", None)
+    if native_transform is not None:
+        return native_transform
     position = waypoint.position
     return carla.Transform(
         carla.Location(
@@ -299,9 +303,11 @@ def spawn_obstacles(
     **_,
 ) -> List[Any]:
     del route_summary, route_points
-    del world_map
     if map_planner is None:
-        raise ValueError("Traffic-light obstacle spawning requires map_planner.")
+        map_planner = coerce_map_planner(
+            world_map=world_map,
+            carla_module=carla,
+        )
 
     obstacle_cfg = dict(scenario_cfg.get("obstacles", {}))
     marker_names = [

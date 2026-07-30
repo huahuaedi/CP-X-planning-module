@@ -7,9 +7,11 @@ import numpy as np
 
 from utility.global_planner import AStarGlobalPlanner, RoutePlanSummary, WaypointNode
 from utility.carla_lane_graph import (
+    StableLaneIdTracker,
     canonical_lane_id_for_waypoint,
     canonical_lane_ids_for_waypoint,
     canonical_lane_waypoint_for_lane_id,
+    lane_hop_offset,
 )
 
 
@@ -569,6 +571,91 @@ class LaneContextConsistencyTests(unittest.TestCase):
         self.assertEqual(list(canonical_lane_ids_for_waypoint(right_wp)), [1, 2])
         self.assertIs(canonical_lane_waypoint_for_lane_id(left_wp, 1), right_wp)
         self.assertIs(canonical_lane_waypoint_for_lane_id(right_wp, 2), left_wp)
+
+    def test_canonical_lane_id_renumbers_the_same_physical_lane_when_lane_count_drops(self):
+        """Documents the bug lane_hop_offset/StableLaneIdTracker fix below:
+        canonical_lane_id_for_waypoint() counts lanes locally, so the same
+        physical lane (unchanged raw road_id/lane_id) gets a different
+        number depending on how many lanes exist at the query point.
+        """
+
+        wp_a_lane1 = _DummyWaypoint(road_id=1, section_id=0, lane_id=1, x_m=0.0, y_m=0.0)
+        wp_a_lane2 = _DummyWaypoint(road_id=1, section_id=0, lane_id=2, x_m=0.0, y_m=3.5)
+        wp_a_lane3 = _DummyWaypoint(road_id=1, section_id=0, lane_id=3, x_m=0.0, y_m=7.0)
+        wp_a_lane1.set_neighbors(left=wp_a_lane2)
+        wp_a_lane2.set_neighbors(left=wp_a_lane3, right=wp_a_lane1)
+        wp_a_lane3.set_neighbors(right=wp_a_lane2)
+
+        # Further down the same road, lane 1 has merged away -- the vehicle's
+        # physical lane (raw lane_id=2) never changed, but it is now the
+        # locally-rightmost driving lane.
+        wp_b_lane2 = _DummyWaypoint(road_id=1, section_id=1, lane_id=2, x_m=50.0, y_m=3.5)
+        wp_b_lane3 = _DummyWaypoint(road_id=1, section_id=1, lane_id=3, x_m=50.0, y_m=7.0)
+        wp_b_lane2.set_neighbors(left=wp_b_lane3)
+        wp_b_lane3.set_neighbors(right=wp_b_lane2)
+
+        self.assertEqual(int(canonical_lane_id_for_waypoint(wp_a_lane2)), 2)
+        self.assertEqual(int(canonical_lane_id_for_waypoint(wp_b_lane2)), 1)
+
+    def test_lane_hop_offset_recognizes_same_physical_lane_despite_local_renumbering(self):
+        wp_a_lane2 = _DummyWaypoint(road_id=1, section_id=0, lane_id=2, x_m=0.0, y_m=3.5)
+        wp_b_lane2 = _DummyWaypoint(road_id=1, section_id=1, lane_id=2, x_m=50.0, y_m=3.5)
+
+        self.assertEqual(lane_hop_offset(wp_a_lane2, wp_b_lane2), 0)
+
+    def test_lane_hop_offset_counts_real_adjacency_steps(self):
+        right = _DummyWaypoint(road_id=1, section_id=0, lane_id=1, x_m=0.0, y_m=0.0)
+        middle = _DummyWaypoint(road_id=1, section_id=0, lane_id=2, x_m=0.0, y_m=3.5)
+        left = _DummyWaypoint(road_id=1, section_id=0, lane_id=3, x_m=0.0, y_m=7.0)
+        right.set_neighbors(left=middle)
+        middle.set_neighbors(left=left, right=right)
+        left.set_neighbors(right=middle)
+
+        self.assertEqual(lane_hop_offset(right, left), 2)
+        self.assertEqual(lane_hop_offset(left, right), -2)
+        self.assertEqual(lane_hop_offset(middle, middle), 0)
+
+    def test_lane_hop_offset_returns_none_across_unconnected_roads(self):
+        this_road = _DummyWaypoint(road_id=1, section_id=0, lane_id=1, x_m=0.0, y_m=0.0)
+        other_road = _DummyWaypoint(road_id=2, section_id=0, lane_id=1, x_m=100.0, y_m=100.0)
+
+        self.assertIsNone(lane_hop_offset(this_road, other_road))
+
+    def test_stable_lane_id_tracker_preserves_identity_across_local_renumbering(self):
+        wp_a_lane1 = _DummyWaypoint(road_id=1, section_id=0, lane_id=1, x_m=0.0, y_m=0.0)
+        wp_a_lane2 = _DummyWaypoint(road_id=1, section_id=0, lane_id=2, x_m=0.0, y_m=3.5)
+        wp_a_lane3 = _DummyWaypoint(road_id=1, section_id=0, lane_id=3, x_m=0.0, y_m=7.0)
+        wp_a_lane1.set_neighbors(left=wp_a_lane2)
+        wp_a_lane2.set_neighbors(left=wp_a_lane3, right=wp_a_lane1)
+        wp_a_lane3.set_neighbors(right=wp_a_lane2)
+
+        wp_b_lane2 = _DummyWaypoint(road_id=1, section_id=1, lane_id=2, x_m=50.0, y_m=3.5)
+        wp_b_lane3 = _DummyWaypoint(road_id=1, section_id=1, lane_id=3, x_m=50.0, y_m=7.0)
+        wp_b_lane2.set_neighbors(left=wp_b_lane3)
+        wp_b_lane3.set_neighbors(right=wp_b_lane2)
+
+        tracker = StableLaneIdTracker()
+        first = tracker.update(wp_a_lane2)
+        second = tracker.update(wp_b_lane2)
+
+        self.assertEqual(first, 2)
+        # Without the tracker, the raw recount at wp_b_lane2 would report 1
+        # (see test_canonical_lane_id_renumbers_...) even though the vehicle
+        # never changed lanes.
+        self.assertEqual(second, 2)
+
+    def test_stable_lane_id_tracker_starts_fresh_after_an_unconnected_jump(self):
+        old_road = _DummyWaypoint(road_id=1, section_id=0, lane_id=2, x_m=0.0, y_m=3.5)
+        new_road_lane1 = _DummyWaypoint(road_id=9, section_id=0, lane_id=1, x_m=200.0, y_m=200.0)
+        new_road_lane2 = _DummyWaypoint(road_id=9, section_id=0, lane_id=2, x_m=200.0, y_m=203.5)
+        new_road_lane1.set_neighbors(left=new_road_lane2)
+        new_road_lane2.set_neighbors(right=new_road_lane1)
+
+        tracker = StableLaneIdTracker()
+        tracker.update(old_road)
+        after_turn = tracker.update(new_road_lane2)
+
+        self.assertEqual(after_turn, 2)
 
     def test_local_lane_context_uses_heading_to_pick_same_direction_lane(self):
         planner = object.__new__(AStarGlobalPlanner)

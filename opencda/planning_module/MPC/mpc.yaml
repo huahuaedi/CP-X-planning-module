@@ -16,6 +16,18 @@ mpc:
   # compute cost. Decrease -> cheaper runtime, but plans can go stale.
   trajectory_generation_frequency_hz: 4.0 #2
 
+  constraints:
+    # Steering bounds match the CARLA passenger-vehicle control envelope used
+    # by the OpenCDA scenarios. ReferenceContract derives its curvature limit
+    # from these values, so geometry and control share one physical bound.
+    min_steer_rad: -0.6
+    max_steer_rad: 0.6
+
+    # The former implicit default of 0.02 rad/s prevented steering reversal
+    # across an S-shaped lane-change connector for several seconds.
+    min_steer_rate_rps: -0.35
+    max_steer_rate_rps: 0.35
+
   # Runtime rule-based behavior planner settings.
   behavior_planner_runtime:
     enabled: true

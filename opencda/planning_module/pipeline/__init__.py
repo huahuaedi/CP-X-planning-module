@@ -9,12 +9,15 @@ from .candidate_evaluation import (
     CandidateEvaluationFrame,
     evaluate_behavior_candidates,
 )
+from .architecture_profile import ArchitectureProfile, normalize_architecture_config
 from .candidate_pipeline import (
     CandidateBehaviorIntent,
     CandidateReferenceResult,
+    CandidateSelectionOutcome,
     build_candidate_intents,
     evaluate_candidate_reference,
     select_best_candidate,
+    select_candidate_with_commitment,
     summarize_candidate_results,
 )
 from .control_buffer import MPCControlBuffer
@@ -29,6 +32,23 @@ from .reference_contract import (
     contract_from_config,
     validate_reference_contract,
 )
+from .reference_gate import FinalReferenceGate, FinalReferenceGateResult
+from .reference_generator import (
+    BoundaryRecoveryValidation,
+    DrivableFootprintOccupancy,
+    GeneratedReference,
+    LaneCorridorOccupancy,
+    ReferenceCorridorProjection,
+    ReferenceGenerator,
+)
+from .reference_pipeline import (
+    ConditionedReference,
+    ReferencePipeline,
+    ReferencePipelineRequest,
+    ReferencePipelineResult,
+)
+from .traffic_light_memory import TrafficLightMemory
+from .stage_contracts import ManeuverCommitment
 from .route_authorization import (
     LaneChangeAuthorization,
     RouteManeuver,
@@ -37,17 +57,26 @@ from .route_authorization import (
 )
 from .route_manager import CPXRouteManager, RouteManagerStatus
 from .safety_supervisor import SafetySupervisor
-from .scenario_manager import CPXScenarioDecision, CPXScenarioManager
+from .scenario_manager import (
+    BoundaryRecoveryRequest,
+    CPXScenarioDecision,
+    CPXScenarioManager,
+)
 from .speed_planner import SpeedPlan, build_speed_plan
 from .tracker import CPXObstacleTracker
 
 __all__ = [
     "BehaviorMPCFeedback",
+    "BoundaryRecoveryRequest",
+    "BoundaryRecoveryValidation",
+    "DrivableFootprintOccupancy",
+    "ArchitectureProfile",
     "BehaviorCandidate",
     "BehaviorCommand",
     "CandidateEvaluationFrame",
     "CandidateBehaviorIntent",
     "CandidateReferenceResult",
+    "CandidateSelectionOutcome",
     "CPXRouteManager",
     "CPXObstacleTracker",
     "CPXPlanningPipeline",
@@ -60,6 +89,18 @@ __all__ = [
     "PlannerOutput",
     "PredictionFrame",
     "ReferenceContract",
+    "FinalReferenceGate",
+    "FinalReferenceGateResult",
+    "ReferenceGenerator",
+    "GeneratedReference",
+    "LaneCorridorOccupancy",
+    "ReferenceCorridorProjection",
+    "ReferencePipeline",
+    "ReferencePipelineRequest",
+    "ReferencePipelineResult",
+    "ConditionedReference",
+    "TrafficLightMemory",
+    "ManeuverCommitment",
     "ReferenceValidationResult",
     "LaneChangeAuthorization",
     "RouteManagerStatus",
@@ -75,7 +116,9 @@ __all__ = [
     "evaluate_behavior_candidates",
     "evaluate_candidate_reference",
     "normalize_route_maneuver",
+    "normalize_architecture_config",
     "select_best_candidate",
+    "select_candidate_with_commitment",
     "summarize_candidate_results",
     "validate_reference_contract",
 ]

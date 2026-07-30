@@ -58,6 +58,14 @@ def _set_spectator_transform(spectator, ego_vehicle):
     ))
 
 
+def _distance_to_destination(ego_vehicle, destination):
+    location = ego_vehicle.get_location()
+    return math.hypot(
+        float(location.x) - float(destination[0]),
+        float(location.y) - float(destination[1]),
+    )
+
+
 def run_scenario(opt, scenario_params):
     scenario_manager = None
     eval_manager = None
@@ -101,18 +109,97 @@ def run_scenario(opt, scenario_params):
             )
 
         spectator = scenario_manager.world.get_spectator()
+        scenario_cfg = scenario_params.get("scenario", {})
+        destination = scenario_cfg["single_cav_list"][0]["destination"]
+        dynamic_reroute_cfg = scenario_cfg.get("dynamic_reroute", {}) or {}
+        dynamic_reroute_enabled = bool(dynamic_reroute_cfg.get("enabled", False))
+        dynamic_reroute_applied = False
+        max_ticks = max(1, int(scenario_cfg.get("max_ticks", 3600)))
+        destination_tolerance_m = max(
+            0.5,
+            float(scenario_cfg.get("destination_tolerance_m", 4.0)),
+        )
+        termination_reason = "max_ticks_reached"
+        completed_ticks = 0
         # run steps
-        while True:
+        for tick_index in range(max_ticks):
+            completed_ticks = int(tick_index) + 1
             scenario_manager.tick()
             _set_spectator_transform(spectator, single_cav_list[0].vehicle)
 
             for i, single_cav in enumerate(single_cav_list):
                 single_cav.update_info()
+                if (
+                    i == 0
+                    and dynamic_reroute_enabled
+                    and not dynamic_reroute_applied
+                ):
+                    ego_location = single_cav.vehicle.get_location()
+                    trigger_y_below = dynamic_reroute_cfg.get("trigger_y_below")
+                    trigger_x_above = dynamic_reroute_cfg.get("trigger_x_above")
+                    trigger_reached = (
+                        trigger_y_below is not None
+                        and float(ego_location.y) <= float(trigger_y_below)
+                    )
+                    if trigger_x_above is not None:
+                        trigger_reached = bool(trigger_reached) and (
+                            float(ego_location.x) >= float(trigger_x_above)
+                        )
+                    if trigger_reached:
+                        reroute_destination = list(
+                            dynamic_reroute_cfg["destination"]
+                        )
+                        new_destination = carla.Location(
+                            x=float(reroute_destination[0]),
+                            y=float(reroute_destination[1]),
+                            z=float(reroute_destination[2]),
+                        )
+                        single_cav.set_destination(
+                            ego_location,
+                            new_destination,
+                            clean=True,
+                        )
+                        destination = reroute_destination
+                        dynamic_reroute_applied = True
+                        print(
+                            "[CP-X dynamic reroute] applied at "
+                            "ego=(%.2f, %.2f), new_destination=(%.2f, %.2f)"
+                            % (
+                                float(ego_location.x),
+                                float(ego_location.y),
+                                float(new_destination.x),
+                                float(new_destination.y),
+                            )
+                        )
                 control = single_cav.run_step()
                 single_cav.vehicle.apply_control(control)
 
             if debug_viewer is not None:
                 debug_viewer.render(single_cav_list)
+            if (
+                _distance_to_destination(
+                    single_cav_list[0].vehicle,
+                    destination,
+                )
+                <= destination_tolerance_m
+            ):
+                termination_reason = "destination_reached"
+                break
+        print(
+            "[single_intersection_town06_carla] finished: "
+            "reason=%s ticks=%d/%d distance_to_destination_m=%.2f"
+            % (
+                str(termination_reason),
+                int(completed_ticks),
+                int(max_ticks),
+                float(
+                    _distance_to_destination(
+                        single_cav_list[0].vehicle,
+                        destination,
+                    )
+                ),
+            )
+        )
 
     finally:
         if eval_manager is not None:

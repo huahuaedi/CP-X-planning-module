@@ -33,6 +33,7 @@ Cost function:
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 import math
 import time
@@ -419,6 +420,15 @@ class MPC:
         self.reference_cfg = dict(mpc_cfg.get("reference_rollout", {}))
         self.reference_heading_gain = float(self.reference_cfg.get("heading_gain", 1.6))
         self.reference_speed_gain = float(self.reference_cfg.get("speed_gain", 1.2))
+        self.reference_speed_upper_bound_margin_mps = max(
+            0.0,
+            float(
+                self.reference_cfg.get(
+                    "speed_upper_bound_margin_mps",
+                    0.5,
+                )
+            ),
+        )
         self.reference_prefer_lane_center_path = bool(self.reference_cfg.get("prefer_lane_center_path", True))
         self.reference_path_los_heading_blend = min(
             1.0,
@@ -453,6 +463,15 @@ class MPC:
                 )
             ),
         )
+        self.solver_failure_log_every_n = max(
+            1,
+            int(self.reference_cfg.get("solver_failure_log_every_n", 50)),
+        )
+        self.log_solution_memory_resets = bool(
+            self.reference_cfg.get("log_solution_memory_resets", False)
+        )
+        self._solver_failure_log_event_count = 0
+        self._solver_failure_emergency_logged = False
         self.reference_previous_solution_search_steps = max(
             0,
             int(self.reference_cfg.get("previous_solution_search_steps", 15)),
@@ -900,7 +919,7 @@ class MPC:
         destination_state: np.ndarray,
         route_reference_points: Sequence[Sequence[float]] | None,
         destination_lane_id: int | None = None,
-    ) -> List[Dict[str, float]]:
+    ) -> List[Dict[str, object]]:
         if route_reference_points is None or len(route_reference_points) < 2:
             return []
 
@@ -1147,6 +1166,73 @@ class MPC:
             float(v),
             float(psi),
         ]
+
+    @staticmethod
+    def _translate_object_snapshots(
+        object_snapshots: Sequence[Mapping[str, object]],
+        *,
+        origin_x_m: float,
+        origin_y_m: float,
+    ) -> List[Dict[str, object]]:
+        """Translate obstacle states into the ego-origin QP frame."""
+
+        translated: List[Dict[str, object]] = []
+        for raw_snapshot in list(object_snapshots or []):
+            if not isinstance(raw_snapshot, Mapping):
+                continue
+            snapshot: Dict[str, object] = dict(raw_snapshot)
+            try:
+                snapshot["x"] = float(snapshot.get("x", 0.0)) - float(origin_x_m)
+                snapshot["y"] = float(snapshot.get("y", 0.0)) - float(origin_y_m)
+            except (TypeError, ValueError):
+                continue
+            for trajectory_key in ("predicted_trajectory", "future_trajectory"):
+                raw_trajectory = snapshot.get(trajectory_key)
+                if not isinstance(raw_trajectory, Sequence):
+                    continue
+                local_trajectory: List[object] = []
+                for raw_state in raw_trajectory:
+                    if isinstance(raw_state, Mapping):
+                        state = dict(raw_state)
+                        if "x" in state and "y" in state:
+                            state["x"] = float(state["x"]) - float(origin_x_m)
+                            state["y"] = float(state["y"]) - float(origin_y_m)
+                        local_trajectory.append(state)
+                    elif isinstance(raw_state, Sequence) and len(raw_state) >= 2:
+                        state = list(raw_state)
+                        state[0] = float(state[0]) - float(origin_x_m)
+                        state[1] = float(state[1]) - float(origin_y_m)
+                        local_trajectory.append(state)
+                    else:
+                        local_trajectory.append(raw_state)
+                snapshot[trajectory_key] = local_trajectory
+            translated.append(snapshot)
+        return translated
+
+    @staticmethod
+    def _translate_lane_reference(
+        lane_center_reference: Sequence[Mapping[str, object]],
+        *,
+        origin_x_m: float,
+        origin_y_m: float,
+    ) -> List[Dict[str, float]]:
+        """Translate lane samples while preserving all geometric metadata."""
+
+        translated: List[Dict[str, object]] = []
+        for raw_sample in list(lane_center_reference or []):
+            sample = dict(raw_sample)
+            sample["x_ref_m"] = float(sample.get("x_ref_m", 0.0)) - float(
+                origin_x_m
+            )
+            sample["y_ref_m"] = float(sample.get("y_ref_m", 0.0)) - float(
+                origin_y_m
+            )
+            if "x" in sample:
+                sample["x"] = float(sample["x"]) - float(origin_x_m)
+            if "y" in sample:
+                sample["y"] = float(sample["y"]) - float(origin_y_m)
+            translated.append(sample)
+        return translated
 
     def _build_shifted_previous_solution_seed(self, x0: np.ndarray) -> Tuple[np.ndarray, np.ndarray] | None:
         """
@@ -1605,23 +1691,28 @@ class MPC:
         """
 
         base_max_velocity_mps = float(self.constraints.max_velocity_mps)
-        if not bool(self.final_stop_speed_cap_enabled):
-            return float(base_max_velocity_mps)
-        if len(destination_state) < 2:
-            return float(base_max_velocity_mps)
-
         destination_speed_mps = (
             abs(float(destination_state[2]))
             if len(destination_state) >= 3
             else 0.0
         )
-        if (
-            not bool(force_stop_goal)
-            and (
-                len(destination_state) < 3
-                or destination_speed_mps > float(self.final_stop_speed_cap_activation_threshold_mps)
-            )
-        ):
+        if not bool(force_stop_goal):
+            if len(destination_state) < 3:
+                return float(base_max_velocity_mps)
+            if destination_speed_mps > float(
+                self.final_stop_speed_cap_activation_threshold_mps
+            ):
+                return float(min(
+                    base_max_velocity_mps,
+                    max(
+                        float(self.constraints.min_velocity_mps),
+                        float(destination_speed_mps)
+                        + float(self.reference_speed_upper_bound_margin_mps),
+                    ),
+                ))
+        if not bool(self.final_stop_speed_cap_enabled):
+            return float(base_max_velocity_mps)
+        if len(destination_state) < 2:
             return float(base_max_velocity_mps)
 
         current_x_m = float(current_state[0]) if len(current_state) >= 1 else 0.0
@@ -1720,12 +1811,28 @@ class MPC:
                 float(self.constraints.min_acceleration_mps2),
                 float(self.constraints.max_acceleration_mps2),
             )
-        print(
-            "[MPC] "
-            + ("EMERGENCY STOP" if emergency else "brake-gently")
-            + " fail-safe fallback trajectory "
-            + f"(consecutive_failures={int(self._consecutive_solver_failure_count)})"
+        event_count = int(getattr(self, "_solver_failure_log_event_count", 0)) + 1
+        self._solver_failure_log_event_count = int(event_count)
+        emergency_first_report = bool(
+            emergency
+            and not bool(
+                getattr(self, "_solver_failure_emergency_logged", False)
+            )
         )
+        log_every_n = max(
+            1,
+            int(getattr(self, "solver_failure_log_every_n", 50)),
+        )
+        if event_count == 1 or emergency_first_report or event_count % log_every_n == 0:
+            print(
+                "[MPC] "
+                + ("EMERGENCY STOP" if emergency else "brake-gently")
+                + " fail-safe fallback trajectory "
+                + f"(consecutive_failures={int(self._consecutive_solver_failure_count)}, "
+                + f"fallback_events={int(event_count)})"
+            )
+        if emergency:
+            self._solver_failure_emergency_logged = True
         return x_solution, u_solution
 
     def _future_speed_upper_bound_mps(
@@ -2626,17 +2733,30 @@ class MPC:
         if len(current_state) != 4:
             raise ValueError("current_state must be [x, y, v, psi].")
 
-        x0 = np.array(
+        origin_x_m = float(current_state[0])
+        origin_y_m = float(current_state[1])
+        x0_world = np.array(
             [
-                float(current_state[0]),
-                float(current_state[1]),
+                float(origin_x_m),
+                float(origin_y_m),
                 self._clamp(float(current_state[2]), self.constraints.min_velocity_mps, self.constraints.max_velocity_mps),
                 self._wrap_angle(float(current_state[3])),
             ],
             dtype=float,
         )
+        x0 = np.asarray(x0_world, dtype=float).copy()
+        x0[0] = 0.0
+        x0[1] = 0.0
         planning_current_acceleration_mps2 = float(current_acceleration_mps2)
-        destination = self._normalize_destination_state(destination_state)
+        destination_world = self._normalize_destination_state(destination_state)
+        destination = np.asarray(destination_world, dtype=float).copy()
+        destination[0] -= float(origin_x_m)
+        destination[1] -= float(origin_y_m)
+        object_snapshots = self._translate_object_snapshots(
+            object_snapshots=object_snapshots,
+            origin_x_m=float(origin_x_m),
+            origin_y_m=float(origin_y_m),
+        )
         destination_lane_id = (
             int(destination_state[4])
             if len(destination_state) >= 5
@@ -2700,16 +2820,24 @@ class MPC:
             or bool(self.reference_prefer_lane_center_path)
         )
         if should_use_lane_center_reference:
-            lane_center_reference = self._normalize_lane_center_reference_samples(
+            world_lane_center_reference = self._normalize_lane_center_reference_samples(
                 lane_center_reference_samples=lane_center_reference_samples,
             )
-            if len(lane_center_reference) == 0:
-                lane_center_reference = self._build_lane_center_reference(
-                    current_state=x0,
-                    destination_state=destination,
+            if len(world_lane_center_reference) == 0:
+                world_destination = np.asarray(destination, dtype=float).copy()
+                world_destination[0] += float(origin_x_m)
+                world_destination[1] += float(origin_y_m)
+                world_lane_center_reference = self._build_lane_center_reference(
+                    current_state=x0_world,
+                    destination_state=world_destination,
                     lane_center_waypoints=lane_center_waypoints,
                     destination_lane_id=destination_lane_id,
                 )
+            lane_center_reference = self._translate_lane_reference(
+                lane_center_reference=world_lane_center_reference,
+                origin_x_m=float(origin_x_m),
+                origin_y_m=float(origin_y_m),
+            )
 
         # During stop-goal mode never reuse the previous QP solution as seed.
         # Previous plans produced under the old v_ref=0 regime may have been
@@ -2733,7 +2861,15 @@ class MPC:
                 self._previous_x_solution = None
                 self._previous_u_solution = None
         else:
-            shifted_seed = self._build_shifted_previous_solution_seed(x0=x0)
+            shifted_seed = self._build_shifted_previous_solution_seed(x0=x0_world)
+            if shifted_seed is not None:
+                shifted_seed_x = np.asarray(shifted_seed[0], dtype=float).copy()
+                shifted_seed_x[:, 0] -= float(origin_x_m)
+                shifted_seed_x[:, 1] -= float(origin_y_m)
+                shifted_seed = (
+                    shifted_seed_x,
+                    np.asarray(shifted_seed[1], dtype=float),
+                )
         x_ref_rollout, u_ref_rollout = self._reference_rollout(
             x0=x0,
             x_ref_target=destination,
@@ -2795,11 +2931,12 @@ class MPC:
         solved_initially = best_x_solution is not None and best_u_solution is not None
         if self._record_solver_failure_state(solved=bool(solved_initially)):
             self._clear_all_solution_memory()
-            print(
-                "[MPC] Solver failed "
-                f"{int(self.reference_consecutive_solver_failure_reset_threshold)} consecutive replans; "
-                "clearing stored solution and retrying with a fresh rollout."
-            )
+            if bool(getattr(self, "log_solution_memory_resets", False)):
+                print(
+                    "[MPC] Solver failed "
+                    f"{int(self.reference_consecutive_solver_failure_reset_threshold)} consecutive replans; "
+                    "clearing stored solution and retrying with a fresh rollout."
+                )
             clean_x_ref_rollout, clean_u_ref_rollout = self._reference_rollout(
                 x0=x0,
                 x_ref_target=destination,
@@ -2854,13 +2991,6 @@ class MPC:
             )
             x_solution[k, 3] = self._wrap_angle(float(x_solution[k, 3]))
 
-        self._last_x_solution = np.asarray(x_solution, dtype=float)
-        self._last_u_solution = np.asarray(u_solution, dtype=float)
-
-        if best_x_solution is not None and best_u_solution is not None:
-            self._previous_x_solution = np.asarray(x_solution, dtype=float)
-            self._previous_u_solution = np.asarray(u_solution, dtype=float)
-
         self._last_cost_terms = self._evaluate_plan_cost_terms(
             x_traj=x_solution,
             u_traj=u_solution,
@@ -2871,6 +3001,16 @@ class MPC:
             lane_center_reference=lane_center_reference,
         )
 
+        world_x_solution = np.asarray(x_solution, dtype=float).copy()
+        world_x_solution[:, 0] += float(origin_x_m)
+        world_x_solution[:, 1] += float(origin_y_m)
+        self._last_x_solution = np.asarray(world_x_solution, dtype=float)
+        self._last_u_solution = np.asarray(u_solution, dtype=float)
+
+        if best_x_solution is not None and best_u_solution is not None:
+            self._previous_x_solution = np.asarray(world_x_solution, dtype=float)
+            self._previous_u_solution = np.asarray(u_solution, dtype=float)
+
         # Record whether this call was a stop goal so the next call can detect
         # the stop→resume transition and avoid reusing the v=0 braking seed.
         self._last_was_stop_goal = bool(_is_stop_goal)
@@ -2879,10 +3019,86 @@ class MPC:
         for k in range(1, self.horizon_steps + 1):
             output.append(
                 [
-                    float(x_solution[k, 0]),
-                    float(x_solution[k, 1]),
+                    float(world_x_solution[k, 0]),
+                    float(world_x_solution[k, 1]),
                     float(x_solution[k, 2]),
                     float(self._wrap_angle(float(x_solution[k, 3]))),
                 ]
             )
         return output
+
+    def probe_trajectory_feasibility(
+        self,
+        *,
+        current_state: Sequence[float],
+        destination_state: Sequence[float],
+        object_snapshots: Sequence[Mapping[str, object]],
+        current_acceleration_mps2: float,
+        current_steering_rad: float,
+        lane_center_reference_samples: Sequence[Mapping[str, object]] | None,
+        stop_goal_active: bool = False,
+    ) -> Dict[str, object]:
+        """Solve a candidate without changing MPC warm-start/runtime state."""
+
+        mutable_fields = (
+            "_last_status",
+            "_last_solve_time_ms",
+            "_last_active_max_velocity_mps",
+            "_last_cost_terms",
+            "_last_lane_keeping_profile",
+            "_last_x_solution",
+            "_last_u_solution",
+            "_previous_x_solution",
+            "_previous_u_solution",
+            "_consecutive_solver_failure_count",
+            "_last_failure_reset_triggered",
+            "_last_was_stop_goal",
+            "_solver_failure_log_event_count",
+            "_solver_failure_emergency_logged",
+        )
+        snapshot = {
+            name: copy.deepcopy(getattr(self, name))
+            for name in mutable_fields
+            if hasattr(self, name)
+        }
+        result: Dict[str, object] = {
+            "solved": False,
+            "status": "probe_not_run",
+            "solve_time_ms": 0.0,
+            "cost_terms": {},
+            "dynamic_cost": 0.0,
+        }
+        try:
+            self.plan_trajectory(
+                current_state=current_state,
+                destination_state=destination_state,
+                object_snapshots=object_snapshots,
+                current_acceleration_mps2=float(current_acceleration_mps2),
+                current_steering_rad=float(current_steering_rad),
+                lane_center_reference_samples=lane_center_reference_samples,
+                stop_goal_active=bool(stop_goal_active),
+            )
+            status = str(getattr(self, "_last_status", "")).strip().lower()
+            cost_terms = dict(getattr(self, "_last_cost_terms", {}) or {})
+            dynamic_cost = sum(
+                max(0.0, float(value))
+                for value in cost_terms.values()
+                if isinstance(value, (int, float)) and math.isfinite(float(value))
+            )
+            result = {
+                "solved": status in {"solved", "solved inaccurate"},
+                "status": str(status or "unknown"),
+                "solve_time_ms": float(
+                    getattr(self, "_last_solve_time_ms", 0.0) or 0.0
+                ),
+                "cost_terms": cost_terms,
+                # Keep probe cost numerically subordinate to behavior safety
+                # and route costs while still breaking ties by trackability.
+                "dynamic_cost": 0.001 * float(dynamic_cost),
+            }
+        except Exception as exc:
+            result["status"] = "probe_exception:" + str(exc)
+        finally:
+            for name, value in snapshot.items():
+                setattr(self, name, value)
+        return result

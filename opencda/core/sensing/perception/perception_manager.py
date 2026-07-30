@@ -541,37 +541,78 @@ class PerceptionManager:
          objects: dict
             Updated object dictionary.
         """
-        # retrieve current cameras and lidar data
+        debug_timing = str(os.environ.get(
+            'OPENCDA_ML_DEBUG', '')).strip().lower() in {
+                '1', 'true', 'yes', 'on'}
+        wait_timeout_s = max(
+            0.1, float(os.environ.get('OPENCDA_SENSOR_WAIT_TIMEOUT_S', '5.0')))
+        stage_started = time.perf_counter()
+
+        # Retrieve current camera and lidar data without an unbounded busy wait.
         rgb_images = []
-        for rgb_camera in self.rgb_camera:
+        for camera_index, rgb_camera in enumerate(self.rgb_camera):
+            deadline = time.monotonic() + wait_timeout_s
             while rgb_camera.image is None:
-                continue
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        'Timed out waiting %.1fs for RGB camera %d first frame'
+                        % (wait_timeout_s, camera_index))
+                time.sleep(0.001)
             rgb_images.append(
                 cv2.cvtColor(
                     np.array(
                         rgb_camera.image),
                     cv2.COLOR_BGR2RGB))
 
+        deadline = time.monotonic() + wait_timeout_s
+        while self.lidar.data is None:
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    'Timed out waiting %.1fs for LiDAR first frame'
+                    % wait_timeout_s)
+            time.sleep(0.001)
+        if debug_timing:
+            print('[OpenCDA ML] sensor_wait_ms=%.1f cameras=%d lidar_points=%d'
+                  % ((time.perf_counter() - stage_started) * 1000.0,
+                     len(rgb_images), len(self.lidar.data)))
+
         # yolo detection
+        stage_started = time.perf_counter()
         yolo_detection = self.ml_manager.object_detector(rgb_images)
+        if debug_timing:
+            detection_count = sum(
+                int(detections.shape[0])
+                for detections in yolo_detection.xyxy)
+            print('[OpenCDA ML] inference_ms=%.1f detections=%d'
+                  % ((time.perf_counter() - stage_started) * 1000.0,
+                     detection_count))
         # rgb_images for drawing
         rgb_draw_images = []
 
         for (i, rgb_camera) in enumerate(self.rgb_camera):
             # lidar projection
+            stage_started = time.perf_counter()
             rgb_image, projected_lidar = st.project_lidar_to_camera(
                 self.lidar.sensor,
                 rgb_camera.sensor, self.lidar.data, np.array(
                     rgb_camera.image))
+            if debug_timing:
+                print('[OpenCDA ML] projection_ms=%.1f camera=%d'
+                      % ((time.perf_counter() - stage_started) * 1000.0, i))
             rgb_draw_images.append(rgb_image)
 
             # camera lidar fusion - Use Open3D version
+            stage_started = time.perf_counter()
             objects = o3d_camera_lidar_fusion(
                 objects,
                 yolo_detection.xyxy[i],
                 self.lidar.data,
                 projected_lidar,
                 self.lidar.sensor)
+            if debug_timing:
+                print('[OpenCDA ML] fusion_ms=%.1f camera=%d vehicles=%d'
+                      % ((time.perf_counter() - stage_started) * 1000.0,
+                         i, len(objects.get('vehicles', []))))
 
             # calculate the speed. current we retrieve from the server
             # directly.
@@ -830,7 +871,7 @@ class PerceptionManager:
                     continue
                 obstacle_loc = obstacle_vehicle.get_location()
                 if abs(loc.x - obstacle_loc.x) <= 3.0 and \
-                        abs(loc.Doy - obstacle_loc.y) <= 3.0:
+                        abs(loc.y - obstacle_loc.y) <= 3.0:
                     obstacle_vehicle.set_velocity(v.get_velocity())
 
                     # the case where the obstacle vehicle is controled by

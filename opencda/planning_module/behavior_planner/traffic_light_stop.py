@@ -8,6 +8,7 @@ import math
 from typing import Any, Dict, Iterable, Mapping, Sequence
 
 from utility.global_planner import canonical_lane_id_for_waypoint, world_heading_rad
+from utility.map_api import coerce_map_planner, pose_from_transform
 
 _STOP_TARGET_QUERY_STATE: Dict[str, tuple[tuple[object, ...], float, float, float]] = {}
 
@@ -28,6 +29,13 @@ def _waypoint_ad_lane_id(waypoint) -> int:
     if ad_lane_id is not None:
         return int(ad_lane_id)
     return int(getattr(waypoint, "lane_id", 0) or 0)
+
+
+def _canonical_lane_id(waypoint) -> int:
+    try:
+        return int(canonical_lane_id_for_waypoint(waypoint))
+    except Exception:
+        return abs(int(getattr(waypoint, "lane_id", 0) or 0))
 
 
 def _pose_xyz(pose: Mapping[str, object]) -> tuple[float, float, float]:
@@ -306,7 +314,7 @@ def _stop_target_match_details(
     return 3, float(match_distance_m)
 
 
-def find_relevant_signal_context(
+def _find_relevant_signal_context_impl(
     *,
     world,
     map_planner,
@@ -441,7 +449,47 @@ def find_relevant_signal_context(
         signal_source = "actor_position_match"
         custom_position_match_rank = None
 
-        if stop_target_xy is not None and signal_position is not None:
+        get_stop_waypoints = getattr(candidate_actor, "get_stop_waypoints", None)
+        actor_stop_waypoints = (
+            list(get_stop_waypoints() or []) if callable(get_stop_waypoints) else []
+        )
+        if stop_target_xy is not None and actor_stop_waypoints:
+            stop_matches = []
+            for stop_waypoint in actor_stop_waypoints:
+                stop_x_m, stop_y_m = _waypoint_xy(stop_waypoint)
+                distance_m = math.hypot(
+                    float(stop_x_m) - float(stop_target_xy[0]),
+                    float(stop_y_m) - float(stop_target_xy[1]),
+                )
+                road_matches = (
+                    stop_target_road_id is not None
+                    and int(getattr(stop_waypoint, "road_id", 0) or 0)
+                    == int(stop_target_road_id)
+                )
+                section_matches = (
+                    stop_target_section_id is not None
+                    and int(getattr(stop_waypoint, "section_id", 0) or 0)
+                    == int(stop_target_section_id)
+                )
+                lane_matches = (
+                    stop_target_lane_id is not None
+                    and int(stop_target_lane_id) != 0
+                    and _canonical_lane_id(stop_waypoint)
+                    == int(stop_target_lane_id)
+                )
+                rank = (
+                    0
+                    if road_matches and section_matches and lane_matches
+                    else 1
+                    if road_matches and lane_matches
+                    else 2
+                    if road_matches and section_matches
+                    else 3
+                )
+                stop_matches.append((int(rank), float(distance_m)))
+            custom_position_match_rank, match_distance_m = min(stop_matches)
+            signal_source = "stop_waypoint_match"
+        elif stop_target_xy is not None and signal_position is not None:
             match_details = _stop_target_match_details(
                 map_planner=map_planner,
                 signal_position=signal_position,
@@ -488,7 +536,7 @@ def find_relevant_signal_context(
             ):
                 match_distance_m = float(stop_target_distance_m)
 
-        if signal_source == "custom_lane_match":
+        if signal_source in {"custom_lane_match", "stop_waypoint_match"}:
             lane_aware_max_match_distance_m = max(
                 float(max_stop_waypoint_match_distance_m),
                 35.0,
@@ -708,7 +756,7 @@ def _project_to_route_arc(
     return float(selected_candidate[1])
 
 
-def find_stop_target_from_ego(
+def _find_stop_target_from_ego_impl(
     *,
     map_planner,
     ego_pose: Mapping[str, object],
@@ -759,7 +807,13 @@ def find_stop_target_from_ego(
         if route_waypoint is None:
             continue
 
-        if bool(getattr(route_waypoint, "is_intersection", False)):
+        if bool(
+            getattr(
+                route_waypoint,
+                "is_intersection",
+                getattr(route_waypoint, "is_junction", False),
+            )
+        ):
             if previous_waypoint is None or previous_arc_m is None:
                 return None
             stop_distance_m = float(previous_arc_m) - float(ego_arc_m)
@@ -770,7 +824,7 @@ def find_stop_target_from_ego(
                 "x_m": float(stop_x_m),
                 "y_m": float(stop_y_m),
                 "heading_rad": float(world_heading_rad(previous_waypoint) or 0.0),
-                "lane_id": int(canonical_lane_id_for_waypoint(previous_waypoint)),
+                "lane_id": _canonical_lane_id(previous_waypoint),
                 "ad_lane_id": int(_waypoint_ad_lane_id(previous_waypoint)),
                 "opendrive_lane_id": int(getattr(previous_waypoint, "lane_id", 0) or 0),
                 "road_id": int(getattr(previous_waypoint, "road_id", 0)),
@@ -819,3 +873,47 @@ def should_stop_for_signal(
     required_stop_distance_m += max(0.0, float(stop_buffer_m))
 
     return float(stop_distance_m) >= float(required_stop_distance_m)
+
+
+class _NoMapPlanner:
+    def get_waypoint(self, point):
+        del point
+        return None
+
+
+def find_relevant_signal_context(*args, **kwargs):
+    """Normalize legacy CARLA arguments at the traffic-control boundary."""
+
+    normalized = dict(kwargs)
+    world_map = normalized.pop("world_map", None)
+    carla_module = normalized.pop("carla", None)
+    if normalized.get("map_planner") is None:
+        normalized["map_planner"] = (
+            coerce_map_planner(
+                world_map=world_map,
+                carla_module=carla_module,
+            )
+            if world_map is not None
+            else _NoMapPlanner()
+        )
+    ego_transform = normalized.pop("ego_transform", None)
+    if normalized.get("ego_pose") is None and ego_transform is not None:
+        normalized["ego_pose"] = pose_from_transform(ego_transform)
+    return _find_relevant_signal_context_impl(*args, **normalized)
+
+
+def find_stop_target_from_ego(*args, **kwargs):
+    """Normalize legacy CARLA arguments at the stop-target boundary."""
+
+    normalized = dict(kwargs)
+    world_map = normalized.pop("world_map", None)
+    carla_module = normalized.pop("carla", None)
+    if normalized.get("map_planner") is None and world_map is not None:
+        normalized["map_planner"] = coerce_map_planner(
+            world_map=world_map,
+            carla_module=carla_module,
+        )
+    ego_transform = normalized.pop("ego_transform", None)
+    if normalized.get("ego_pose") is None and ego_transform is not None:
+        normalized["ego_pose"] = pose_from_transform(ego_transform)
+    return _find_stop_target_from_ego_impl(*args, **normalized)

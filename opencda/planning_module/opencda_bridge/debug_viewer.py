@@ -201,7 +201,22 @@ class OpenCDADebugViewer:
             for point in list(route_points or [])
             if hasattr(point, "__len__") and len(point) >= 2
         ]
-        if len(normalized_route) >= 2 and not self._stable_route_points:
+        # Refresh the cached route on a genuine replan (start/end moved by
+        # more than a couple of lane-widths), not on every tick's tiny
+        # per-frame numerical jitter in the same route -- that jitter is
+        # exactly what "stable" is protecting against.
+        def _distance_2d(a: Sequence[float], b: Sequence[float]) -> float:
+            return math.hypot(float(a[0]) - float(b[0]), float(a[1]) - float(b[1]))
+
+        replanned = (
+            len(normalized_route) >= 2
+            and len(self._stable_route_points) >= 2
+            and (
+                _distance_2d(normalized_route[0], self._stable_route_points[0]) > 8.0
+                or _distance_2d(normalized_route[-1], self._stable_route_points[-1]) > 8.0
+            )
+        )
+        if len(normalized_route) >= 2 and (not self._stable_route_points or replanned):
             self._stable_route_points = [list(point) for point in normalized_route]
             xs = [float(point[0]) for point in self._stable_route_points]
             ys = [float(point[1]) for point in self._stable_route_points]

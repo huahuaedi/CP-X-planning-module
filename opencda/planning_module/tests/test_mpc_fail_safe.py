@@ -1,5 +1,8 @@
 import numpy as np
+from pathlib import Path
 import unittest
+from unittest import mock
+import yaml
 
 from MPC.mpc import MPC, MPCComfortCostSpec, MPCConstraintSpec, MPCSafetyCostSpec
 
@@ -30,6 +33,9 @@ def _bare_mpc(
     mpc.fail_safe_gentle_brake_deceleration_mps2 = float(gentle_brake_mps2)
     mpc.fail_safe_emergency_stop_failure_threshold = int(emergency_threshold)
     mpc._consecutive_solver_failure_count = int(consecutive_failures)
+    mpc.solver_failure_log_every_n = 50
+    mpc._solver_failure_log_event_count = 0
+    mpc._solver_failure_emergency_logged = False
     return mpc
 
 
@@ -66,6 +72,22 @@ class MinimumReachableSpeedProfileBrakingMagnitudeTests(unittest.TestCase):
         for gentle_v, full_v in zip(gentle_profile, full_profile):
             self.assertGreaterEqual(gentle_v + 1e-9, full_v)
         self.assertGreater(gentle_profile[-1], full_profile[-1])
+
+
+class ActiveSpeedUpperBoundTests(unittest.TestCase):
+    def test_lane_follow_uses_target_speed_as_hard_upper_bound(self):
+        mpc = _bare_mpc(consecutive_failures=0)
+        mpc.final_stop_speed_cap_enabled = True
+        mpc.final_stop_speed_cap_activation_threshold_mps = 0.1
+        mpc.reference_speed_upper_bound_margin_mps = 0.5
+
+        speed_cap = mpc._compute_active_speed_upper_bound_mps(
+            current_state=[0.0, 0.0, 8.0, 0.0],
+            destination_state=[10.0, 0.0, 3.0, 0.0],
+            force_stop_goal=False,
+        )
+
+        self.assertAlmostEqual(speed_cap, 3.5)
 
 
 class FailSafeFallbackTrajectoryTests(unittest.TestCase):
@@ -147,6 +169,26 @@ class FailSafeFallbackTrajectoryTests(unittest.TestCase):
         self.assertTrue(np.all(u_solution[:, 0] >= mpc.constraints.min_acceleration_mps2 - 1e-6))
         self.assertTrue(np.all(u_solution[:, 0] <= mpc.constraints.max_acceleration_mps2 + 1e-6))
 
+    def test_repeated_fallback_logging_is_rate_limited(self):
+        mpc = _bare_mpc(
+            consecutive_failures=1,
+            emergency_threshold=20,
+        )
+        mpc.solver_failure_log_every_n = 5
+        rollout_x, rollout_u = self._rollout(mpc.horizon_steps)
+        x0 = np.array([0.0, 2.5, 10.0, 0.3])
+
+        with mock.patch("builtins.print") as print_mock:
+            for _ in range(6):
+                mpc._fail_safe_fallback_trajectory(
+                    x0=x0,
+                    rollout_x=rollout_x,
+                    rollout_u=rollout_u,
+                    current_acceleration_mps2=0.0,
+                )
+
+        self.assertEqual(print_mock.call_count, 2)
+
 
 class ModeCostProfileTests(unittest.TestCase):
     def test_apply_mode_cost_profile_updates_objective_weights(self):
@@ -162,6 +204,7 @@ class ModeCostProfileTests(unittest.TestCase):
             qdelta=100.0,
         )
         mpc.lane_center_follow_weight = 20.0
+        mpc.lane_center_follow_xy_weight = 20.0
         mpc.lane_center_follow_qpsi = 2.0
         mpc.road_boundary_weight = 10000.0
         mpc.road_boundary_margin_m = 0.5
@@ -186,6 +229,112 @@ class ModeCostProfileTests(unittest.TestCase):
         self.assertAlmostEqual(mpc.road_boundary_weight, 16000.0)
         self.assertAlmostEqual(mpc.lane_keep_boundary_weight, 16000.0)
         self.assertAlmostEqual(mpc.comfort_cost.w_comf, 8.0)
+
+
+class MPCFeasibilityProbeTests(unittest.TestCase):
+    def test_probe_restores_warm_start_and_runtime_state(self):
+        mpc = object.__new__(MPC)
+        mpc._last_status = "solved"
+        mpc._last_solve_time_ms = 1.0
+        mpc._last_active_max_velocity_mps = 8.0
+        mpc._last_cost_terms = {"Cost_ref": 2.0}
+        mpc._last_lane_keeping_profile = None
+        mpc._last_x_solution = np.ones((2, 4))
+        mpc._last_u_solution = np.ones((1, 2))
+        mpc._previous_x_solution = np.full((2, 4), 3.0)
+        mpc._previous_u_solution = np.full((1, 2), 4.0)
+        mpc._consecutive_solver_failure_count = 0
+        mpc._last_failure_reset_triggered = False
+        mpc._last_was_stop_goal = False
+        mpc._solver_failure_log_event_count = 0
+        mpc._solver_failure_emergency_logged = False
+
+        def fake_plan(**_kwargs):
+            mpc._last_status = "primal infeasible"
+            mpc._last_solve_time_ms = 7.0
+            mpc._last_cost_terms = {"Cost_ref": 99.0}
+            mpc._previous_x_solution = None
+            mpc._consecutive_solver_failure_count = 4
+            return []
+
+        mpc.plan_trajectory = fake_plan
+        result = mpc.probe_trajectory_feasibility(
+            current_state=[0.0, 0.0, 1.0, 0.0],
+            destination_state=[5.0, 0.0, 1.0, 0.0],
+            object_snapshots=[],
+            current_acceleration_mps2=0.0,
+            current_steering_rad=0.0,
+            lane_center_reference_samples=[],
+        )
+
+        self.assertFalse(result["solved"])
+        self.assertEqual(result["status"], "primal infeasible")
+        self.assertEqual(mpc._last_status, "solved")
+        self.assertEqual(mpc._consecutive_solver_failure_count, 0)
+        np.testing.assert_allclose(mpc._previous_x_solution, np.full((2, 4), 3.0))
+
+
+class WorldTranslationInvarianceTests(unittest.TestCase):
+    @staticmethod
+    def _solve_with_offset(offset_x: float, offset_y: float):
+        config_path = Path(__file__).resolve().parents[1] / "MPC" / "mpc.yaml"
+        payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        mpc = MPC(payload["mpc"], payload.get("road", {}))
+        current_x = float(offset_x) + 0.05
+        current_y = float(offset_y)
+        reference = [
+            {
+                "x_ref_m": float(offset_x),
+                "y_ref_m": float(offset_y) + 0.35 * float(k + 1),
+                "x": float(offset_x),
+                "y": float(offset_y) + 0.35 * float(k + 1),
+                "heading_rad": np.pi / 2.0,
+                "lane_id": 1,
+                "lane_width_m": 3.5,
+                "speed_ref_mps": 3.0,
+            }
+            for k in range(mpc.horizon_steps)
+        ]
+        output = mpc.plan_trajectory(
+            current_state=[
+                current_x,
+                current_y,
+                3.0,
+                np.deg2rad(89.87),
+            ],
+            destination_state=[
+                float(offset_x),
+                float(offset_y) + 7.35,
+                3.0,
+                np.pi / 2.0,
+                1,
+            ],
+            object_snapshots=[],
+            current_acceleration_mps2=0.0,
+            current_steering_rad=0.0,
+            lane_center_reference_samples=reference,
+        )
+        return mpc, output
+
+    def test_qp_control_is_invariant_to_world_translation(self):
+        origin_mpc, origin_output = self._solve_with_offset(0.0, 0.0)
+        world_mpc, world_output = self._solve_with_offset(132.12, 219.75)
+
+        np.testing.assert_allclose(
+            world_mpc._last_u_solution,
+            origin_mpc._last_u_solution,
+            atol=1.0e-5,
+        )
+        self.assertAlmostEqual(
+            world_output[0][0] - 132.12,
+            origin_output[0][0],
+            places=5,
+        )
+        self.assertAlmostEqual(
+            world_output[0][1] - 219.75,
+            origin_output[0][1],
+            places=5,
+        )
 
 
 if __name__ == "__main__":

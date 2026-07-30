@@ -15,14 +15,13 @@ class CPXPlanningPipeline:
 
     ``PlannerInputFrame -> behavior/reference/MPC -> PlannerOutput``.
 
-    The first integrated version delegates the detailed stages to methods on
-    ``CPXMPCPlannerBridge`` so we preserve the already-tested behavior while
-    exposing the correct pipeline boundary.  The stage internals can then be
-    moved here incrementally without changing OpenCDA integration.
+    OpenCDA lifecycle details stay behind the bridge's public
+    ``execute_planning_pipeline`` port.  No pipeline code calls bridge-private
+    methods.
     """
 
     def __init__(self, bridge: Any):
         self.bridge = bridge
 
     def run_step(self) -> PlannerOutput:
-        return self.bridge._run_full_cpx_pipeline_step()
+        return self.bridge.execute_planning_pipeline()

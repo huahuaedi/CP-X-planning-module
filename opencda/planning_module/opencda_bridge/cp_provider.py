@@ -1,11 +1,27 @@
 """OpenCDA cooperative-perception provider for the planning module.
 
-The provider can publish CP messages from two sources:
+Obstacle messages come from a **multi-vantage-point CARLA actor scan**, not
+from ``vehicle_manager.perception_manager.objects``: for the publishing CAV
+and every nearby CAV in ``v2x_manager.cav_nearby`` (population itself is
+distance-gated by ``v2x.communication_range``, unrelated to whether that CAV
+runs the CP-X planner), this scans every ``*vehicle*``/``*walker*`` CARLA
+actor within ``communication_range_m`` of *that* vantage point and fuses
+(deduplicates) the union into one obstacle list. This sidesteps two
+limitations of OpenCDA's own perception path: its ground-truth "deactivated"
+mode hard-codes a 50 m detection radius (``perception_manager.py::deactivate_mode``'s
+``thresh = 50``), and it never tracks pedestrians at all (only
+``{"vehicles", "traffic_lights"}``). Nearby CAVs only need to exist and be
+tracked -- they do not need their own CP-X planner/provider running, so
+plain OpenCDA-default-``BehaviorAgent`` traffic works as an observation
+point too.
 
-* native OpenCDA ``VehicleManager`` output:
-  ``perception_manager.objects`` and ``v2x_manager.cav_nearby``.
-* fallback CARLA actors, used only by standalone planning-module scenarios that
-  do not run the native OpenCDA stack.
+Traffic-light control messages are unaffected: they still come from
+``perception_manager.objects["traffic_lights"]`` via the native OpenCDA
+path.
+
+Fallback CARLA actor messages (vehicles only, single vantage point) remain
+available for standalone planning-module scenarios that do not run the
+native OpenCDA stack at all (no ``vehicle_manager``).
 """
 
 from __future__ import annotations
@@ -52,6 +68,7 @@ class OpenCDACPProvider:
         native_available = vehicle_manager is not None
         if native_available:
             messages = self._native_opencda_messages(
+                world=world,
                 vehicle_manager=vehicle_manager,
                 map_planner=map_planner,
                 sim_time_s=float(sim_time_s),
@@ -231,6 +248,7 @@ class OpenCDACPProvider:
     def _native_opencda_messages(
         self,
         *,
+        world: Any,
         vehicle_manager: Any,
         map_planner: Any,
         sim_time_s: float,
@@ -242,47 +260,67 @@ class OpenCDACPProvider:
             ego_location = ego_vehicle.get_location()
         except RuntimeError:
             return []
+        ego_id = int(getattr(ego_vehicle, "id", -1))
+
+        # Every vantage point this CAV can borrow: itself, plus every nearby
+        # CAV's tracked position (`v2x_manager.cav_nearby`'s own population
+        # is already distance-gated by `v2x.communication_range` -- a
+        # separate, independent check from `communication_range_m` below).
+        # A nearby CAV only needs to be a tracked VehicleManager; it does not
+        # need its own CP-X planner running.
+        vantage_points: list[Any] = [ego_location]
+        v2x_manager = getattr(vehicle_manager, "v2x_manager", None)
+        cav_nearby = getattr(v2x_manager, "cav_nearby", {}) or {}
+        for nearby_vm in dict(cav_nearby).values():
+            nearby_vehicle = getattr(nearby_vm, "vehicle", None)
+            get_location = getattr(nearby_vehicle, "get_location", None)
+            if not callable(get_location):
+                continue
+            try:
+                vantage_points.append(get_location())
+            except RuntimeError:
+                continue
 
         messages: list[dict] = []
         seen_actor_ids: set[str] = set()
+        candidate_actors = list(world.get_actors().filter("*vehicle*")) + list(
+            world.get_actors().filter("*walker*")
+        )
+        for actor in candidate_actors:
+            actor_id_int = int(getattr(actor, "id", -1))
+            if actor_id_int == ego_id:
+                continue
+            try:
+                actor_location = actor.get_location()
+            except RuntimeError:
+                continue
+            # In range of *some* vantage point (ego or a relaying nearby
+            # CAV) -- this is the actual cooperative-perception range check.
+            # `_object_to_cp_message`'s own internal range check is
+            # ego-centric and would incorrectly reject things a nearby CAV
+            # sees but that sit beyond ego's own communication_range_m, so
+            # it is skipped below via `skip_range_filter=True`.
+            if not any(
+                actor_location.distance(vantage) <= self.communication_range_m
+                for vantage in vantage_points
+            ):
+                continue
 
-        perception_manager = getattr(vehicle_manager, "perception_manager", None)
-        perception_objects = getattr(perception_manager, "objects", {}) or {}
-        for index, obj in enumerate(list(perception_objects.get("vehicles", []) or [])):
-            actor_id = self._object_actor_id(obj, fallback=f"perception:{index}")
+            actor_id = self._object_actor_id(actor, fallback=str(actor_id_int))
             if actor_id in seen_actor_ids:
                 continue
+            type_id = str(getattr(actor, "type_id", ""))
+            object_type = "pedestrian" if type_id.startswith("walker.") else "vehicle"
             message = self._object_to_cp_message(
-                obj=obj,
+                obj=actor,
                 map_planner=map_planner,
                 ego_location=ego_location,
                 sim_time_s=float(sim_time_s),
-                source="opencda_perception",
-                provider_source="native_opencda_perception",
+                source="opencda_multi_vantage",
+                provider_source="native_opencda_multi_vantage",
                 fallback_id=actor_id,
-            )
-            if isinstance(message, Mapping):
-                seen_actor_ids.add(actor_id)
-                messages.append(dict(message))
-
-        v2x_manager = getattr(vehicle_manager, "v2x_manager", None)
-        cav_nearby = getattr(v2x_manager, "cav_nearby", {}) or {}
-        for vid, nearby_vm in dict(cav_nearby).items():
-            actor = getattr(nearby_vm, "vehicle", None)
-            actor_id = self._object_actor_id(actor, fallback=f"v2x:{vid}")
-            if actor_id in seen_actor_ids:
-                continue
-            v2x_obj = actor if actor is not None else nearby_vm
-            message = self._object_to_cp_message(
-                obj=v2x_obj,
-                map_planner=map_planner,
-                ego_location=ego_location,
-                sim_time_s=float(sim_time_s),
-                source="opencda_v2x",
-                provider_source="native_opencda_v2x",
-                fallback_id=actor_id,
-                speed_kmh=self._nearby_vm_speed_kmh(nearby_vm),
-                transform_override=self._nearby_vm_transform(nearby_vm),
+                object_type=object_type,
+                skip_range_filter=True,
             )
             if isinstance(message, Mapping):
                 seen_actor_ids.add(actor_id)
@@ -328,6 +366,8 @@ class OpenCDACPProvider:
         fallback_id: str,
         speed_kmh: float | None = None,
         transform_override: Any = None,
+        object_type: str = "vehicle",
+        skip_range_filter: bool = False,
     ) -> Optional[dict]:
         try:
             transform = transform_override or self._object_transform(obj)
@@ -347,7 +387,14 @@ class OpenCDACPProvider:
             distance_m = float(location.distance(ego_location))
         except Exception:
             distance_m = 0.0
-        if self.communication_range_m > 0.0 and distance_m > self.communication_range_m:
+        # Callers that already ran their own (possibly multi-vantage-point)
+        # range check pass `skip_range_filter=True` -- this ego-centric
+        # check is only correct for a single-vantage-point caller.
+        if (
+            not bool(skip_range_filter)
+            and self.communication_range_m > 0.0
+            and distance_m > self.communication_range_m
+        ):
             return None
 
         if speed_kmh is None:
@@ -383,7 +430,7 @@ class OpenCDACPProvider:
         actor_id = self._object_actor_id(obj, fallback=fallback_id)
         return {
             "id": f"{provider_source}:{actor_id}",
-            "type": "vehicle",
+            "type": str(object_type),
             "source": str(source),
             "provider_source": str(provider_source),
             "timestamp_s": float(sim_time_s),
@@ -449,30 +496,6 @@ class OpenCDACPProvider:
         if callable(get_velocity):
             return get_velocity()
         return getattr(obj, "velocity", None)
-
-    @staticmethod
-    def _nearby_vm_transform(vehicle_manager: Any):
-        v2x_manager = getattr(vehicle_manager, "v2x_manager", None)
-        get_ego_pos = getattr(v2x_manager, "get_ego_pos", None)
-        if callable(get_ego_pos):
-            return get_ego_pos()
-        localizer = getattr(vehicle_manager, "localizer", None)
-        get_ego_pos = getattr(localizer, "get_ego_pos", None)
-        return get_ego_pos() if callable(get_ego_pos) else None
-
-    @staticmethod
-    def _nearby_vm_speed_kmh(vehicle_manager: Any) -> float | None:
-        v2x_manager = getattr(vehicle_manager, "v2x_manager", None)
-        get_ego_speed = getattr(v2x_manager, "get_ego_speed", None)
-        if callable(get_ego_speed):
-            speed = get_ego_speed()
-            return None if speed is None else float(speed)
-        localizer = getattr(vehicle_manager, "localizer", None)
-        get_ego_spd = getattr(localizer, "get_ego_spd", None)
-        if callable(get_ego_spd):
-            speed = get_ego_spd()
-            return None if speed is None else float(speed)
-        return None
 
     @staticmethod
     def _ego_transform(*, vehicle_manager: Any, ego_vehicle: Any):

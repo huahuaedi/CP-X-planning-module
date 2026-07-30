@@ -187,6 +187,15 @@ class EvaluationManager(object):
             -log_file (File): The log file to write the data.
         """
         vm = self.cav_world.get_ego_vehicle_manager()
+        if vm.agent is None:
+            # cpx_mpc-planned vehicles don't populate OpenCDA's own
+            # BehaviorAgent (``vm.agent``), so the planned-vs-real route
+            # comparison below has nothing to compare against. Skip it
+            # instead of crashing the whole evaluate() call, so the other
+            # evaluations (localization/kinematics/etc.) still run.
+            print("[Planning Evaluation Module] Skipped: vm.agent is None "
+                  "(cpx_mpc planner does not populate the OpenCDA BehaviorAgent).")
+            return
         planned_route = vm.agent.initial_global_route
         real_route = vm.v2x_manager.ego_dynamic_trace  # return in (ego_pos, ego_speed, world_tik)
         planned_dist = self.calculate_route_dist(planned_route)

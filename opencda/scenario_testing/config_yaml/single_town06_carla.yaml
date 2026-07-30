@@ -9,34 +9,52 @@ vehicle_base:
     perception:
       activate: true # when not activated, objects positions will be retrieved from server directly
       camera:
-        visualize: 4 # how many camera images need to be visualized. 0 means no visualization for camera
-        num: 4 # how many cameras are mounted on the vehicle. Maximum 3(frontal, left and right cameras)
+        visualize: 1 # show only the frontal camera during the ML smoke test
+        num: 1 # use one frontal camera to keep CPU inference responsive
         # relative positions (x,y,z,yaw) of the camera. len(positions) should be equal to camera num
         positions:
           - [2.5, 0, 1.0, 0]
-          - [0.0, 0.3, 1.8, 100]
-          - [0.0, -0.3, 1.8, -100]
-          - [-2.0, 0.0, 1.5, 180]
+      lidar:
+        visualize: false
 
     localization:
       activate: true # when not activated, ego position will be retrieved from server directly
       debug_helper:
-        show_animation: true # whether to show real-time trajectory plotting
+        show_animation: false # keep the ML smoke test focused on the camera output
 
   behavior:
     ignore_traffic_light: false # whether to ignore traffic light
     collision_time_ahead: 2.0 # used for collision checking
+
+  planner:
+    enabled: true
+    type: cpx_mpc
+    mode: full_cpx_mpc
+    fallback_policy: emergency_stop
+    use_opencda_global_route: true
+    opencda_global_route_reference_allowed: true
+    global_planner_mode: dij
+    publish_cp_message: true
+    require_native_opencda_cp: false
+    target_speed_mps: 3.0
+    lookahead_m: 18.0
+    min_front_gap_m: 8.0
+    max_mpc_obstacles: 4
+    record_debug: true
+    debug_output_dir: opencda/planning_module/opencda_bridge/debug_single_town06_ml
+    debug: true
 
 
 # define the background traffic control by carla
 carla_traffic_manager:
   random: true # whether to random select vehicles' color and model
   ignore_lights_percentage: 0 # whether set the traffic ignore traffic lights
+  auto_lane_change: false
   vehicle_list: ~  # a number or a list
   # Used only when vehicle_list is a number.
   # x_min, x_max, y_min, y_max, x_step, y_step
   range:
-    - [ 50, 250, 135, 145, 50, 4, 30]
+    - [ 60, 310, 134, 150, 25, 4, 24]
 
 # define scenario. In this scenario, only a single CAV will be spawned
 scenario:

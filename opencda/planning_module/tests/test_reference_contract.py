@@ -171,6 +171,46 @@ class ReferenceContractTest(unittest.TestCase):
         )
         self.assertTrue(result.valid, result.reason())
 
+    def test_vehicle_curvature_limit_tightens_turn_contract(self):
+        contract = contract_from_config(
+            mode="intersection_turn",
+            expected_lane_id=1,
+            horizon_steps=4,
+            config={
+                "reference_contract_intersection_turn_max_curvature_1pm": 0.55,
+                "reference_vehicle_max_curvature_1pm": 0.20,
+            },
+            default_speed_mps=2.0,
+        )
+
+        self.assertAlmostEqual(contract.max_curvature_1pm, 0.20)
+
+    def test_validation_reports_vehicle_curvature_margin(self):
+        contract = contract_from_config(
+            mode="intersection_turn",
+            expected_lane_id=1,
+            horizon_steps=4,
+            config={"reference_vehicle_max_curvature_1pm": 0.10},
+            default_speed_mps=2.0,
+        )
+        reference = [
+            {"x_ref_m": 1.0, "y_ref_m": 0.0},
+            {"x_ref_m": 2.0, "y_ref_m": 0.0},
+            {"x_ref_m": 2.98, "y_ref_m": 0.20},
+            {"x_ref_m": 3.88, "y_ref_m": 0.63},
+        ]
+        result = validate_reference_contract(
+            reference_samples=reference,
+            destination_state=[3.88, 0.63, 1.0, 0.0, 1],
+            ego_state=[0.0, 0.0, 0.0, 0.0],
+            contract=contract,
+            check_destination_body_lateral=False,
+        )
+
+        self.assertFalse(result.valid)
+        self.assertIn("curvature_out_of_contract", result.violations)
+        self.assertLess(result.curvature_margin_1pm, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

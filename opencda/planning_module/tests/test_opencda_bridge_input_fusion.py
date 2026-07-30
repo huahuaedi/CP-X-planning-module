@@ -1,6 +1,7 @@
 import sys
 import types
 import unittest
+from unittest.mock import Mock
 
 
 if "carla" not in sys.modules:
@@ -27,282 +28,155 @@ from opencda_bridge.cpx_mpc_planner import (
     CPXMPCPlannerBridge,
     _Mode2ObjectTrackMemory,
     _Mode2ReferenceMemory,
-    _Mode2TrafficLightMemory,
     _Mode2TrajectoryMemory,
 )
+from pipeline.traffic_light_memory import TrafficLightMemory
+from pipeline.reference_gate import FinalReferenceGate
+from pipeline.reference_generator import GeneratedReference, ReferenceGenerator
+from pipeline.reference_pipeline import ReferencePipeline, ReferencePipelineRequest
 
 
 class OpenCDABridgeInputFusionTests(unittest.TestCase):
     @staticmethod
-    def _longitudinal_guard_bridge():
+    def _attach_reference_generator(bridge):
+        bridge.reference_generator = ReferenceGenerator(
+            config=bridge.config,
+            mpc=bridge.mpc,
+            map_planner=None,
+            map_waypoint_from_location=lambda location: (
+                bridge._map_waypoint_from_location(location)
+                if hasattr(bridge, "_map_waypoint_from_location")
+                else None
+            ),
+            lane_id_at_location=lambda _location: 1,
+            body_frame_xy=bridge._body_frame_xy,
+            target_speed_mps=float(getattr(bridge, "target_speed_mps", 3.0)),
+            lookahead_m=18.0,
+        )
+        bridge.final_reference_gate = FinalReferenceGate(bridge.config)
+        bridge.reference_pipeline = ReferencePipeline(
+            config=bridge.config,
+            generator=bridge.reference_generator,
+            final_gate=bridge.final_reference_gate,
+            horizon_steps=int(bridge.mpc.horizon_steps),
+            dt_s=float(bridge.mpc.dt_s),
+            default_speed_mps=float(getattr(bridge, "target_speed_mps", 3.0)),
+        )
+        bridge._active_global_route_points = lambda: []
+        return bridge.reference_generator
+
+    def test_set_destination_does_not_require_removed_full_mode_memories(self):
         bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
-        bridge.config = {
-            "full_low_speed_launch_ramp_enabled": False,
-            "lane_follow_negative_accel_release_min_front_gap_m": 12.0,
-        }
-        bridge.mpc = types.SimpleNamespace(
-            constraints=types.SimpleNamespace(
-                min_acceleration_mps2=-3.0,
-                max_acceleration_mps2=2.0,
-                max_steer_rad=0.5,
-            )
-        )
-        bridge.min_front_gap_m = 8.0
-        bridge.overspeed_guard_enabled = True
-        bridge.overspeed_margin_mps = 0.5
-        bridge.overspeed_release_margin_mps = 0.1
-        bridge.overspeed_decel_gain = 0.8
-        bridge.overspeed_max_decel_mps2 = 0.8
-        bridge._overspeed_guard_active = False
-        bridge.lane_follow_negative_accel_release_enabled = True
-        bridge.lane_follow_negative_accel_release_error_mps = 0.05
-        bridge.lane_follow_negative_accel_release_max_lateral_m = 0.5
-        bridge.lane_follow_speed_recovery_enabled = True
-        bridge.lane_follow_speed_recovery_enter_error_mps = 0.20
-        bridge.lane_follow_speed_recovery_release_error_mps = 0.05
-        bridge.lane_follow_speed_recovery_min_accel_mps2 = 0.80
-        bridge.lane_follow_speed_recovery_max_lateral_m = 0.50
-        bridge._lane_follow_speed_recovery_active = False
-        bridge.full_low_speed_launch_enabled = False
-        bridge.full_low_speed_launch_speed_mps = 0.35
-        bridge.full_low_speed_launch_min_accel_mps2 = 0.8
-        bridge.low_speed_lateral_recovery_enabled = False
-        bridge._full_launch_start_s = None
-        bridge._full_launch_start_xy = None
-        bridge._control_from_mpc = lambda accel, steer: types.SimpleNamespace(
-            throttle=max(0.0, float(accel)),
-            brake=max(0.0, -float(accel)),
-            steer=float(steer),
-        )
-        return bridge
+        bridge.route_manager = Mock()
+        bridge.route_manager.set_destination.return_value = {"route": "ok"}
+        bridge._mode2_reference_memory = Mock()
+        bridge._mode2_trajectory_memory = Mock()
+        bridge._lane_id_tracker = Mock()
+        bridge.control_buffer = Mock()
+        bridge._temporary_destination_state = [1.0, 2.0]
+        bridge._previous_lane_center_reference = [{"x": 1.0}]
+        bridge._lane_reference_freeze_count = 4
+        bridge._turn_latch_decision = "intersection_turn_left"
+        bridge._turn_latch_until_sim_time_s = 10.0
 
-    def test_overspeed_guard_uses_hysteresis_until_release_margin(self):
-        bridge = self._longitudinal_guard_bridge()
-        transform = types.SimpleNamespace(
-            location=types.SimpleNamespace(x=0.0, y=0.0),
-            rotation=types.SimpleNamespace(yaw=0.0),
+        bridge.set_destination(
+            start_location={"x": 0.0, "y": 0.0, "z": 0.0},
+            end_location={"x": 10.0, "y": 0.0, "z": 0.0},
         )
 
-        _, accel, _, reason = bridge._apply_control_safety_guards(
-            control=bridge._control_from_mpc(1.0, 0.0),
-            accel_mps2=1.0,
-            steer_rad=0.0,
-            ego_transform=transform,
-            ego_speed_mps=3.6,
-            speed_ref_mps=3.0,
-            destination_state=[8.0, 0.0, 3.0, 0.0, 1],
-            destination_lateral_m=0.0,
-            stop_goal_active=False,
-            behavior_decision="lane_follow",
-            behavior_fsm_state="IDLE",
-            traffic_signal_state="unknown",
-            front_gap_m=None,
-            sim_time_s=1.0,
+        bridge._mode2_reference_memory.reset.assert_called_once_with()
+        bridge._mode2_trajectory_memory.reset.assert_called_once_with()
+        bridge._lane_id_tracker.reset.assert_called_once_with()
+        bridge.control_buffer.reset.assert_called_once_with(
+            reason="destination_updated"
         )
-        self.assertEqual(reason, "overspeed_guard_hysteresis")
-        self.assertLess(accel, 0.0)
+        self.assertEqual(bridge._turn_latch_decision, "")
 
-        _, _, _, reason = bridge._apply_control_safety_guards(
-            control=bridge._control_from_mpc(1.0, 0.0),
-            accel_mps2=1.0,
-            steer_rad=0.0,
-            ego_transform=transform,
-            ego_speed_mps=3.3,
-            speed_ref_mps=3.0,
-            destination_state=[8.0, 0.0, 3.0, 0.0, 1],
-            destination_lateral_m=0.0,
-            stop_goal_active=False,
-            behavior_decision="lane_follow",
-            behavior_fsm_state="IDLE",
-            traffic_signal_state="unknown",
-            front_gap_m=None,
-            sim_time_s=1.1,
-        )
-        self.assertEqual(reason, "overspeed_guard_hysteresis")
-
-        _, accel, _, reason = bridge._apply_control_safety_guards(
-            control=bridge._control_from_mpc(0.4, 0.0),
-            accel_mps2=0.4,
-            steer_rad=0.0,
-            ego_transform=transform,
-            ego_speed_mps=3.05,
-            speed_ref_mps=3.0,
-            destination_state=[8.0, 0.0, 3.0, 0.0, 1],
-            destination_lateral_m=0.0,
-            stop_goal_active=False,
-            behavior_decision="lane_follow",
-            behavior_fsm_state="IDLE",
-            traffic_signal_state="unknown",
-            front_gap_m=None,
-            sim_time_s=1.2,
-        )
-        self.assertEqual(reason, "")
-        self.assertAlmostEqual(accel, 0.4)
-
-    def test_red_light_stationary_stop_uses_direct_brake_hold(self):
-        bridge = self._longitudinal_guard_bridge()
-        bridge.config.update(
-            {
-                "full_stop_hold_speed_mps": 0.10,
-                "full_stop_hold_brake": 0.60,
+    def test_collect_object_snapshots_accepts_external_mapping_detections(self):
+        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
+        snapshots = bridge._collect_object_snapshots(
+            detected_objects={
+                "vehicles": [
+                    {
+                        "id": "mdrive_detection:7",
+                        "x": 12.0,
+                        "y": -3.0,
+                        "v": 2.5,
+                        "psi": 0.25,
+                        "length_m": 4.2,
+                        "width_m": 1.9,
+                        "confidence": 0.8,
+                        "source": "mdrive_cooperative_perception",
+                    }
+                ]
             }
         )
-        transform = types.SimpleNamespace(
-            location=types.SimpleNamespace(x=0.0, y=0.0),
-            rotation=types.SimpleNamespace(yaw=0.0),
+
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(snapshots[0]["vehicle_id"], "mdrive_detection:7")
+        self.assertAlmostEqual(snapshots[0]["x"], 12.0)
+        self.assertAlmostEqual(snapshots[0]["confidence"], 0.8)
+
+    def test_collect_object_snapshots_accepts_ml_fusion_vehicle_without_transform(self):
+        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
+        fused_vehicle = types.SimpleNamespace(
+            carla_id=-1,
+            location=types.SimpleNamespace(x=18.0, y=2.5, z=0.0),
+            velocity=types.SimpleNamespace(x=3.0, y=4.0, z=0.0),
+            bounding_box=types.SimpleNamespace(
+                extent=types.SimpleNamespace(x=2.1, y=0.95, z=0.8)
+            ),
+            get_transform=lambda: None,
+            get_location=lambda: types.SimpleNamespace(
+                x=18.0, y=2.5, z=0.0),
+            get_velocity=lambda: types.SimpleNamespace(
+                x=3.0, y=4.0, z=0.0),
         )
 
-        control, accel, steer, reason = bridge._apply_control_safety_guards(
-            control=bridge._control_from_mpc(0.5, 0.2),
-            accel_mps2=0.5,
-            steer_rad=0.2,
-            ego_transform=transform,
-            ego_speed_mps=0.05,
-            speed_ref_mps=0.0,
-            destination_state=[1.5, 0.0, 0.0, 0.0, 1],
-            destination_lateral_m=0.0,
-            stop_goal_active=True,
-            behavior_decision="stop_at_intersection",
-            behavior_fsm_state="IDLE",
-            traffic_signal_state="red",
-            front_gap_m=None,
-            sim_time_s=1.0,
+        snapshots = bridge._collect_object_snapshots(
+            detected_objects={"vehicles": [fused_vehicle]}
         )
 
-        self.assertEqual(reason, "red_yellow_stop_stationary_hold")
-        self.assertAlmostEqual(control.throttle, 0.0)
-        self.assertAlmostEqual(control.brake, 0.60)
-        self.assertAlmostEqual(control.steer, 0.0)
-        self.assertAlmostEqual(accel, -1.8)
-        self.assertAlmostEqual(steer, 0.0)
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(
+            snapshots[0]["vehicle_id"], "opencda_detection:0")
+        self.assertEqual(
+            snapshots[0]["source"], "opencda_ml_lidar_fusion")
+        self.assertAlmostEqual(snapshots[0]["x"], 18.0)
+        self.assertAlmostEqual(snapshots[0]["y"], 2.5)
+        self.assertAlmostEqual(snapshots[0]["v"], 5.0)
+        self.assertAlmostEqual(snapshots[0]["psi"], 0.927295218, places=6)
+        self.assertAlmostEqual(snapshots[0]["length_m"], 4.2)
+        self.assertAlmostEqual(snapshots[0]["width_m"], 1.9)
 
-    def test_lane_follow_releases_unexplained_brake_below_target(self):
-        bridge = self._longitudinal_guard_bridge()
-        transform = types.SimpleNamespace(
-            location=types.SimpleNamespace(x=0.0, y=0.0),
-            rotation=types.SimpleNamespace(yaw=0.0),
+    def test_low_speed_lane_follow_forces_closed_loop_replan(self):
+        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
+        bridge.full_control_buffer_min_speed_mps = 1.5
+
+        self.assertTrue(
+            bridge._low_speed_control_buffer_force_replan(
+                ego_speed_mps=0.2,
+                behavior_decision="lane_follow",
+                behavior_fsm_state="IDLE",
+                stop_goal_active=False,
+            )
         )
-
-        _, accel, _, reason = bridge._apply_control_safety_guards(
-            control=bridge._control_from_mpc(-0.35, 0.0),
-            accel_mps2=-0.35,
-            steer_rad=0.0,
-            ego_transform=transform,
-            ego_speed_mps=2.9,
-            speed_ref_mps=3.0,
-            destination_state=[8.0, 0.0, 3.0, 0.0, 1],
-            destination_lateral_m=0.0,
-            stop_goal_active=False,
-            behavior_decision="lane_follow",
-            behavior_fsm_state="IDLE",
-            traffic_signal_state="unknown",
-            front_gap_m=18.0,
-            sim_time_s=1.0,
+        self.assertFalse(
+            bridge._low_speed_control_buffer_force_replan(
+                ego_speed_mps=2.0,
+                behavior_decision="lane_follow",
+                behavior_fsm_state="IDLE",
+                stop_goal_active=False,
+            )
         )
-
-        self.assertEqual(reason, "lane_follow_negative_accel_release")
-        self.assertAlmostEqual(accel, 0.0)
-
-    def test_lane_follow_keeps_braking_when_front_gap_is_close(self):
-        bridge = self._longitudinal_guard_bridge()
-        transform = types.SimpleNamespace(
-            location=types.SimpleNamespace(x=0.0, y=0.0),
-            rotation=types.SimpleNamespace(yaw=0.0),
+        self.assertFalse(
+            bridge._low_speed_control_buffer_force_replan(
+                ego_speed_mps=0.2,
+                behavior_decision="intersection_turn_left",
+                behavior_fsm_state="IDLE",
+                stop_goal_active=False,
+            )
         )
-
-        _, accel, _, reason = bridge._apply_control_safety_guards(
-            control=bridge._control_from_mpc(-0.35, 0.0),
-            accel_mps2=-0.35,
-            steer_rad=0.0,
-            ego_transform=transform,
-            ego_speed_mps=2.9,
-            speed_ref_mps=3.0,
-            destination_state=[8.0, 0.0, 3.0, 0.0, 1],
-            destination_lateral_m=0.0,
-            stop_goal_active=False,
-            behavior_decision="lane_follow",
-            behavior_fsm_state="IDLE",
-            traffic_signal_state="unknown",
-            front_gap_m=8.0,
-            sim_time_s=1.0,
-        )
-
-        self.assertEqual(reason, "")
-        self.assertAlmostEqual(accel, -0.35)
-
-    def test_lane_follow_speed_recovery_holds_minimum_acceleration(self):
-        bridge = self._longitudinal_guard_bridge()
-        transform = types.SimpleNamespace(
-            location=types.SimpleNamespace(x=0.0, y=0.0),
-            rotation=types.SimpleNamespace(yaw=0.0),
-        )
-
-        _, accel, _, reason = bridge._apply_control_safety_guards(
-            control=bridge._control_from_mpc(0.1, 0.0),
-            accel_mps2=0.1,
-            steer_rad=0.0,
-            ego_transform=transform,
-            ego_speed_mps=2.7,
-            speed_ref_mps=3.0,
-            destination_state=[8.0, 0.0, 3.0, 0.0, 1],
-            destination_lateral_m=0.0,
-            stop_goal_active=False,
-            behavior_decision="lane_follow",
-            behavior_fsm_state="IDLE",
-            traffic_signal_state="unknown",
-            front_gap_m=18.0,
-            sim_time_s=1.0,
-        )
-
-        self.assertEqual(reason, "lane_follow_speed_recovery")
-        self.assertAlmostEqual(accel, 0.8)
-
-        _, accel, _, reason = bridge._apply_control_safety_guards(
-            control=bridge._control_from_mpc(0.2, 0.0),
-            accel_mps2=0.2,
-            steer_rad=0.0,
-            ego_transform=transform,
-            ego_speed_mps=2.96,
-            speed_ref_mps=3.0,
-            destination_state=[8.0, 0.0, 3.0, 0.0, 1],
-            destination_lateral_m=0.0,
-            stop_goal_active=False,
-            behavior_decision="lane_follow",
-            behavior_fsm_state="IDLE",
-            traffic_signal_state="unknown",
-            front_gap_m=18.0,
-            sim_time_s=1.1,
-        )
-
-        self.assertEqual(reason, "")
-        self.assertAlmostEqual(accel, 0.2)
-
-    def test_lane_follow_speed_recovery_does_not_override_close_gap(self):
-        bridge = self._longitudinal_guard_bridge()
-        transform = types.SimpleNamespace(
-            location=types.SimpleNamespace(x=0.0, y=0.0),
-            rotation=types.SimpleNamespace(yaw=0.0),
-        )
-
-        _, accel, _, reason = bridge._apply_control_safety_guards(
-            control=bridge._control_from_mpc(0.1, 0.0),
-            accel_mps2=0.1,
-            steer_rad=0.0,
-            ego_transform=transform,
-            ego_speed_mps=2.5,
-            speed_ref_mps=3.0,
-            destination_state=[8.0, 0.0, 3.0, 0.0, 1],
-            destination_lateral_m=0.0,
-            stop_goal_active=False,
-            behavior_decision="lane_follow",
-            behavior_fsm_state="IDLE",
-            traffic_signal_state="green",
-            front_gap_m=8.0,
-            sim_time_s=1.0,
-        )
-
-        self.assertEqual(reason, "")
-        self.assertAlmostEqual(accel, 0.1)
 
     def test_road_boundary_metrics_uses_vehicle_footprint(self):
         bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
@@ -319,26 +193,211 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         bridge.map_planner = types.SimpleNamespace(
             get_waypoint=lambda _location: waypoint
         )
+        bridge.mpc = types.SimpleNamespace(dt_s=0.1, horizon_steps=20)
+        bridge.target_speed_mps = 3.0
+        self._attach_reference_generator(bridge)
         vehicle = types.SimpleNamespace(
             bounding_box=types.SimpleNamespace(
-                extent=types.SimpleNamespace(y=1.0)
+                extent=types.SimpleNamespace(x=2.4, y=1.0)
             )
         )
         bridge.vehicle_manager = types.SimpleNamespace(vehicle=vehicle)
 
         inside = bridge._road_boundary_metrics(
-            types.SimpleNamespace(x=0.0, y=0.5)
+            types.SimpleNamespace(x=0.0, y=0.5),
+            ego_yaw_rad=0.0,
         )
         outside = bridge._road_boundary_metrics(
-            types.SimpleNamespace(x=0.0, y=1.0)
+            types.SimpleNamespace(x=0.0, y=1.0),
+            ego_yaw_rad=0.0,
         )
 
         self.assertTrue(inside["road_boundary_sample_valid"])
         self.assertFalse(inside["road_boundary_breach"])
-        self.assertAlmostEqual(inside["road_boundary_clearance_m"], 0.25)
+        self.assertAlmostEqual(inside["road_boundary_clearance_m"], 0.10)
         self.assertTrue(outside["road_boundary_breach"])
         self.assertEqual(bridge._metrics_boundary_sample_count, 2)
         self.assertEqual(bridge._metrics_boundary_breach_count, 1)
+
+    def test_road_boundary_projection_limits_rolling_reference_heading_jump(self):
+        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
+        bridge.config = {
+            "road_boundary_projection_max_heading_step_rad": 0.04,
+        }
+        bridge._metrics_boundary_sample_count = 0
+        bridge._metrics_boundary_breach_count = 0
+        waypoint = types.SimpleNamespace(
+            transform=types.SimpleNamespace(
+                location=types.SimpleNamespace(x=0.0, y=0.0),
+                rotation=types.SimpleNamespace(yaw=0.0),
+            ),
+            lane_width=3.5,
+        )
+        bridge.map_planner = types.SimpleNamespace(
+            get_waypoint=lambda _location: waypoint
+        )
+        bridge.mpc = types.SimpleNamespace(dt_s=0.1, horizon_steps=20)
+        bridge.target_speed_mps = 3.0
+        self._attach_reference_generator(bridge)
+        bridge.vehicle_manager = types.SimpleNamespace(
+            vehicle=types.SimpleNamespace(
+                bounding_box=types.SimpleNamespace(
+                    extent=types.SimpleNamespace(x=2.4, y=1.0)
+                )
+            )
+        )
+
+        def reference(start_x, heading):
+            return [
+                {
+                    "x_ref_m": start_x + index,
+                    "y_ref_m": 0.0,
+                    "corridor_center_x_m": start_x + index,
+                    "corridor_center_y_m": 0.0,
+                    "corridor_heading_rad": heading,
+                    "lane_width_m": 3.5,
+                }
+                for index in range(3)
+            ]
+
+        bridge._road_boundary_metrics(
+            types.SimpleNamespace(x=0.9, y=0.0),
+            ego_yaw_rad=0.0,
+            reference_samples=reference(0.0, 0.0),
+        )
+        jumped = bridge._road_boundary_metrics(
+            types.SimpleNamespace(x=1.01, y=0.0),
+            ego_yaw_rad=0.0,
+            reference_samples=reference(1.0, 0.11),
+        )
+
+        self.assertAlmostEqual(
+            jumped["road_boundary_projection_raw_heading_rad"],
+            0.11,
+        )
+        self.assertAlmostEqual(
+            jumped["road_boundary_projection_conditioned_heading_rad"],
+            0.04,
+        )
+        self.assertTrue(
+            jumped["road_boundary_projection_continuity_limited"]
+        )
+
+    def test_boundary_feedback_requires_persistence_then_latches(self):
+        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
+        bridge.config = {
+            "boundary_recovery_trigger_clearance_m": -0.10,
+            "boundary_recovery_trigger_frames": 3,
+            "boundary_recovery_release_clearance_m": 0.10,
+        }
+        bridge._boundary_recovery_trigger_frames = 0
+        bridge._reset_boundary_recovery_request()
+        snapshot = {
+            "road_boundary_sample_valid": True,
+            "road_boundary_clearance_m": -0.2,
+            "road_boundary_lateral_offset_m": 0.3,
+            "road_boundary_heading_error_rad": -0.2,
+        }
+
+        for index in range(2):
+            bridge._update_boundary_recovery_request(
+                boundary_snapshot=snapshot,
+                behavior_decision="intersection_turn_right",
+                sim_time_s=float(index),
+            )
+            self.assertFalse(bridge._boundary_recovery_request.active)
+        bridge._update_boundary_recovery_request(
+            boundary_snapshot=snapshot,
+            behavior_decision="intersection_turn_right",
+            sim_time_s=2.0,
+        )
+
+        self.assertTrue(bridge._boundary_recovery_request.active)
+        self.assertEqual(
+            bridge._boundary_recovery_request.turn_direction,
+            "right",
+        )
+
+        bridge._update_boundary_recovery_request(
+            boundary_snapshot={
+                **snapshot,
+                "road_boundary_clearance_m": 0.2,
+                "road_boundary_lateral_offset_m": 0.1,
+                "road_boundary_heading_error_rad": 0.04,
+            },
+            behavior_decision="intersection_turn_right",
+            sim_time_s=3.0,
+        )
+        self.assertFalse(bridge._boundary_recovery_request.active)
+
+    def test_soft_margin_does_not_latch_recovery_inside_drivable_union(self):
+        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
+        bridge.config = {
+            "boundary_recovery_trigger_clearance_m": -0.10,
+            "boundary_recovery_trigger_frames": 3,
+        }
+        bridge._boundary_recovery_trigger_frames = 0
+        bridge._boundary_recovery_infeasible_frames = 0
+        bridge._boundary_recovery_cooldown_until_s = -float("inf")
+        bridge._reset_boundary_recovery_request()
+        snapshot = {
+            "road_boundary_sample_valid": True,
+            "road_boundary_clearance_m": -0.11,
+            "road_boundary_lateral_offset_m": 0.4,
+            "road_boundary_heading_error_rad": -0.2,
+            "road_boundary_geometry_source": (
+                "drivable_footprint:carla_driving_lane_union"
+            ),
+            "road_boundary_drivable_inside": True,
+        }
+
+        for index in range(10):
+            bridge._update_boundary_recovery_request(
+                boundary_snapshot=snapshot,
+                behavior_decision="intersection_turn_right",
+                sim_time_s=0.05 * float(index),
+            )
+
+        self.assertFalse(bridge._boundary_recovery_request.active)
+        self.assertEqual(bridge._boundary_recovery_trigger_frames, 0)
+
+    def test_infeasible_boundary_recovery_enters_cooldown(self):
+        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
+        bridge.config = {
+            "boundary_recovery_max_infeasible_frames": 3,
+            "boundary_recovery_cooldown_s": 2.0,
+        }
+        bridge._boundary_recovery_trigger_frames = 0
+        bridge._boundary_recovery_infeasible_frames = 0
+        bridge._boundary_recovery_cooldown_until_s = -float("inf")
+        bridge._reset_boundary_recovery_request()
+        snapshot = {
+            "road_boundary_sample_valid": True,
+            "road_boundary_clearance_m": -0.3,
+            "road_boundary_lateral_offset_m": 0.4,
+            "road_boundary_heading_error_rad": -0.2,
+        }
+
+        for index in range(3):
+            bridge._update_boundary_recovery_request(
+                boundary_snapshot=snapshot,
+                behavior_decision="intersection_turn_right",
+                sim_time_s=10.0 + 0.05 * float(index),
+                recovery_planned=True,
+                recovery_reference_feasible=False,
+            )
+
+        self.assertFalse(bridge._boundary_recovery_request.active)
+        self.assertGreater(
+            bridge._boundary_recovery_cooldown_until_s,
+            12.0,
+        )
+        bridge._update_boundary_recovery_request(
+            boundary_snapshot=snapshot,
+            behavior_decision="intersection_turn_right",
+            sim_time_s=11.0,
+        )
+        self.assertFalse(bridge._boundary_recovery_request.active)
 
     def test_strict_reference_veto_hard_gates_explicit_fallback(self):
         reason = CPXMPCPlannerBridge._candidate_hard_gate_reason(
@@ -392,13 +451,27 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
             valid=True,
             reason=lambda: "",
         )
-        bridge._build_ego_heading_emergency_stop_reference = lambda **_kwargs: (
-            [
-                {"x_ref_m": 0.5, "y_ref_m": 0.0, "lane_id": 1, "speed_ref_mps": 0.0},
-                {"x_ref_m": 1.0, "y_ref_m": 0.0, "lane_id": 1, "speed_ref_mps": 0.0},
-                {"x_ref_m": 1.5, "y_ref_m": 0.0, "lane_id": 1, "speed_ref_mps": 0.0},
-            ],
-            [0.5, 0.0, 0.0, 0.0, 1],
+        bridge.reference_generator = types.SimpleNamespace(
+            _build_ego_heading_emergency_stop_reference=lambda **_kwargs: (
+                [
+                    {"x_ref_m": 0.5, "y_ref_m": 0.0, "lane_id": 1, "speed_ref_mps": 0.0},
+                    {"x_ref_m": 1.0, "y_ref_m": 0.0, "lane_id": 1, "speed_ref_mps": 0.0},
+                    {"x_ref_m": 1.5, "y_ref_m": 0.0, "lane_id": 1, "speed_ref_mps": 0.0},
+                ],
+                [0.5, 0.0, 0.0, 0.0, 1],
+            ),
+            emergency_stop_reference=lambda **_kwargs: GeneratedReference(
+                samples=[
+                    {
+                        "x_ref_m": 0.5,
+                        "y_ref_m": 0.0,
+                        "lane_id": 1,
+                        "speed_ref_mps": 0.0,
+                    }
+                ],
+                destination_state=[0.5, 0.0, 0.0, 0.0, 1],
+                source="ego_heading_emergency_stop",
+            ),
         )
 
         decision, _, speed_mps, _, _, debug = bridge._explicit_fallback_candidate_for_mpc(
@@ -434,6 +507,7 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         bridge.full_stop_max_destination_lateral_m = 1.0
         bridge.full_stop_max_reference_first_lateral_m = 0.55
         bridge.strict_reference_validator_veto_enabled = True
+        self._attach_reference_generator(bridge)
         reference = [
             {"x_ref_m": 0.34, "y_ref_m": 0.00, "lane_id": 1, "speed_ref_mps": 1.0},
             {"x_ref_m": 0.68, "y_ref_m": 0.01, "lane_id": 1, "speed_ref_mps": 1.0},
@@ -441,27 +515,33 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
             {"x_ref_m": 1.36, "y_ref_m": 0.06, "lane_id": 1, "speed_ref_mps": 1.0},
         ]
 
-        destination, stabilized, reason = bridge._stabilize_mpc_reference_input(
-            destination_state=[1.36, 0.06, 1.0, 0.0, 1],
-            lane_center_reference=reference,
-            current_state=[0.0, 0.0, 1.0, 0.0],
-            ego_location=sys.modules["carla"].Location(0.0, 0.0, 0.0),
-            ego_yaw_rad=0.0,
-            ego_speed_mps=1.0,
-            speed_ref_mps=1.0,
-            stop_goal_active=False,
-            behavior_decision="intersection_turn_left",
-            behavior_fsm_state="INTERSECTION_TURN_LEFT",
-            current_lane_id=1,
-            stop_target=None,
+        conditioned = bridge.reference_pipeline.condition(
+            ReferencePipelineRequest(
+                destination_state=[1.36, 0.06, 1.0, 0.0, 1],
+                reference_samples=reference,
+                current_state=[0.0, 0.0, 1.0, 0.0],
+                ego_location=sys.modules["carla"].Location(0.0, 0.0, 0.0),
+                ego_yaw_rad=0.0,
+                ego_speed_mps=1.0,
+                target_speed_mps=1.0,
+                stop_goal_active=False,
+                behavior_decision="intersection_turn_left",
+                behavior_fsm_state="INTERSECTION_TURN_LEFT",
+                current_lane_id=1,
+                target_lane_id=1,
+                stop_target=None,
+            )
         )
+        destination = conditioned.destination_state
+        stabilized = conditioned.reference_samples
+        reason = conditioned.reason
 
         self.assertEqual(len(stabilized), 4)
         self.assertNotIn("drop_duplicate_sample", reason)
         self.assertNotIn("creep_turn_reference", reason)
         self.assertAlmostEqual(float(destination[0]), 1.36)
 
-    def test_strict_lane_follow_rebuilds_curved_reference_before_veto(self):
+    def test_lane_follow_curvature_is_conditioned_before_contract_veto(self):
         bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
         bridge.config = {}
         bridge.target_speed_mps = 3.0
@@ -476,36 +556,142 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         bridge.strict_reference_validator_veto_enabled = True
         bridge._map_waypoint_from_location = lambda _location: object()
         bridge._active_global_route_points = lambda: []
-        bridge._current_lane_center_reference_samples = lambda **_kwargs: [
-            {"x_ref_m": 1.0, "y_ref_m": 0.0, "lane_id": 1, "speed_ref_mps": 2.0},
-            {"x_ref_m": 2.0, "y_ref_m": 0.0, "lane_id": 1, "speed_ref_mps": 2.0},
-            {"x_ref_m": 3.0, "y_ref_m": 0.0, "lane_id": 1, "speed_ref_mps": 2.0},
-        ]
-
-        destination, reference, reason = bridge._stabilize_mpc_reference_input(
-            destination_state=[2.0, 2.0, 2.0, 0.0, 1],
-            lane_center_reference=[
+        self._attach_reference_generator(bridge)
+        bridge.reference_generator._ego_anchored_lane_recovery_reference_samples = (
+            lambda **_kwargs: [
                 {"x_ref_m": 1.0, "y_ref_m": 0.0, "lane_id": 1, "speed_ref_mps": 2.0},
-                {"x_ref_m": 1.1, "y_ref_m": 1.0, "lane_id": 1, "speed_ref_mps": 2.0},
-                {"x_ref_m": 2.0, "y_ref_m": 1.1, "lane_id": 1, "speed_ref_mps": 2.0},
-            ],
+                {"x_ref_m": 2.0, "y_ref_m": 0.0, "lane_id": 1, "speed_ref_mps": 2.0},
+                {"x_ref_m": 3.0, "y_ref_m": 0.0, "lane_id": 1, "speed_ref_mps": 2.0},
+            ]
+        )
+
+        conditioned = bridge.reference_pipeline.condition(
+            ReferencePipelineRequest(
+                destination_state=[2.0, 2.0, 2.0, 0.0, 1],
+                reference_samples=[
+                    {"x_ref_m": 1.0, "y_ref_m": 0.0, "lane_id": 1, "speed_ref_mps": 2.0},
+                    {"x_ref_m": 1.1, "y_ref_m": 1.0, "lane_id": 1, "speed_ref_mps": 2.0},
+                    {"x_ref_m": 2.0, "y_ref_m": 1.1, "lane_id": 1, "speed_ref_mps": 2.0},
+                ],
+                current_state=[0.0, 0.0, 1.0, 0.0],
+                ego_location=sys.modules["carla"].Location(0.0, 0.0, 0.0),
+                ego_yaw_rad=0.0,
+                ego_speed_mps=1.0,
+                target_speed_mps=3.0,
+                stop_goal_active=False,
+                behavior_decision="lane_follow",
+                behavior_fsm_state="LANE_KEEP",
+                current_lane_id=1,
+                target_lane_id=1,
+                stop_target=None,
+            )
+        )
+        destination = conditioned.destination_state
+        reference = conditioned.reference_samples
+        reason = conditioned.reason
+
+        self.assertIn("curvature_feasible_lane_follow", reason)
+        self.assertTrue(conditioned.validation.valid, conditioned.validation.reason())
+        self.assertLessEqual(conditioned.validation.max_curvature_1pm, 0.351)
+        self.assertNotIn("strict_reference_veto", reason)
+        self.assertEqual(len(reference), 3)
+        self.assertAlmostEqual(
+            float(destination[1]),
+            float(reference[-1]["y_ref_m"]),
+        )
+
+    def test_final_reference_pipeline_holds_lane_recovery_across_short_valid_gap(self):
+        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
+        bridge.config = {
+            "reference_pipeline_lane_follow_recovery_release_frames": 3,
+        }
+        bridge.target_speed_mps = 3.0
+        bridge.mpc = types.SimpleNamespace(dt_s=0.1, horizon_steps=3)
+        bridge._map_waypoint_from_location = lambda _location: object()
+        self._attach_reference_generator(bridge)
+        recovery = [
+            {"x_ref_m": 1.0, "y_ref_m": 0.0, "heading_rad": 0.0, "lane_id": 1},
+            {"x_ref_m": 2.0, "y_ref_m": 0.0, "heading_rad": 0.0, "lane_id": 1},
+            {"x_ref_m": 3.0, "y_ref_m": 0.0, "heading_rad": 0.0, "lane_id": 1},
+        ]
+        bridge.reference_generator._ego_anchored_lane_recovery_reference_samples = (
+            lambda **_kwargs: [dict(row) for row in recovery]
+        )
+        base = dict(
             current_state=[0.0, 0.0, 1.0, 0.0],
             ego_location=sys.modules["carla"].Location(0.0, 0.0, 0.0),
             ego_yaw_rad=0.0,
             ego_speed_mps=1.0,
-            speed_ref_mps=3.0,
+            target_speed_mps=2.0,
             stop_goal_active=False,
             behavior_decision="lane_follow",
             behavior_fsm_state="LANE_KEEP",
             current_lane_id=1,
-            stop_target=None,
+            target_lane_id=1,
         )
 
-        self.assertIn("curvature_out_of_contract", reason)
-        self.assertIn("rebuilt_current_lane_reference_after_contract_veto", reason)
-        self.assertNotIn("strict_reference_veto", reason)
-        self.assertEqual([float(sample["y_ref_m"]) for sample in reference], [0.0, 0.0, 0.0])
-        self.assertAlmostEqual(float(destination[1]), 0.0)
+        first = bridge.reference_pipeline.finalize(ReferencePipelineRequest(
+            destination_state=[3.0, 2.0, 2.0, 0.0, 1],
+            reference_samples=recovery,
+            **base,
+        ))
+        second = bridge.reference_pipeline.finalize(ReferencePipelineRequest(
+            destination_state=[3.0, 0.0, 2.0, 0.0, 1],
+            reference_samples=recovery,
+            **base,
+        ))
+
+        self.assertIn("lane_recovery_reference", first.conditioning_reason)
+        self.assertIn(
+            "lane_recovery_reference_hysteresis",
+            second.conditioning_reason,
+        )
+
+    def test_candidate_contract_allows_lane_center_recovery_body_lateral(self):
+        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
+        bridge.config = {}
+        bridge.target_speed_mps = 3.0
+        bridge.mpc = types.SimpleNamespace(horizon_steps=4)
+        reference = [
+            {
+                "x_ref_m": 0.8,
+                "y_ref_m": 0.0,
+                "lane_id": 1,
+                "lane_transition_kind": "ego_anchored_lane_recovery",
+            },
+            {
+                "x_ref_m": 2.0,
+                "y_ref_m": 0.5,
+                "lane_id": 1,
+                "lane_transition_kind": "ego_anchored_lane_recovery",
+            },
+            {
+                "x_ref_m": 3.5,
+                "y_ref_m": 1.2,
+                "lane_id": 1,
+                "lane_transition_kind": "ego_anchored_lane_recovery",
+            },
+            {
+                "x_ref_m": 5.0,
+                "y_ref_m": 2.0,
+                "lane_id": 1,
+                "lane_transition_kind": "ego_anchored_lane_recovery",
+            },
+        ]
+
+        result = bridge._validate_candidate_reference_contract(
+            decision="lane_follow",
+            lc_state="LANE_KEEP",
+            current_lane_id=1,
+            speed_ref_mps=3.0,
+            stop_goal_active=False,
+            current_state=[0.0, 0.0, 1.0, 0.0],
+            destination_state=[5.0, 2.0, 3.0, 0.0, 1],
+            lane_center_reference=reference,
+        )
+
+        self.assertTrue(result.valid, result.reason())
+        self.assertGreater(result.destination_body_lateral_m, 1.5)
 
     def test_fuses_local_and_cp_obstacles_with_source_priority_and_ttl(self):
         bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
@@ -762,7 +948,7 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         self.assertFalse(should_use_pid)
 
     def test_mode2_traffic_memory_holds_red_through_unknown(self):
-        memory = _Mode2TrafficLightMemory(hold_unknown_s=0.8)
+        memory = TrafficLightMemory(hold_unknown_s=0.8)
 
         state, stop_target, reason = memory.update(
             state="red",
@@ -783,7 +969,7 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         self.assertEqual(reason, "traffic_memory_hold_red")
 
     def test_traffic_memory_uses_asymmetric_unknown_hold_and_green_confirm(self):
-        memory = _Mode2TrafficLightMemory(
+        memory = TrafficLightMemory(
             hold_unknown_s=1.5,
             hold_green_unknown_s=0.25,
             green_confirm_s=0.5,
@@ -836,7 +1022,7 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         self.assertEqual(reason, "")
 
     def test_full_mode_green_confirmation_releases_after_short_debounce(self):
-        memory = _Mode2TrafficLightMemory(
+        memory = TrafficLightMemory(
             hold_unknown_s=1.5,
             hold_green_unknown_s=0.25,
             green_confirm_s=0.15,
@@ -863,7 +1049,7 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         self.assertEqual(reason, "traffic_memory_green_release")
 
     def test_full_mode_holds_red_through_long_unknown_until_green(self):
-        memory = _Mode2TrafficLightMemory(
+        memory = TrafficLightMemory(
             hold_unknown_s=1.5,
             hold_green_unknown_s=0.25,
             green_confirm_s=0.15,

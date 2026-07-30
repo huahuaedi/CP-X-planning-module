@@ -1,0 +1,24 @@
+base_config: single_intersection_town06_carla.yaml
+
+description: |-
+  Single-CAV Town06 test: turn left at the first signalized intersection.
+
+carla_traffic_manager:
+  vehicle_list: []
+  range: []
+
+scenario:
+  max_ticks: 3000
+  destination_tolerance_m: 3.0
+  single_cav_list:
+    - name: cav1
+      spawn_position: [6.31, 125.03, 0.3, 0, -92, 0]
+      destination: [50.6808, 107.8696, 0.3]
+      v2x:
+        communication_range: 60
+      behavior:
+        local_planner:
+          debug_trajectory: true
+          debug: true
+      planner:
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_single_first_light_turn

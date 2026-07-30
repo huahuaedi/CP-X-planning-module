@@ -444,7 +444,7 @@ def maybe_replan_global_route(
     *,
     runtime_state,
     world,
-    map_planner,
+    map_planner=None,
     carla,
     ego_transform,
     active_global_route_points: Sequence[Sequence[float]] | None = None,

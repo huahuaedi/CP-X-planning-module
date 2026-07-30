@@ -85,6 +85,7 @@ from utility.speed_profile import (
     summarize_speed_cap_history,
     stop_profile_speed_cap_mps,
 )
+from utility.map_api import coerce_map_planner, pose_from_transform
 from opencda_scenario.sumo_assets import resolve_xodr_path
 
 try:
@@ -816,7 +817,7 @@ def _signal_state_requires_stop(signal_state: object) -> bool:
     return str(signal_state or "").strip().lower() in {"red", "yellow", "amber"}
 
 
-def _fallback_signal_stop_target_from_ego(
+def _fallback_signal_stop_target_from_ego_impl(
     *,
     map_planner: Any,
     ego_transform: Any,
@@ -3720,7 +3721,7 @@ def _stop_target_state_from_behavior_output(
         return None
 
 
-def _follow_target_state_from_behavior_output(
+def _follow_target_state_from_behavior_output_impl(
     *,
     map_planner: Any,
     ego_pose: Mapping[str, object],
@@ -8943,3 +8944,37 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
         _destroy_actors(actors_to_destroy)
         if pygame is not None:
             pygame.quit()
+
+
+def _fallback_signal_stop_target_from_ego(*args, **kwargs):
+    """Legacy CARLA boundary for the canonical map-planner implementation."""
+
+    normalized = dict(kwargs)
+    world_map = normalized.pop("world_map", None)
+    carla_module = normalized.pop("carla", None)
+    if normalized.get("map_planner") is None and world_map is not None:
+        normalized["map_planner"] = coerce_map_planner(
+            world_map=world_map,
+            carla_module=carla_module,
+        )
+    ego_transform = normalized.pop("ego_transform", None)
+    if ego_transform is not None:
+        normalized["ego_transform"] = ego_transform
+    return _fallback_signal_stop_target_from_ego_impl(*args, **normalized)
+
+
+def _follow_target_state_from_behavior_output(*args, **kwargs):
+    """Legacy CARLA boundary for behavior follow-target conversion."""
+
+    normalized = dict(kwargs)
+    world_map = normalized.pop("world_map", None)
+    carla_module = normalized.pop("carla", None)
+    if normalized.get("map_planner") is None and world_map is not None:
+        normalized["map_planner"] = coerce_map_planner(
+            world_map=world_map,
+            carla_module=carla_module,
+        )
+    ego_transform = normalized.pop("ego_transform", None)
+    if normalized.get("ego_pose") is None and ego_transform is not None:
+        normalized["ego_pose"] = pose_from_transform(ego_transform)
+    return _follow_target_state_from_behavior_output_impl(*args, **normalized)

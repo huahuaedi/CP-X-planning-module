@@ -1,0 +1,84 @@
+base_config: cpx_profile_full_default.yaml
+
+description: |-
+  Lane-change cooperative-perception test scenario on OpenCDA's proven
+  2lane_freeway_simplified custom-map layout (same map/coordinates already
+  used by cpx_mature_2lanefree_carla / single_2lanefree_carla /
+  platoon_joining_2lanefree_carla), with the full CP-X pipeline
+  (`mode: full_cpx_mpc`) active instead of that scenario's `opencda_reference_mpc`
+  mode -- so behavior_planner's lane_safety scoring, candidate lane-change
+  evaluation, and route_authorization actually run.
+  A single slow-moving vehicle is placed directly in the shared lane, well
+  ahead of cav1's spawn point, with `auto_lane_change: false` (the repo-wide
+  default) so it will NOT move out of the way on its own. With a low
+  lane-safety score in its own lane and a clear adjacent lane available, cav1
+  should trigger the "safety-score detour" lane change described in
+  `behavior_planner/planner.py`, pass the slow vehicle, and (per that same
+  logic) return to its original lane afterward.
+
+  This was originally a 3-CAV cooperative-perception test; cav2/cav3 were
+  removed for single-CAV testing and saved to
+  `cpx_lane_change_2lanefree.multi_cav_extra_cavs.yaml.snippet` (paste back
+  into `scenario.single_cav_list` to restore). See that snippet / the
+  `cp_provider.py::_native_opencda_messages` multi-vantage-point CARLA actor
+  scan for how cross-CAV perception fusion works.
+
+cpx_mature:
+  map_mode: 2lane_freeway_simplified
+  max_ticks: 1200
+  destination_tolerance_m: 10.0
+  run_opencda_evaluation: false
+
+# Only override what genuinely differs from cpx_profile_full_default.yaml:
+# this scenario runs through cpx_mature_runner.py (not cpx_scenario_bridge.py
+# like the other cpx_* scenarios), on a custom xodr map with ground-truth
+# perception and no localization noise model, and exercises the lane-change
+# candidate pipeline specifically.
+vehicle_base:
+  sensing:
+    perception:
+      activate: false
+    localization:
+      activate: false
+      debug_helper:
+        show_animation: false
+  behavior:
+    ignore_traffic_light: true
+    overtake_allowed: true
+  planner:
+    global_planner_xodr_path: ../assets/2lane_freeway_simplified/2lane_freeway_simplified.xodr
+    communication_range_m: 60.0
+    full_allow_opportunistic_lane_change: true
+    full_candidate_pipeline_enabled: true
+    candidate_mpc_probe_enabled: true
+    # Keep lane plus all three lane-change timing variants are MPC-probed.
+    candidate_mpc_probe_top_k: 4
+    candidate_mpc_probe_interval_s: 0.2
+    candidate_lane_change_assertive_duration_s: 3.2
+    candidate_lane_change_normal_duration_s: 4.0
+    candidate_lane_change_conservative_duration_s: 5.5
+    candidate_lane_change_assertive_speed_scale: 1.0
+    candidate_lane_change_normal_speed_scale: 0.9
+    candidate_lane_change_conservative_speed_scale: 0.7
+    debug_output_dir: opencda/planning_module/opencda_bridge/debug_cpx_lane_change_2lanefree
+
+# Single slow vehicle parked in ego's own lane (y=8.3, same lane cav1 spawns
+# in), 170m ahead of cav1's spawn point. auto_lane_change defaults to false
+# (see default.yaml) so it will NOT move out of ego's way -- ego must change
+# to the adjacent lane (y=4.8, 3.5m to the right, the same lane spacing
+# already used by cpx_mature_2lanefree_carla's background traffic) to pass.
+# vehicle_speed_perc: 90 means ~10% of the speed limit (crawling), not a
+# literal zero-velocity static prop, since OpenCDA's Traffic Manager does not
+# reliably support 100%.
+carla_traffic_manager:
+  vehicle_list:
+    - spawn_position: [ -200, 8.3, 0.3, 0, 0, 0 ]
+      vehicle_speed_perc: 90
+
+scenario:
+  single_cav_list:
+    - name: cav1
+      spawn_position: [ -370, 8.3, 0.3, 0, 0, 0 ]
+      destination: [ 700, 8.3, 0.3 ]
+      v2x:
+        communication_range: 60

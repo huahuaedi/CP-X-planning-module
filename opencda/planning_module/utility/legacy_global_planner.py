@@ -778,8 +778,8 @@ class AStarGlobalPlanner:
         # Optimal lane = the lane the global route is travelling through at the
         # blue dot's closest position on the stored route. The behavior planner
         # then decides whether to stay on that lane or move away from it.
-        optimal_lane_id = self._active_lane_id_from_remaining_sequence(
-            remaining_lane_ids=list(remaining_lane_ids),
+        optimal_lane_id = self._route_optimal_lane_id_for_stored_route_index(
+            route_index=int(route_index),
             fallback_lane_id=int(self._stored_route_summary.optimal_lane_id),
         )
 
@@ -1760,12 +1760,17 @@ class AStarGlobalPlanner:
         if skip_active_turn_block and len(normalized_options) > 0:
             while len(normalized_options) > 0 and normalized_options[0] in {"LEFT", "RIGHT", "STRAIGHT"}:
                 normalized_options = normalized_options[1:]
+        # Preserve route order. A required lane change before an intersection
+        # must not be hidden by a later LEFT/RIGHT connector.
         for option_name in normalized_options:
+            if option_name == "CHANGELANELEFT":
+                return "Lane Change Left"
+            if option_name == "CHANGELANERIGHT":
+                return "Lane Change Right"
             if option_name == "LEFT":
                 return "Left Turn"
             if option_name == "RIGHT":
                 return "Right Turn"
-        for option_name in normalized_options:
             if option_name == "STRAIGHT":
                 return "Continue Straight"
         return "Continue Straight"

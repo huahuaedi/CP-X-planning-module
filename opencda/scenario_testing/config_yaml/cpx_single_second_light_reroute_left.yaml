@@ -1,0 +1,30 @@
+base_config: single_intersection_town06_carla.yaml
+
+description: |-
+  Single-CAV Town06 test: start with a straight global route, pass the first
+  signalized intersection, then install a new route that turns left at the
+  second intersection.
+
+carla_traffic_manager:
+  vehicle_list: []
+  range: []
+
+scenario:
+  max_ticks: 5000
+  destination_tolerance_m: 3.0
+  dynamic_reroute:
+    enabled: true
+    trigger_y_below: 95.0
+    destination: [50.0, 52.38, 0.3]
+  single_cav_list:
+    - name: cav1
+      spawn_position: [6.31, 125.03, 0.3, 0, -92, 0]
+      destination: [6.31, -60.0, 0.3]
+      v2x:
+        communication_range: 60
+      behavior:
+        local_planner:
+          debug_trajectory: true
+          debug: true
+      planner:
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_single_second_light_reroute_left

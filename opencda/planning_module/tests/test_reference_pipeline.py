@@ -7,12 +7,51 @@ from behavior_planner.reference_pipeline import (
     MpcReferenceGenerationOutput,
     build_mpc_reference_result,
     generate_mpc_reference,
+    lane_center_destination_from_reference_arc_length,
     summarize_reference_pipeline_history,
     trace_reference_pipeline,
 )
 
 
 class ReferencePipelineTraceTests(unittest.TestCase):
+    def test_turn_destination_uses_reference_arc_length(self):
+        reference = [
+            {
+                "x_ref_m": 1.0,
+                "y_ref_m": 0.0,
+                "heading_rad": 0.0,
+                "lane_id": 1,
+            },
+            {
+                "x_ref_m": 2.0,
+                "y_ref_m": 0.0,
+                "heading_rad": 0.0,
+                "lane_id": 1,
+            },
+            {
+                "x_ref_m": 2.0,
+                "y_ref_m": 2.0,
+                "heading_rad": 1.5708,
+                "lane_id": 2,
+            },
+            {
+                "x_ref_m": 2.0,
+                "y_ref_m": 4.0,
+                "heading_rad": 1.5708,
+                "lane_id": 2,
+            },
+        ]
+
+        destination = lane_center_destination_from_reference_arc_length(
+            destination_state=[20.0, 0.0, 1.5, 0.0, 1],
+            lane_center_reference=reference,
+            target_arc_length_m=2.5,
+        )
+
+        self.assertEqual(destination[:2], [2.0, 2.0])
+        self.assertAlmostEqual(destination[3], 1.5708)
+        self.assertEqual(destination[4], 2.0)
+
     def test_generate_mpc_reference_accepts_context_object(self):
         intent = select_reference_intent(
             behavior_decision="lane_follow",

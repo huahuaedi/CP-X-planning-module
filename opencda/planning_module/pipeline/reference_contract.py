@@ -38,6 +38,8 @@ class ReferenceValidationResult:
     max_point_jump_m: float = 0.0
     max_heading_jump_rad: float = 0.0
     max_curvature_1pm: float = 0.0
+    contract_max_curvature_1pm: float = 0.0
+    curvature_margin_1pm: float = 0.0
 
     def reason(self) -> str:
         return ";".join(dict.fromkeys(str(v) for v in self.violations if str(v)))
@@ -60,6 +62,18 @@ def contract_from_config(
         max_body_default,
     )
     max_body = None if max_body_value is None else float(max_body_value)
+    configured_max_curvature_1pm = float(
+        config.get(
+            prefix + "max_curvature_1pm",
+            defaults["max_curvature_1pm"],
+        )
+    )
+    vehicle_max_curvature = config.get("reference_vehicle_max_curvature_1pm")
+    if vehicle_max_curvature is not None:
+        configured_max_curvature_1pm = min(
+            float(configured_max_curvature_1pm),
+            max(1.0e-3, float(vehicle_max_curvature)),
+        )
     return ReferenceContract(
         mode=normalized_mode,
         expected_lane_id=int(expected_lane_id),
@@ -70,7 +84,7 @@ def contract_from_config(
         max_destination_body_lateral_abs_m=max_body,
         max_point_jump_m=float(config.get(prefix + "max_point_jump_m", defaults["max_point_jump_m"])),
         max_heading_jump_rad=float(config.get(prefix + "max_heading_jump_rad", defaults["max_heading_jump_rad"])),
-        max_curvature_1pm=float(config.get(prefix + "max_curvature_1pm", defaults["max_curvature_1pm"])),
+        max_curvature_1pm=float(configured_max_curvature_1pm),
         max_speed_mps=float(config.get(prefix + "max_speed_mps", default_speed_mps)),
         require_monotonic_progress=bool(
             config.get(
@@ -94,7 +108,11 @@ def validate_reference_contract(
     check_destination_body_lateral: bool,
 ) -> ReferenceValidationResult:
     samples = [dict(sample) for sample in list(reference_samples or [])]
-    result = ReferenceValidationResult(valid=True)
+    result = ReferenceValidationResult(
+        valid=True,
+        contract_max_curvature_1pm=float(contract.max_curvature_1pm),
+        curvature_margin_1pm=float(contract.max_curvature_1pm),
+    )
     violations: list[str] = []
     if len(ego_state) < 4:
         return ReferenceValidationResult(valid=False, violations=["missing_ego_state"])
@@ -189,6 +207,9 @@ def validate_reference_contract(
         result.max_curvature_1pm = max(result.max_curvature_1pm, float(curvature))
         if curvature > float(contract.max_curvature_1pm):
             violations.append("curvature_out_of_contract")
+    result.curvature_margin_1pm = (
+        float(contract.max_curvature_1pm) - float(result.max_curvature_1pm)
+    )
 
     if destination_state is not None and len(destination_state) >= 2:
         try:

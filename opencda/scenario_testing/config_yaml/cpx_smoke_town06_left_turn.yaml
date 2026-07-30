@@ -1,5 +1,7 @@
 description: |-
-  CP-X deterministic smoke test: Town06 left turn through an intersection.
+  CP-X targeted Town06 route-connector turn test with surrounding CARLA traffic.
+  Traffic lights are ignored so the run isolates turn connector geometry,
+  prediction-aware candidate evaluation, and MPC tracking.
 
 vehicle_base:
   sensing:
@@ -40,33 +42,58 @@ vehicle_base:
     target_speed_mps: 2.8
     lookahead_m: 16.0
     min_front_gap_m: 8.0
-    max_mpc_obstacles: 0
+    max_mpc_obstacles: 4
     full_allow_opportunistic_lane_change: false
     full_candidate_pipeline_enabled: true
     full_reference_memory_enabled: true
     full_trajectory_memory_enabled: true
-    full_intersection_turn_prepare_enabled: false
-    full_intersection_turn_speed_cap_mps: 1.8
-    opencda_style_turn_speed_cap_mps: 1.2
+    full_intersection_turn_prepare_enabled: true
+    full_intersection_turn_prepare_lookahead_m: 22.0
+    full_intersection_turn_prepare_min_m: 3.0
+    full_intersection_turn_speed_cap_mps: 2.0
+    full_intersection_turn_prepare_speed_cap_mps: 2.0
+    opencda_style_turn_speed_cap_mps: 2.0
+    carla_waypoint_turn_speed_cap_mps: 2.0
+    carla_waypoint_turn_min_step_m: 0.35
+    carla_waypoint_turn_connector_distance_m: 7.0
+    carla_waypoint_turn_destination_arc_m: 4.5
+    carla_turn_connector_smoothing_passes: 16
+    reference_contract_intersection_turn_max_curvature_1pm: 0.55
     scenario_creep_speed_cap_mps: 0.8
     scenario_turn_exit_hold_s: 1.0
+    scenario_turn_exit_max_heading_error_rad: 0.15
+    scenario_turn_exit_max_lateral_m: 0.75
+    scenario_turn_exit_heading_lookahead_m: 5.0
+    candidate_mpc_probe_enabled: true
+    candidate_mpc_probe_top_k: 2
+    candidate_mpc_probe_interval_s: 0.2
+    record_evaluation_metrics: true
+    record_collision_sensor: true
     record_debug: true
-    debug_output_dir: opencda/planning_module/opencda_bridge/debug_smoke_left_turn
+    debug_output_dir: opencda/planning_module/opencda_bridge/debug_turn_connector_town06
     debug: true
 
 carla_traffic_manager:
-  vehicle_list: []
-  range: []
+  random: true
+  ignore_lights_percentage: 0
+  auto_lane_change: false
+  vehicle_list: ~
+  # Native Town06 traffic around the connector; the ego is spawned first, so
+  # CARLA filters occupied spawn points.
+  range:
+    - [440, 560, 134, 150, 20, 4, 16]
 
 cpx_smoke:
-  max_ticks: 800
-  destination_tolerance_m: 6.0
+  max_ticks: 700
+  destination_tolerance_m: 4.0
+  run_opencda_evaluation: false
 
 scenario:
   single_cav_list:
     - name: cav1
-      spawn_position: [6.31, 125.03, 0.3, 0, -92, 0]
-      destination: [-12.51, 110.31, 0.3]
+      # This segment is taken from a recorded Town06 route that entered the
+      # problematic connector near x=497 and exited onto y~=145.
+      spawn_position: [475.0, 141.40, 0.3, 0, 0, 0]
+      destination: [540.0, 145.03, 0.3]
       v2x:
         communication_range: 45
-

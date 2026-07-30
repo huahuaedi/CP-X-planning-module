@@ -46,6 +46,7 @@ from behavior_planner.reroute import (
 )
 from utility import CustomGlobalPlannerAdapter, Tracker, load_yaml_file
 from utility import canonical_lane_id_for_waypoint, world_heading_rad
+from utility.map_api import coerce_map_planner, pose_from_transform
 from opencda_scenario.sumo_assets import resolve_xodr_path
 
 try:
@@ -2008,7 +2009,7 @@ def _stop_target_state_from_behavior_output(
         return None
 
 
-def _follow_target_state_from_behavior_output(
+def _follow_target_state_from_behavior_output_impl(
     *,
     map_planner: Any,
     ego_pose: Mapping[str, object],
@@ -2026,8 +2027,19 @@ def _follow_target_state_from_behavior_output(
             {"x": follow_x_m, "y": follow_y_m, "z": float(ego_pose.get("z", 0.0))}
         )
         if follow_waypoint is not None:
-            follow_x_m = float(follow_waypoint.position["x"])
-            follow_y_m = float(follow_waypoint.position["y"])
+            waypoint_position = getattr(follow_waypoint, "position", None)
+            if isinstance(waypoint_position, Mapping):
+                follow_x_m = float(waypoint_position["x"])
+                follow_y_m = float(waypoint_position["y"])
+            else:
+                waypoint_location = getattr(
+                    getattr(follow_waypoint, "transform", None),
+                    "location",
+                    None,
+                )
+                if waypoint_location is not None:
+                    follow_x_m = float(waypoint_location.x)
+                    follow_y_m = float(waypoint_location.y)
             follow_heading_rad = float(world_heading_rad(follow_waypoint) or 0.0)
             follow_lane_id = float(canonical_lane_id_for_waypoint(follow_waypoint))
             follow_road_id = float(getattr(follow_waypoint, "road_id", int(follow_road_id)))
@@ -4061,3 +4073,20 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
         _destroy_actors(actors_to_destroy)
         if pygame is not None:
             pygame.quit()
+
+
+def _follow_target_state_from_behavior_output(*args, **kwargs):
+    """Legacy CARLA boundary for behavior follow-target conversion."""
+
+    normalized = dict(kwargs)
+    world_map = normalized.pop("world_map", None)
+    carla_module = normalized.pop("carla", None)
+    if normalized.get("map_planner") is None and world_map is not None:
+        normalized["map_planner"] = coerce_map_planner(
+            world_map=world_map,
+            carla_module=carla_module,
+        )
+    ego_transform = normalized.pop("ego_transform", None)
+    if normalized.get("ego_pose") is None and ego_transform is not None:
+        normalized["ego_pose"] = pose_from_transform(ego_transform)
+    return _follow_target_state_from_behavior_output_impl(*args, **normalized)

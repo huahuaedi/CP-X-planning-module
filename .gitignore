@@ -166,6 +166,8 @@ opencda/planning_module/.codex
 opencda/planning_module/Global_Planner/map_repo/install/
 opencda/planning_module/Global_Planner/map_repo/log/
 opencda/planning_module/Global_Planner/map_repo/source/
+opencda/planning_module/analysis_exports/
+opencda/planning_module/opencda_bridge/debug*/
 
 # Local agent/editor state
 .agents/

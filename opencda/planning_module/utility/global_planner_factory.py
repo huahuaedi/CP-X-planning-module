@@ -22,7 +22,16 @@ from .legacy_global_planner import AStarGlobalPlanner
 
 
 ASTAR_GLOBAL_PLANNER_MODES = {"", "astar", "legacy", "carla_grp"}
-CUSTOM_GLOBAL_PLANNER_MODES = {"custom", "custom_admap", "admap", "opendrive"}
+# "dijkstra"/"dij" are recognized here too so that
+# ``cpx_scenario_bridge.py``'s legacy-scenario bootstrap (which calls this
+# factory to align spawn/destination anchors) makes the same backend choice
+# as ``opencda_bridge/cpx_mpc_planner.py``'s own inline selection (which has
+# always accepted these as custom-planner aliases). Before this fix, a
+# scenario configured with ``global_planner_mode: dij`` would bootstrap its
+# anchors against the legacy A*/CARLA waypoint graph (this factory's default)
+# while the CAV actually drove against the custom AD-map Dijkstra planner --
+# two different route graphs used within the same scenario run.
+CUSTOM_GLOBAL_PLANNER_MODES = {"custom", "custom_admap", "admap", "opendrive", "dijkstra", "dij"}
 
 
 @dataclass(frozen=True)

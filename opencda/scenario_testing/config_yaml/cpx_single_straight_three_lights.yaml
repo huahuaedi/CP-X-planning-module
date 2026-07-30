@@ -1,0 +1,26 @@
+base_config: single_intersection_town06_carla.yaml
+
+description: |-
+  Single-CAV Town06 test: travel straight through three traffic-light
+  interactions and stop before the later turning region. ML is optional and
+  remains disabled unless opencda.py is launched with --apply_ml.
+
+carla_traffic_manager:
+  vehicle_list: []
+  range: []
+
+scenario:
+  max_ticks: 5000
+  destination_tolerance_m: 3.0
+  single_cav_list:
+    - name: cav1
+      spawn_position: [6.31, 125.03, 0.3, 0, -92, 0]
+      destination: [6.31, -60.0, 0.3]
+      v2x:
+        communication_range: 60
+      behavior:
+        local_planner:
+          debug_trajectory: true
+          debug: true
+      planner:
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_single_straight_three_lights

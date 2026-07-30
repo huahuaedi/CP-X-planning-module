@@ -15,6 +15,7 @@ import math
 from typing import Dict, Mapping, Optional, Sequence
 
 from .reference_contract import ReferenceValidationResult
+from .stage_contracts import ManeuverCommitment
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,8 @@ class CandidateBehaviorIntent:
     reason: str = ""
     stop_goal_active: bool = False
     stop_target: Optional[Mapping[str, object]] = None
+    trajectory_variant: str = ""
+    lane_change_duration_s: float = 0.0
 
 
 @dataclass
@@ -54,12 +57,21 @@ class CandidateReferenceResult:
             "decision": str(self.intent.decision),
             "target_lane_id": int(self.intent.target_lane_id),
             "target_speed_mps": float(self.intent.target_speed_mps),
+            "trajectory_variant": str(self.intent.trajectory_variant),
+            "lane_change_duration_s": float(self.intent.lane_change_duration_s),
             "base_cost": float(self.intent.base_cost),
             "feasibility_status": str(self.feasibility_status),
             "feasibility_reason": str(self.feasibility_reason),
             "contract_reason": str(contract_reason),
             "total_cost": float(self.total_cost),
         }
+
+
+@dataclass(frozen=True)
+class CandidateSelectionOutcome:
+    selected: Optional[CandidateReferenceResult]
+    status: str
+    reason: str
 
 
 def build_candidate_intents(
@@ -77,6 +89,14 @@ def build_candidate_intents(
     lane_change_authorized_target_lane_id: int,
     allow_lane_change_candidates: bool,
     stop_target: Optional[Mapping[str, object]] = None,
+    lane_change_assertive_duration_s: float = 3.2,
+    lane_change_normal_duration_s: float = 4.0,
+    lane_change_conservative_duration_s: float = 5.5,
+    lane_change_assertive_speed_scale: float = 1.0,
+    lane_change_normal_speed_scale: float = 0.9,
+    lane_change_conservative_speed_scale: float = 0.7,
+    lane_change_authorization_source: str = "route",
+    lane_change_defer_cost: float = 10.0,
 ) -> list[CandidateBehaviorIntent]:
     """Generate behavior candidates for the reference/MPC boundary."""
 
@@ -86,23 +106,32 @@ def build_candidate_intents(
     target_speed_mps = max(0.0, float(target_speed_mps))
 
     def add(intent: CandidateBehaviorIntent) -> None:
-        key = (str(intent.decision), int(intent.target_lane_id), round(float(intent.target_speed_mps), 2))
+        key = (
+            str(intent.decision),
+            int(intent.target_lane_id),
+            round(float(intent.target_speed_mps), 2),
+            str(intent.trajectory_variant),
+            round(float(intent.lane_change_duration_s), 2),
+        )
         existing = {
             (
                 str(row.decision),
                 int(row.target_lane_id),
                 round(float(row.target_speed_mps), 2),
+                str(row.trajectory_variant),
+                round(float(row.lane_change_duration_s), 2),
             )
             for row in intents
         }
         if key not in existing:
             intents.append(intent)
 
-    if bool(stop_goal_active) or bool(traffic_stop_active) or str(selected_decision) in {
+    hard_stop_required = bool(traffic_stop_active) or str(selected_decision) in {
         "stop_at_intersection",
         "stop_sign",
         "emergency_brake",
-    }:
+    }
+    if bool(hard_stop_required):
         add(CandidateBehaviorIntent(
             name="stop",
             decision=(
@@ -118,6 +147,26 @@ def build_candidate_intents(
             stop_target=dict(stop_target or {}) if isinstance(stop_target, Mapping) else None,
         ))
         return intents
+
+    # A close lead obstacle is different from a traffic-control stop. Keep a
+    # stop candidate available, but do not erase an already authorized escape
+    # lane. Candidate prediction/contract/MPC checks decide whether changing
+    # lane is actually safer than stopping behind the obstacle.
+    if bool(stop_goal_active):
+        add(CandidateBehaviorIntent(
+            name="obstacle_stop",
+            decision="stop_at_intersection",
+            target_lane_id=int(current_lane_id),
+            target_speed_mps=0.0,
+            base_cost=0.0,
+            reason="front_obstacle_stop_candidate",
+            stop_goal_active=True,
+            stop_target=(
+                dict(stop_target)
+                if isinstance(stop_target, Mapping)
+                else None
+            ),
+        ))
 
     if str(selected_decision) in {"intersection_turn_left", "intersection_turn_right"}:
         add(CandidateBehaviorIntent(
@@ -135,33 +184,53 @@ def build_candidate_intents(
         ))
         return intents
 
+    lane_change_committed = bool(lane_change_authorized) and (
+        str(lane_change_authorization_source or "").strip().lower() == "route"
+        or str(selected_decision) in {"lane_change_left", "lane_change_right"}
+    )
     add(CandidateBehaviorIntent(
         name="keep_lane",
         decision="lane_follow",
         target_lane_id=int(current_lane_id),
         target_speed_mps=float(target_speed_mps),
-        base_cost=_lane_cost(
+        base_cost=(
+            max(0.0, float(lane_change_defer_cost))
+            if bool(lane_change_committed)
+            else 0.0
+        ) + _lane_cost(
             lane_id=int(current_lane_id),
             current_lane_id=int(current_lane_id),
             lane_safety_scores=lane_safety_scores,
             lane_prediction_risks=lane_prediction_risks,
         ),
-        reason="default_keep_lane",
+        reason=(
+            "defer_route_lane_change"
+            if bool(lane_change_committed)
+            else "default_keep_lane"
+        ),
     ))
     add(CandidateBehaviorIntent(
         name="yield_slow_down",
         decision="lane_follow",
         target_lane_id=int(current_lane_id),
         target_speed_mps=max(0.6, min(float(target_speed_mps), 0.55 * float(target_speed_mps))),
-        base_cost=4.0 + _lane_cost(
+        base_cost=4.0 + (
+            max(0.0, float(lane_change_defer_cost))
+            if bool(lane_change_committed)
+            else 0.0
+        ) + _lane_cost(
             lane_id=int(current_lane_id),
             current_lane_id=int(current_lane_id),
             lane_safety_scores=lane_safety_scores,
             lane_prediction_risks=lane_prediction_risks,
         ),
-        reason="conservative_yield_candidate",
+        reason=(
+            "conservative_yield_defer_route_lane_change"
+            if bool(lane_change_committed)
+            else "conservative_yield_candidate"
+        ),
     ))
-    if str(selected_decision) in {"lane_follow", "lane_change_left", "lane_change_right"}:
+    if str(selected_decision) == "lane_follow":
         add(CandidateBehaviorIntent(
             name="selected_behavior",
             decision=str(selected_decision),
@@ -179,20 +248,60 @@ def build_candidate_intents(
     if bool(allow_lane_change_candidates) and bool(lane_change_authorized):
         target_lane_id = int(lane_change_authorized_target_lane_id or 0)
         if target_lane_id != 0 and target_lane_id != int(current_lane_id):
-            decision = "lane_change_left" if target_lane_id > int(current_lane_id) else "lane_change_right"
-            add(CandidateBehaviorIntent(
-                name=f"route_{decision}",
-                decision=str(decision),
-                target_lane_id=int(target_lane_id),
-                target_speed_mps=float(target_speed_mps),
-                base_cost=2.0 + _lane_cost(
-                    lane_id=int(target_lane_id),
-                    current_lane_id=int(current_lane_id),
-                    lane_safety_scores=lane_safety_scores,
-                    lane_prediction_risks=lane_prediction_risks,
+            authorization_source = str(
+                lane_change_authorization_source or "route"
+            ).strip().lower()
+            if authorization_source not in {"route", "opportunistic"}:
+                authorization_source = "route"
+            decision = (
+                str(selected_decision)
+                if authorization_source == "opportunistic"
+                and str(selected_decision) in {"lane_change_left", "lane_change_right"}
+                else (
+                    "lane_change_left"
+                    if target_lane_id > int(current_lane_id)
+                    else "lane_change_right"
+                )
+            )
+            lane_cost = _lane_cost(
+                lane_id=int(target_lane_id),
+                current_lane_id=int(current_lane_id),
+                lane_safety_scores=lane_safety_scores,
+                lane_prediction_risks=lane_prediction_risks,
+            )
+            for variant, duration_s, speed_scale, extra_cost in (
+                (
+                    "assertive",
+                    lane_change_assertive_duration_s,
+                    lane_change_assertive_speed_scale,
+                    3.0,
                 ),
-                reason="authorized_route_lane_change",
-            ))
+                (
+                    "normal",
+                    lane_change_normal_duration_s,
+                    lane_change_normal_speed_scale,
+                    2.0,
+                ),
+                (
+                    "conservative",
+                    lane_change_conservative_duration_s,
+                    lane_change_conservative_speed_scale,
+                    2.5,
+                ),
+            ):
+                add(CandidateBehaviorIntent(
+                    name=f"{authorization_source}_{decision}_{variant}",
+                    decision=str(decision),
+                    target_lane_id=int(target_lane_id),
+                    target_speed_mps=max(
+                        0.8,
+                        float(target_speed_mps) * float(speed_scale),
+                    ),
+                    base_cost=float(extra_cost) + float(lane_cost),
+                    reason=f"{authorization_source}_lane_change_authorized",
+                    trajectory_variant=str(variant),
+                    lane_change_duration_s=float(duration_s),
+                ))
 
     for lane_id in list(candidate_lane_ids or []):
         try:
@@ -206,21 +315,231 @@ def build_candidate_intents(
         if not bool(lane_change_authorized) or candidate_lane_id != int(lane_change_authorized_target_lane_id or 0):
             continue
         decision = "lane_change_left" if candidate_lane_id > int(current_lane_id) else "lane_change_right"
-        add(CandidateBehaviorIntent(
-            name=f"candidate_{decision}_{candidate_lane_id}",
-            decision=str(decision),
-            target_lane_id=int(candidate_lane_id),
-            target_speed_mps=float(target_speed_mps),
-            base_cost=3.0 + _lane_cost(
-                lane_id=int(candidate_lane_id),
-                current_lane_id=int(current_lane_id),
-                lane_safety_scores=lane_safety_scores,
-                lane_prediction_risks=lane_prediction_risks,
-            ),
-            reason="authorized_candidate_lane",
-        ))
+        # The authorized target already owns assertive/normal/conservative
+        # variants above. Other lanes remain forbidden by the authorization
+        # boundary and must not leak into reference generation.
 
     return intents
+
+
+def shape_lane_change_reference(
+    *,
+    target_reference: Sequence[Mapping[str, object]],
+    source_reference: Sequence[Mapping[str, object]],
+    duration_s: float,
+    dt_s: float,
+    current_lane_id: int,
+    target_lane_id: int,
+    target_speed_mps: float,
+    ego_x_m: Optional[float] = None,
+    ego_y_m: Optional[float] = None,
+    initial_progress_floor: float = 0.0,
+) -> list[Dict[str, object]]:
+    """Blend lane paths without resetting lateral progress every replan."""
+
+    target = [dict(sample) for sample in list(target_reference or [])]
+    source = [dict(sample) for sample in list(source_reference or [])]
+    if not target or not source:
+        return target
+    target = _align_target_reference_to_source(
+        source_reference=source,
+        target_reference=target,
+    )
+    count = min(len(target), len(source))
+    duration = max(float(dt_s), float(duration_s))
+    separations_sq = [
+        _sample_separation_sq(source[index], target[index])
+        for index in range(count)
+    ]
+    # Anchor the lateral-progress projection on the EARLIEST point where the
+    # source/target lane-center paths have meaningfully diverged, not the
+    # point of maximum separation. Right after a turn/intersection the two
+    # paths are not parallel; projecting ego onto a distant, non-parallel
+    # anchor can spuriously read as "already most of the way to the target
+    # lane" even for a lane change that has just started, producing a first
+    # reference sample whose lateral offset trips the reference-contract
+    # veto and permanently stops the vehicle (the same spurious projection
+    # then repeats every subsequent tick, since nothing about the geometry
+    # changes while the vehicle is stopped). A nearby, meaningfully
+    # separated anchor stays representative of the true local lane gap
+    # while still measuring genuine progress on an already-in-progress lane
+    # change, where source/target are close to parallel near ego.
+    min_anchor_separation_sq = min(max(separations_sq, default=0.0), 1.0 ** 2)
+    anchor_index = next(
+        (
+            index
+            for index, separation_sq in enumerate(separations_sq)
+            if separation_sq >= min_anchor_separation_sq
+        ),
+        max(range(count), key=lambda index: separations_sq[index]),
+    )
+    initial_alpha = max(
+        min(0.98, max(0.0, float(initial_progress_floor))),
+        _lane_change_initial_progress(
+        source_sample=source[anchor_index],
+        target_sample=target[anchor_index],
+        ego_x_m=ego_x_m,
+        ego_y_m=ego_y_m,
+        ),
+    )
+    remaining_duration = max(
+        float(dt_s),
+        float(duration) * max(0.15, 1.0 - float(initial_alpha)),
+    )
+    result: list[Dict[str, object]] = []
+    for index in range(count):
+        t_s = float(index + 1) * max(1.0e-3, float(dt_s))
+        u = min(1.0, max(0.0, t_s / remaining_duration))
+        smooth_progress = 10.0 * u ** 3 - 15.0 * u ** 4 + 6.0 * u ** 5
+        alpha = float(initial_alpha) + (
+            1.0 - float(initial_alpha)
+        ) * float(smooth_progress)
+        source_sample = source[index]
+        target_sample = target[index]
+        sx = float(source_sample.get("x_ref_m", source_sample.get("x", 0.0)))
+        sy = float(source_sample.get("y_ref_m", source_sample.get("y", 0.0)))
+        tx = float(target_sample.get("x_ref_m", target_sample.get("x", sx)))
+        ty = float(target_sample.get("y_ref_m", target_sample.get("y", sy)))
+        sample = dict(target_sample)
+        sample["x_ref_m"] = sx + float(alpha) * (tx - sx)
+        sample["y_ref_m"] = sy + float(alpha) * (ty - sy)
+        sample["x"] = float(sample["x_ref_m"])
+        sample["y"] = float(sample["y_ref_m"])
+        sample["lane_id"] = (
+            int(current_lane_id) if float(alpha) < 0.5 else int(target_lane_id)
+        )
+        sample["lane_transition_kind"] = "lateral_lane_change"
+        sample["lane_change_progress"] = float(alpha)
+        sample["lane_change_initial_progress"] = float(initial_alpha)
+        sample["speed_ref_mps"] = max(0.0, float(target_speed_mps))
+        sample["v_ref_mps"] = max(0.0, float(target_speed_mps))
+        sample["speed_mps"] = max(0.0, float(target_speed_mps))
+        result.append(sample)
+    result.extend(dict(sample) for sample in target[count:])
+    for index, sample in enumerate(result):
+        if len(result) < 2:
+            break
+        first = sample if index + 1 < len(result) else result[index - 1]
+        second = result[index + 1] if index + 1 < len(result) else sample
+        dx = float(second["x_ref_m"]) - float(first["x_ref_m"])
+        dy = float(second["y_ref_m"]) - float(first["y_ref_m"])
+        if math.hypot(dx, dy) > 1.0e-6:
+            sample["heading_rad"] = math.atan2(dy, dx)
+    return result
+
+
+def _align_target_reference_to_source(
+    *,
+    source_reference: Sequence[Mapping[str, object]],
+    target_reference: Sequence[Mapping[str, object]],
+) -> list[Dict[str, object]]:
+    """Match parallel-lane samples by a monotonic longitudinal station.
+
+    CARLA lane-center queries may start the adjacent lane one or more samples
+    ahead of the current lane. Blending equal array indices then adds an
+    unintended longitudinal motion to the lateral lane-change polynomial and
+    creates artificial curvature spikes.
+    """
+
+    source = [dict(sample) for sample in list(source_reference or [])]
+    target = [dict(sample) for sample in list(target_reference or [])]
+    if not source or not target:
+        return target
+    aligned: list[Dict[str, object]] = []
+    target_index = 0
+    for source_index, source_sample in enumerate(source):
+        sx = float(source_sample.get("x_ref_m", source_sample.get("x", 0.0)))
+        sy = float(source_sample.get("y_ref_m", source_sample.get("y", 0.0)))
+        search_end = min(len(target), target_index + 8)
+        best_index = min(
+            range(target_index, search_end),
+            key=lambda index: _sample_distance_sq_xy(
+                x_m=sx,
+                y_m=sy,
+                sample=target[index],
+            ),
+        )
+        target_index = max(target_index, int(best_index))
+        matched = dict(target[target_index])
+        tx = float(matched.get("x_ref_m", matched.get("x", sx)))
+        ty = float(matched.get("y_ref_m", matched.get("y", sy)))
+        previous_source = source[max(0, source_index - 1)]
+        next_source = source[min(len(source) - 1, source_index + 1)]
+        tangent_x = float(
+            next_source.get("x_ref_m", next_source.get("x", sx))
+        ) - float(
+            previous_source.get("x_ref_m", previous_source.get("x", sx))
+        )
+        tangent_y = float(
+            next_source.get("y_ref_m", next_source.get("y", sy))
+        ) - float(
+            previous_source.get("y_ref_m", previous_source.get("y", sy))
+        )
+        tangent_norm = max(1.0e-6, math.hypot(tangent_x, tangent_y))
+        normal_x = -tangent_y / tangent_norm
+        normal_y = tangent_x / tangent_norm
+        lateral_offset = (tx - sx) * normal_x + (ty - sy) * normal_y
+        matched["x_ref_m"] = sx + float(lateral_offset) * normal_x
+        matched["y_ref_m"] = sy + float(lateral_offset) * normal_y
+        matched["x"] = float(matched["x_ref_m"])
+        matched["y"] = float(matched["y_ref_m"])
+        aligned.append(matched)
+    return aligned
+
+
+def _sample_distance_sq_xy(
+    *,
+    x_m: float,
+    y_m: float,
+    sample: Mapping[str, object],
+) -> float:
+    tx = float(sample.get("x_ref_m", sample.get("x", 0.0)))
+    ty = float(sample.get("y_ref_m", sample.get("y", 0.0)))
+    return float((tx - float(x_m)) ** 2 + (ty - float(y_m)) ** 2)
+
+
+def _sample_separation_sq(
+    source_sample: Mapping[str, object],
+    target_sample: Mapping[str, object],
+) -> float:
+    try:
+        source_x = float(source_sample.get("x_ref_m", source_sample.get("x", 0.0)))
+        source_y = float(source_sample.get("y_ref_m", source_sample.get("y", 0.0)))
+        target_x = float(target_sample.get("x_ref_m", target_sample.get("x", source_x)))
+        target_y = float(target_sample.get("y_ref_m", target_sample.get("y", source_y)))
+        return float((target_x - source_x) ** 2 + (target_y - source_y) ** 2)
+    except Exception:
+        return 0.0
+
+
+def _lane_change_initial_progress(
+    *,
+    source_sample: Mapping[str, object],
+    target_sample: Mapping[str, object],
+    ego_x_m: Optional[float],
+    ego_y_m: Optional[float],
+) -> float:
+    """Project ego between source and target lanes as replanning memory."""
+
+    if ego_x_m is None or ego_y_m is None:
+        return 0.0
+    try:
+        source_x = float(source_sample.get("x_ref_m", source_sample.get("x", 0.0)))
+        source_y = float(source_sample.get("y_ref_m", source_sample.get("y", 0.0)))
+        target_x = float(target_sample.get("x_ref_m", target_sample.get("x", source_x)))
+        target_y = float(target_sample.get("y_ref_m", target_sample.get("y", source_y)))
+        delta_x = target_x - source_x
+        delta_y = target_y - source_y
+        denominator = delta_x * delta_x + delta_y * delta_y
+        if denominator <= 1.0e-6:
+            return 0.0
+        progress = (
+            (float(ego_x_m) - source_x) * delta_x
+            + (float(ego_y_m) - source_y) * delta_y
+        ) / denominator
+        return min(0.98, max(0.0, float(progress)))
+    except Exception:
+        return 0.0
 
 
 def evaluate_candidate_reference(
@@ -270,10 +589,59 @@ def evaluate_candidate_reference(
         if float(lane_risk_cost) >= float(infeasible_cost):
             feasible = False
 
+    comfort_cost = _trajectory_comfort_cost(
+        reference_samples=candidate.lane_center_reference,
+        target_speed_mps=float(candidate.intent.target_speed_mps),
+    )
+    cost += float(comfort_cost)
+    if float(comfort_cost) > 0.0:
+        reasons.append(f"trajectory_comfort_cost:{float(comfort_cost):.2f}")
+
     candidate.feasibility_status = "feasible" if bool(feasible) else "infeasible"
     candidate.feasibility_reason = ";".join(dict.fromkeys(reasons))
     candidate.feasibility_cost = float(cost) - float(candidate.intent.base_cost)
     candidate.total_cost = float(cost)
+    return candidate
+
+
+def apply_mpc_probe_result(
+    *,
+    candidate: CandidateReferenceResult,
+    solved: bool,
+    status: str,
+    solve_time_ms: float,
+    dynamic_cost: float = 0.0,
+) -> CandidateReferenceResult:
+    """Attach a side-effect-free MPC feasibility probe to a candidate."""
+
+    if bool(solved):
+        candidate.feasibility_status = "mpc_probe_solved"
+        candidate.total_cost += max(0.0, float(dynamic_cost))
+    else:
+        candidate.feasibility_status = "mpc_probe_infeasible"
+        candidate.total_cost += 10000.0
+        candidate.feasibility_reason = ";".join(
+            reason
+            for reason in (
+                str(candidate.feasibility_reason),
+                "mpc_probe:" + str(status or "not_solved"),
+            )
+            if reason
+        )
+    candidate.reference_debug["candidate_mpc_probe_status"] = str(status)
+    candidate.reference_debug["candidate_mpc_probe_solved"] = bool(solved)
+    candidate.reference_debug["candidate_mpc_probe_solve_time_ms"] = float(
+        solve_time_ms
+    )
+    return candidate
+
+
+def mark_mpc_probe_skipped(
+    candidate: CandidateReferenceResult,
+) -> CandidateReferenceResult:
+    candidate.feasibility_status = "mpc_probe_skipped"
+    candidate.reference_debug["candidate_mpc_probe_status"] = "skipped_top_k"
+    candidate.reference_debug["candidate_mpc_probe_solved"] = False
     return candidate
 
 
@@ -290,6 +658,111 @@ def select_best_candidate(candidates: Sequence[CandidateReferenceResult]) -> Can
             0 if str(candidate.intent.decision) == "lane_follow" else 1,
             abs(int(candidate.intent.target_lane_id)),
         ),
+    )
+
+
+def select_candidate_with_commitment(
+    candidates: Sequence[CandidateReferenceResult],
+    *,
+    commitment: ManeuverCommitment,
+) -> CandidateSelectionOutcome:
+    """Prevent an executing maneuver from disappearing during reranking."""
+
+    rows = [candidate for candidate in list(candidates or [])]
+    if not rows:
+        return CandidateSelectionOutcome(
+            selected=None,
+            status="no_candidates",
+            reason="candidate_selection_empty",
+        )
+    if not commitment.active:
+        return CandidateSelectionOutcome(
+            selected=select_best_candidate(rows),
+            status="selected",
+            reason="no_active_maneuver_commitment",
+        )
+
+    committed_rows = [
+        candidate
+        for candidate in rows
+        if commitment.accepts(
+            decision=str(candidate.intent.decision),
+            target_lane_id=int(candidate.intent.target_lane_id),
+        )
+    ]
+    locked_continuations = [
+        candidate
+        for candidate in committed_rows
+        if str(candidate.intent.name) == "committed_lane_change_continuation"
+    ]
+    feasible_locked_continuations = [
+        candidate for candidate in locked_continuations if candidate.feasible
+    ]
+    if feasible_locked_continuations:
+        return CandidateSelectionOutcome(
+            selected=select_best_candidate(feasible_locked_continuations),
+            status="selected_committed",
+            reason="locked_maneuver_reference_preserved",
+        )
+    # Once execution starts, newly generated lane-change variants are not
+    # substitutes for the locked trajectory. Switching between them resets
+    # lateral progress and can reverse the geometry seen by MPC.
+    if locked_continuations:
+        return CandidateSelectionOutcome(
+            selected=None,
+            status="committed_reference_required",
+            reason="locked_maneuver_reference_infeasible",
+        )
+    return CandidateSelectionOutcome(
+        selected=None,
+        status="committed_reference_required",
+        reason="committed_maneuver_missing_locked_continuation",
+    )
+
+
+def _trajectory_comfort_cost(
+    *,
+    reference_samples: Sequence[Mapping[str, object]],
+    target_speed_mps: float,
+) -> float:
+    points = []
+    for sample in list(reference_samples or []):
+        try:
+            points.append((
+                float(sample.get("x_ref_m", sample.get("x", ""))),
+                float(sample.get("y_ref_m", sample.get("y", ""))),
+            ))
+        except Exception:
+            continue
+    if len(points) < 3:
+        return 0.0
+    headings = []
+    segment_lengths = []
+    for first, second in zip(points[:-1], points[1:]):
+        dx = second[0] - first[0]
+        dy = second[1] - first[1]
+        ds = math.hypot(dx, dy)
+        if ds <= 1.0e-6:
+            continue
+        headings.append(math.atan2(dy, dx))
+        segment_lengths.append(ds)
+    curvatures = []
+    for index, (first, second) in enumerate(zip(headings[:-1], headings[1:])):
+        delta = math.atan2(math.sin(second - first), math.cos(second - first))
+        ds = max(1.0e-3, segment_lengths[min(index + 1, len(segment_lengths) - 1)])
+        curvatures.append(abs(float(delta)) / float(ds))
+    if not curvatures:
+        return 0.0
+    max_curvature = max(curvatures)
+    curvature_variation = sum(
+        abs(second - first)
+        for first, second in zip(curvatures[:-1], curvatures[1:])
+    )
+    lateral_accel = float(target_speed_mps) ** 2 * float(max_curvature)
+    return (
+        2.0 * float(max_curvature)
+        + 0.5 * float(curvature_variation)
+        + 0.25 * float(lateral_accel)
     )
 
 
@@ -348,6 +821,18 @@ def _lane_change_risk_cost(
     )
     if min_pred_distance is not None:
         if float(min_pred_distance) < float(min_object_distance_m):
+            if int(lane_id) == int(current_lane_id):
+                # A lead vehicle predicted on the ego lane is primarily a
+                # longitudinal-following constraint.  Rejecting the keep-lane
+                # candidate here forces the bridge to rebuild a lateral
+                # fallback reference, which makes dense same-lane traffic
+                # produce steering oscillation.  Keep a strong cost so the
+                # slower yield candidate wins; MPC/stop-gap logic still owns
+                # the longitudinal safety constraint.
+                return (
+                    120.0,
+                    f"candidate_prediction_lead_follow:{min_pred_distance:.2f}",
+                )
             return 10000.0, f"candidate_prediction_collision_risk:{min_pred_distance:.2f}"
         if float(min_pred_distance) < 2.0 * float(min_object_distance_m):
             return 60.0, f"candidate_prediction_near_object:{min_pred_distance:.2f}"

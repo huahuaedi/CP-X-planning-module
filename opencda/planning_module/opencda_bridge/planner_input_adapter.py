@@ -55,11 +55,50 @@ class PlannerInputAdapterOutput:
     source_quality: Dict[str, object]
 
 
+class OpenCDARuntimePort:
+    """Public input-facing port over the legacy bridge implementation.
+
+    Only this compatibility class may call bridge-private data helpers.  The
+    planner input adapter itself depends on named runtime capabilities, which
+    makes those helpers movable without changing the input contract.
+    """
+
+    def __init__(self, bridge: Any):
+        self._bridge = bridge
+
+    def __getattr__(self, name: str):
+        return getattr(self._bridge, name)
+
+    def sim_time_s(self) -> float:
+        return float(self._bridge._sim_time_s())
+
+    def assign_obstacles_to_lanes(self, snapshots):
+        return self._bridge._assign_obstacles_to_lanes(snapshots)
+
+    def nearest_front_distance_by_lane(self, **kwargs):
+        return self._bridge._nearest_front_distance_by_lane(**kwargs)
+
+    def active_global_route_points(self):
+        return self._bridge._active_global_route_points()
+
+    def planning_global_route_summary(self, **kwargs):
+        return self._bridge._planning_module_global_route_summary(**kwargs)
+
+    def load_cp_message_payload(self):
+        return self._bridge._load_cp_message_payload()
+
+    def select_relevant_traffic_control(self, **kwargs):
+        return self._bridge._select_relevant_traffic_control(**kwargs)
+
+    def traffic_context_from_cp_control(self, **kwargs):
+        return self._bridge._traffic_context_from_cp_control(**kwargs)
+
+
 class OpenCDAPlanningAdapter:
     """Build PlannerInputFrame from a native OpenCDA VehicleManager snapshot."""
 
     def __init__(self, bridge: Any):
-        self.bridge = bridge
+        self.runtime = OpenCDARuntimePort(bridge)
 
     def build(
         self,
@@ -70,8 +109,8 @@ class OpenCDAPlanningAdapter:
         object_snapshots: Sequence[Mapping[str, Any]],
         cp_payload: Optional[Mapping[str, Any]],
     ) -> PlannerInputAdapterOutput:
-        bridge = self.bridge
-        sim_time_s = float(bridge._sim_time_s())
+        bridge = self.runtime
+        sim_time_s = float(bridge.sim_time_s())
         ego_pose = {
             "x": float(ego_location.x),
             "y": float(ego_location.y),
@@ -85,7 +124,19 @@ class OpenCDAPlanningAdapter:
             float(ego_yaw_rad),
         ]
         ego_waypoint = bridge.reference_map.get_waypoint(ego_pose)
-        current_lane_id = int(canonical_lane_id_for_waypoint(ego_waypoint))
+        # canonical_lane_id_for_waypoint() numbers lanes by counting how many
+        # driving lanes exist AT THIS POINT (rightmost = 1, increasing
+        # leftward). That count is only meaningful locally: wherever the
+        # total lane count changes along the road (a lane merges away, a
+        # turn-only lane appears/disappears), the same physical lane this
+        # vehicle never left gets renumbered out from under it, which can
+        # make the route think a required lane change already happened (the
+        # new number coincidentally matches the target) when the vehicle
+        # never actually moved laterally. _lane_id_tracker instead only
+        # changes id when real get_left_lane()/get_right_lane() adjacency
+        # proves the vehicle's raw lane changed, so it stays a stable
+        # identity across the whole route -- see StableLaneIdTracker.
+        current_lane_id = int(bridge._lane_id_tracker.update(ego_waypoint))
         if current_lane_id == 0:
             current_lane_id = 1
         lane_ids = [
@@ -105,7 +156,7 @@ class OpenCDAPlanningAdapter:
             ego_heading_rad=float(ego_yaw_rad),
         )
 
-        lane_assignments = bridge._assign_obstacles_to_lanes(object_snapshots)
+        lane_assignments = bridge.assign_obstacles_to_lanes(object_snapshots)
         ego_snapshot = {
             "x": float(ego_location.x),
             "y": float(ego_location.y),
@@ -121,18 +172,19 @@ class OpenCDAPlanningAdapter:
             timestamp_s=float(sim_time_s),
         )
         bridge.lane_safety_scorer.cleanup_stale_obstacles(set(lane_assignments.keys()))
-        front_dist_by_lane = bridge._nearest_front_distance_by_lane(
+        front_dist_by_lane = bridge.nearest_front_distance_by_lane(
             ego_snapshot=ego_snapshot,
             obstacle_snapshots=object_snapshots,
             lane_assignments=lane_assignments,
             available_lane_ids=lane_ids,
         )
 
-        route_points = bridge._active_global_route_points()
-        route_summary = bridge._planning_module_global_route_summary(
+        route_points = bridge.active_global_route_points()
+        route_summary = bridge.planning_global_route_summary(
             ego_location=ego_location,
             ego_heading_rad=float(ego_yaw_rad),
             fallback_lane_id=int(current_lane_id),
+            ego_waypoint=ego_waypoint,
         )
         route_optimal_lane_id = int(
             route_summary.get("optimal_lane_id", current_lane_id) or current_lane_id
@@ -149,7 +201,7 @@ class OpenCDAPlanningAdapter:
             else str(route_summary.get("debug_reason", "opencda_global_route_unavailable"))
         )
 
-        cp_payload = dict(cp_payload or bridge._load_cp_message_payload())
+        cp_payload = dict(cp_payload or bridge.load_cp_message_payload())
         cp_timestamp_s = _optional_float(cp_payload.get("timestamp_s", None))
         cp_age_s = (
             ""
@@ -166,7 +218,7 @@ class OpenCDAPlanningAdapter:
             cp_payload.get("lane_closures", cp_payload.get("lane_events", [])) or []
         )
         cp_obstacles = list(cp_payload.get("obstacles", []) or [])
-        selected_control = bridge._select_relevant_traffic_control(
+        selected_control = bridge.select_relevant_traffic_control(
             traffic_controls=traffic_controls,
             ego_location=ego_location,
             ego_heading_rad=float(ego_yaw_rad),
@@ -174,7 +226,7 @@ class OpenCDAPlanningAdapter:
             current_road_id=int(getattr(ego_waypoint, "road_id", 0) or 0),
             sim_time_s=float(sim_time_s),
         )
-        signal_context, stop_target = bridge._traffic_context_from_cp_control(
+        signal_context, stop_target = bridge.traffic_context_from_cp_control(
             selected_control=selected_control,
             ego_location=ego_location,
         )
@@ -195,7 +247,7 @@ class OpenCDAPlanningAdapter:
             signal_context=signal_context,
             stop_target=stop_target,
         )
-        lane_assignments = bridge._assign_obstacles_to_lanes(tracked_obstacles)
+        lane_assignments = bridge.assign_obstacles_to_lanes(tracked_obstacles)
         lane_safety_scores = bridge.lane_safety_scorer.compute_lane_scores(
             ego_snapshot=ego_snapshot,
             obstacle_snapshots=tracked_obstacles,
@@ -205,7 +257,7 @@ class OpenCDAPlanningAdapter:
             timestamp_s=float(sim_time_s),
         )
         bridge.lane_safety_scorer.cleanup_stale_obstacles(set(lane_assignments.keys()))
-        front_dist_by_lane = bridge._nearest_front_distance_by_lane(
+        front_dist_by_lane = bridge.nearest_front_distance_by_lane(
             ego_snapshot=ego_snapshot,
             obstacle_snapshots=tracked_obstacles,
             lane_assignments=lane_assignments,
