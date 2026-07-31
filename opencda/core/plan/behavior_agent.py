@@ -376,8 +376,21 @@ class BehaviorAgent(object):
 
         """
 
-        light_id = self.vehicle.get_traffic_light(
-        ).id if self.vehicle.get_traffic_light() is not None else -1
+        # Query CARLA once. The original conditional called this synchronous
+        # RPC twice back-to-back, which can time out under multi-CAV load even
+        # after the first call succeeded.
+        try:
+            traffic_light = self.vehicle.get_traffic_light()
+        except RuntimeError as exc:
+            if "time-out" not in str(exc).lower():
+                raise
+            traffic_light = None
+            if self.debug:
+                print(
+                    "[OpenCDA BehaviorAgent] traffic-light RPC timed out; "
+                    "treating this tick as no associated signal."
+                )
+        light_id = int(traffic_light.id) if traffic_light is not None else -1
 
         # this is the case where the vehicle just pass a stop sign, and won't
         # stop at any stop sign in the next 4 seconds.

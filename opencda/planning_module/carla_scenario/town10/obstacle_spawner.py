@@ -8,21 +8,7 @@ import math
 import re
 from typing import Any, List, Mapping, Sequence
 
-from utility.global_planner import world_heading_rad
-
-
-def _custom_waypoint_transform(waypoint, carla):
-    if waypoint is None:
-        return None
-    position = waypoint.position
-    return carla.Transform(
-        carla.Location(
-            x=float(position["x"]),
-            y=float(position["y"]),
-            z=float(position.get("z", 0.0)),
-        ),
-        carla.Rotation(yaw=math.degrees(float(world_heading_rad(waypoint) or 0.0))),
-    )
+from utility.global_planner import waypoint_transform as _custom_waypoint_transform
 
 
 def _obstacle_sort_key(env_obj, prefix: str) -> tuple[int, int, str]:

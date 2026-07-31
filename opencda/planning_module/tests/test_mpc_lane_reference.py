@@ -59,6 +59,26 @@ class MPCLaneReferenceTests(unittest.TestCase):
         self.assertIsNone(mpc._previous_x_solution)
         self.assertIsNone(mpc._previous_u_solution)
 
+    def test_tracking_reference_uses_matching_rollout_stage(self):
+        rollout = np.array([
+            [0.0, 0.0, 1.0, 0.0],
+            [0.2, 0.0, 1.5, 0.0],
+            [0.5, 0.0, 2.0, 0.0],
+            [0.9, 0.0, 2.5, 0.0],
+        ])
+
+        stage_one = MPC._tracking_reference_at_stage(
+            x_ref_rollout=rollout,
+            stage_index=1,
+        )
+        terminal = MPC._tracking_reference_at_stage(
+            x_ref_rollout=rollout,
+            stage_index=99,
+        )
+
+        np.testing.assert_allclose(stage_one, rollout[1])
+        np.testing.assert_allclose(terminal, rollout[-1])
+
 
 if __name__ == "__main__":
     unittest.main()

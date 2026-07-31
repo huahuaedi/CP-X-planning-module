@@ -9,6 +9,7 @@ from .candidate_evaluation import (
     CandidateEvaluationFrame,
     evaluate_behavior_candidates,
 )
+from .actuator_mapper import ActuatorCommand, CarlaActuatorMapper
 from .architecture_profile import ArchitectureProfile, normalize_architecture_config
 from .candidate_pipeline import (
     CandidateBehaviorIntent,
@@ -23,6 +24,7 @@ from .candidate_pipeline import (
 from .control_buffer import MPCControlBuffer
 from .decision_record import DecisionRecord, DecisionVeto, build_decision_record
 from .mpc_feedback import BehaviorMPCFeedback
+from .maneuver_manager import ManeuverManager, ManeuverPlan, ManeuverReferenceResult
 from .prediction import PredictionFrame, build_prediction_frame
 from .planner_pipeline import CPXPlanningPipeline
 from .output import BehaviorCommand, PlannerDiagnostics, PlannerOutput
@@ -66,7 +68,9 @@ from .speed_planner import SpeedPlan, build_speed_plan
 from .tracker import CPXObstacleTracker
 
 __all__ = [
+    "ActuatorCommand",
     "BehaviorMPCFeedback",
+    "CarlaActuatorMapper",
     "BoundaryRecoveryRequest",
     "BoundaryRecoveryValidation",
     "DrivableFootprintOccupancy",
@@ -85,6 +89,9 @@ __all__ = [
     "DecisionRecord",
     "DecisionVeto",
     "MPCControlBuffer",
+    "ManeuverManager",
+    "ManeuverPlan",
+    "ManeuverReferenceResult",
     "PlannerDiagnostics",
     "PlannerOutput",
     "PredictionFrame",

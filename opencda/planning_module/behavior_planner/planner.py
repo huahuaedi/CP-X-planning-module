@@ -3007,7 +3007,18 @@ class RuleBasedBehaviorPlanner:
         signal_match_distance_m = None
         signal_match_rank = None
         signal_actor_raw_state = ""
+        scenario_owns_traffic_control = False
+        scenario_fsm_state = ""
         if isinstance(traffic_signal_context, Mapping):
+            scenario_owns_traffic_control = bool(
+                traffic_signal_context.get(
+                    "scenario_owns_traffic_control",
+                    False,
+                )
+            )
+            scenario_fsm_state = str(
+                traffic_signal_context.get("scenario_fsm_state", "")
+            )
             signal_found = bool(traffic_signal_context.get("signal_found", False))
             signal_actor_id = traffic_signal_context.get("signal_actor_id", None)
             signal_actor_name = str(traffic_signal_context.get("signal_actor_name", ""))
@@ -3045,6 +3056,20 @@ class RuleBasedBehaviorPlanner:
         # `stop` incorrectly.
         release_for_green = str(normalized_signal_state) == "green"
         should_release_latch = bool(ego_in_junction) or bool(release_for_green)
+        if (
+            bool(scenario_owns_traffic_control)
+            and str(self._active_control_message_type) == "legacy_traffic_light"
+            and (
+                str(normalized_signal_state) not in {"red", "yellow"}
+                or not isinstance(traffic_stop_target, Mapping)
+            )
+        ):
+            # CPXScenarioManager owns approach/commit/hold/release. During a
+            # distant-red approach it intentionally passes unknown + no stop
+            # target so Behavior cannot convert the approach into an immediate
+            # stop. Release only this legacy traffic-light latch; obstacle and
+            # CP control stops retain their independent ownership.
+            should_release_latch = True
         if should_release_latch:
             self._clear_stop_state()
 
@@ -3104,6 +3129,10 @@ class RuleBasedBehaviorPlanner:
             "should_stop_now": bool(should_stop_now),
             "stop_latched": bool(self._stop),
             "stop_decision_active": bool(self._stop),
+            "scenario_owns_traffic_control": bool(
+                scenario_owns_traffic_control
+            ),
+            "scenario_fsm_state": str(scenario_fsm_state),
             "latched_signal_actor_id": self._active_control_message_id,
             "control_found": bool(signal_found),
             "control_type": "traffic_light" if bool(signal_found) else "",

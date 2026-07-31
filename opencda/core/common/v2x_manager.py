@@ -158,6 +158,7 @@ class V2XManager(object):
         Search the CAVs nearby.
         """
         vehicle_manager_dict = self.cav_world.get_vehicle_managers()
+        nearby = {}
 
         for vid, vm in vehicle_manager_dict.items():
             # avoid the Nonetype error at the first simulation step
@@ -171,7 +172,12 @@ class V2XManager(object):
                 vm.v2x_manager.get_ego_pos().location)
 
             if distance < self.communication_range:
-                self.cav_nearby.update({vid: vm})
+                nearby[vid] = vm
+
+        # Rebuild membership every tick. Keeping the previous dictionary and
+        # only adding entries lets a CAV remain a cooperative observation
+        # point forever after it leaves communication range.
+        self.cav_nearby = nearby
     """
     -----------------------------------------------------------
                  Below is platooning related 

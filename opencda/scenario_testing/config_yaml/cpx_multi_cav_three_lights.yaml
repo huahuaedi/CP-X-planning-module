@@ -1,0 +1,65 @@
+base_config: single_intersection_town06_carla.yaml
+
+description: |-
+  Three-CAV Town06 cooperative-perception test. CAV1 runs the CP-X planning
+  pipeline. CAV2 and CAV3 use OpenCDA's default BehaviorAgent and act as
+  additional 360-degree CARLA-GT observation points with a 60 m radius.
+
+vehicle_base:
+  # Background CAVs inherit this default and therefore keep BehaviorAgent.
+  # CAV1 explicitly enables CP-X below.
+  planner:
+    enabled: false
+
+scenario:
+  max_ticks: 5000
+  destination_tolerance_m: 3.0
+  single_cav_list:
+    - name: cav1
+      spawn_position: [6.31, 125.03, 0.3, 0, -92, 0]
+      destination: [6.31, -60.0, 0.3]
+      v2x:
+        enabled: true
+        communication_range: 60
+      behavior:
+        local_planner:
+          debug_trajectory: true
+          debug: true
+      planner:
+        enabled: true
+        type: cpx_mpc
+        mode: full_cpx_mpc
+        publish_cp_message: true
+        require_native_opencda_cp: true
+        communication_range_m: 60.0
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_multi_cav_three_lights
+
+    - name: cav2
+      spawn_position: [6.31, 105.03, 0.3, 0, -92, 0]
+      # Lead observer: remain on the ego arterial and continue beyond the
+      # primary ego destination so it never parks in the ego route.
+      destination: [6.31, -100.0, 0.3]
+      v2x:
+        enabled: true
+        communication_range: 60
+      behavior:
+        local_planner:
+          debug_trajectory: false
+          debug: false
+      planner:
+        enabled: false
+
+    - name: cav3
+      spawn_position: [6.31, 145.03, 0.3, 0, -92, 0]
+      # Rear observer: use the same arterial. Its BehaviorAgent owns normal
+      # car-following behind the CP-X ego instead of crossing the ego route.
+      destination: [6.31, -100.0, 0.3]
+      v2x:
+        enabled: true
+        communication_range: 60
+      behavior:
+        local_planner:
+          debug_trajectory: false
+          debug: false
+      planner:
+        enabled: false

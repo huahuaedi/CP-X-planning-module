@@ -1,0 +1,26 @@
+base_config: cpx_multi_cav_three_lights.yaml
+
+description: |-
+  Stable native-OpenCDA three-CAV VRU-awareness validation on Town06. CAV1
+  runs CP-X; CAV2/CAV3 use BehaviorAgent. A CARLA-GT pedestrian crosses the
+  southbound arterial ahead of CAV1. Cooperative observations use 60 m range,
+  actor-ID fusion, and client-side actor-geometry visibility filtering.
+
+vehicle_base:
+  planner:
+    communication_range_m: 60.0
+    cp_visibility_filter_enabled: true
+    cp_visibility_backend: actor_geometry
+    cp_visibility_sensor_height_m: 1.6
+    cp_visibility_target_tolerance_m: 0.75
+
+scenario:
+  max_ticks: 5000
+  destination_tolerance_m: 3.0
+  terminate_on_cav_collision: true
+  cooperative_vru:
+    enabled: true
+    blueprint: walker.pedestrian.0001
+    spawn_position: [-2.0, 80.0, 0.6]
+    direction: [1.0, 0.0, 0.0]
+    speed_mps: 1.4

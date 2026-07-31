@@ -168,6 +168,50 @@ def export(input_csv: Path, output_dir: Path) -> None:
         axis.grid(alpha=0.25)
     _save(fig, output_dir, "04_reference_stability")
 
+    if "maneuver_geometry_active" in rows[0]:
+        active = np.asarray([
+            1.0
+            if str(row.get("maneuver_geometry_active", "")).lower()
+            in {"true", "1"}
+            else 0.0
+            for row in rows
+        ])
+        fig, axes = plt.subplots(3, 1, figsize=(13, 8.0), sharex=True)
+        axes[0].step(
+            time_s,
+            active,
+            where="post",
+            color="#6b46c1",
+            label="Unified maneuver active",
+        )
+        axes[0].set(ylabel="Active", yticks=[0, 1], title="Unified Maneuver Ownership")
+        axes[0].legend()
+        axes[1].plot(
+            time_s,
+            _values(rows, "maneuver_first_point_jump_m", 0.0),
+            color="#177e89",
+            label="First-point frame jump",
+        )
+        axes[1].axhline(0.3, color="#c53030", linestyle="--", label="0.3 m target")
+        axes[1].set(ylabel="Distance (m)", title="Reference Position Continuity")
+        axes[1].legend()
+        axes[2].plot(
+            time_s,
+            _values(rows, "maneuver_first_heading_jump_deg", 0.0),
+            color="#d97706",
+            label="First-heading frame jump",
+        )
+        axes[2].axhline(5.0, color="#c53030", linestyle="--", label="5 deg target")
+        axes[2].set(
+            xlabel="Simulation time (s)",
+            ylabel="Angle (deg)",
+            title="Reference Heading Continuity",
+        )
+        axes[2].legend()
+        for axis in axes:
+            axis.grid(alpha=0.25)
+        _save(fig, output_dir, "05_maneuver_continuity")
+
     statuses = ["solved", "solved inaccurate", "buffer_reuse", "primal infeasible", "candidate_hard_gate", "emergency_brake_direct"]
     counts = Counter(str(row.get("mpc_status", "")) for row in rows)
     fig, axes = plt.subplots(1, 2, figsize=(13, 4.8))
@@ -243,7 +287,13 @@ def export(input_csv: Path, output_dir: Path) -> None:
         np.nansum(np.hypot(np.diff(x_m), np.diff(y_m)))
     )
     duration_s = float(time_s[-1] - time_s[0])
-    destination_distance_m = math.hypot(float(x_m[-1]) - 50.0, float(y_m[-1]) - 52.38)
+    destination_distance_m = _float(
+        rows[-1],
+        "route_remaining_distance_m",
+        float("nan"),
+    )
+    if not math.isfinite(destination_distance_m):
+        destination_distance_m = float("nan")
     collision_count = max(_values(rows, "collision_count", 0.0))
     finite_ttc = ttc[np.isfinite(ttc) & (ttc >= 0.0)]
     finite_drac = drac[np.isfinite(drac)]
@@ -309,7 +359,7 @@ def export(input_csv: Path, output_dir: Path) -> None:
         "",
         "## Key Findings",
         "",
-        f"- The route completed within the configured 1 m tolerance: **{destination_distance_m:.3f} m** remained.",
+        f"- Final route-manager remaining distance: **{destination_distance_m:.3f} m**.",
         f"- Candidate hard-gate frames: **{counts['candidate_hard_gate']}**.",
         f"- Quintic lane-recovery references were accepted for **{metrics[-2][1]}** frames.",
         f"- Safety-supervisor stuck-stop frames: **{metrics[-1][1]}**.",

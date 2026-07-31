@@ -2169,15 +2169,10 @@ class MPC:
             lower_bounds.append(float(lower))
             upper_bounds.append(float(upper))
 
-        # Reference state is the destination state.
-        # The image shows the state-tracking sum from k=0..N. Here the k=0 term
-        # is omitted from optimization assembly because X_0 is fixed by an
-        # equality constraint, so that term is a constant offset and does not
-        # change the optimizer solution.
-        x_ref_value = float(x_ref_target[0])
-        y_ref_value = float(x_ref_target[1])
-        v_ref_value = float(x_ref_target[2])
-        psi_ref_value = float(x_ref_target[3])
+        # X_0 is fixed, so tracking starts at stage 1. Each predicted state must
+        # track its matching time-parameterized rollout sample. Applying the
+        # terminal destination to every stage creates a receding-horizon
+        # accelerate/brake limit cycle as the endpoint moves forward each tick.
 
         # --- Objective: control term Cost_Control ---
         # Penalizes rapid changes in acceleration and steering across horizon.
@@ -2218,6 +2213,14 @@ class MPC:
         w_qv_safe = attractive_scale * float(self.comfort_cost.qv)
         w_qpsi_safe = attractive_scale * float(self.comfort_cost.qpsi)
         for k in range(1, self.horizon_steps + 1):
+            stage_reference = self._tracking_reference_at_stage(
+                x_ref_rollout=x_ref_rollout,
+                stage_index=int(k),
+            )
+            x_ref_value = float(stage_reference[0])
+            y_ref_value = float(stage_reference[1])
+            v_ref_value = float(stage_reference[2])
+            psi_ref_value = self._wrap_angle(float(stage_reference[3]))
             x_k_idx = index.state_index(k, 0)
             y_k_idx = index.state_index(k, 1)
             add_tracking(x_k_idx, w_qx_safe, x_ref_value)
@@ -2477,6 +2480,20 @@ class MPC:
         l = np.asarray(lower_bounds, dtype=float)
         u = np.asarray(upper_bounds, dtype=float)
         return P, q, A, l, u, index
+
+    @staticmethod
+    def _tracking_reference_at_stage(
+        *,
+        x_ref_rollout: np.ndarray,
+        stage_index: int,
+    ) -> np.ndarray:
+        """Return the time-matched state reference for one MPC stage."""
+
+        rollout = np.asarray(x_ref_rollout, dtype=float)
+        if rollout.ndim != 2 or rollout.shape[0] == 0 or rollout.shape[1] < 4:
+            raise ValueError("MPC tracking rollout must contain Nx4 states")
+        index = max(0, min(int(stage_index), int(rollout.shape[0]) - 1))
+        return np.asarray(rollout[index, :4], dtype=float)
 
     def _solve_qp(
         self,

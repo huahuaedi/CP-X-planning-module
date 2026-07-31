@@ -1,0 +1,39 @@
+base_config: cpx_profile_full_default.yaml
+
+description: |-
+  CP-X use case F (high-level path/route planning awareness of a complex
+  road condition -- special event / emergency-vehicle-style blockage), built
+  on
+  opencda/planning_module/carla_scenario/high_level_route_planning/emergency_vehicle_blockage.yaml
+  (Town10HD_Opt). cav1 is the primary ego; that legacy scenario's own
+  `carla_scenario.high_level_route_planning.scenario` module already
+  publishes a proactive `lane_closure` CP message once cav1 is within
+  `cooperative_message_trigger_longitudinal_distance_m` of the "workzone"
+  marker, feeding `behavior_planner/reroute.py`'s reroute pathway.
+
+  cav2/cav3 are real "cooperative perception observer" CAVs, added at
+  runtime by this script's `configure_extra_cavs` callback, positioned near
+  that same "workzone" marker (resolved live -- its position is baked into
+  the map, not known statically) so more than one real VehicleManager exists
+  to demonstrate genuine cross-vehicle awareness through OpenCDA's native
+  V2X, on top of the legacy scenario's own file-based CP lane-closure
+  message.
+
+vehicle_base:
+  planner:
+    global_planner_xodr_path: Global_Planner/maps/Town10HD_Opt.xodr
+    debug_output_dir: opencda/planning_module/opencda_bridge/debug_cpx_f_route_awareness
+    communication_range_m: 60.0
+    cp_visibility_filter_enabled: false
+
+# spawn_position/destination below are placeholders overwritten at runtime by
+# cpx_scenario_bridge from the legacy scenario's own anchor markers.
+scenario:
+  max_ticks: 5000
+  destination_tolerance_m: 4.0
+  single_cav_list:
+    - name: cav1
+      spawn_position: [0.0, 0.0, 0.3, 0, 0, 0]
+      destination: [0.0, 0.0, 0.3]
+      v2x:
+        communication_range: 60

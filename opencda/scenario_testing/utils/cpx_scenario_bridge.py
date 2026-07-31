@@ -45,12 +45,17 @@ available for HUD-style debugging through the native OpenCDA path if needed.
 
 from __future__ import annotations
 
+import copy
+import json
 import math
 import os
 import sys
 import time
+import traceback
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional, Sequence
+
+from omegaconf import OmegaConf
 
 import carla
 
@@ -168,6 +173,66 @@ def load_legacy_scenario_cfg(loader_name: str, scenario_name: str) -> dict:
     return dict(_load(scenario_name))
 
 
+def _find_environment_object_by_name(world, carla_module, name: str):
+    requested = name.strip().lower()
+    if not requested or not hasattr(world, "get_environment_objects"):
+        return None
+    try:
+        for env_obj in world.get_environment_objects(carla_module.CityObjectLabel.Any):
+            if str(getattr(env_obj, "name", "")).strip().lower() == requested:
+                return env_obj
+    except Exception:
+        return None
+    return None
+
+
+def _find_actor_by_role_name(world, name: str):
+    requested = name.strip().lower()
+    if not requested:
+        return None
+    for actor in world.get_actors():
+        attributes = getattr(actor, "attributes", {}) or {}
+        if str(attributes.get("role_name", "")).strip().lower() == requested:
+            return actor
+    return None
+
+
+def align_transform_to_lane(global_planner: Any, carla_module: Any, transform: Any) -> Any:
+    """Snap `transform` onto the nearest driving lane, reusing
+    `planning_runner`'s own alignment helper (unchanged). Useful after
+    `resolve_marker_transform`, since a marker's own baked-in orientation
+    (e.g. a workzone prop) is not necessarily aligned with the road, but the
+    returned transform's heading is -- e.g. to place an observer CAV a
+    realistic distance upstream of a marker, along the road rather than
+    along whatever direction the marker prop happens to face.
+    """
+
+    aligned_transform, _waypoint = planning_runner._align_transform_to_lane(
+        global_planner, carla_module, transform
+    )
+    return aligned_transform
+
+
+def resolve_marker_transform(world, carla_module, marker_name: str) -> Optional[Any]:
+    """Resolve a single named CARLA marker (an EnvironmentObject baked into
+    the map, or a spawned actor's `role_name`) to a `carla.Transform`.
+
+    Used to place additional CAVs (beyond the primary ego) at a location
+    that only exists as a marker in the live world -- e.g. the "workzone"
+    marker `high_level_route_planning` scenarios already resolve for their
+    own CP-message logic -- since such positions cannot be known statically
+    without connecting to CARLA.
+    """
+
+    env_obj = _find_environment_object_by_name(world, carla_module, marker_name)
+    transform = getattr(env_obj, "transform", None)
+    if transform is not None:
+        return transform
+    actor = _find_actor_by_role_name(world, marker_name)
+    get_transform = getattr(actor, "get_transform", None)
+    return get_transform() if callable(get_transform) else None
+
+
 def _sync_named_destination_marker(world, legacy_cfg: dict) -> None:
     """Align the generic 'final_destination' marker onto a scenario-specific
     destination marker, when configured. Mirrors
@@ -183,34 +248,7 @@ def _sync_named_destination_marker(world, legacy_cfg: dict) -> None:
     if not target_name or target_name.lower() == source_name.lower():
         return
 
-    def _find_environment_object(name: str):
-        requested = name.strip().lower()
-        if not requested or not hasattr(world, "get_environment_objects"):
-            return None
-        try:
-            for env_obj in world.get_environment_objects(carla.CityObjectLabel.Any):
-                if str(getattr(env_obj, "name", "")).strip().lower() == requested:
-                    return env_obj
-        except Exception:
-            return None
-        return None
-
-    def _find_actor(name: str):
-        requested = name.strip().lower()
-        if not requested:
-            return None
-        for actor in world.get_actors():
-            attributes = getattr(actor, "attributes", {}) or {}
-            if str(attributes.get("role_name", "")).strip().lower() == requested:
-                return actor
-        return None
-
-    target_env_obj = _find_environment_object(target_name)
-    target_transform = getattr(target_env_obj, "transform", None)
-    if target_transform is None:
-        target_actor = _find_actor(target_name)
-        get_transform = getattr(target_actor, "get_transform", None)
-        target_transform = get_transform() if callable(get_transform) else None
+    target_transform = resolve_marker_transform(world, carla, target_name)
     if target_transform is None:
         print(
             f"[CPX SCENARIO BRIDGE] Could not resolve destination marker "
@@ -218,7 +256,7 @@ def _sync_named_destination_marker(world, legacy_cfg: dict) -> None:
         )
         return
 
-    source_actor = _find_actor(source_name)
+    source_actor = _find_actor_by_role_name(world, source_name)
     set_transform = getattr(source_actor, "set_transform", None)
     if source_actor is not None and callable(set_transform):
         try:
@@ -338,6 +376,129 @@ def apply_resolved_anchors(scenario_params, cav_index: int, context: LegacyScena
     cav_cfg["spawn_position"] = spawn_position
 
 
+def offset_transform_along_heading(transform: Any, carla_module: Any, distance_m: float) -> Any:
+    """A transform `distance_m` ahead of `transform` along its own heading
+    (negative moves backward instead). Used both to give an "observer" CAV a
+    short, legitimate route to plan (rather than a zero-length one) while it
+    stays essentially in place, and to place an observer CAV some distance
+    upstream/downstream of a resolved marker transform (see
+    `resolve_marker_transform` / `align_transform_to_lane`).
+    """
+
+    yaw_rad = math.radians(float(transform.rotation.yaw))
+    location = transform.location + carla_module.Location(
+        x=distance_m * math.cos(yaw_rad),
+        y=distance_m * math.sin(yaw_rad),
+    )
+    return carla_module.Transform(location, transform.rotation)
+
+
+def align_observer_to_adjacent_lane(
+    world: Any,
+    carla_module: Any,
+    proposed_transform: Any,
+) -> Any:
+    """Move an observer anchor to a same-direction adjacent driving lane."""
+
+    try:
+        waypoint = world.get_map().get_waypoint(
+            proposed_transform.location,
+            project_to_road=True,
+            lane_type=carla_module.LaneType.Driving,
+        )
+    except Exception:
+        waypoint = None
+    if waypoint is None:
+        print("[CPX SCENARIO BRIDGE] Observer anchor is not on a driving lane.")
+        return proposed_transform
+
+    base_yaw_rad = math.radians(float(waypoint.transform.rotation.yaw))
+    candidates = []
+    for getter_name in ("get_left_lane", "get_right_lane"):
+        getter = getattr(waypoint, getter_name, None)
+        candidate = getter() if callable(getter) else None
+        if candidate is None:
+            continue
+        if getattr(candidate, "lane_type", None) != carla_module.LaneType.Driving:
+            continue
+        candidate_yaw_rad = math.radians(float(candidate.transform.rotation.yaw))
+        heading_alignment = math.cos(candidate_yaw_rad - base_yaw_rad)
+        if heading_alignment < 0.5:
+            continue
+        candidates.append(candidate)
+    if not candidates:
+        print(
+            "[CPX SCENARIO BRIDGE] No same-direction adjacent driving lane "
+            "for observer anchor; using the proposed lane and treating the "
+            "placement as provisional."
+        )
+        return waypoint.transform
+    return candidates[0].transform
+
+
+def add_observer_cav(
+    scenario_params,
+    *,
+    name: str,
+    spawn_transform: Any,
+    carla_module: Any,
+    destination_transform: Optional[Any] = None,
+    forward_offset_m: float = 6.0,
+    target_speed_mps: float = 0.6,
+    template_index: int = 0,
+) -> int:
+    """Append another real CAV (beyond the primary ego at `template_index`)
+    to `scenario.single_cav_list`, positioned as a stationary-ish
+    "cooperative perception observer" rather than a scenario-driving ego.
+
+    Why this is needed: OpenCDA's native cross-vehicle awareness
+    (`opencda_bridge/cp_provider.py`'s `_native_opencda_messages`, reading
+    `vehicle_manager.v2x_manager.cav_nearby`) only produces genuine
+    "vehicle A perceives something vehicle B cannot yet" behavior when more
+    than one real `VehicleManager` exists in the scenario -- a single ego
+    plus scripted CARLA actors cannot demonstrate that, since there is only
+    one real perceiving agent. Adding a second (or third) CAV at a vantage
+    point the primary ego does not yet have gives a real, independent
+    `PerceptionManager` + `V2XManager` that can share genuinely new
+    information, instead of the file-based CP-message proxy used elsewhere
+    in this bridge for single-ego scenarios.
+
+    Per `cpx_profile_full_default.yaml`'s own convention, `vehicle_base.planner`
+    is already deep-merged into every CAV by `sim_api.py`'s
+    `create_vehicle_manager()` (`OmegaConf.merge(vehicle_base, platoon_base,
+    cav_config)`); a per-CAV `planner:` block should therefore only carry the
+    handful of fields that genuinely differ for this CAV, not a full copy of
+    the ~120-key profile. Here that is just `target_speed_mps` (kept low so
+    the CAV behaves as a stationary-ish observer) and `debug_output_dir`.
+    """
+
+    cav_list = scenario_params["scenario"]["single_cav_list"]
+    template_cfg = OmegaConf.to_container(cav_list[template_index], resolve=True)
+    new_cfg = copy.deepcopy(template_cfg)
+    new_cfg.pop("planner", None)
+    new_cfg["name"] = str(name)
+    new_cfg["spawn_position"] = transform_to_spawn_position(spawn_transform)
+    if destination_transform is None:
+        destination_transform = offset_transform_along_heading(
+            spawn_transform, carla_module, forward_offset_m
+        )
+    new_cfg["destination"] = transform_to_destination(destination_transform)
+    # `vehicle_base.planner.enabled` is true in CP-X profiles. Override it
+    # explicitly so observer CAVs use OpenCDA's BehaviorAgent rather than
+    # silently inheriting a second CP-X planner.
+    new_cfg["planner"] = {"enabled": False}
+    behavior_cfg = dict(new_cfg.get("behavior", {}) or {})
+    behavior_cfg["max_speed"] = max(2.0, float(target_speed_mps) * 3.6)
+    new_cfg["behavior"] = behavior_cfg
+    cav_list.append(OmegaConf.create(new_cfg))
+    new_index = len(cav_list) - 1
+    print(
+        f"[CPX SCENARIO BRIDGE] Added observer CAV '{name}' at index {new_index} "
+        f"(spawn=({spawn_transform.location.x:.2f}, {spawn_transform.location.y:.2f}))."
+    )
+    return new_index
+
+
 def _destroy_spawn_blockers(world: Any, spawn_transform: Any, radius_m: float = 6.0) -> int:
     """Remove stale actors left by a previous failed run near ego spawn."""
 
@@ -448,6 +609,9 @@ def run_legacy_scenario_port(
     legacy_scenario_name: str,
     script_name: str,
     cav_index: int = 0,
+    configure_extra_cavs: Optional[
+        Callable[[Any, Any, Any, "LegacyScenarioContext"], None]
+    ] = None,
 ) -> None:
     """Run a `carla_scenario`/`opencda_scenario` legacy scenario through the
     official OpenCDA `VehicleManager` / `CPXMPCPlannerBridge` pipeline.
@@ -466,6 +630,16 @@ def run_legacy_scenario_port(
         `"town10_scenario_5"`.
     script_name:
         Used only for the evaluation manager's output folder name.
+    configure_extra_cavs:
+        Optional `(scenario_params, world, carla_module, context) -> None`
+        callback, invoked once the live CARLA world/global-planner context
+        are available but before vehicles are spawned. Use it with
+        `add_observer_cav(...)` to add a second/third real CAV -- e.g. a
+        cooperative-perception "observer" positioned somewhere the primary
+        ego cannot yet see -- to `scenario_params["scenario"]
+        ["single_cav_list"]`. See `add_observer_cav`'s docstring for why a
+        real extra CAV (rather than a scripted CARLA actor) is required to
+        demonstrate genuine multi-vehicle CP value.
     """
 
     scenario_params = add_current_time(scenario_params)
@@ -486,18 +660,21 @@ def run_legacy_scenario_port(
 
     context = build_legacy_context(legacy_cfg, world, carla_module)
     apply_resolved_anchors(scenario_params, cav_index, context)
-    current_spawn_transform = _current_cav_spawn_transform(
-        scenario_params, cav_index, carla_module
-    )
-    cleared_spawn_blockers = _destroy_spawn_blockers(
-        world,
-        current_spawn_transform,
-        radius_m=float(legacy_cfg.get("ego", {}).get("spawn_clear_radius_m", 12.0)),
-    )
-    if int(cleared_spawn_blockers) > 0:
+
+    if configure_extra_cavs is not None:
+        configure_extra_cavs(scenario_params, world, carla_module, context)
+
+    spawn_clear_radius_m = float(legacy_cfg.get("ego", {}).get("spawn_clear_radius_m", 12.0))
+    total_cleared_spawn_blockers = 0
+    for list_index in range(len(scenario_params["scenario"]["single_cav_list"])):
+        spawn_transform = _current_cav_spawn_transform(scenario_params, list_index, carla_module)
+        total_cleared_spawn_blockers += _destroy_spawn_blockers(
+            world, spawn_transform, radius_m=spawn_clear_radius_m
+        )
+    if total_cleared_spawn_blockers > 0:
         print(
             "[CPX SCENARIO BRIDGE] Removed "
-            f"{int(cleared_spawn_blockers)} stale actor(s) near ego spawn."
+            f"{total_cleared_spawn_blockers} stale actor(s) near CAV spawn points."
         )
         try:
             world.tick()
@@ -564,9 +741,20 @@ def run_legacy_scenario_port(
             ego_vehicle=ego_vehicle,
         )
 
+    termination_reason = "initialization_complete"
+    completed_ticks = 0
+    scenario_exception = ""
     try:
         spectator = world.get_spectator()
-        while True:
+        scenario_cfg = scenario_params.get("scenario", {})
+        max_ticks = max(1, int(scenario_cfg.get("max_ticks", 5000)))
+        destination_tolerance_m = max(
+            0.5,
+            float(scenario_cfg.get("destination_tolerance_m", 4.0)),
+        )
+        termination_reason = "max_ticks_reached"
+        for _tick_index in range(max_ticks):
+            completed_ticks = int(_tick_index) + 1
             if sumo_bridge is not None:
                 sumo_bridge.tick()
             else:
@@ -610,14 +798,78 @@ def run_legacy_scenario_port(
 
             _set_spectator_transform(spectator, ego_vehicle)
 
-            for cav in single_cav_list:
+            for cav_index_in_list, cav in enumerate(single_cav_list):
                 cav.update_info()
-                control = cav.run_step()
+                if bool(getattr(cav, "_opencda_agent_finished", False)):
+                    control = carla_module.VehicleControl(
+                        throttle=0.0, brake=1.0, steer=0.0
+                    )
+                else:
+                    try:
+                        control = cav.run_step()
+                    except SystemExit as exc:
+                        if cav_index_in_list == int(cav_index):
+                            raise
+                        if int(getattr(exc, "code", 0) or 0) != 0:
+                            raise
+                        cav._opencda_agent_finished = True
+                        print(
+                            "[CPX SCENARIO BRIDGE] Observer CAV vehicle "
+                            f"{getattr(cav.vehicle, 'id', '')} reached its "
+                            "destination; holding it stopped."
+                        )
+                        control = carla_module.VehicleControl(
+                            throttle=0.0, brake=1.0, steer=0.0
+                        )
                 cav.vehicle.apply_control(control)
 
             if debug_viewer is not None:
                 debug_viewer.render(single_cav_list)
+            ego_location = ego_vehicle.get_location()
+            goal_location = context.destination_transform.location
+            if ego_location.distance(goal_location) <= destination_tolerance_m:
+                termination_reason = "destination_reached"
+                break
+        print(
+            "[CPX SCENARIO BRIDGE] finished: "
+            f"reason={termination_reason} ticks={_tick_index + 1}/{max_ticks} "
+            f"distance_to_destination_m="
+            f"{ego_vehicle.get_location().distance(context.destination_transform.location):.2f}"
+        )
+    except BaseException as exc:
+        termination_reason = "scenario_exception"
+        scenario_exception = "".join(traceback.format_exception(
+            type(exc), exc, exc.__traceback__
+        ))
+        print("[CPX SCENARIO BRIDGE] scenario exception:\n%s" % scenario_exception)
+        raise
     finally:
+        try:
+            planner_cfg = scenario_params["vehicle_base"]["planner"]
+            debug_output_dir = Path(str(planner_cfg.get(
+                "debug_output_dir",
+                "opencda/planning_module/opencda_bridge/debug_cpx_default",
+            )))
+            if not debug_output_dir.is_absolute():
+                debug_output_dir = Path(__file__).resolve().parents[3] / debug_output_dir
+            debug_output_dir.mkdir(parents=True, exist_ok=True)
+            with open(
+                debug_output_dir / "run_status.json",
+                "w",
+                encoding="utf-8",
+            ) as status_file:
+                json.dump({
+                    "termination_reason": str(termination_reason),
+                    "completed_ticks": int(completed_ticks),
+                    "exception": str(scenario_exception),
+                    "distance_to_destination_m": float(
+                        ego_vehicle.get_location().distance(
+                            context.destination_transform.location
+                        )
+                    ),
+                }, status_file, indent=2, sort_keys=True)
+        except Exception as status_exc:
+            print("[CPX SCENARIO BRIDGE] run status write failed: %s" % status_exc)
         eval_manager.evaluate()
         if debug_viewer is not None:
             debug_viewer.destroy()

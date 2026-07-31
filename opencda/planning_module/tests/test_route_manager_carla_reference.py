@@ -318,6 +318,50 @@ class RouteManagerCarlaReferenceTest(unittest.TestCase):
             for sample in reference
         ))
 
+    def test_straight_junction_lane_id_transition_keeps_route_geometry(self):
+        """Lane renumbering at a junction must not redirect a straight route."""
+
+        manager = CPXRouteManager(
+            global_planner=object(),
+            carla_reference_smoothing_passes=3,
+        )
+        manager._carla_route_entries = [
+            (_Waypoint(0.0, 0.0, lane_id=1, road_id=10), "LANEFOLLOW"),
+            (_Waypoint(2.0, 0.0, lane_id=1, road_id=10), "STRAIGHT"),
+            (_Waypoint(4.0, 0.0, lane_id=2, road_id=20), "STRAIGHT"),
+            (_Waypoint(6.0, 0.0, lane_id=2, road_id=20), "LANEFOLLOW"),
+            (_Waypoint(8.0, 0.0, lane_id=2, road_id=20), "LANEFOLLOW"),
+            (_Waypoint(10.0, 0.0, lane_id=2, road_id=20), "LANEFOLLOW"),
+        ]
+        manager._carla_route_debug_reason = "carla_grp_route_ready"
+
+        reference, reason = manager.carla_waypoint_reference(
+            ego_x_m=1.9,
+            ego_y_m=0.15,
+            ego_heading_rad=0.0,
+            horizon_steps=14,
+            step_distance_m=0.5,
+            target_speed_mps=2.0,
+            fallback_lane_id=2,
+            anchor_to_ego_heading=False,
+        )
+
+        self.assertIn("carla_grp_waypoint_chain_smoothed", reason)
+        self.assertEqual(len(reference), 14)
+        self.assertTrue(all(
+            float(current["x_ref_m"]) > float(previous["x_ref_m"])
+            for previous, current in zip(reference[:-1], reference[1:])
+        ))
+        self.assertLess(
+            max(abs(float(row["y_ref_m"])) for row in reference),
+            0.16,
+        )
+        self.assertTrue(all(
+            row["lane_transition_kind"] == "longitudinal_successor"
+            for row in reference
+        ))
+        self.assertIn(2, {int(row["lane_id"]) for row in reference})
+
     def test_samples_selected_turn_connector_without_duplicate_points(self):
         manager = CPXRouteManager(global_planner=object())
         manager._carla_route_entries = [

@@ -15,6 +15,10 @@ except Exception:  # pragma: no cover - optional debug dependency
     pygame = None
 
 
+def _csv_count(value: object) -> int:
+    return len([item for item in str(value or "").split(",") if item.strip()])
+
+
 class OpenCDADebugViewer:
     """Two-camera viewer with a bottom HUD, modeled after planning_runner."""
 
@@ -144,8 +148,6 @@ class OpenCDADebugViewer:
             return
         ego_vm = vehicle_managers[0]
         cpx_debug = getattr(getattr(ego_vm, "cpx_planner", None), "last_debug", {}) or {}
-        if not cpx_debug:
-            return
         try:
             ego_transform = ego_vm.vehicle.get_transform()
             ego_x = float(ego_transform.location.x)
@@ -162,12 +164,23 @@ class OpenCDADebugViewer:
                 dx = float(point[0]) - ego_x
                 dy = float(point[1]) - ego_y
                 forward = dx * math.cos(ego_yaw) + dy * math.sin(ego_yaw)
-                right = dx * math.sin(ego_yaw) - dy * math.cos(ego_yaw)
+                # CARLA camera coordinates use +Y to the vehicle's right.
+                # The previous sign mirrored every non-ego overlay across
+                # the image center, so CAV boxes appeared beside their cars.
+                right = -dx * math.sin(ego_yaw) + dy * math.cos(ego_yaw)
                 px = int(round(0.5 * self.width_px + right * px_per_m_x))
                 py = int(round(0.5 * self.height_px - forward * px_per_m_y))
                 if px < -20 or px > self.width_px + 20 or py < -20 or py > self.height_px + 20:
                     return None
                 return px, py
+
+            self._draw_cav_boxes(
+                surface=surface,
+                vehicle_managers=vehicle_managers,
+                project=project,
+            )
+            if not cpx_debug:
+                return
 
             mpc_points = self._project_points(cpx_debug.get("mpc_trajectory_points", []), project)
 
@@ -188,6 +201,58 @@ class OpenCDADebugViewer:
             )
         except Exception:
             return
+
+    def _draw_cav_boxes(
+        self,
+        *,
+        surface: Any,
+        vehicle_managers: Sequence[Any],
+        project: Any,
+    ) -> None:
+        """Mark every managed CAV with an oriented red footprint and label."""
+
+        for index, vehicle_manager in enumerate(list(vehicle_managers or [])):
+            vehicle = getattr(vehicle_manager, "vehicle", None)
+            if vehicle is None:
+                continue
+            try:
+                transform = vehicle.get_transform()
+                bbox = vehicle.bounding_box
+                extent = bbox.extent
+                offset = bbox.location
+                yaw_rad = math.radians(float(transform.rotation.yaw))
+                cos_yaw = math.cos(yaw_rad)
+                sin_yaw = math.sin(yaw_rad)
+                center_x = (
+                    float(transform.location.x)
+                    + float(offset.x) * cos_yaw
+                    - float(offset.y) * sin_yaw
+                )
+                center_y = (
+                    float(transform.location.y)
+                    + float(offset.x) * sin_yaw
+                    + float(offset.y) * cos_yaw
+                )
+                corners = []
+                for local_x, local_y in (
+                    (float(extent.x), float(extent.y)),
+                    (float(extent.x), -float(extent.y)),
+                    (-float(extent.x), -float(extent.y)),
+                    (-float(extent.x), float(extent.y)),
+                ):
+                    world_x = center_x + local_x * cos_yaw - local_y * sin_yaw
+                    world_y = center_y + local_x * sin_yaw + local_y * cos_yaw
+                    pixel = project((world_x, world_y))
+                    if pixel is None:
+                        corners = []
+                        break
+                    corners.append(pixel)
+                if len(corners) != 4:
+                    continue
+
+                pygame.draw.polygon(surface, (245, 45, 45), corners, width=3)
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                continue
 
     def _draw_stable_route_minimap(
         self,
@@ -338,6 +403,10 @@ class OpenCDADebugViewer:
             f"speed={speed_mps:.2f} m/s  loc=({transform.location.x:.1f}, {transform.location.y:.1f}) yaw={transform.rotation.yaw:.1f}",
             f"objects={len(objects.get('vehicles', []) or [])}  traffic_lights={len(objects.get('traffic_lights', []) or [])}  v2x_nearby={len(getattr(ego_vm.v2x_manager, 'cav_nearby', {}) or {})}",
             f"cp_source={cpx_debug.get('cp_provider_source', '')}  native_cp={cpx_debug.get('native_opencda_available', '')}  cp_obs={cpx_debug.get('cp_obstacle_count', '')} cp_ctrl={cpx_debug.get('cp_control_count', '')}",
+            f"cp_shared observers={cpx_debug.get('cp_observer_cav_count', '')} ids={cpx_debug.get('cp_observer_cav_ids', '')} multi_seen={cpx_debug.get('cp_multi_observer_obstacle_count', '')}",
+            f"cp_visibility enabled={cpx_debug.get('cp_visibility_filter_enabled', '')} backend={cpx_debug.get('cp_visibility_backend', '')} blind_shared={cpx_debug.get('cp_blind_spot_shared_count', '')} actors={cpx_debug.get('cp_blind_spot_shared_actor_ids', '')}",
+            f"cp_vru pedestrians={cpx_debug.get('cp_pedestrian_count', '')} blind={cpx_debug.get('cp_blind_spot_pedestrian_count', '')} predicted={_csv_count(cpx_debug.get('cp_prediction_used_pedestrian_ids', ''))} candidate_relevant={_csv_count(cpx_debug.get('cp_candidate_relevant_pedestrian_ids', ''))}",
+            f"maneuver owner={cpx_debug.get('maneuver_geometry_owner', '')} id={cpx_debug.get('maneuver_geometry_id', '')} phase={cpx_debug.get('maneuver_geometry_phase', '')} jump={cpx_debug.get('maneuver_first_point_jump_m', '')}m heading_jump={cpx_debug.get('maneuver_first_heading_jump_deg', '')}deg",
             f"behavior={cpx_debug.get('behavior_decision', '')}  fsm={cpx_debug.get('behavior_fsm_state', '')}  target_lane={cpx_debug.get('behavior_target_lane_id', '')}",
             f"scenario={cpx_debug.get('scenario_fsm_state', '')}  turn_ahead={cpx_debug.get('carla_upcoming_turn_direction', '')} dist={cpx_debug.get('carla_upcoming_turn_distance_m', '')}",
             f"lane current={cpx_debug.get('current_lane_id', '')}  dest_lane={cpx_debug.get('destination_lane_id', '')}",

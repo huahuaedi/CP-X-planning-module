@@ -30,6 +30,7 @@ from opencda_bridge.cpx_mpc_planner import (
     _Mode2ReferenceMemory,
     _Mode2TrajectoryMemory,
 )
+from opencda_bridge.cp_provider import OpenCDACPProvider
 from pipeline.traffic_light_memory import TrafficLightMemory
 from pipeline.reference_gate import FinalReferenceGate
 from pipeline.reference_generator import GeneratedReference, ReferenceGenerator
@@ -37,6 +38,56 @@ from pipeline.reference_pipeline import ReferencePipeline, ReferencePipelineRequ
 
 
 class OpenCDABridgeInputFusionTests(unittest.TestCase):
+    def test_cp_normalization_preserves_cooperative_provenance(self):
+        snapshot = CPXMPCPlannerBridge._normalize_cp_obstacle_snapshot({
+            "id": "native_opencda_multi_vantage:42",
+            "type": "pedestrian",
+            "state": [5.0, 1.0, 1.2, 0.0],
+            "observed_by_cav_ids": ["10", "11"],
+            "not_observed_by_cav_ids": ["9"],
+            "blind_spot_shared": True,
+        })
+
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot["vehicle_id"], "42")
+        self.assertEqual(snapshot["object_type"], "pedestrian")
+        self.assertEqual(snapshot["observed_by_cav_ids"], ["10", "11"])
+        self.assertEqual(snapshot["not_observed_by_cav_ids"], ["9"])
+        self.assertTrue(snapshot["blind_spot_shared"])
+
+    def test_cooperative_actor_evidence_tracks_prediction_and_candidate_relevance(self):
+        evidence = CPXMPCPlannerBridge._cooperative_actor_evidence(
+            cp_summary={
+                "actor_provenance": [{
+                    "actor_id": "native_opencda_multi_vantage:42",
+                    "actor_type": "pedestrian",
+                    "observer_cav_ids": ["11"],
+                    "not_observed_by_cav_ids": ["9"],
+                    "visible_to_ego": False,
+                    "visible_to_auxiliary": True,
+                    "blind_spot_shared": True,
+                    "distance_to_ego_m": 12.0,
+                }]
+            },
+            prediction_trajectories={
+                "42": [
+                    {"x": 5.0, "y": 0.5},
+                    {"x": 6.0, "y": 0.5},
+                ]
+            },
+            selected_reference=[
+                {"x_ref_m": 5.0, "y_ref_m": 0.0},
+                {"x_ref_m": 6.0, "y_ref_m": 0.0},
+            ],
+        )
+
+        self.assertEqual(evidence["cp_pedestrian_count"], 1)
+        self.assertEqual(evidence["cp_blind_spot_pedestrian_count"], 1)
+        self.assertIn(":42", evidence["cp_prediction_used_pedestrian_ids"])
+        self.assertIn(":42", evidence["cp_candidate_relevant_pedestrian_ids"])
+        self.assertIn('"used_by_prediction": true', evidence["cp_actor_evidence"])
+        self.assertIn('"candidate_relevant": true', evidence["cp_actor_evidence"])
+
     @staticmethod
     def _attach_reference_generator(bridge):
         bridge.reference_generator = ReferenceGenerator(
@@ -1208,6 +1259,82 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         self.assertTrue(reason.startswith("trajectory_memory_blend"))
         self.assertAlmostEqual(accel, 1.5)
         self.assertAlmostEqual(steer, 0.2)
+
+    def test_cp_visibility_filter_rejects_hit_before_target(self):
+        provider = OpenCDACPProvider.__new__(OpenCDACPProvider)
+        provider.visibility_filter_enabled = True
+        provider.visibility_sensor_height_m = 1.6
+        provider.visibility_target_tolerance_m = 0.5
+        location = sys.modules["carla"].Location
+        target = types.SimpleNamespace(
+            bounding_box=types.SimpleNamespace(
+                extent=types.SimpleNamespace(x=0.4, y=0.4, z=0.9)
+            )
+        )
+        world = types.SimpleNamespace(
+            cast_ray=lambda _start, _end: [
+                types.SimpleNamespace(location=location(3.0, 0.0, 1.6))
+            ]
+        )
+
+        visible, reason = provider._line_of_sight_visible(
+            world=world,
+            observer_location=location(0.0, 0.0, 0.0),
+            target_actor=target,
+            target_location=location(10.0, 0.0, 0.0),
+        )
+
+        self.assertFalse(visible)
+        self.assertTrue(reason.startswith("occluded:"))
+
+    def test_cp_visibility_filter_accepts_clear_ray(self):
+        provider = OpenCDACPProvider.__new__(OpenCDACPProvider)
+        provider.visibility_filter_enabled = True
+        provider.visibility_sensor_height_m = 1.6
+        provider.visibility_target_tolerance_m = 0.5
+        location = sys.modules["carla"].Location
+        target = types.SimpleNamespace(
+            bounding_box=types.SimpleNamespace(
+                extent=types.SimpleNamespace(x=0.4, y=0.4, z=0.9)
+            )
+        )
+        world = types.SimpleNamespace(cast_ray=lambda _start, _end: [])
+
+        visible, reason = provider._line_of_sight_visible(
+            world=world,
+            observer_location=location(0.0, 0.0, 0.0),
+            target_actor=target,
+            target_location=location(10.0, 0.0, 0.0),
+        )
+
+        self.assertTrue(visible)
+        self.assertEqual(reason, "line_of_sight_clear")
+
+    def test_cp_actor_geometry_visibility_detects_vehicle_occluder(self):
+        provider = OpenCDACPProvider.__new__(OpenCDACPProvider)
+        provider.visibility_filter_enabled = True
+        provider.visibility_backend = "actor_geometry"
+        location = sys.modules["carla"].Location
+        target = types.SimpleNamespace(id=30)
+        blocker = types.SimpleNamespace(
+            id=20,
+            type_id="vehicle.truck",
+            get_location=lambda: location(5.0, 0.0, 0.0),
+            bounding_box=types.SimpleNamespace(
+                extent=types.SimpleNamespace(x=2.5, y=1.2)
+            ),
+        )
+
+        visible, reason = provider._line_of_sight_visible(
+            world=types.SimpleNamespace(),
+            observer_location=location(0.0, 0.0, 0.0),
+            target_actor=target,
+            target_location=location(10.0, 0.0, 0.0),
+            occluder_actors=[blocker, target],
+        )
+
+        self.assertFalse(visible)
+        self.assertEqual(reason, "occluded_by_actor:20")
 
 
 if __name__ == "__main__":

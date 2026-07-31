@@ -439,7 +439,7 @@ class SafetySupervisorTest(unittest.TestCase):
         self.assertEqual(control.throttle, 0.5)
         self.assertEqual(control.brake, 0.0)
 
-    def test_stuck_holds_on_red_lane_follow(self):
+    def test_stuck_releases_on_distant_red_approach(self):
         supervisor = SafetySupervisor()
         control, reason = supervisor.filter_control(
             control=_Control(throttle=0.5),
@@ -450,8 +450,9 @@ class SafetySupervisorTest(unittest.TestCase):
             stop_goal_active=False,
             planner_accel_mps2=1.0,
         )
-        self.assertEqual(reason, "safety_supervisor_emergency_stop:stuck")
-        self.assertEqual(control.brake, 1.0)
+        self.assertEqual(reason, "safety_supervisor_release:stuck")
+        self.assertEqual(control.throttle, 0.5)
+        self.assertEqual(control.brake, 0.0)
 
     def test_stuck_releases_on_unknown_intersection_turn(self):
         supervisor = SafetySupervisor()

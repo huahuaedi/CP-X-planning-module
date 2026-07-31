@@ -459,6 +459,107 @@ class ReferenceGeneratorTests(unittest.TestCase):
         self.assertFalse(validation.valid)
         self.assertIn("outside_corridor", reason)
 
+    def test_turn_swept_footprint_prefers_drivable_lane_union(self):
+        generator = self._generator(horizon_steps=6)
+
+        # The nearest single-lane strip is intentionally too narrow for a
+        # rotated vehicle, while every footprint point belongs to one of the
+        # junction's incoming/connector/outgoing driving lanes.
+        def narrow_waypoint(location):
+            return types.SimpleNamespace(
+                transform=types.SimpleNamespace(
+                    location=types.SimpleNamespace(x=location.x, y=0.0),
+                    rotation=types.SimpleNamespace(yaw=0.0),
+                ),
+                lane_width=2.0,
+            )
+
+        def drivable_waypoint(location):
+            return types.SimpleNamespace(
+                transform=types.SimpleNamespace(
+                    location=types.SimpleNamespace(x=location.x, y=location.y),
+                    rotation=types.SimpleNamespace(yaw=45.0),
+                ),
+                lane_width=3.5,
+            )
+
+        generator._map_waypoint_callback = narrow_waypoint
+        generator._drivable_waypoint_callback = drivable_waypoint
+        raw = [
+            {
+                "x_ref_m": float(index + 1),
+                "y_ref_m": 0.0,
+                "heading_rad": math.radians(45.0),
+                "lane_id": 1,
+            }
+            for index in range(8)
+        ]
+
+        unchanged, validation, reason = generator.ensure_turn_swept_footprint(
+            reference_samples=raw,
+            horizon_steps=6,
+            step_distance_m=0.5,
+            fallback_heading_rad=0.0,
+            ego_half_width_m=1.0,
+            ego_half_length_m=2.4,
+            safety_margin_m=0.15,
+            max_violations=0,
+        )
+
+        self.assertTrue(validation.valid)
+        self.assertIn("drivable_union_valid", reason)
+        self.assertEqual(unchanged, raw)
+
+    def test_turn_union_seam_tolerance_is_small_and_ratio_bounded(self):
+        generator = self._generator(
+            config={
+                "turn_drivable_union_seam_max_pose_violations": 3,
+                "turn_drivable_union_seam_max_violation_ratio": 0.10,
+            },
+            horizon_steps=20,
+        )
+        generator._drivable_waypoint_callback = lambda location: (
+            None
+            if 9.45 <= float(location.x) <= 9.55
+            else types.SimpleNamespace(
+                transform=types.SimpleNamespace(
+                    location=types.SimpleNamespace(
+                        x=location.x,
+                        y=location.y,
+                    ),
+                    rotation=types.SimpleNamespace(yaw=0.0),
+                ),
+                lane_width=3.5,
+            )
+        )
+        raw = [
+            {
+                "x_ref_m": 0.5 * float(index + 1),
+                "y_ref_m": 0.0,
+                "heading_rad": 0.0,
+                "lane_id": 1,
+            }
+            for index in range(20)
+        ]
+        validation = generator.validate_turn_swept_footprint(
+            reference_samples=raw,
+            ego_half_width_m=1.0,
+            ego_half_length_m=2.4,
+            safety_margin_m=0.15,
+        )
+        self.assertTrue(validation.valid)
+        self.assertIn("seam_tolerated", validation.reason)
+
+        generator.config["turn_drivable_union_seam_max_pose_violations"] = 0
+        rejected = generator.validate_turn_swept_footprint(
+            reference_samples=raw,
+            ego_half_width_m=1.0,
+            ego_half_length_m=2.4,
+            safety_margin_m=0.15,
+        )
+        self.assertFalse(rejected.valid)
+        self.assertIn("outside_drivable_union", rejected.reason)
+
 
 class BoundaryRecoveryProgressTests(unittest.TestCase):
     """validate_boundary_recovery_progress's worsening tolerance must scale

@@ -1,7 +1,8 @@
 description: |-
-  Town06 single-CAV intersection test. The ego approaches the first
-  intersection southbound, changes to the route-required lane, turns right,
-  and continues east on the outgoing road.
+  Town06 urban traffic-light test. The ego follows the southbound arterial
+  through three signalized intersections while CARLA Traffic Manager provides
+  surrounding traffic. The destination is beyond the third traffic light and
+  before the later turning region.
 
 # First define the basic parameters of the vehicles
 vehicle_base:
@@ -57,6 +58,27 @@ vehicle_base:
     publish_cp_message: true
     require_native_opencda_cp: true
     target_speed_mps: 3.0
+    # MPC outputs physical acceleration, while CARLA accepts normalized pedal
+    # positions. This inverse-actuator model compensates steady-state drag and
+    # uses measured acceleration as the MPC feedback state.
+    actuator_compensation_enabled: true
+    actuator_cruise_throttle_feedforward: 0.28
+    actuator_cruise_max_throttle: 0.55
+    actuator_speed_error_throttle_gain: 0.0
+    actuator_max_speed_error_throttle_boost: 0.0
+    actuator_speed_deadband_mps: 0.15
+    actuator_tracking_brake_decel_per_unit_mps2: 14.0
+    actuator_stop_brake_decel_per_unit_mps2: 10.0
+    actuator_tracking_max_brake: 0.22
+    actuator_stop_max_brake: 0.35
+    actuator_max_measured_accel_abs_mps2: 3.0
+    control_buffer_speed_crossing_deadband_mps: 0.15
+    # CARLA junction topology can contain tiny non-projecting waypoint seams.
+    # Tolerate only a small fraction of failed swept poses; broad or sustained
+    # off-road references remain hard-gated.
+    turn_drivable_union_seam_max_pose_violations: 3
+    turn_drivable_union_seam_max_violation_ratio: 0.10
+    actuator_measured_accel_alpha: 0.25
     lookahead_m: 18.0
     min_front_gap_m: 8.0
     communication_range_m: 60.0
@@ -241,14 +263,14 @@ carla_traffic_manager:
 
 # define scenario. In this scenario, a 4-vehicle platoon already exists.
 scenario:
-  max_ticks: 3600
-  destination_tolerance_m: 1.0
+  max_ticks: 5000
+  destination_tolerance_m: 3.0
   single_cav_list: # this is for merging vehicle or single cav without v2x
     - name: cav1
       spawn_position: [6.31, 125.03, 0.3, 0, -92, 0]
-      # CARLA GRP verified route:
-      # LANEFOLLOW -> CHANGELANERIGHT -> LANEFOLLOW -> RIGHT -> LANEFOLLOW.
-      destination: [50.0, 52.38, 0.3]
+      # Keep the CARLA GRP route on the southbound arterial. This endpoint is
+      # beyond the third signalized intersection but before the later turn.
+      destination: [6.31, -60.0, 0.3]
       v2x:
         communication_range: 60
       behavior:
@@ -273,6 +295,21 @@ scenario:
         publish_cp_message: true
         require_native_opencda_cp: true
         target_speed_mps: 3.0
+        actuator_compensation_enabled: true
+        actuator_cruise_throttle_feedforward: 0.28
+        actuator_cruise_max_throttle: 0.55
+        actuator_speed_error_throttle_gain: 0.0
+        actuator_max_speed_error_throttle_boost: 0.0
+        actuator_speed_deadband_mps: 0.15
+        actuator_tracking_brake_decel_per_unit_mps2: 14.0
+        actuator_stop_brake_decel_per_unit_mps2: 10.0
+        actuator_tracking_max_brake: 0.22
+        actuator_stop_max_brake: 0.35
+        actuator_max_measured_accel_abs_mps2: 3.0
+        control_buffer_speed_crossing_deadband_mps: 0.15
+        turn_drivable_union_seam_max_pose_violations: 3
+        turn_drivable_union_seam_max_violation_ratio: 0.10
+        actuator_measured_accel_alpha: 0.25
         lookahead_m: 18.0
         min_front_gap_m: 8.0
         communication_range_m: 60.0

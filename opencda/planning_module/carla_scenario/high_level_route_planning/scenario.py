@@ -16,6 +16,7 @@ from behavior_planner.reroute import (
     write_cp_messages,
 )
 from utility import canonical_lane_id_for_waypoint, raw_opendrive_lane_id_for_waypoint
+from utility.global_planner import waypoint_transform
 
 
 def _best_partial_match(candidates: List[Tuple[int, Any]]) -> Any | None:
@@ -154,6 +155,7 @@ def _resolve_workzone_object(
             _nearest_driving_waypoint_info(
                 map_planner=map_planner,
                 world_object=world_object,
+                carla=carla,
             ),
         )
     return None, None, None
@@ -188,6 +190,7 @@ def _nearest_driving_waypoint_info(
     *,
     map_planner,
     world_object: Any,
+    carla: Any,
 ) -> Dict[str, object] | None:
     object_transform = getattr(world_object, "transform", None)
     if object_transform is None:
@@ -203,14 +206,22 @@ def _nearest_driving_waypoint_info(
         waypoint = None
     if waypoint is None:
         return None
-    waypoint_position = waypoint.position
+    # `.position`/`.ad_lane_id` only exist on the custom AD-map adapter's
+    # waypoint, not on a raw `carla.Waypoint` (returned under
+    # `global_planner_mode: astar`, which this scenario uses) -- see
+    # `utility/global_planner.py::waypoint_transform` for why both shapes
+    # need to be handled here.
+    waypoint_carla_transform = waypoint_transform(waypoint, carla)
+    if waypoint_carla_transform is None:
+        return None
+    waypoint_location = waypoint_carla_transform.location
     return {
-        "position_xy": [float(waypoint_position["x"]), float(waypoint_position["y"])],
+        "position_xy": [float(waypoint_location.x), float(waypoint_location.y)],
         "road_id": int(waypoint.road_id or 0),
         "section_id": int(waypoint.section_id or 0),
         "lane_id": int(canonical_lane_id_for_waypoint(waypoint)),
         "opendrive_lane_id": int(raw_opendrive_lane_id_for_waypoint(waypoint)),
-        "ad_lane_id": int(waypoint.ad_lane_id),
+        "ad_lane_id": int(getattr(waypoint, "ad_lane_id", 0) or 0),
     }
 
 def _append_lane_closure_message(

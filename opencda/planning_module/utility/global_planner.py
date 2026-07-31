@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 import math
 import threading
-from typing import Dict, List, Mapping, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
 import numpy as np
 
@@ -180,6 +180,42 @@ def world_heading_rad(waypoint: Waypoint | None) -> float | None:
             return _wrap_angle(math.radians(float(rotation.yaw)))
         return None
     return _wrap_angle(-float(heading))
+
+
+def waypoint_transform(waypoint: Any, carla: Any):
+    """Build a `carla.Transform` from either waypoint shape this project's
+    `map_planner.get_waypoint(...)` can return: a raw `carla.Waypoint`
+    (`.transform`, returned when `planning.global_planner_mode` selects the
+    legacy CARLA-native `astar` backend) or this module's
+    `CustomGlobalPlannerAdapter` waypoint (`.position` dict, returned by the
+    custom Dijkstra/AD-map backend).
+
+    Several scenario modules used to each carry their own near-identical
+    copy of this conversion (`carla_scenario/roadway_hazard/scenario.py`,
+    `carla_scenario/town10/obstacle_spawner.py`,
+    `carla_scenario/high_level_route_planning/scenario.py`,
+    `utility/coordinate_obstacle_spawner.py`); some handled only the
+    `.position` shape and raised `AttributeError` under `astar` mode. This
+    is the single shared implementation all of them now call, mirroring the
+    fallback `world_heading_rad` already used above.
+    """
+
+    if waypoint is None:
+        return None
+    native_transform = getattr(waypoint, "transform", None)
+    if native_transform is not None:
+        return native_transform
+    position = getattr(waypoint, "position", None)
+    if position is None:
+        return None
+    return carla.Transform(
+        carla.Location(
+            x=float(position["x"]),
+            y=float(position["y"]),
+            z=float(position.get("z", 0.0)),
+        ),
+        carla.Rotation(yaw=math.degrees(float(world_heading_rad(waypoint) or 0.0))),
+    )
 
 
 def _point_dict(point: Mapping[str, object] | Sequence[object]) -> Dict[str, float]:

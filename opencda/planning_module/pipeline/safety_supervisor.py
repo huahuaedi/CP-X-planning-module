@@ -560,8 +560,17 @@ class SafetySupervisor:
                 )
             ):
                 hazards.discard("stuck")
-            elif bool(stop_like) or normalized_signal in {"red", "yellow"}:
+            elif bool(stop_like):
                 return "stuck"
+            elif (
+                normalized_signal in {"red", "yellow"}
+                and float(planner_accel_mps2)
+                >= float(stuck_release_min_accel_mps2)
+            ):
+                # Signal colour alone does not authorize a stop. ScenarioManager
+                # owns approach/commit/hold and exposes the committed state via
+                # stop_goal_active. This permits progress toward a distant light.
+                hazards.discard("stuck")
         if (
             "offroad" in hazards
             and bool(turn_like)

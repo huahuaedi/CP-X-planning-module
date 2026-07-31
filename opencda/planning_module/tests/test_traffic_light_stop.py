@@ -301,6 +301,53 @@ class TrafficLightStopTests(unittest.TestCase):
         )
         self.assertEqual(third_result["decision"], "lane_follow")
 
+    def test_scenario_owned_approach_releases_behavior_red_latch(self):
+        planner = RuleBasedBehaviorPlanner()
+        stop_target = {
+            "x_m": 0.0,
+            "y_m": 22.0,
+            "heading_rad": math.pi / 2.0,
+            "lane_id": 1,
+            "road_id": 10,
+            "distance_m": 22.0,
+        }
+        committed = planner.update(
+            lane_safety_scores={1: 1.0},
+            ego_lane_id=1,
+            mode="NORMAL",
+            traffic_signal_state="red",
+            traffic_stop_target=stop_target,
+            traffic_signal_context={
+                "scenario_owns_traffic_control": True,
+                "scenario_fsm_state": "TRAFFIC_LIGHT_STOP",
+            },
+            ego_speed_mps=2.0,
+            ego_max_deceleration_mps2=2.0,
+            ego_in_junction=False,
+        )
+        self.assertEqual(committed["decision"], "stop_at_intersection")
+
+        approach = planner.update(
+            lane_safety_scores={1: 1.0},
+            ego_lane_id=1,
+            mode="NORMAL",
+            traffic_signal_state="unknown",
+            traffic_stop_target=None,
+            traffic_signal_context={
+                "scenario_owns_traffic_control": True,
+                "scenario_fsm_state": "TRAFFIC_LIGHT_APPROACH",
+            },
+            ego_speed_mps=0.5,
+            ego_max_deceleration_mps2=2.0,
+            ego_in_junction=False,
+        )
+
+        self.assertEqual(approach["decision"], "lane_follow")
+        self.assertFalse(approach["traffic_light_debug"]["stop_latched"])
+        self.assertTrue(
+            approach["traffic_light_debug"]["scenario_owns_traffic_control"]
+        )
+
     def test_red_light_stop_holds_current_lane_even_if_stop_marker_is_adjacent(self):
         planner = RuleBasedBehaviorPlanner()
         adjacent_lane_stop_target = {

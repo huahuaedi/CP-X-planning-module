@@ -1,19 +1,20 @@
 base_config: single_intersection_town06_carla.yaml
 
 description: |-
-  Single-CAV Town06 test: start with a straight global route, pass the first
-  signalized intersection, then install a new route that turns left at the
-  second intersection.
-
-carla_traffic_manager:
-  vehicle_list: []
-  range: []
+  Town06 dynamic-route comparison test. The ego starts with the same straight
+  Global Route as single_intersection_town06_carla. After it passes the first
+  intersection, the scenario installs a new Global Route that turns left at
+  the second intersection. Background traffic is inherited from the base
+  scenario.
 
 scenario:
   max_ticks: 5000
   destination_tolerance_m: 3.0
   dynamic_reroute:
     enabled: true
+    # Southbound ego starts at y=125. This line is beyond the first junction
+    # and still leaves enough distance to rebuild and validate the connector
+    # before the second junction.
     trigger_y_below: 95.0
     destination: [50.0, 52.38, 0.3]
   single_cav_list:

@@ -391,6 +391,9 @@ class CPXMPCPlannerBridge:
         self.last_debug: dict[str, Any] = {}
         self._last_accel_mps2 = 0.0
         self._last_steer_rad = 0.0
+        self._actuator_ego_speed_mps = 0.0
+        self._actuator_target_speed_mps = 0.0
+        self._actuator_stop_goal_active = False
         self._warned = False
         self._previous_lane_center_reference: list[dict[str, object]] = []
         from utility.carla_lane_graph import StableLaneIdTracker
@@ -595,7 +598,13 @@ class CPXMPCPlannerBridge:
             "y_m",
             "yaw_deg",
             "speed_mps",
+            "measured_accel_mps2",
             "target_speed_mps",
+            "speed_plan_target_mps",
+            "speed_plan_front_gap_m",
+            "speed_plan_desired_follow_gap_m",
+            "speed_plan_continuous_following_active",
+            "speed_plan_reason",
             "behavior_decision",
             "behavior_fsm_state",
             "current_lane_id",
@@ -609,6 +618,21 @@ class CPXMPCPlannerBridge:
             "cp_obstacle_count",
             "cp_control_count",
             "v2x_nearby_count",
+            "cp_observer_cav_count",
+            "cp_observer_cav_ids",
+            "cp_multi_observer_obstacle_count",
+            "cp_blind_spot_shared_count",
+            "cp_blind_spot_shared_actor_ids",
+            "cp_actor_provenance",
+            "cp_pedestrian_count",
+            "cp_blind_spot_pedestrian_count",
+            "cp_prediction_used_actor_ids",
+            "cp_prediction_used_pedestrian_ids",
+            "cp_candidate_relevant_actor_ids",
+            "cp_candidate_relevant_pedestrian_ids",
+            "cp_actor_evidence",
+            "cp_visibility_filter_enabled",
+            "cp_visibility_backend",
             "reference_source",
             "final_reference_geometry_source",
             "reference_pipeline_stage",
@@ -708,6 +732,18 @@ class CPXMPCPlannerBridge:
             "maneuver_commitment_progress",
             "maneuver_commitment_reference_locked",
             "maneuver_commitment_active",
+            "maneuver_geometry_active",
+            "maneuver_geometry_id",
+            "maneuver_geometry_type",
+            "maneuver_geometry_direction",
+            "maneuver_geometry_phase",
+            "maneuver_geometry_revision",
+            "maneuver_geometry_source_changed",
+            "maneuver_geometry_owner",
+            "maneuver_geometry_point_count",
+            "maneuver_first_point_jump_m",
+            "maneuver_first_heading_jump_deg",
+            "maneuver_geometry_release_reason",
             "lane_change_commitment_release_reason",
             "lane_change_phase",
             "lane_change_stabilization_frames",
@@ -883,6 +919,8 @@ class CPXMPCPlannerBridge:
 
         mpc_cfg, road_cfg = self._load_mpc_config()
         self.mpc = MPC(mpc_cfg=mpc_cfg, road_cfg=road_cfg)
+        from opencda.planning_module.pipeline.actuator_mapper import CarlaActuatorMapper
+        self.actuator_mapper = CarlaActuatorMapper(self.config)
         vehicle_curvature_margin = min(
             1.0,
             max(
@@ -938,6 +976,8 @@ class CPXMPCPlannerBridge:
             dt_s=float(self.mpc.dt_s),
             default_speed_mps=float(self.target_speed_mps),
         )
+        from opencda.planning_module.pipeline.maneuver_manager import ManeuverManager
+        self.maneuver_manager = ManeuverManager(self.config)
         self._authorize_mpc_entry = authorize_mpc_entry
         self._build_decision_record = build_decision_record
         self.safety_supervisor = SafetySupervisor(
@@ -1108,6 +1148,21 @@ class CPXMPCPlannerBridge:
                 require_native_opencda=bool(
                     self.config.get("require_native_opencda_cp", True)
                 ),
+                visibility_filter_enabled=bool(
+                    self.config.get("cp_visibility_filter_enabled", False)
+                ),
+                visibility_backend=str(
+                    self.config.get(
+                        "cp_visibility_backend",
+                        "actor_geometry",
+                    )
+                ),
+                visibility_sensor_height_m=float(
+                    self.config.get("cp_visibility_sensor_height_m", 1.6)
+                ),
+                visibility_target_tolerance_m=float(
+                    self.config.get("cp_visibility_target_tolerance_m", 0.75)
+                ),
             )
         self.active_mpc_cost_profile = "lane_follow"
         self.requested_mpc_cost_profile = "lane_follow"
@@ -1219,6 +1274,9 @@ class CPXMPCPlannerBridge:
         self._mode2_trajectory_memory.reset()
         self._lane_id_tracker.reset()
         self.control_buffer.reset(reason="destination_updated")
+        maneuver_manager = getattr(self, "maneuver_manager", None)
+        if maneuver_manager is not None:
+            maneuver_manager.reset(reason="destination_updated")
         self._turn_latch_decision = ""
         self._turn_latch_until_sim_time_s = 0.0
 
@@ -1231,6 +1289,9 @@ class CPXMPCPlannerBridge:
         self._previous_lane_center_reference = []
         self._lane_reference_freeze_count = 0
         self.control_buffer.reset(reason="external_global_plan_installed")
+        maneuver_manager = getattr(self, "maneuver_manager", None)
+        if maneuver_manager is not None:
+            maneuver_manager.reset(reason="external_global_plan_installed")
 
     def update_information(
         self,
@@ -1312,6 +1373,10 @@ class CPXMPCPlannerBridge:
             latest_update.get("ego_speed_kmh", self.vehicle_manager.localizer.get_ego_spd())
         )
         ego_speed_mps = ego_speed_kmh / 3.6
+        measured_accel_mps2 = self.actuator_mapper.update_measurement(
+            speed_mps=float(ego_speed_mps),
+            timestamp_s=float(sim_time_s),
+        )
         ego_location = ego_transform.location
         ego_yaw_rad = math.radians(float(ego_transform.rotation.yaw))
 
@@ -1346,7 +1411,14 @@ class CPXMPCPlannerBridge:
             ego_yaw_rad=ego_yaw_rad,
             object_snapshots=object_snapshots,
         )
-        stop_goal_active = front_gap_m is not None and front_gap_m < self.min_front_gap_m
+        emergency_front_gap_m = max(
+            0.5,
+            float(self.config.get("following_emergency_gap_m", 3.0)),
+        )
+        stop_goal_active = (
+            front_gap_m is not None
+            and float(front_gap_m) <= float(emergency_front_gap_m)
+        )
         speed_ref_mps = 0.0 if stop_goal_active else self.target_speed_mps
         current_state = [
             float(ego_location.x),
@@ -1624,6 +1696,14 @@ class CPXMPCPlannerBridge:
                     force_replan=bool(force_replan),
                     context_key=str(control_context_key),
                     reference_anchor_xy=reference_anchor_xy,
+                    ego_speed_mps=float(ego_speed_mps),
+                    target_speed_mps=float(speed_ref_mps),
+                    speed_error_crossing_deadband_mps=float(
+                        self.config.get(
+                            "control_buffer_speed_crossing_deadband_mps",
+                            0.15,
+                        )
+                    ),
                 )
             )
             if bool(mpc_replan_executed):
@@ -1636,7 +1716,7 @@ class CPXMPCPlannerBridge:
                             "prediction_trajectories", {}
                         ),
                     ),
-                    current_acceleration_mps2=float(self._last_accel_mps2),
+                    current_acceleration_mps2=float(measured_accel_mps2),
                     current_steering_rad=float(self._last_steer_rad),
                     lane_center_reference_samples=lane_center_reference,
                     stop_goal_active=bool(mpc_stop_goal_active),
@@ -1670,6 +1750,11 @@ class CPXMPCPlannerBridge:
                     if bool(stationary_traffic_stop_hold)
                     else "buffer_reuse"
                 )
+            self._set_actuator_context(
+                ego_speed_mps=float(ego_speed_mps),
+                target_speed_mps=float(speed_ref_mps),
+                stop_goal_active=bool(mpc_stop_goal_active),
+            )
             control = self._control_from_mpc(accel_mps2, steer_rad)
             fallback_reason = ""
         except Exception as exc:
@@ -1834,6 +1919,7 @@ class CPXMPCPlannerBridge:
             "y_m": float(ego_location.y),
             "yaw_deg": float(ego_transform.rotation.yaw),
             "speed_mps": float(ego_speed_mps),
+            "measured_accel_mps2": float(measured_accel_mps2),
             "planner": "cpx_mpc",
             "object_count": len(object_snapshots),
             "mpc_object_count": len(mpc_object_snapshots),
@@ -1846,6 +1932,38 @@ class CPXMPCPlannerBridge:
             "native_opencda_available": bool(cp_summary.get("native_opencda_available", False)),
             "cp_obstacle_count": int(cp_summary.get("obstacle_count", 0) or 0),
             "cp_control_count": int(cp_summary.get("control_count", 0) or 0),
+            "cp_observer_cav_count": int(
+                cp_summary.get("observer_cav_count", 0) or 0
+            ),
+            "cp_observer_cav_ids": ",".join(
+                str(item)
+                for item in list(cp_summary.get("observer_cav_ids", []) or [])
+            ),
+            "cp_multi_observer_obstacle_count": int(
+                cp_summary.get("multi_observer_obstacle_count", 0) or 0
+            ),
+            "cp_blind_spot_shared_count": int(
+                cp_summary.get("blind_spot_shared_count", 0) or 0
+            ),
+            "cp_blind_spot_shared_actor_ids": ",".join(
+                str(item)
+                for item in list(
+                    cp_summary.get("blind_spot_shared_actor_ids", []) or []
+                )
+            ),
+            **self._cooperative_actor_evidence(
+                cp_summary=cp_summary,
+                prediction_trajectories=dict(
+                    reference_debug.get("prediction_trajectories", {}) or {}
+                ),
+                selected_reference=lane_center_reference,
+            ),
+            "cp_visibility_filter_enabled": bool(
+                cp_summary.get("visibility_filter_enabled", False)
+            ),
+            "cp_visibility_backend": str(
+                cp_summary.get("visibility_backend", "")
+            ),
             "front_gap_m": "" if front_gap_m is None else float(front_gap_m),
             "stop_goal_active": bool(mpc_stop_goal_active),
             "behavior_decision": str(behavior_debug.get("decision", "")),
@@ -1991,6 +2109,42 @@ class CPXMPCPlannerBridge:
             ),
             "maneuver_commitment_active": reference_debug.get(
                 "maneuver_commitment_active", ""
+            ),
+            "maneuver_geometry_active": reference_debug.get(
+                "maneuver_geometry_active", ""
+            ),
+            "maneuver_geometry_id": reference_debug.get(
+                "maneuver_geometry_id", ""
+            ),
+            "maneuver_geometry_type": reference_debug.get(
+                "maneuver_geometry_type", ""
+            ),
+            "maneuver_geometry_direction": reference_debug.get(
+                "maneuver_geometry_direction", ""
+            ),
+            "maneuver_geometry_phase": reference_debug.get(
+                "maneuver_geometry_phase", ""
+            ),
+            "maneuver_geometry_revision": reference_debug.get(
+                "maneuver_geometry_revision", ""
+            ),
+            "maneuver_geometry_source_changed": reference_debug.get(
+                "maneuver_geometry_source_changed", ""
+            ),
+            "maneuver_geometry_owner": reference_debug.get(
+                "maneuver_geometry_owner", ""
+            ),
+            "maneuver_geometry_point_count": reference_debug.get(
+                "maneuver_geometry_point_count", ""
+            ),
+            "maneuver_first_point_jump_m": reference_debug.get(
+                "maneuver_first_point_jump_m", ""
+            ),
+            "maneuver_first_heading_jump_deg": reference_debug.get(
+                "maneuver_first_heading_jump_deg", ""
+            ),
+            "maneuver_geometry_release_reason": reference_debug.get(
+                "maneuver_geometry_release_reason", ""
             ),
             "route_tracking_recovery_active": reference_debug.get(
                 "route_tracking_recovery_active", ""
@@ -2590,6 +2744,31 @@ class CPXMPCPlannerBridge:
             "cp_obstacle_count": int(cp_summary.get("obstacle_count", 0) or 0),
             "cp_control_count": int(cp_summary.get("control_count", 0) or 0),
             "v2x_nearby_count": len(getattr(self.vehicle_manager.v2x_manager, "cav_nearby", {}) or {}),
+            "cp_observer_cav_count": int(
+                cp_summary.get("observer_cav_count", 0) or 0
+            ),
+            "cp_observer_cav_ids": ",".join(
+                str(item)
+                for item in list(cp_summary.get("observer_cav_ids", []) or [])
+            ),
+            "cp_multi_observer_obstacle_count": int(
+                cp_summary.get("multi_observer_obstacle_count", 0) or 0
+            ),
+            "cp_blind_spot_shared_count": int(
+                cp_summary.get("blind_spot_shared_count", 0) or 0
+            ),
+            "cp_blind_spot_shared_actor_ids": ",".join(
+                str(item)
+                for item in list(
+                    cp_summary.get("blind_spot_shared_actor_ids", []) or []
+                )
+            ),
+            "cp_visibility_filter_enabled": bool(
+                cp_summary.get("visibility_filter_enabled", False)
+            ),
+            "cp_visibility_backend": str(
+                cp_summary.get("visibility_backend", "")
+            ),
             "reference_source": "opencda_local_planner",
             "reference_pipeline_stage": "opencda_behavior_agent>opencda_local_planner>mpc",
             "reference_pipeline_intent": "mode2_opencda_reference_mpc",
@@ -4361,6 +4540,10 @@ class CPXMPCPlannerBridge:
         )
         filtered_signal_context["signal_state"] = str(filtered_traffic_state)
         filtered_signal_context["behavior_signal_state"] = str(behavior_traffic_state)
+        filtered_signal_context["scenario_owns_traffic_control"] = True
+        filtered_signal_context["scenario_fsm_state"] = str(
+            scenario_decision.state
+        )
         filtered_signal_context["traffic_stop_forward_m"] = float(traffic_stop_forward_m)
         filtered_signal_context["traffic_stop_commit_distance_m"] = float(traffic_stop_commit_distance_m)
         filtered_signal_context["carla_upcoming_turn_direction"] = str(
@@ -4592,6 +4775,11 @@ class CPXMPCPlannerBridge:
             requested_speed_mps=float(speed_ref_mps),
             ego_speed_mps=float(ego_speed_mps),
             config=dict(self.config),
+            front_gap_m=self._front_gap_m(
+                ego_location=ego_location,
+                ego_yaw_rad=float(ego_yaw_rad),
+                object_snapshots=object_snapshots,
+            ),
         )
         speed_ref_mps = float(speed_plan.target_speed_mps)
         stop_goal_active = bool(stop_goal_active or speed_plan.stop_goal_active)
@@ -5101,23 +5289,38 @@ class CPXMPCPlannerBridge:
                 ego_yaw_rad=float(ego_yaw_rad),
             )
         if str(lateral_guard_reason):
-            # Treat the lateral guard as a request for an independent lane-centre
-            # reference, not as an immediate hard stop.  A curved lane naturally
-            # puts the first look-ahead point farther to the side in ego
-            # coordinates; the rebuilt reference is still contract-validated by
-            # ReferencePipeline before it reaches MPC.
+            # Rebuild from the route-owned corridor first. At a junction,
+            # CARLA may renumber the lane and expose several valid next()
+            # branches; independently walking the current lane center here can
+            # conflict with the already-authorized GRP branch.
             step_distance_m = max(
                 0.5,
                 float(self.mpc.dt_s)
                 * max(1.0, min(float(speed_ref_mps), float(self.target_speed_mps))),
             )
-            guarded_reference = self.reference_generator.lane_center_samples(
-                start_waypoint=ego_waypoint,
-                current_lane_id=int(current_lane_id),
-                horizon_steps=int(self.mpc.horizon_steps),
-                step_distance_m=float(step_distance_m),
-                route_points=route_points,
+            guarded_reference, guarded_route_reason = (
+                self.route_manager.carla_waypoint_reference(
+                    ego_x_m=float(ego_location.x),
+                    ego_y_m=float(ego_location.y),
+                    ego_heading_rad=float(ego_yaw_rad),
+                    horizon_steps=int(self.mpc.horizon_steps),
+                    step_distance_m=float(step_distance_m),
+                    target_speed_mps=float(speed_ref_mps),
+                    fallback_lane_id=int(current_lane_id),
+                    anchor_to_ego_heading=False,
+                )
             )
+            guarded_reference_source = "carla_grp_lateral_guard"
+            if not guarded_reference:
+                guarded_reference = self.reference_generator.lane_center_samples(
+                    start_waypoint=ego_waypoint,
+                    current_lane_id=int(current_lane_id),
+                    horizon_steps=int(self.mpc.horizon_steps),
+                    step_distance_m=float(step_distance_m),
+                    route_points=route_points,
+                )
+                guarded_reference_source = "current_lane_center_lateral_guard"
+                guarded_route_reason = "carla_route_reference_unavailable"
             if guarded_reference:
                 from opencda.planning_module.behavior_planner.reference_pipeline import (
                     lane_center_destination_from_reference,
@@ -5139,14 +5342,21 @@ class CPXMPCPlannerBridge:
                     target_forward_m=float(target_forward_m),
                 )
                 self._lane_reference_freeze_count = 0
-                reference_debug["reference_source"] = "current_lane_center_lateral_guard"
+                reference_debug["reference_source"] = str(
+                    guarded_reference_source
+                )
+                reference_debug["junction_connector_reason"] = str(
+                    guarded_route_reason
+                )
                 reference_debug["fallback_reason"] = (
                     f"{reference_debug.get('fallback_reason', '')}:"
                     if str(reference_debug.get("fallback_reason", ""))
                     else ""
                 ) + str(lateral_guard_reason)
                 reference_debug["stage"] = "lateral_guard"
-                reference_debug["reference_pipeline_follow_global_route_lane"] = 0
+                reference_debug["reference_pipeline_follow_global_route_lane"] = int(
+                    str(guarded_reference_source) == "carla_grp_lateral_guard"
+                )
             elif bool(self.strict_reference_validator_veto_enabled):
                 reference_debug["candidate_pipeline_selected_status"] = "infeasible"
                 reference_debug["candidate_pipeline_selected_reason"] = (
@@ -5162,6 +5372,43 @@ class CPXMPCPlannerBridge:
         reference_debug["reference_lateral_guard_reason"] = str(lateral_guard_reason)
         reference_debug["opencda_style_reference_conditioning_reason"] = ""
         reference_debug["reference_memory_reason"] = ""
+        raw_geometry_source = str(
+            reference_debug.get(
+                "final_reference_geometry_source",
+                reference_debug.get("reference_source", ""),
+            )
+        )
+        maneuver_reference = self.maneuver_manager.update(
+            reference_samples=local_lane_center_reference,
+            destination_state=self._temporary_destination_state,
+            decision=str(decision),
+            behavior_fsm_state=str(lc_state),
+            current_lane_id=int(current_lane_id),
+            target_lane_id=int(target_lane_id),
+            ego_x_m=float(ego_location.x),
+            ego_y_m=float(ego_location.y),
+            reference_source=str(raw_geometry_source),
+            route_current_option=str(route_context.current_road_option),
+            route_next_maneuver=str(route_context.next_macro_maneuver),
+            stop_goal_active=bool(stop_goal_active),
+        )
+        local_lane_center_reference = list(
+            maneuver_reference.reference_samples
+        )
+        self._temporary_destination_state = list(
+            maneuver_reference.destination_state
+        )
+        reference_debug.update(maneuver_reference.debug)
+        if bool(maneuver_reference.debug.get("maneuver_geometry_active", False)):
+            reference_debug["pre_maneuver_geometry_source"] = str(
+                raw_geometry_source
+            )
+            reference_debug["final_reference_geometry_source"] = (
+                "unified_maneuver_geometry"
+            )
+            reference_debug["reference_source"] = (
+                "unified_maneuver_geometry"
+            )
         self._previous_lane_center_reference = [
             dict(sample) for sample in list(local_lane_center_reference or [])
         ]
@@ -5289,13 +5536,10 @@ class CPXMPCPlannerBridge:
             step_distance_m=float(step_distance_m),
             target_speed_mps=float(speed_ref_mps),
             fallback_lane_id=int(current_lane_id),
-            anchor_to_ego_heading=True,
-            ego_anchor_distance_m=float(
-                self.config.get(
-                    "route_tracking_rejoin_distance_m",
-                    7.0,
-                )
-            ),
+            # The GRP chain is connected once when the route is built. Keep
+            # that immutable corridor through junction lane-id transitions;
+            # small offsets use the bounded route-rejoin path below.
+            anchor_to_ego_heading=False,
         )
         normalized_route_option = str(
             route_context.current_road_option or ""
@@ -7096,29 +7340,22 @@ class CPXMPCPlannerBridge:
             int(self.mpc.horizon_steps),
             int(math.ceil(float(duration_s) / float(self.mpc.dt_s))),
         )
-        speed_mps = min(
-            max(
-                0.5,
-                float(
-                    getattr(
-                        self,
-                        "_route_tracking_lane_change_target_speed_mps",
-                        0.0,
-                    )
-                    or self.config.get(
-                        "lane_change_stabilization_speed_mps",
-                        1.5,
-                    )
-                ),
-            ),
-            max(
-                0.5,
-                float(
-                    self.config.get(
-                        "lane_change_stabilization_speed_mps",
-                        1.5,
-                    )
-                ),
+        # Stabilization is a geometric phase, not a separate low-speed
+        # behavior. Preserve the committed maneuver speed; curvature and
+        # traffic-control constraints are applied by the unified speed path.
+        committed_speed_mps = float(
+            getattr(
+                self,
+                "_route_tracking_lane_change_target_speed_mps",
+                0.0,
+            )
+            or self.target_speed_mps
+        )
+        speed_mps = max(
+            0.5,
+            min(
+                float(getattr(self, "target_speed_mps", committed_speed_mps)),
+                float(committed_speed_mps),
             ),
         )
         step_distance_m = max(
@@ -8938,9 +9175,125 @@ class CPXMPCPlannerBridge:
                 "confidence": float(obstacle.get("confidence", 0.5)),
                 "lane_id": int(float(obstacle.get("lane_id", 0) or 0)),
                 "road_id": int(float(obstacle.get("road_id", 0) or 0)),
+                "object_type": str(obstacle.get("type", "unknown")),
+                "observed_by_cav_ids": list(
+                    obstacle.get("observed_by_cav_ids", []) or []
+                ),
+                "not_observed_by_cav_ids": list(
+                    obstacle.get("not_observed_by_cav_ids", []) or []
+                ),
+                "blind_spot_shared": bool(
+                    obstacle.get("blind_spot_shared", False)
+                ),
             }
         except Exception:
             return None
+
+    @staticmethod
+    def _cooperative_actor_evidence(
+        *,
+        cp_summary: Mapping[str, Any],
+        prediction_trajectories: Mapping[
+            str, Sequence[Mapping[str, Any]]
+        ],
+        selected_reference: Sequence[Mapping[str, Any]],
+        candidate_proximity_m: float = 3.0,
+    ) -> dict[str, Any]:
+        """Build an auditable CP-to-prediction-to-candidate evidence chain.
+
+        ``candidate_relevant`` means that a predicted actor position enters
+        the selected reference's spatial safety envelope at a corresponding
+        horizon step. It deliberately does not claim that the actor changed
+        the selected decision; proving that stronger counterfactual requires
+        evaluating the same candidate set with that actor removed.
+        """
+
+        provenance = [
+            dict(item)
+            for item in list(cp_summary.get("actor_provenance", []) or [])
+            if isinstance(item, Mapping)
+        ]
+        prediction_by_actor = {
+            str(key).rsplit(":", 1)[-1]: list(points or [])
+            for key, points in dict(prediction_trajectories or {}).items()
+        }
+        reference = list(selected_reference or [])
+        prediction_used_ids: list[str] = []
+        prediction_used_pedestrian_ids: list[str] = []
+        candidate_relevant_ids: list[str] = []
+        candidate_relevant_pedestrian_ids: list[str] = []
+        evidence: list[dict[str, Any]] = []
+
+        for actor in provenance:
+            message_id = str(actor.get("actor_id", ""))
+            actor_id = message_id.rsplit(":", 1)[-1]
+            actor_type = str(actor.get("actor_type", "unknown"))
+            predicted_points = prediction_by_actor.get(actor_id, [])
+            used_by_prediction = bool(predicted_points)
+            min_distance_m: float | None = None
+            if used_by_prediction and reference:
+                for index in range(min(len(reference), len(predicted_points))):
+                    try:
+                        ref = reference[index]
+                        point = predicted_points[index]
+                        rx = float(ref.get("x_ref_m", ref.get("x", 0.0)))
+                        ry = float(ref.get("y_ref_m", ref.get("y", 0.0)))
+                        px = float(point.get("x", point.get("x_m", 0.0)))
+                        py = float(point.get("y", point.get("y_m", 0.0)))
+                    except (TypeError, ValueError):
+                        continue
+                    distance_m = math.hypot(rx - px, ry - py)
+                    min_distance_m = (
+                        distance_m
+                        if min_distance_m is None
+                        else min(min_distance_m, distance_m)
+                    )
+            candidate_relevant = bool(
+                min_distance_m is not None
+                and min_distance_m <= float(candidate_proximity_m)
+            )
+            if used_by_prediction:
+                prediction_used_ids.append(message_id)
+                if actor_type == "pedestrian":
+                    prediction_used_pedestrian_ids.append(message_id)
+            if candidate_relevant:
+                candidate_relevant_ids.append(message_id)
+                if actor_type == "pedestrian":
+                    candidate_relevant_pedestrian_ids.append(message_id)
+            evidence.append({
+                **actor,
+                "used_by_prediction": bool(used_by_prediction),
+                "candidate_relevant": bool(candidate_relevant),
+                "candidate_min_predicted_distance_m": (
+                    None if min_distance_m is None else float(min_distance_m)
+                ),
+            })
+
+        pedestrian_count = sum(
+            str(item.get("actor_type", "")) == "pedestrian"
+            for item in provenance
+        )
+        blind_pedestrian_count = sum(
+            str(item.get("actor_type", "")) == "pedestrian"
+            and bool(item.get("blind_spot_shared", False))
+            for item in provenance
+        )
+        return {
+            "cp_actor_provenance": json.dumps(provenance, default=str),
+            "cp_pedestrian_count": int(pedestrian_count),
+            "cp_blind_spot_pedestrian_count": int(blind_pedestrian_count),
+            "cp_prediction_used_actor_ids": ",".join(prediction_used_ids),
+            "cp_prediction_used_pedestrian_ids": ",".join(
+                prediction_used_pedestrian_ids
+            ),
+            "cp_candidate_relevant_actor_ids": ",".join(
+                candidate_relevant_ids
+            ),
+            "cp_candidate_relevant_pedestrian_ids": ",".join(
+                candidate_relevant_pedestrian_ids
+            ),
+            "cp_actor_evidence": json.dumps(evidence, default=str),
+        }
 
     @staticmethod
     def _obstacle_source_priority(snapshot: Mapping[str, Any]) -> int:
@@ -9269,21 +9622,48 @@ class CPXMPCPlannerBridge:
         lateral_m = -dx_m * sin_h + dy_m * cos_h
         return float(forward_m), float(lateral_m)
 
+    def _set_actuator_context(
+        self,
+        *,
+        ego_speed_mps: float,
+        target_speed_mps: float,
+        stop_goal_active: bool,
+    ) -> None:
+        self._actuator_ego_speed_mps = float(ego_speed_mps)
+        self._actuator_target_speed_mps = float(target_speed_mps)
+        self._actuator_stop_goal_active = bool(stop_goal_active)
+
     def _control_from_mpc(self, acceleration_mps2: float, steering_angle_rad: float) -> carla.VehicleControl:
         max_accel = max(1e-6, float(self.mpc.constraints.max_acceleration_mps2))
         max_brake = max(1e-6, abs(float(self.mpc.constraints.min_acceleration_mps2)))
         max_steer = max(1e-6, float(self.mpc.constraints.max_steer_rad))
-        throttle = min(1.0, max(0.0, float(acceleration_mps2) / max_accel))
-        brake = min(1.0, max(0.0, -float(acceleration_mps2) / max_brake))
+        pedals = self.actuator_mapper.map_acceleration(
+            acceleration_mps2=float(acceleration_mps2),
+            max_acceleration_mps2=float(max_accel),
+            min_acceleration_mps2=-float(max_brake),
+            ego_speed_mps=float(self._actuator_ego_speed_mps),
+            target_speed_mps=float(self._actuator_target_speed_mps),
+            stop_goal_active=bool(self._actuator_stop_goal_active),
+        )
         steer = min(1.0, max(-1.0, float(steering_angle_rad) / max_steer))
-        return carla.VehicleControl(throttle=throttle, brake=brake, steer=steer)
+        return carla.VehicleControl(
+            throttle=float(pedals.throttle),
+            brake=float(pedals.brake),
+            steer=steer,
+        )
 
     def _accel_from_control(self, control: carla.VehicleControl) -> float:
         max_accel = max(1e-6, float(self.mpc.constraints.max_acceleration_mps2))
         max_brake = max(1e-6, abs(float(self.mpc.constraints.min_acceleration_mps2)))
-        throttle_accel = float(getattr(control, "throttle", 0.0)) * float(max_accel)
-        brake_accel = float(getattr(control, "brake", 0.0)) * float(max_brake)
-        return float(throttle_accel - brake_accel)
+        return self.actuator_mapper.acceleration_from_command(
+            throttle=float(getattr(control, "throttle", 0.0)),
+            brake=float(getattr(control, "brake", 0.0)),
+            max_acceleration_mps2=float(max_accel),
+            min_acceleration_mps2=-float(max_brake),
+            ego_speed_mps=float(self._actuator_ego_speed_mps),
+            target_speed_mps=float(self._actuator_target_speed_mps),
+            stop_goal_active=bool(self._actuator_stop_goal_active),
+        )
 
     def _steer_rad_from_control(self, control: carla.VehicleControl) -> float:
         max_steer = max(1e-6, float(self.mpc.constraints.max_steer_rad))

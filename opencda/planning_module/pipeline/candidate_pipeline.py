@@ -552,6 +552,7 @@ def evaluate_candidate_reference(
     min_object_distance_m: float = 2.0,
     contract_invalid_cost: float = 1000.0,
     infeasible_cost: float = 10000.0,
+    lane_change_duration_cost_per_s: float = 0.75,
 ) -> CandidateReferenceResult:
     """Attach lightweight feasibility and cost to a generated reference."""
 
@@ -596,6 +597,17 @@ def evaluate_candidate_reference(
     cost += float(comfort_cost)
     if float(comfort_cost) > 0.0:
         reasons.append(f"trajectory_comfort_cost:{float(comfort_cost):.2f}")
+
+    if str(candidate.intent.decision) in {"lane_change_left", "lane_change_right"}:
+        duration_cost = max(
+            0.0,
+            float(candidate.intent.lane_change_duration_s),
+        ) * max(0.0, float(lane_change_duration_cost_per_s))
+        cost += float(duration_cost)
+        if duration_cost > 0.0:
+            reasons.append(
+                f"maneuver_duration_cost:{float(duration_cost):.2f}"
+            )
 
     candidate.feasibility_status = "feasible" if bool(feasible) else "infeasible"
     candidate.feasibility_reason = ";".join(dict.fromkeys(reasons))

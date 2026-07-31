@@ -29,6 +29,7 @@ class MPCControlBuffer:
         self._context_key = ""
         self._reference_anchor_xy: Optional[Tuple[float, float]] = None
         self._last_reason = "control_buffer_empty"
+        self._previous_speed_error_mps: Optional[float] = None
 
     def should_replan(
         self,
@@ -37,12 +38,23 @@ class MPCControlBuffer:
         force_replan: bool = False,
         context_key: str = "",
         reference_anchor_xy: Optional[Tuple[float, float]] = None,
+        ego_speed_mps: Optional[float] = None,
+        target_speed_mps: Optional[float] = None,
+        speed_error_crossing_deadband_mps: float = 0.15,
     ) -> bool:
+        longitudinal_reason = self._longitudinal_replan_reason(
+            ego_speed_mps=ego_speed_mps,
+            target_speed_mps=target_speed_mps,
+            deadband_mps=float(speed_error_crossing_deadband_mps),
+        )
         if not self.enabled:
             self._last_reason = "control_buffer_disabled"
             return True
         if bool(force_replan):
             self._last_reason = "control_buffer_force_replan"
+            return True
+        if longitudinal_reason:
+            self._last_reason = str(longitudinal_reason)
             return True
         if self._plan_time_s is None or not self._sequence:
             self._last_reason = "control_buffer_empty"
@@ -126,7 +138,40 @@ class MPCControlBuffer:
         self._sequence = []
         self._context_key = ""
         self._reference_anchor_xy = None
+        self._previous_speed_error_mps = None
         self._last_reason = str(reason)
+
+    def _longitudinal_replan_reason(
+        self,
+        *,
+        ego_speed_mps: Optional[float],
+        target_speed_mps: Optional[float],
+        deadband_mps: float,
+    ) -> str:
+        try:
+            speed_error_mps = float(target_speed_mps) - float(ego_speed_mps)
+        except (TypeError, ValueError):
+            return ""
+        if not math.isfinite(speed_error_mps):
+            return ""
+        previous = self._previous_speed_error_mps
+        self._previous_speed_error_mps = float(speed_error_mps)
+        if previous is None or self._plan_time_s is None or not self._sequence:
+            return ""
+        deadband = max(0.0, float(deadband_mps))
+        crossed_target = bool(
+            (float(previous) > deadband and float(speed_error_mps) <= 0.0)
+            or (float(previous) < -deadband and float(speed_error_mps) >= 0.0)
+        )
+        entered_target_band = bool(
+            abs(float(speed_error_mps)) <= deadband
+            and abs(float(previous)) > deadband
+        )
+        if crossed_target:
+            return "control_buffer_speed_target_crossed"
+        if entered_target_band:
+            return "control_buffer_speed_target_band_entered"
+        return ""
 
     def _reference_anchor_jump_exceeded(
         self,

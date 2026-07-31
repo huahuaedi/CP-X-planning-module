@@ -954,7 +954,32 @@ class ReferenceGenerator:
         checked = 0
         violations = 0
         min_clearance_m = float("inf")
+        drivable_union_checks = 0
         for x_m, y_m, heading_rad, geometry in swept_poses:
+            # Junction turns span the incoming lane, connector and outgoing
+            # lane.  A nearest-lane tangent strip cannot represent that union
+            # and falsely rejects valid vehicle envelopes near the apex.
+            # Prefer CARLA's non-projected Driving-lane occupancy whenever it
+            # is available; retain the tangent-strip check as a map-agnostic
+            # fallback for tests and custom maps.
+            drivable = self.drivable_footprint_occupancy(
+                x_m=float(x_m),
+                y_m=float(y_m),
+                heading_rad=float(heading_rad),
+                ego_half_width_m=float(ego_half_width_m),
+                ego_half_length_m=float(ego_half_length_m),
+                safety_margin_m=float(safety_margin_m),
+            )
+            if bool(drivable.valid):
+                checked += 1
+                drivable_union_checks += 1
+                min_clearance_m = min(
+                    float(min_clearance_m),
+                    float(drivable.min_clearance_m),
+                )
+                if not bool(drivable.inside):
+                    violations += 1
+                continue
             if geometry is None:
                 geometry = self._lane_corridor_geometry(
                     x_m=float(x_m),
@@ -995,18 +1020,67 @@ class ReferenceGenerator:
                 min_clearance_m=float("-inf"),
                 reason="turn_swept_footprint:no_corridor_geometry",
             )
-        valid = bool(int(violations) <= max(0, int(max_violations)))
+        allowed_by_contract = bool(
+            int(violations) <= max(0, int(max_violations))
+        )
+        union_seam_tolerated = False
+        if (
+            int(drivable_union_checks) == int(checked)
+            and int(checked) > 0
+            and int(violations) > max(0, int(max_violations))
+        ):
+            seam_max_poses = max(
+                0,
+                int(
+                    self.config.get(
+                        "turn_drivable_union_seam_max_pose_violations",
+                        3,
+                    )
+                ),
+            )
+            seam_max_ratio = min(
+                1.0,
+                max(
+                    0.0,
+                    float(
+                        self.config.get(
+                            "turn_drivable_union_seam_max_violation_ratio",
+                            0.10,
+                        )
+                    ),
+                ),
+            )
+            union_seam_tolerated = bool(
+                int(violations) <= int(seam_max_poses)
+                and float(violations) / float(checked) <= float(seam_max_ratio)
+            )
+        valid = bool(allowed_by_contract or union_seam_tolerated)
         return SweptFootprintValidation(
             valid=bool(valid),
             checked_pose_count=int(checked),
             violation_count=int(violations),
             min_clearance_m=float(min_clearance_m),
             reason=(
-                "turn_swept_footprint:valid"
+                (
+                    (
+                        "turn_swept_footprint:drivable_union_seam_tolerated:"
+                        f"violations={int(violations)}:"
+                        f"checked={int(checked)}:"
+                        f"min_clearance={float(min_clearance_m):.3f}"
+                    )
+                    if bool(union_seam_tolerated)
+                    else "turn_swept_footprint:drivable_union_valid"
+                    if int(drivable_union_checks) == int(checked)
+                    else "turn_swept_footprint:valid"
+                )
                 if bool(valid)
-                else "turn_swept_footprint:outside_corridor:"
-                f"violations={int(violations)}:"
-                f"min_clearance={float(min_clearance_m):.3f}"
+                else (
+                    "turn_swept_footprint:outside_drivable_union:"
+                    if int(drivable_union_checks) == int(checked)
+                    else "turn_swept_footprint:outside_corridor:"
+                )
+                + f"violations={int(violations)}:"
+                + f"min_clearance={float(min_clearance_m):.3f}"
             ),
         )
 
@@ -1042,6 +1116,11 @@ class ReferenceGenerator:
             # Without map corridor geometry there is no defensible correction
             # direction. Preserve the horizon exactly and let the final gate
             # reject the unverifiable reference.
+            return original, validation, validation.reason
+        if "outside_drivable_union" in str(validation.reason):
+            # There is no single lateral correction direction in a junction
+            # lane union. Per-point nearest-lane projection introduces kinks
+            # and can turn a feasible connector into an impossible one.
             return original, validation, validation.reason
 
         correction_padding_m = max(

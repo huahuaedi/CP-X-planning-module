@@ -46,6 +46,10 @@ class OpenCDACPProvider:
         prediction_dt_s: float = 0.2,
         source: str = "opencda_cp_provider",
         require_native_opencda: bool = False,
+        visibility_filter_enabled: bool = False,
+        visibility_backend: str = "actor_geometry",
+        visibility_sensor_height_m: float = 1.6,
+        visibility_target_tolerance_m: float = 0.75,
     ) -> None:
         self.message_path = str(message_path)
         self.schema_version = int(schema_version)
@@ -54,7 +58,16 @@ class OpenCDACPProvider:
         self.prediction_dt_s = max(1.0e-3, float(prediction_dt_s))
         self.source = str(source)
         self.require_native_opencda = bool(require_native_opencda)
+        self.visibility_filter_enabled = bool(visibility_filter_enabled)
+        self.visibility_backend = str(visibility_backend).strip().lower()
+        self.visibility_sensor_height_m = max(
+            0.1, float(visibility_sensor_height_m)
+        )
+        self.visibility_target_tolerance_m = max(
+            0.1, float(visibility_target_tolerance_m)
+        )
         self.last_publish_summary: dict[str, object] = {}
+        self._last_observer_cav_ids: list[str] = []
 
     def publish(
         self,
@@ -65,6 +78,7 @@ class OpenCDACPProvider:
         sim_time_s: float,
         vehicle_manager: Any = None,
     ) -> list[dict]:
+        self._last_observer_cav_ids = []
         native_available = vehicle_manager is not None
         if native_available:
             messages = self._native_opencda_messages(
@@ -120,7 +134,60 @@ class OpenCDACPProvider:
             "control_count": int(len(controls)),
             "communication_range_m": float(self.communication_range_m),
             "timestamp_s": float(sim_time_s),
+            "observer_cav_ids": list(self._last_observer_cav_ids),
+            "multi_observer_obstacle_count": int(sum(
+                len(set(str(item) for item in list(
+                    message.get("observed_by_cav_ids", []) or []
+                ))) >= 2
+                for message in messages
+            )),
+            "blind_spot_shared_count": int(sum(
+                bool(message.get("blind_spot_shared", False))
+                for message in messages
+            )),
+            "blind_spot_shared_actor_ids": sorted(
+                str(message.get("id", ""))
+                for message in messages
+                if bool(message.get("blind_spot_shared", False))
+            ),
+            "actor_provenance": [
+                {
+                    "actor_id": str(message.get("id", "")),
+                    "actor_type": str(message.get("type", "unknown")),
+                    "observer_cav_ids": list(
+                        message.get("observed_by_cav_ids", []) or []
+                    ),
+                    "not_observed_by_cav_ids": list(
+                        message.get("not_observed_by_cav_ids", []) or []
+                    ),
+                    "visible_to_ego": bool(
+                        str(getattr(ego_vehicle, "id", ""))
+                        in list(message.get("observed_by_cav_ids", []) or [])
+                    ),
+                    "visible_to_auxiliary": bool(
+                        any(
+                            str(observer_id)
+                            != str(getattr(ego_vehicle, "id", ""))
+                            for observer_id in list(
+                                message.get("observed_by_cav_ids", []) or []
+                            )
+                        )
+                    ),
+                    "blind_spot_shared": bool(
+                        message.get("blind_spot_shared", False)
+                    ),
+                    "distance_to_ego_m": float(
+                        message.get("distance_m", 0.0) or 0.0
+                    ),
+                }
+                for message in messages
+            ],
+            "visibility_filter_enabled": bool(self.visibility_filter_enabled),
+            "visibility_backend": str(self.visibility_backend),
         }
+        self.last_publish_summary["observer_cav_count"] = int(
+            len(self.last_publish_summary["observer_cav_ids"])
+        )
         return messages
 
     def _native_opencda_traffic_controls(
@@ -268,7 +335,7 @@ class OpenCDACPProvider:
         # separate, independent check from `communication_range_m` below).
         # A nearby CAV only needs to be a tracked VehicleManager; it does not
         # need its own CP-X planner running.
-        vantage_points: list[Any] = [ego_location]
+        vantage_points: list[tuple[str, Any]] = [(str(ego_id), ego_location)]
         v2x_manager = getattr(vehicle_manager, "v2x_manager", None)
         cav_nearby = getattr(v2x_manager, "cav_nearby", {}) or {}
         for nearby_vm in dict(cav_nearby).values():
@@ -277,9 +344,17 @@ class OpenCDACPProvider:
             if not callable(get_location):
                 continue
             try:
-                vantage_points.append(get_location())
+                vantage_points.append((
+                    str(getattr(nearby_vehicle, "id", "")),
+                    get_location(),
+                ))
             except RuntimeError:
                 continue
+        self._last_observer_cav_ids = sorted(set(
+            str(observer_id)
+            for observer_id, _ in vantage_points
+            if str(observer_id)
+        ))
 
         messages: list[dict] = []
         seen_actor_ids: set[str] = set()
@@ -300,10 +375,25 @@ class OpenCDACPProvider:
             # ego-centric and would incorrectly reject things a nearby CAV
             # sees but that sit beyond ego's own communication_range_m, so
             # it is skipped below via `skip_range_filter=True`.
-            if not any(
-                actor_location.distance(vantage) <= self.communication_range_m
-                for vantage in vantage_points
-            ):
+            in_range_observer_ids: list[str] = []
+            observed_by_cav_ids: list[str] = []
+            visibility_by_cav_id: dict[str, str] = {}
+            for observer_id, vantage in vantage_points:
+                if actor_location.distance(vantage) > self.communication_range_m:
+                    continue
+                observer_id = str(observer_id)
+                in_range_observer_ids.append(observer_id)
+                visible, reason = self._line_of_sight_visible(
+                    world=world,
+                    observer_location=vantage,
+                    target_actor=actor,
+                    target_location=actor_location,
+                    occluder_actors=candidate_actors,
+                )
+                visibility_by_cav_id[observer_id] = str(reason)
+                if bool(visible):
+                    observed_by_cav_ids.append(observer_id)
+            if not observed_by_cav_ids:
                 continue
 
             actor_id = self._object_actor_id(actor, fallback=str(actor_id_int))
@@ -321,10 +411,25 @@ class OpenCDACPProvider:
                 fallback_id=actor_id,
                 object_type=object_type,
                 skip_range_filter=True,
+                observed_by_cav_ids=observed_by_cav_ids,
+                not_observed_by_cav_ids=[
+                    observer_id
+                    for observer_id in in_range_observer_ids
+                    if observer_id not in observed_by_cav_ids
+                ],
+                visibility_by_cav_id=visibility_by_cav_id,
             )
             if isinstance(message, Mapping):
+                message = dict(message)
+                message["blind_spot_shared"] = bool(
+                    str(ego_id) not in observed_by_cav_ids
+                    and any(
+                        observer_id != str(ego_id)
+                        for observer_id in observed_by_cav_ids
+                    )
+                )
                 seen_actor_ids.add(actor_id)
-                messages.append(dict(message))
+                messages.append(message)
 
         return messages
 
@@ -368,6 +473,9 @@ class OpenCDACPProvider:
         transform_override: Any = None,
         object_type: str = "vehicle",
         skip_range_filter: bool = False,
+        observed_by_cav_ids: list[str] | None = None,
+        not_observed_by_cav_ids: list[str] | None = None,
+        visibility_by_cav_id: Mapping[str, str] | None = None,
     ) -> Optional[dict]:
         try:
             transform = transform_override or self._object_transform(obj)
@@ -452,7 +560,159 @@ class OpenCDACPProvider:
             "road_id": int(road_id),
             "lane_id": int(lane_id),
             "trajectory": trajectory,
+            "observed_by_cav_ids": sorted(set(
+                str(item) for item in list(observed_by_cav_ids or [])
+                if str(item)
+            )),
+            "not_observed_by_cav_ids": sorted(set(
+                str(item) for item in list(not_observed_by_cav_ids or [])
+                if str(item)
+            )),
+            "visibility_by_cav_id": dict(visibility_by_cav_id or {}),
         }
+
+    def _line_of_sight_visible(
+        self,
+        *,
+        world: Any,
+        observer_location: Any,
+        target_actor: Any,
+        target_location: Any,
+        occluder_actors: list[Any] | None = None,
+    ) -> tuple[bool, str]:
+        """Approximate sensor visibility without blocking the simulator tick."""
+
+        if not bool(self.visibility_filter_enabled):
+            return True, "visibility_filter_disabled"
+        if str(getattr(self, "visibility_backend", "ray_cast")) == "actor_geometry":
+            return self._actor_geometry_visible(
+                observer_location=observer_location,
+                target_actor=target_actor,
+                target_location=target_location,
+                occluder_actors=list(occluder_actors or []),
+            )
+        cast_ray = getattr(world, "cast_ray", None)
+        if not callable(cast_ray):
+            return True, "cast_ray_unavailable_fallback_visible"
+
+        start = self._location_with_height(
+            observer_location,
+            float(getattr(observer_location, "z", 0.0))
+            + self.visibility_sensor_height_m,
+        )
+        bbox = getattr(target_actor, "bounding_box", None)
+        extent = getattr(bbox, "extent", None)
+        target_height = max(0.5, float(getattr(extent, "z", 0.8)))
+        end = self._location_with_height(
+            target_location,
+            float(getattr(target_location, "z", 0.0)) + target_height,
+        )
+        ray_distance_m = self._distance_3d(start, end)
+        target_radius_m = math.sqrt(
+            float(getattr(extent, "x", 0.4)) ** 2
+            + float(getattr(extent, "y", 0.4)) ** 2
+            + float(getattr(extent, "z", 0.8)) ** 2
+        )
+        clear_before_m = max(
+            0.0,
+            ray_distance_m
+            - target_radius_m
+            - self.visibility_target_tolerance_m,
+        )
+        try:
+            hits = list(cast_ray(start, end) or [])
+        except Exception as exc:
+            return True, "cast_ray_error_fallback_visible:%s" % type(exc).__name__
+        nearest_hit_m = min(
+            (
+                self._distance_3d(start, getattr(hit, "location", None))
+                for hit in hits
+                if getattr(hit, "location", None) is not None
+            ),
+            default=float("inf"),
+        )
+        if nearest_hit_m < clear_before_m:
+            return False, "occluded:hit_distance=%.2f" % float(nearest_hit_m)
+        return True, "line_of_sight_clear"
+
+    def _actor_geometry_visible(
+        self,
+        *,
+        observer_location: Any,
+        target_actor: Any,
+        target_location: Any,
+        occluder_actors: list[Any],
+    ) -> tuple[bool, str]:
+        """Use actor footprints as a non-RPC dynamic-occlusion approximation."""
+
+        start_x = float(observer_location.x)
+        start_y = float(observer_location.y)
+        end_x = float(target_location.x)
+        end_y = float(target_location.y)
+        segment_x = end_x - start_x
+        segment_y = end_y - start_y
+        segment_length_sq = segment_x ** 2 + segment_y ** 2
+        if segment_length_sq <= 1.0e-6:
+            return True, "actor_geometry_same_position"
+        target_id = int(getattr(target_actor, "id", -1))
+        for actor in list(occluder_actors or []):
+            if int(getattr(actor, "id", -2)) == target_id:
+                continue
+            if not str(getattr(actor, "type_id", "")).startswith("vehicle."):
+                continue
+            try:
+                location = actor.get_location()
+            except (AttributeError, RuntimeError):
+                continue
+            rel_x = float(location.x) - start_x
+            rel_y = float(location.y) - start_y
+            progress = (
+                rel_x * segment_x + rel_y * segment_y
+            ) / segment_length_sq
+            # Ignore the observer's own body and actors at/behind the target.
+            if progress <= 0.05 or progress >= 0.95:
+                continue
+            closest_x = start_x + progress * segment_x
+            closest_y = start_y + progress * segment_y
+            lateral_distance_m = math.hypot(
+                float(location.x) - closest_x,
+                float(location.y) - closest_y,
+            )
+            extent = getattr(getattr(actor, "bounding_box", None), "extent", None)
+            blocking_radius_m = max(
+                0.8,
+                math.hypot(
+                    float(getattr(extent, "x", 1.8)),
+                    float(getattr(extent, "y", 0.9)),
+                ),
+            )
+            if lateral_distance_m <= blocking_radius_m:
+                return (
+                    False,
+                    "occluded_by_actor:%s" % str(getattr(actor, "id", "")),
+                )
+        return True, "actor_geometry_clear"
+
+    @staticmethod
+    def _location_with_height(location: Any, z_m: float):
+        try:
+            return type(location)(
+                x=float(location.x),
+                y=float(location.y),
+                z=float(z_m),
+            )
+        except Exception:
+            return location
+
+    @staticmethod
+    def _distance_3d(first: Any, second: Any) -> float:
+        if first is None or second is None:
+            return float("inf")
+        return math.sqrt(
+            (float(first.x) - float(second.x)) ** 2
+            + (float(first.y) - float(second.y)) ** 2
+            + (float(first.z) - float(second.z)) ** 2
+        )
 
     @staticmethod
     def _object_actor_id(obj: Any, fallback: str) -> str:
