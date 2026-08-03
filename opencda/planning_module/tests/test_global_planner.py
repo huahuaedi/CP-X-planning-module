@@ -1055,5 +1055,70 @@ class CarlaBlockedLaneRerouteTests(unittest.TestCase):
         self.assertEqual(original_graph[0][2]["length"], 6.0)
 
 
+class _SteppableWaypoint:
+    """Minimal waypoint stub exposing the `.next()`/`.previous()` API shared
+    by both `carla.Waypoint` and `Global_Planner.global_planner.Waypoint`."""
+
+    def __init__(self, x_m, y_m, yaw_deg, *, next_waypoints=None, previous_waypoints=None):
+        self.transform = _DummyTransform(x=x_m, y=y_m, yaw=yaw_deg)
+        self._next_waypoints = list(next_waypoints or [])
+        self._previous_waypoints = list(previous_waypoints or [])
+
+    def next(self, distance_m):
+        del distance_m
+        return list(self._next_waypoints)
+
+    def previous(self, distance_m):
+        del distance_m
+        return list(self._previous_waypoints)
+
+
+class LaneStepXYHeadingTests(unittest.TestCase):
+    def test_steps_forward_onto_the_next_waypoint(self):
+        from utility.global_planner import lane_step_xy_heading
+
+        successor = _SteppableWaypoint(10.0, 0.0, 0.0)
+        current = _SteppableWaypoint(0.0, 0.0, 0.0, next_waypoints=[successor])
+
+        result = lane_step_xy_heading(
+            0.0,
+            0.0,
+            5.0,
+            get_waypoint_fn=lambda pose: current,
+        )
+
+        self.assertIsNotNone(result)
+        x_m, y_m, heading_rad = result
+        self.assertAlmostEqual(x_m, 10.0)
+        self.assertAlmostEqual(y_m, 0.0)
+        self.assertAlmostEqual(heading_rad, 0.0)
+
+    def test_returns_none_when_lane_has_no_successor(self):
+        from utility.global_planner import lane_step_xy_heading
+
+        current = _SteppableWaypoint(0.0, 0.0, 0.0, next_waypoints=[])
+
+        result = lane_step_xy_heading(
+            0.0,
+            0.0,
+            5.0,
+            get_waypoint_fn=lambda pose: current,
+        )
+
+        self.assertIsNone(result)
+
+    def test_returns_none_when_no_waypoint_resolves(self):
+        from utility.global_planner import lane_step_xy_heading
+
+        result = lane_step_xy_heading(
+            0.0,
+            0.0,
+            5.0,
+            get_waypoint_fn=lambda pose: None,
+        )
+
+        self.assertIsNone(result)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -677,8 +677,16 @@ def select_candidate_with_commitment(
     candidates: Sequence[CandidateReferenceResult],
     *,
     commitment: ManeuverCommitment,
+    required_decision: str = "",
+    required_target_lane_id: int = 0,
 ) -> CandidateSelectionOutcome:
-    """Prevent an executing maneuver from disappearing during reranking."""
+    """Select a feasible candidate while preserving route/commitment ownership.
+
+    A route-authorized lane change is a required maneuver, not merely another
+    soft-cost alternative to lane keeping.  Before execution is committed we
+    therefore prefer a feasible candidate matching that requirement.  Hard
+    contract, prediction, and MPC feasibility checks still retain veto power.
+    """
 
     rows = [candidate for candidate in list(candidates or [])]
     if not rows:
@@ -687,11 +695,36 @@ def select_candidate_with_commitment(
             status="no_candidates",
             reason="candidate_selection_empty",
         )
+    normalized_required_decision = str(required_decision or "").strip().lower()
+    route_requirement_active = (
+        normalized_required_decision in {"lane_change_left", "lane_change_right"}
+        and int(required_target_lane_id or 0) != 0
+    )
+    if not commitment.active and bool(route_requirement_active):
+        required_rows = [
+            candidate
+            for candidate in rows
+            if candidate.feasible
+            and str(candidate.intent.decision).strip().lower()
+            == normalized_required_decision
+            and int(candidate.intent.target_lane_id)
+            == int(required_target_lane_id)
+        ]
+        if required_rows:
+            return CandidateSelectionOutcome(
+                selected=select_best_candidate(required_rows),
+                status="selected_route_required",
+                reason="feasible_route_required_candidate",
+            )
     if not commitment.active:
         return CandidateSelectionOutcome(
             selected=select_best_candidate(rows),
             status="selected",
-            reason="no_active_maneuver_commitment",
+            reason=(
+                "route_required_candidate_infeasible_defer"
+                if bool(route_requirement_active)
+                else "no_active_maneuver_commitment"
+            ),
         )
 
     committed_rows = [

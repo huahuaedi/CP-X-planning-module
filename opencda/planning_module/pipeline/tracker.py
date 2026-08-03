@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 from opencda.planning_module.pipeline.prediction import (
     PredictionFrame,
@@ -122,6 +122,7 @@ class CPXObstacleTracker:
         min_ttc_s: float,
         prediction_model: str = "constant_acceleration",
         max_abs_acceleration_mps2: float = 4.0,
+        lane_step_fn: Optional[Callable[[float, float, float], Any]] = None,
     ) -> PredictionFrame:
         return build_prediction_frame(
             ego_snapshot=ego_snapshot,
@@ -135,6 +136,7 @@ class CPXObstacleTracker:
             min_ttc_s=float(min_ttc_s),
             prediction_model=str(prediction_model),
             max_abs_acceleration_mps2=float(max_abs_acceleration_mps2),
+            lane_step_fn=lane_step_fn,
         )
 
     @property

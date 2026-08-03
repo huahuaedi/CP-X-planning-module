@@ -138,15 +138,17 @@ class ManeuverManager:
         plan.phase = phase
         if int(target_lane_id):
             plan.target_lane_id = int(target_lane_id)
-        retained = self._forward_window(
+        retained, retained_index = self._forward_window(
             plan.geometry,
             ego_x_m=float(ego_x_m),
             ego_y_m=float(ego_y_m),
             count=max(len(incoming), 2),
+            start_index=plan.progress_index,
         )
         source_changed = bool(
             str(reference_source) and str(reference_source) != plan.reference_source
         )
+        window_start_index = retained_index
         if incoming:
             if retained and bool(stop_goal_active):
                 geometry = retained[:len(incoming)]
@@ -157,13 +159,22 @@ class ManeuverManager:
             plan.geometry = self._extend_geometry(geometry, incoming)
             plan.geometry_revision += int(source_changed)
             plan.reference_source = str(reference_source or plan.reference_source)
+            # The rebuilt geometry's index 0 is re-anchored near ego (it is
+            # built from retained[0]/incoming[0], the point nearest ego
+            # found above), so the window search below must restart at 0
+            # instead of inheriting retained_index, which is an index into
+            # the old (pre-rebuild) array and can point past the end of a
+            # shorter rebuilt one.
+            window_start_index = 0
 
-        window = self._forward_window(
+        window, window_index = self._forward_window(
             plan.geometry,
             ego_x_m=float(ego_x_m),
             ego_y_m=float(ego_y_m),
             count=max(1, len(incoming)),
+            start_index=window_start_index,
         )
+        plan.progress_index = int(window_index)
         if not window:
             window = self._geometry_only(incoming)
         output = self._apply_velocity_profile(window, incoming)
@@ -247,18 +258,43 @@ class ManeuverManager:
         return cls._recompute_geometry(result)
 
     @classmethod
-    def _forward_window(cls, geometry, *, ego_x_m: float, ego_y_m: float, count: int):
+    def _forward_window(
+        cls,
+        geometry,
+        *,
+        ego_x_m: float,
+        ego_y_m: float,
+        count: int,
+        start_index: int = 0,
+    ) -> tuple[list[dict[str, object]], int]:
+        """Return a forward window plus the resolved (monotonic) start index.
+
+        The nearest-point search is bounded to a span starting at
+        ``start_index`` and never resolves to an index before it, instead of
+        an unconstrained global nearest-neighbor search over the whole
+        geometry array. Callers must only carry the returned index forward
+        into a later search over the SAME (unmodified) array; once the array
+        is rebuilt/replaced, restart the search at 0 instead (a rebuilt
+        array's index 0 is always re-anchored near ego by construction).
+        """
+
         points = [dict(sample) for sample in list(geometry or [])]
         if not points:
-            return []
+            return [], max(0, int(start_index))
+        start = min(max(0, int(start_index)), len(points) - 1)
+        search_span = max(int(count) * 2, 20)
+        search_end = min(len(points), start + search_span)
         nearest = min(
-            range(len(points)),
+            range(start, search_end),
             key=lambda index: (
                 cls._xy(points[index])[0] - ego_x_m
             ) ** 2 + (cls._xy(points[index])[1] - ego_y_m) ** 2,
         )
-        start = max(0, nearest)
-        return points[start:start + max(1, int(count))]
+        resolved_index = max(start, nearest)
+        return (
+            points[resolved_index:resolved_index + max(1, int(count))],
+            int(resolved_index),
+        )
 
     @classmethod
     def _continuous_handoff(cls, retained, incoming):

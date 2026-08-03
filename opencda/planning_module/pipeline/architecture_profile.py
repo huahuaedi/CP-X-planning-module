@@ -85,13 +85,25 @@ def normalize_architecture_config(
     normalized["full_mpc_reference_stabilizer_enabled"] = True
     normalized["control_buffer_enabled"] = True
     normalized["safety_supervisor_enabled"] = True
-    normalized["architecture_profile"] = "unified_full_v2"
+    velocity_steering_interface = bool(
+        normalized.get("velocity_steering_interface_enabled", False)
+    )
+    profile_name = (
+        "unified_velocity_steering_v1"
+        if bool(velocity_steering_interface)
+        else "unified_full_v2"
+    )
+    normalized["architecture_profile"] = str(profile_name)
     return normalized, ArchitectureProfile(
-        name="unified_full_v2",
+        name=str(profile_name),
         behavior_owner="BehaviorPlanner+CandidateEvaluator",
         speed_owner="SpeedPlanner",
         reference_owner="ReferenceGenerator+ReferencePipeline",
-        control_memory_owner="MPCControlBuffer",
+        control_memory_owner=(
+            "CarlaVelocitySteeringAdapter"
+            if bool(velocity_steering_interface)
+            else "MPCControlBuffer"
+        ),
         safety_owner="MinimalSafetySupervisor",
         normalized_overrides=tuple(overrides),
     )

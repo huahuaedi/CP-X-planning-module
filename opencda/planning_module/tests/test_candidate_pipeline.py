@@ -481,6 +481,80 @@ class CandidatePipelineTest(unittest.TestCase):
         self.assertEqual(outcome.status, "selected_committed")
         self.assertIs(outcome.selected, change)
 
+    def test_route_required_lane_change_outranks_soft_keep_lane_cost(self):
+        keep = candidate_pipeline.CandidateReferenceResult(
+            intent=candidate_pipeline.CandidateBehaviorIntent(
+                name="keep_lane",
+                decision="lane_follow",
+                target_lane_id=2,
+                target_speed_mps=3.0,
+            ),
+            destination_state=[],
+            lane_center_reference=[],
+            feasibility_status="mpc_probe_solved",
+            total_cost=13.0,
+        )
+        change = candidate_pipeline.CandidateReferenceResult(
+            intent=candidate_pipeline.CandidateBehaviorIntent(
+                name="route_lane_change_right_assertive",
+                decision="lane_change_right",
+                target_lane_id=1,
+                target_speed_mps=3.0,
+            ),
+            destination_state=[],
+            lane_center_reference=[],
+            feasibility_status="mpc_probe_solved",
+            total_cost=49.0,
+        )
+
+        outcome = candidate_pipeline.select_candidate_with_commitment(
+            [keep, change],
+            commitment=candidate_pipeline.ManeuverCommitment(),
+            required_decision="lane_change_right",
+            required_target_lane_id=1,
+        )
+
+        self.assertEqual(outcome.status, "selected_route_required")
+        self.assertEqual(outcome.reason, "feasible_route_required_candidate")
+        self.assertIs(outcome.selected, change)
+
+    def test_route_required_lane_change_defers_when_candidate_is_infeasible(self):
+        keep = candidate_pipeline.CandidateReferenceResult(
+            intent=candidate_pipeline.CandidateBehaviorIntent(
+                name="keep_lane",
+                decision="lane_follow",
+                target_lane_id=2,
+                target_speed_mps=3.0,
+            ),
+            destination_state=[],
+            lane_center_reference=[],
+            feasibility_status="mpc_probe_solved",
+            total_cost=13.0,
+        )
+        change = candidate_pipeline.CandidateReferenceResult(
+            intent=candidate_pipeline.CandidateBehaviorIntent(
+                name="route_lane_change_right_normal",
+                decision="lane_change_right",
+                target_lane_id=1,
+                target_speed_mps=2.7,
+            ),
+            destination_state=[],
+            lane_center_reference=[],
+            feasibility_status="infeasible",
+            total_cost=1000.0,
+        )
+
+        outcome = candidate_pipeline.select_candidate_with_commitment(
+            [keep, change],
+            commitment=candidate_pipeline.ManeuverCommitment(),
+            required_decision="lane_change_right",
+            required_target_lane_id=1,
+        )
+
+        self.assertEqual(outcome.status, "selected")
+        self.assertEqual(outcome.reason, "route_required_candidate_infeasible_defer")
+        self.assertIs(outcome.selected, keep)
+
     def test_committed_lane_change_requests_locked_reference_when_rerank_fails(self):
         keep = candidate_pipeline.CandidateReferenceResult(
             intent=candidate_pipeline.CandidateBehaviorIntent(

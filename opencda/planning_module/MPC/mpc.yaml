@@ -518,8 +518,8 @@ mpc:
       q_y: 0.0
       q_v: 1.5
       q_psi: 0.0
-      lane_center_w0: 20.0
-      lane_center_xy_w0: 4.0
+      lane_center_w0: 40.0 # doubled from 20.0 -- steer-rate cost (w_control*q_delta=1280) was dominating the lateral pull (20+4), producing slow ~5-9s drift-then-recover convergence after lane changes/low-speed segments instead of holding lane center
+      lane_center_xy_w0: 8.0 # doubled from 4.0, same reason
       lane_center_q_psi: 2.0
       road_boundary_w: 10000.0
       road_boundary_margin_m: 0.50

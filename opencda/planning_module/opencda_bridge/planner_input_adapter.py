@@ -75,6 +75,9 @@ class OpenCDARuntimePort:
     def assign_obstacles_to_lanes(self, snapshots):
         return self._bridge._assign_obstacles_to_lanes(snapshots)
 
+    def lane_step_fn(self):
+        return self._bridge._obstacle_lane_step_fn()
+
     def nearest_front_distance_by_lane(self, **kwargs):
         return self._bridge._nearest_front_distance_by_lane(**kwargs)
 
@@ -272,6 +275,7 @@ class OpenCDAPlanningAdapter:
             min_front_gap_m=float(bridge.min_front_gap_m),
             min_rear_gap_m=float(bridge.min_front_gap_m),
             min_ttc_s=float(bridge.config.get("prediction_min_ttc_s", 2.0)),
+            lane_step_fn=bridge.lane_step_fn(),
         )
         route_context = RouteContext(
             optimal_lane_id=int(route_optimal_lane_id),

@@ -58,6 +58,15 @@ vehicle_base:
     publish_cp_message: true
     require_native_opencda_cp: true
     target_speed_mps: 3.0
+    velocity_steering_interface_enabled: true
+    velocity_adapter_kp: 0.18
+    velocity_adapter_ki: 0.025
+    velocity_adapter_cruise_feedforward: 0.28
+    velocity_adapter_speed_deadband_mps: 0.12
+    velocity_adapter_brake_activation_error_mps: 0.35
+    velocity_adapter_max_throttle: 0.48
+    velocity_adapter_max_tracking_brake: 0.10
+    velocity_adapter_max_stop_brake: 0.35
     # MPC outputs physical acceleration, while CARLA accepts normalized pedal
     # positions. This inverse-actuator model compensates steady-state drag and
     # uses measured acceleration as the MPC feedback state.
@@ -295,6 +304,15 @@ scenario:
         publish_cp_message: true
         require_native_opencda_cp: true
         target_speed_mps: 3.0
+        velocity_steering_interface_enabled: true
+        velocity_adapter_kp: 0.18
+        velocity_adapter_ki: 0.025
+        velocity_adapter_cruise_feedforward: 0.28
+        velocity_adapter_speed_deadband_mps: 0.12
+        velocity_adapter_brake_activation_error_mps: 0.35
+        velocity_adapter_max_throttle: 0.48
+        velocity_adapter_max_tracking_brake: 0.10
+        velocity_adapter_max_stop_brake: 0.35
         actuator_compensation_enabled: true
         actuator_cruise_throttle_feedforward: 0.28
         actuator_cruise_max_throttle: 0.55

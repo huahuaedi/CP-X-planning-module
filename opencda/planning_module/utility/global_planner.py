@@ -218,6 +218,65 @@ def waypoint_transform(waypoint: Any, carla: Any):
     )
 
 
+def _waypoint_xy(waypoint: Any) -> Tuple[float, float] | None:
+    transform = getattr(waypoint, "transform", None)
+    if transform is not None:
+        location = getattr(transform, "location", None)
+        if location is not None:
+            return float(location.x), float(location.y)
+    position = getattr(waypoint, "position", None)
+    if isinstance(position, Mapping):
+        return float(position["x"]), float(position["y"])
+    return None
+
+
+def lane_step_xy_heading(
+    x_m: float,
+    y_m: float,
+    distance_m: float,
+    *,
+    get_waypoint_fn: Any,
+) -> Tuple[float, float, float] | None:
+    """Advance (x_m, y_m) by distance_m along the nearest lane centerline.
+
+    ``get_waypoint_fn`` is expected to be ``map_planner.get_waypoint``-shaped
+    (accepts a ``{"x", "y", "z"}`` mapping, returns either a raw
+    ``carla.Waypoint`` under the legacy `astar` backend or this module's
+    `CustomGlobalPlannerAdapter` waypoint under the default `custom`/`admap`
+    backend). Both waypoint shapes already expose a matching
+    ``.next(distance_m) -> list[Waypoint]`` /
+    ``.previous(distance_m) -> list[Waypoint]`` API, so this stays
+    backend-agnostic the same way `waypoint_transform` and `world_heading_rad`
+    do above.
+
+    Returns None when no waypoint can be resolved at the query point or the
+    lane has no reachable successor/predecessor at that distance (off-road
+    position, dead end, unmapped area) -- callers should fall back to a
+    straight-line extrapolation in that case rather than treat it as an error.
+    """
+
+    waypoint = get_waypoint_fn({"x": float(x_m), "y": float(y_m), "z": 0.0})
+    if waypoint is None:
+        return None
+    if abs(float(distance_m)) <= 1e-6:
+        xy = _waypoint_xy(waypoint)
+        if xy is None:
+            return None
+        heading_rad = world_heading_rad(waypoint)
+        return float(xy[0]), float(xy[1]), float(heading_rad or 0.0)
+
+    stepper = waypoint.next if float(distance_m) >= 0.0 else waypoint.previous
+    candidates = stepper(abs(float(distance_m))) or []
+    if not candidates:
+        return None
+    next_waypoint = candidates[0]
+    xy = _waypoint_xy(next_waypoint)
+    if xy is None:
+        return None
+    heading_rad = world_heading_rad(next_waypoint)
+    return float(xy[0]), float(xy[1]), float(heading_rad or 0.0)
+
+
 def _point_dict(point: Mapping[str, object] | Sequence[object]) -> Dict[str, float]:
     if isinstance(point, Mapping):
         return {

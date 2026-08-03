@@ -65,6 +65,10 @@ from .scenario_manager import (
     CPXScenarioManager,
 )
 from .speed_planner import SpeedPlan, build_speed_plan
+from .velocity_steering_adapter import (
+    CarlaVelocitySteeringAdapter,
+    VelocitySteeringCommand,
+)
 from .tracker import CPXObstacleTracker
 
 __all__ = [
@@ -114,6 +118,8 @@ __all__ = [
     "RouteManeuver",
     "SafetySupervisor",
     "SpeedPlan",
+    "CarlaVelocitySteeringAdapter",
+    "VelocitySteeringCommand",
     "authorize_route_lane_change",
     "build_prediction_frame",
     "build_candidate_intents",

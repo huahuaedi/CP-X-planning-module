@@ -684,6 +684,11 @@ class CPXMPCPlannerBridge:
             "applied_throttle",
             "applied_brake",
             "applied_steer",
+            "control_interface",
+            "platform_target_speed_mps",
+            "platform_target_steer_rad",
+            "platform_actual_speed_mps",
+            "platform_adapter_reason",
             "planner_input_cp_traffic_control_count",
             "planner_input_prediction_risky_lane_count",
             "planner_input_perception_planning_count",
@@ -885,6 +890,14 @@ class CPXMPCPlannerBridge:
             "road_boundary_sample_count",
             "road_boundary_breach_rate",
             "Cost_RoadBoundary",
+            "Cost_Repulsive",
+            "Cost_Repulsive_Safe",
+            "Cost_Repulsive_Collision",
+            "Cost_ref",
+            "Cost_LaneCenter",
+            "Cost_Control",
+            "prediction_lane_step_resolved_count",
+            "prediction_lane_step_none_count",
             "turn_boundary_recovery_active",
             "turn_boundary_recovery_phase",
         ]
@@ -905,6 +918,9 @@ class CPXMPCPlannerBridge:
             ReferencePipeline,
         )
         from opencda.planning_module.pipeline.safety_supervisor import SafetySupervisor
+        from opencda.planning_module.pipeline.velocity_steering_adapter import (
+            CarlaVelocitySteeringAdapter,
+        )
         from opencda.planning_module.pipeline.stage_contracts import (
             authorize_mpc_entry,
         )
@@ -989,6 +1005,10 @@ class CPXMPCPlannerBridge:
                 self.config.get("safety_stuck_release_min_accel_mps2", 0.01)
             ),
         )
+        self.velocity_steering_interface_enabled = bool(
+            self.config.get("velocity_steering_interface_enabled", False)
+        )
+        self.velocity_steering_adapter = CarlaVelocitySteeringAdapter(self.config)
         route_sample_distance_m = float(self.config.get("route_sample_distance_m", 2.0))
         self.global_planner_backend = "legacy_astar"
         self.global_planner_backend_warning = ""
@@ -1192,6 +1212,8 @@ class CPXMPCPlannerBridge:
         self._metrics_boundary_sample_count = 0
         self._metrics_last_collision_actor_type = ""
         self._metrics_last_collision_impulse = ""
+        self._prediction_lane_step_resolved_count = 0
+        self._prediction_lane_step_none_count = 0
         self._spawn_metrics_collision_sensor()
 
     @staticmethod
@@ -1346,8 +1368,86 @@ class CPXMPCPlannerBridge:
             return control
         self.last_output = planner_output
         self.last_debug = planner_output.diagnostics_dict()
+        if bool(self.velocity_steering_interface_enabled):
+            planner_output = self._adapt_velocity_steering_output(planner_output)
+            self.last_output = planner_output
+            self.last_debug = planner_output.diagnostics_dict()
         self._record_debug(self.last_debug)
         return planner_output.control
+
+    def _adapt_velocity_steering_output(self, planner_output):
+        """Apply the platform adapter to planner-owned v and steering only."""
+
+        from opencda.planning_module.pipeline.output import PlannerDiagnostics, PlannerOutput
+        from opencda.planning_module.pipeline.velocity_steering_adapter import (
+            VelocitySteeringCommand,
+        )
+
+        diagnostics = planner_output.diagnostics_dict()
+        safety_reason = str(diagnostics.get("safety_supervisor_reason", "")).lower()
+        selected_candidate = str(
+            diagnostics.get("candidate_pipeline_selected", "")
+        ).lower()
+        behavior_decision = str(
+            planner_output.behavior_command.decision
+        ).lower()
+        emergency_stop = bool(
+            "collision" in safety_reason
+            or "explicit_fallback_emergency_stop" in selected_candidate
+            or behavior_decision == "emergency_brake"
+        )
+        stop_goal_active = bool(
+            diagnostics.get("stop_goal_active", False)
+            or diagnostics.get("scenario_stop_goal_active", False)
+            or behavior_decision in {"stop_at_intersection", "stop_sign"}
+        )
+        latest_update = dict(getattr(self, "_latest_opencda_update", {}) or {})
+        actual_speed_mps = max(
+            0.0,
+            float(
+                latest_update.get(
+                    "ego_speed_kmh",
+                    self.vehicle_manager.localizer.get_ego_spd(),
+                )
+            )
+            / 3.6,
+        )
+        control, adapter_reason = self.velocity_steering_adapter.run_step(
+            command=VelocitySteeringCommand(
+                target_speed_mps=float(
+                    planner_output.behavior_command.target_speed_mps
+                ),
+                target_steering_rad=float(planner_output.steering_rad),
+                emergency_stop=bool(emergency_stop),
+                stop_goal_active=bool(stop_goal_active),
+            ),
+            actual_speed_mps=float(actual_speed_mps),
+            sim_time_s=float(self._sim_time_s()),
+            max_steering_rad=float(self.mpc.constraints.max_steer_rad),
+            carla_module=carla,
+        )
+        diagnostics.update({
+            "control_interface": "planner_velocity_steering",
+            "platform_target_speed_mps": float(
+                planner_output.behavior_command.target_speed_mps
+            ),
+            "platform_target_steer_rad": float(planner_output.steering_rad),
+            "platform_actual_speed_mps": float(actual_speed_mps),
+            "platform_adapter_reason": str(adapter_reason),
+            "applied_throttle": float(getattr(control, "throttle", 0.0)),
+            "applied_brake": float(getattr(control, "brake", 0.0)),
+            "applied_steer": float(getattr(control, "steer", 0.0)),
+        })
+        return PlannerOutput(
+            control=control,
+            behavior_command=planner_output.behavior_command,
+            reference_trajectory=planner_output.reference_trajectory,
+            planned_trajectory=planner_output.planned_trajectory,
+            predictions=planner_output.predictions,
+            acceleration_mps2=0.0,
+            steering_rad=float(planner_output.steering_rad),
+            diagnostics=PlannerDiagnostics(diagnostics),
+        )
 
     def execute_planning_pipeline(self):
         """Public OpenCDA bridge port for one full CP-X planning tick."""
@@ -4201,6 +4301,20 @@ class CPXMPCPlannerBridge:
                 else ""
             ),
             "Cost_RoadBoundary": cost_terms.get("Cost_RoadBoundary", ""),
+            "Cost_Repulsive": cost_terms.get("Cost_Repulsive", ""),
+            "Cost_Repulsive_Safe": cost_terms.get("Cost_Repulsive_Safe", ""),
+            "Cost_Repulsive_Collision": cost_terms.get(
+                "Cost_Repulsive_Collision", ""
+            ),
+            "Cost_ref": cost_terms.get("Cost_ref", ""),
+            "Cost_LaneCenter": cost_terms.get("Cost_LaneCenter", ""),
+            "Cost_Control": cost_terms.get("Cost_Control", ""),
+            "prediction_lane_step_resolved_count": int(
+                self._prediction_lane_step_resolved_count
+            ),
+            "prediction_lane_step_none_count": int(
+                self._prediction_lane_step_none_count
+            ),
         }
 
     def destroy(self) -> None:
@@ -5056,6 +5170,22 @@ class CPXMPCPlannerBridge:
                 planner_input_frame=planner_input_frame,
                 planner_mode=str(planner_mode),
                 object_snapshots=object_snapshots,
+                required_lane_change_decision=(
+                    "lane_change_left"
+                    if bool(route_lane_change_required)
+                    and bool(lane_change_authorized)
+                    and str(lane_change_authorization.direction).strip().lower() == "left"
+                    else "lane_change_right"
+                    if bool(route_lane_change_required)
+                    and bool(lane_change_authorized)
+                    and str(lane_change_authorization.direction).strip().lower() == "right"
+                    else ""
+                ),
+                required_lane_change_target_lane_id=(
+                    int(lane_change_authorization.target_lane_id)
+                    if bool(route_lane_change_required) and bool(lane_change_authorized)
+                    else 0
+                ),
             )
             # The upstream front-gap flag proposes an obstacle-stop candidate;
             # it must not remain a global stop latch after a safe lane-change
@@ -6406,6 +6536,8 @@ class CPXMPCPlannerBridge:
         planner_input_frame: Any,
         planner_mode: str,
         object_snapshots: Sequence[Mapping[str, object]],
+        required_lane_change_decision: str = "",
+        required_lane_change_target_lane_id: int = 0,
     ) -> tuple[str, int, float, list[dict[str, object]], list[float], dict[str, object]]:
         from opencda.planning_module.behavior_planner import (
             MpcReferenceGenerationContext,
@@ -6924,6 +7056,8 @@ class CPXMPCPlannerBridge:
         selection_outcome = select_candidate_with_commitment(
             candidate_results,
             commitment=maneuver_commitment,
+            required_decision=str(required_lane_change_decision),
+            required_target_lane_id=int(required_lane_change_target_lane_id),
         )
 
         if (
@@ -8488,6 +8622,40 @@ class CPXMPCPlannerBridge:
         except Exception:
             return 0.0
 
+    def _obstacle_lane_step_fn(self):
+        """Return a ``(x, y, distance_m) -> (x, y, heading_rad) | None``
+        closure for lane-curve-aware obstacle prediction, or None to keep the
+        old straight-line-only fallback.
+
+        ``obstacle_future_trajectory`` (behavior_planner/trajectory_risk.py)
+        only follows the lane centerline when given this closure; without
+        it, every obstacle without a CP-supplied ``predicted_trajectory``
+        keeps being extrapolated as a straight line at its current heading,
+        which is wrong for a vehicle following a curved lane (e.g. mid-turn
+        at an intersection).
+        """
+
+        if not bool(self.config.get("prediction_lane_following_enabled", True)):
+            return None
+        from utility.global_planner import lane_step_xy_heading
+
+        get_waypoint_fn = self.reference_map.get_waypoint
+
+        def _step(x_m: float, y_m: float, distance_m: float):
+            result = lane_step_xy_heading(
+                float(x_m),
+                float(y_m),
+                float(distance_m),
+                get_waypoint_fn=get_waypoint_fn,
+            )
+            if result is None:
+                self._prediction_lane_step_none_count += 1
+            else:
+                self._prediction_lane_step_resolved_count += 1
+            return result
+
+        return _step
+
     def _assign_obstacles_to_lanes(
         self,
         object_snapshots: Sequence[Mapping[str, Any]],
@@ -9595,6 +9763,14 @@ class CPXMPCPlannerBridge:
         cos_h = math.cos(ego_yaw_rad)
         sin_h = math.sin(ego_yaw_rad)
         best_gap = None
+        ego_half_length_m = 2.25
+        try:
+            ego_half_length_m = max(
+                0.0,
+                float(self.vehicle_manager.vehicle.bounding_box.extent.x),
+            )
+        except Exception:
+            pass
         for snapshot in object_snapshots:
             dx = float(snapshot.get("x", 0.0)) - float(ego_location.x)
             dy = float(snapshot.get("y", 0.0)) - float(ego_location.y)
@@ -9602,7 +9778,21 @@ class CPXMPCPlannerBridge:
             lateral = -dx * sin_h + dy * cos_h
             if longitudinal <= 0.0 or abs(lateral) > 2.5:
                 continue
-            best_gap = longitudinal if best_gap is None else min(best_gap, longitudinal)
+            object_half_length_m = max(
+                0.0,
+                0.5 * float(snapshot.get("length_m", 4.5) or 4.5),
+            )
+            clearance_m = max(
+                0.0,
+                float(longitudinal)
+                - float(ego_half_length_m)
+                - float(object_half_length_m),
+            )
+            best_gap = (
+                float(clearance_m)
+                if best_gap is None
+                else min(float(best_gap), float(clearance_m))
+            )
         return best_gap
 
     @staticmethod

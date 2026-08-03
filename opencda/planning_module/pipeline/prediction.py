@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Sequence
+from typing import Any, Callable, Dict, List, Mapping, Sequence
 
 from behavior_planner.trajectory_risk import (
     lane_prediction_risk,
@@ -112,6 +112,7 @@ def build_prediction_frame(
     min_ttc_s: float,
     prediction_model: str = "constant_acceleration",
     max_abs_acceleration_mps2: float = 4.0,
+    lane_step_fn: Callable[[float, float, float], Any] | None = None,
 ) -> PredictionFrame:
     """Build an Apollo-style prediction frame for one planning tick.
 
@@ -120,6 +121,11 @@ def build_prediction_frame(
     (`prediction_model="constant_acceleration"`).  With no acceleration field
     available this degenerates to constant velocity, so existing snapshots keep
     their previous behaviour.
+
+    ``lane_step_fn``, when supplied, lets the fallback follow the obstacle's
+    own lane centerline (curved) instead of a straight line -- see
+    ``behavior_planner.trajectory_risk._lane_following_points``. Passing None
+    (the default) preserves the exact previous straight-line behaviour.
     """
 
     normalized_ego = {
@@ -140,6 +146,7 @@ def build_prediction_frame(
             dt_s=float(dt_s),
             model=str(prediction_model),
             max_abs_acceleration_mps2=float(max_abs_acceleration_mps2),
+            lane_step_fn=lane_step_fn,
         )
         for snapshot in normalized_obstacles
         for obstacle_id in [_obstacle_id(snapshot)]
@@ -158,6 +165,7 @@ def build_prediction_frame(
             min_ttc_s=float(min_ttc_s),
             prediction_model=str(prediction_model),
             max_abs_acceleration_mps2=float(max_abs_acceleration_mps2),
+            lane_step_fn=lane_step_fn,
         )
         for lane_id in list(available_lane_ids or [])
     }
