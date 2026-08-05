@@ -714,13 +714,30 @@ class ReferencePipeline:
         reference: Sequence[Mapping[str, object]],
         lane_recovery: bool = False,
     ) -> ReferenceValidationResult:
+        contract_mode = mode
+        if mode == "lane_change" and bool(
+            self.config.get(
+                "route_tracking_lane_change_direct_target_tracking_enabled",
+                False,
+            )
+        ):
+            # Under direct target-lane tracking, MPC is handed the target
+            # lane's own (unblended) centerline -- its first sample
+            # legitimately sits close to a full lane width from ego at lock
+            # time, which the standard "lane_change" mode's tighter limit
+            # (sized for an already-ramping blend) would veto. Only the
+            # contract-checking mode widens here; `mode` itself stays
+            # "lane_change" for the reference-shaping branches elsewhere in
+            # condition() that key off that exact string.
+            contract_mode = "lane_change_direct"
         expected_lane_id = (
             int(request.target_lane_id)
-            if mode == "lane_change" and int(request.target_lane_id) != 0
+            if contract_mode in ("lane_change", "lane_change_direct")
+            and int(request.target_lane_id) != 0
             else int(request.current_lane_id)
         )
         contract = contract_from_config(
-            mode=mode,
+            mode=contract_mode,
             expected_lane_id=expected_lane_id,
             horizon_steps=int(self.horizon_steps),
             config=self.config,
@@ -737,7 +754,7 @@ class ReferencePipeline:
             contract=contract,
             check_destination_body_lateral=(
                 self.final_gate.check_destination_body_lateral(
-                    mode=mode,
+                    mode=contract_mode,
                     reference_samples=reference,
                 )
                 and not bool(lane_recovery)

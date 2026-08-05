@@ -92,6 +92,48 @@ class FinalReferenceGateTests(unittest.TestCase):
         self.assertFalse(result.accepted)
         self.assertIn("terminal_speed_not_zero", result.reason)
 
+    def test_direct_target_tracking_widens_first_lateral_limit(self):
+        # Under direct target-lane tracking, MPC is handed the target lane's
+        # own (unblended) centerline, whose first sample legitimately sits
+        # close to a full lane width from ego -- the standard "lane_change"
+        # mode's tighter limit would veto it every tick.
+        wide_offset_reference = _straight_reference(lane_id=2)
+        for sample in wide_offset_reference:
+            sample["y_ref_m"] = 3.2
+
+        blocked = FinalReferenceGate({}).validate(
+            reference_samples=wide_offset_reference,
+            destination_state=[4.0, 3.2, 2.0],
+            ego_state=[0.0, 0.0, 2.0, 0.0],
+            behavior_decision="lane_change_left",
+            behavior_fsm_state="EXECUTE_LANE_CHANGE_LEFT",
+            current_lane_id=1,
+            target_lane_id=2,
+            stop_goal_active=False,
+            horizon_steps=4,
+            default_speed_mps=3.0,
+        )
+        self.assertFalse(blocked.accepted)
+        self.assertIn("first_lateral_out_of_contract", blocked.reason)
+
+        gate = FinalReferenceGate(
+            {"route_tracking_lane_change_direct_target_tracking_enabled": True}
+        )
+        allowed = gate.validate(
+            reference_samples=wide_offset_reference,
+            destination_state=[4.0, 3.2, 2.0],
+            ego_state=[0.0, 0.0, 2.0, 0.0],
+            behavior_decision="lane_change_left",
+            behavior_fsm_state="EXECUTE_LANE_CHANGE_LEFT",
+            current_lane_id=1,
+            target_lane_id=2,
+            stop_goal_active=False,
+            horizon_steps=4,
+            default_speed_mps=3.0,
+        )
+        self.assertTrue(allowed.accepted, allowed.reason)
+        self.assertEqual(allowed.mode, "lane_change_direct")
+
     def test_lane_change_contract_uses_target_lane(self):
         gate = FinalReferenceGate({})
         result = gate.validate(

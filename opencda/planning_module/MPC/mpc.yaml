@@ -2,7 +2,28 @@ mpc:
   # Prediction horizon [s].
   # Increase -> planner can anticipate farther ahead, but the QP gets larger
   # and more expensive. Decrease -> faster solve, but shorter planning view.
-  horizon_s: 2.0
+  # This is the STARTING value when adaptive_horizon_enabled is on below --
+  # the bridge then smoothly blends it toward a per-behavior-mode target
+  # every tick (mirroring mode_cost_profile_blend_alpha's own blending).
+  horizon_s: 4.5
+
+  # Off by default. When on, horizon_s above is smoothly blended (every tick,
+  # via MPC.blend_toward_horizon_s) toward a target chosen from the active
+  # behavior mode and shortened further by nearby-obstacle distance -- a
+  # single fixed horizon can't fit both a multi-second lane-change S-curve
+  # and a short, sharp intersection-turn connector at the same time.
+  adaptive_horizon_enabled: true
+  adaptive_horizon_min_s: 1.0
+  adaptive_horizon_max_s: 5.0
+  # The per-mode target horizon map (adaptive_horizon_profile_s) is a
+  # BRIDGE-level setting, not an MPC one -- it belongs in the scenario/bridge
+  # config (self.config), not here, since MPC/mpc.yaml only ever populates
+  # attributes on the MPC instance itself. Left unset in the scenario config,
+  # _adaptive_target_horizon_s in cpx_mpc_planner.py falls back to
+  # _DEFAULT_ADAPTIVE_HORIZON_PROFILE_S (lane_follow=3.0,
+  # prepare_lane_change/execute_lane_change=4.5, intersection_turn=1.5,
+  # stop=2.0, recovery=1.5) -- the same values, so no scenario YAML change is
+  # needed unless those defaults need overriding per scenario.
 
   # MPC prediction discretization step [s].
   # Independent from CARLA simulation tick (fixed at 0.05s / 20 Hz).
@@ -682,6 +703,23 @@ mpc:
       # Decrease -> lane-center cost behaves more like pure lateral position.
       q_psi: 2.0 #10  #2  (1.5 caused running-wide; 3.0 caused oscillation; 2.0 is the stable midpoint)
 
+      # Arc-length ("Frenet-like") lane-reference lookup: select each
+      # stage's lane-center sample by how far along the reference path that
+      # stage has actually traveled, instead of by array position -- the two
+      # only agree on a straight reference built at exactly the nominal step
+      # distance. Off by default, preserving today's index/local-window
+      # lookup exactly. Falls back to the index lookup automatically if any
+      # reference sample lacks a progress_m tag.
+      use_progress_lookup: false
+
+      # When true, xy_w0's pull is decomposed into lane-local
+      # longitudinal/lateral components instead of independently attracting
+      # raw world x and y toward the reference point (which couples
+      # world-frame x/y errors together and doesn't rotate with lane heading
+      # the way the lateral-offset term already does). Off by default,
+      # preserving today's per-mode-profile xy_w0 tuning until validated.
+      xy_term_uses_frenet_decomposition: false
+
     road_boundary:
       # Road = all same-direction CARLA Driving lanes around the reference lane.
       enabled: true
@@ -695,6 +733,47 @@ mpc:
       # Hard-ish cap on boundary slack [m]. Keeps severe boundary violations
       # from being accepted as merely high-cost soft-constraint solutions.
       max_slack_m: 0.10
+
+    # Road-envelope block-union hard constraint (Yu et al., "Spatial
+    # Envelope MPC," arXiv:2509.18506, Sec. III-B1). Off by default: only
+    # ever activates when the bridge explicitly supplies road_envelope
+    # blocks to plan_trajectory (during a locked route-tracking lane
+    # change) AND this flag is on. Replaces the single-reference-line
+    # road_boundary constraint above for that call only -- the union of two
+    # *static* blocks (source lane + target lane, fixed once at lock time)
+    # stays satisfiable even as the tracked reference switches lanes
+    # mid-maneuver, unlike a line tied to whichever reference sample is
+    # active that tick (the diagnosed cause of a primal-infeasible QP right
+    # at the reference-switch instant).
+    road_envelope:
+      enabled: false
+      # Quadratic penalty weight on the envelope slack.
+      w_envelope: 10000.0
+      # Hard-ish cap on envelope slack [m].
+      max_slack_m: 0.10
+      # p-norm exponent for the hyperellipse blocks. Must stay an even
+      # integer (removes the abs()-kink, keeps the block distance smooth).
+      shape_exponent: 4.0
+      # LogSumExp sharpness for the smooth-min union of blocks. Must be
+      # negative; larger magnitude = sharper (closer to a true min), with a
+      # transition band roughly 2*ln(19)/|rho| wide around the true seam.
+      rho: -8.0
+
+    # Speed profile upper-bound ("speed cap") soft constraint. The lower
+    # bound (near-zero floor) always stays a hard constraint. Disabled by
+    # default: the upper bound stays a hard per-stage constraint exactly as
+    # before. When enabled, a per-stage slack absorbs overshoot above the
+    # posted cap (curve/traffic-light/lead-obstacle speed limits), penalized
+    # quadratically and hard-capped at max_slack_mps -- mirrors the
+    # road_boundary slack pattern above, reducing QP primal-infeasibility
+    # when the dynamic speed cap and vehicle dynamics briefly conflict
+    # (observed most often while a stop guard already owns braking).
+    speed_soft_constraint:
+      enabled: true
+      # Quadratic penalty weight per (m/s) of overshoot beyond the posted cap.
+      weight: 200.0
+      # Hard-ish cap on how far v may exceed the posted cap even under penalty [m/s].
+      max_slack_mps: 3.0
 
     control:
       # Global weight on control smoothness.
@@ -804,6 +883,36 @@ mpc:
       # Increase -> more numerical stability, but more curvature smoothing.
       # Decrease -> closer to the raw local Hessian, but less robust.
       min_hessian_eig: 1.0e-9
+
+      # Softplus (log-formulation) envelope-containment cost, additive to the
+      # exponential collision-zone cost above by default. Per Yu et al.,
+      # "Spatial Envelope MPC: High Performance Driving without a
+      # Reference" (arXiv:2509.18506): J = w_log * log(1 + exp(-gain*(rc -
+      # collision_distance_shift))). Disabled by default (w_log_barrier: 0.0
+      # is also inert on its own, belt-and-suspenders).
+      log_barrier_enabled: true
+      # When true, the exponential collision-zone cost above is zeroed and
+      # this term is the sole repulsive cost instead of an addition to it.
+      log_barrier_replace_exponential: false
+      w_log_barrier: 50.0
+      # Steepness of the transition from ~0 cost to ~linear penalty around
+      # rc == collision_distance_shift. Larger = sharper, more barrier-like.
+      log_barrier_gain: 4.0
+
+      # Off by default. A lead vehicle directly ahead in the same lane
+      # should slow ego down, not nudge it sideways -- but the collision
+      # cost's gradient is differentiated in world x/y, so a tiny lateral
+      # offset in ego's own rollout still picks up a small lateral pull that
+      # compounds tick-over-tick as the obstacle closes (observed as a slow,
+      # never-converging lateral drift during ordinary lane-following).
+      # When enabled, the cost's cross-track (lateral, relative to ego's own
+      # stage heading) contribution is smoothly scaled toward 0 as the
+      # obstacle's cross-track offset shrinks below cross_track_full_response_m,
+      # fully zeroed at/below cross_track_full_suppression_m -- the
+      # along-track (braking) contribution is never touched.
+      cross_track_suppression_enabled: true
+      cross_track_full_suppression_m: 1.0
+      cross_track_full_response_m: 2.0
 
   solver:
     # Maximum OSQP iterations.

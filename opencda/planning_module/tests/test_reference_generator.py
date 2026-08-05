@@ -130,6 +130,106 @@ class ReferenceGeneratorTests(unittest.TestCase):
         self.assertAlmostEqual(second.conditioned_heading_rad, 0.04)
         self.assertTrue(second.continuity_limited)
 
+    def test_corridor_projection_uses_tracking_heading_not_stale_map_lane_during_maneuver(self):
+        # Maneuver-geometry samples (lane change / turn) carry no
+        # corridor_center_* tags, so project_reference_corridor used to fall
+        # back to a live nearest-lane map lookup for its offset/heading
+        # decomposition. Mid-lane-change this is ambiguous -- the queried
+        # point can snap to a map lane whose heading has nothing to do with
+        # the vehicle's actual, smoothly rotating commanded heading, which
+        # produced a large phantom "offset" tracking the vehicle's own yaw
+        # change rather than any real drift. Confirm the fix: ego sitting
+        # exactly on the (linearly interpolated) tracking path reports ~0
+        # lateral offset and ~0 heading error, even when the mocked map
+        # lookup would disagree sharply (flat heading=0, far-off center).
+        generator = self._generator()
+
+        def stale_flat_map_waypoint(location):
+            return types.SimpleNamespace(
+                transform=types.SimpleNamespace(
+                    location=types.SimpleNamespace(x=location.x, y=0.0),
+                    rotation=types.SimpleNamespace(yaw=0.0),
+                ),
+                lane_width=3.5,
+            )
+
+        generator._map_waypoint_callback = stale_flat_map_waypoint
+        samples = [
+            {
+                "x_ref_m": 1.0,
+                "y_ref_m": 0.3,
+                "heading_rad": 0.2,
+                "lane_width_m": 3.5,
+            },
+            {
+                "x_ref_m": 2.0,
+                "y_ref_m": 0.6,
+                "heading_rad": 0.5,
+                "lane_width_m": 3.5,
+            },
+        ]
+
+        projection = generator.project_reference_corridor(
+            reference_samples=samples,
+            x_m=1.5,
+            y_m=0.45,
+            heading_rad=0.35,
+            ego_half_width_m=1.0,
+            ego_half_length_m=2.4,
+        )
+
+        self.assertTrue(projection.valid)
+        self.assertAlmostEqual(projection.occupancy.lateral_offset_m, 0.0, places=6)
+        self.assertAlmostEqual(projection.occupancy.heading_error_rad, 0.0, places=6)
+
+    def test_corridor_projection_limits_a_same_tick_segment_flip_jump(self):
+        # Two parallel segments 2.16m apart (source lane vs target lane
+        # during a lane change), both in the same candidate list. Tick 1:
+        # ego sits near the first segment, so it's picked. Tick 2: ego has
+        # moved close enough to the second segment that the argmin
+        # legitimately flips to it -- the raw jump (1.6m) is under
+        # continuity_reset_distance_m (2.5, so it isn't treated as a full
+        # reset) but is far larger than one tick of realistic driving
+        # motion. Before this fix, position was accepted as-is whenever the
+        # jump was under continuity_reset_distance_m; only heading was ever
+        # rate-limited. Confirm position is now rate-limited the same way.
+        generator = self._generator()
+        samples = [
+            {"x_ref_m": 0.0, "y_ref_m": 0.0, "corridor_center_x_m": 0.0, "corridor_center_y_m": 0.0, "corridor_heading_rad": 0.0, "lane_width_m": 3.5},
+            {"x_ref_m": 1.0, "y_ref_m": 0.0, "corridor_center_x_m": 1.0, "corridor_center_y_m": 0.0, "corridor_heading_rad": 0.0, "lane_width_m": 3.5},
+            {"x_ref_m": 0.0, "y_ref_m": 2.16, "corridor_center_x_m": 0.0, "corridor_center_y_m": 2.16, "corridor_heading_rad": 0.0, "lane_width_m": 3.5},
+            {"x_ref_m": 1.0, "y_ref_m": 2.16, "corridor_center_x_m": 1.0, "corridor_center_y_m": 2.16, "corridor_heading_rad": 0.0, "lane_width_m": 3.5},
+        ]
+
+        first = generator.project_reference_corridor(
+            reference_samples=samples,
+            x_m=0.5, y_m=0.3,
+            heading_rad=0.0,
+            ego_half_width_m=1.0, ego_half_length_m=2.4,
+            max_position_step_m=0.5,
+        )
+        second = generator.project_reference_corridor(
+            reference_samples=samples,
+            x_m=0.5, y_m=1.9,
+            heading_rad=0.0,
+            ego_half_width_m=1.0, ego_half_length_m=2.4,
+            max_position_step_m=0.5,
+        )
+
+        self.assertAlmostEqual(first.projected_y_m, 0.0, places=3)
+        # The *conditioned* (returned) position must move at most
+        # max_position_step_m (0.5) from the previous tick's position, not
+        # jump straight to the new segment (y=2.16), even though the raw
+        # argmin has legitimately flipped to it.
+        self.assertTrue(second.continuity_limited)
+        self.assertLessEqual(
+            math.hypot(
+                second.projected_x_m - first.projected_x_m,
+                second.projected_y_m - first.projected_y_m,
+            ),
+            0.5 + 1e-6,
+        )
+
     def test_boundary_recovery_reference_is_ego_anchored_and_time_spaced(self):
         generator = self._generator(
             config={"boundary_recovery_first_arc_m": 0.25},
@@ -375,6 +475,26 @@ class ReferenceGeneratorTests(unittest.TestCase):
         self.assertTrue(
             all(bool(sample["reference_curvature_limited"]) for sample in shaped)
         )
+
+    def test_discrete_curvature_1pm_matches_internal_computation(self):
+        generator = self._generator(horizon_steps=8)
+        raw = [
+            {"x_ref_m": float(x_m), "y_ref_m": float(y_m), "heading_rad": 0.0}
+            for x_m, y_m in (
+                (0.5, 0.0),
+                (1.0, 0.0),
+                (1.3, 0.4),
+                (1.3, 0.9),
+                (1.3, 1.4),
+                (1.3, 1.9),
+            )
+        ]
+
+        self.assertEqual(
+            generator.discrete_curvature_1pm(raw),
+            generator._max_discrete_curvature_1pm(raw),
+        )
+        self.assertGreater(generator.discrete_curvature_1pm(raw), 0.0)
 
     def test_turn_swept_footprint_corrects_centerline_offset(self):
         generator = self._generator(

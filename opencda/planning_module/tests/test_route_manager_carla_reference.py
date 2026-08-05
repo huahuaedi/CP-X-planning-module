@@ -728,6 +728,103 @@ class RouteManagerCarlaReferenceTest(unittest.TestCase):
 
         self.assertEqual(len(bridged), len(entries))
 
+    def test_unbounded_extrapolation_drifts_far_past_a_short_route(self):
+        # Default behavior (today's, unchanged): once the requested
+        # lookahead exceeds the real route length, samples keep extrapolating
+        # straight ahead without bound.
+        manager = CPXRouteManager(global_planner=object())
+        manager._carla_route_entries = [
+            (_Waypoint(float(index), 0.0), "LANEFOLLOW") for index in range(5)
+        ]
+
+        reference, _ = manager.carla_waypoint_reference(
+            ego_x_m=0.0,
+            ego_y_m=0.0,
+            ego_heading_rad=0.0,
+            horizon_steps=20,
+            step_distance_m=1.0,
+            target_speed_mps=1.0,
+            fallback_lane_id=1,
+        )
+
+        self.assertGreater(float(reference[-1]["x_ref_m"]), 15.0)
+
+    def test_max_extrapolation_m_caps_drift_past_a_short_route(self):
+        # A short connector (like an intersection turn) combined with a long
+        # requested horizon must not hand MPC a reference tail that runs
+        # arbitrarily far past the real geometry in a straight line.
+        manager = CPXRouteManager(global_planner=object())
+        manager._carla_route_entries = [
+            (_Waypoint(float(index), 0.0), "LANEFOLLOW") for index in range(5)
+        ]
+
+        reference, _ = manager.carla_waypoint_reference(
+            ego_x_m=0.0,
+            ego_y_m=0.0,
+            ego_heading_rad=0.0,
+            horizon_steps=20,
+            step_distance_m=1.0,
+            target_speed_mps=1.0,
+            fallback_lane_id=1,
+            max_extrapolation_m=2.0,
+        )
+
+        last_real_x_m = 4.0
+        for sample in reference:
+            self.assertLessEqual(
+                float(sample["x_ref_m"]),
+                last_real_x_m + 2.0 + 1.0e-6,
+            )
+            self.assertTrue(math.isfinite(float(sample["heading_rad"])))
+
+    def test_extrapolated_samples_inherit_real_lane_width_by_default(self):
+        manager = CPXRouteManager(global_planner=object())
+        manager._carla_route_entries = [
+            (_Waypoint(float(index), 0.0), "LANEFOLLOW") for index in range(5)
+        ]
+
+        reference, _ = manager.carla_waypoint_reference(
+            ego_x_m=0.0,
+            ego_y_m=0.0,
+            ego_heading_rad=0.0,
+            horizon_steps=20,
+            step_distance_m=1.0,
+            target_speed_mps=1.0,
+            fallback_lane_id=1,
+            max_extrapolation_m=2.0,
+        )
+
+        # Real (first) and extrapolated (last) samples both keep the real
+        # waypoint's own lane width when no override is given -- today's
+        # unchanged behavior.
+        self.assertAlmostEqual(float(reference[0]["lane_width_m"]), 3.5)
+        self.assertAlmostEqual(float(reference[-1]["lane_width_m"]), 3.5)
+
+    def test_extrapolated_lane_width_m_overrides_only_the_parked_tail(self):
+        manager = CPXRouteManager(global_planner=object())
+        manager._carla_route_entries = [
+            (_Waypoint(float(index), 0.0), "LANEFOLLOW") for index in range(5)
+        ]
+
+        reference, _ = manager.carla_waypoint_reference(
+            ego_x_m=0.0,
+            ego_y_m=0.0,
+            ego_heading_rad=0.0,
+            horizon_steps=20,
+            step_distance_m=1.0,
+            target_speed_mps=1.0,
+            fallback_lane_id=1,
+            max_extrapolation_m=2.0,
+            extrapolated_lane_width_m=8.0,
+        )
+
+        # The first sample is still real geometry -- unaffected by the
+        # override. The last sample is parked past the real route's end --
+        # it should carry the generous override width instead of the real
+        # waypoint's normal 3.5m lane width.
+        self.assertAlmostEqual(float(reference[0]["lane_width_m"]), 3.5)
+        self.assertAlmostEqual(float(reference[-1]["lane_width_m"]), 8.0)
+
 
 if __name__ == "__main__":
     unittest.main()

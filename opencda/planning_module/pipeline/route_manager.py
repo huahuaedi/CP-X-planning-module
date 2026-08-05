@@ -650,12 +650,28 @@ class CPXRouteManager:
         anchor_to_ego_heading: bool = False,
         ego_anchor_distance_m: Optional[float] = None,
         allow_route_rejoin: bool = True,
+        max_extrapolation_m: float = float("inf"),
+        extrapolated_lane_width_m: Optional[float] = None,
     ) -> Tuple[List[Dict[str, object]], str]:
         """Sample a local reference from the CARLA GRP waypoint chain.
 
         The chain already contains the route-selected junction connector. Route
         progress is monotonic, so a nearby crossing or adjacent connector cannot
         make the local reference jump backward to another branch.
+
+        Once the requested lookahead exceeds the real remaining polyline
+        length, samples fall back to extrapolating straight ahead in the last
+        real segment's heading -- fine when there's plenty of real route left
+        (the common case), but on a short segment (e.g. an intersection turn
+        connector) a long horizon can extrapolate far past the real curve.
+        max_extrapolation_m bounds how far that fallback is allowed to drift
+        past the real geometry; the default preserves today's unbounded
+        behavior. extrapolated_lane_width_m, when given, overrides the lane
+        width reported for those same extrapolated samples (which otherwise
+        inherit the last real waypoint's own width) -- lets a caller loosen
+        the road-boundary corridor for a tail it has no real geometry for,
+        instead of forcing a normal-width corridor onto a parked/uncertain
+        position. Real samples are never affected by either parameter.
         """
 
         sync_reason = self.sync_carla_route_progress(
@@ -722,21 +738,28 @@ class CPXRouteManager:
                 heading_rad = math.atan2(node_b[1] - node_a[1], node_b[0] - node_a[0])
                 waypoint = node_b[3]
                 option = node_b[4]
+                is_extrapolated = False
             else:
                 node_a = polyline[-2]
                 node_b = polyline[-1]
                 heading_rad = math.atan2(node_b[1] - node_a[1], node_b[0] - node_a[0])
                 extra_m = max(0.0, target_s_m - cumulative[-1])
+                extra_m = min(float(extra_m), float(max_extrapolation_m))
                 x_m = node_b[0] + extra_m * math.cos(heading_rad)
                 y_m = node_b[1] + extra_m * math.sin(heading_rad)
                 waypoint = node_b[3]
                 option = node_b[4]
+                is_extrapolated = True
             normalized_option = str(option or "").strip().upper().replace("_", "")
             lane_transition_kind = (
                 "lateral_lane_change"
                 if normalized_option in {"CHANGELANELEFT", "CHANGELANERIGHT"}
                 else "longitudinal_successor"
             )
+            if is_extrapolated and extrapolated_lane_width_m is not None:
+                lane_width_m = float(extrapolated_lane_width_m)
+            else:
+                lane_width_m = float(getattr(waypoint, "lane_width", 3.5) or 3.5)
             samples.append({
                 "x_ref_m": float(x_m),
                 "y_ref_m": float(y_m),
@@ -744,7 +767,7 @@ class CPXRouteManager:
                 "y": float(y_m),
                 "heading_rad": float(heading_rad),
                 "lane_id": int(_canonical_carla_lane_id(waypoint, fallback_lane_id)),
-                "lane_width_m": float(getattr(waypoint, "lane_width", 3.5) or 3.5),
+                "lane_width_m": float(lane_width_m),
                 "road_id": int(getattr(waypoint, "road_id", 0) or 0),
                 "road_option": str(option),
                 "lane_transition_kind": str(lane_transition_kind),

@@ -126,6 +126,31 @@ class FailSafeFallbackTrajectoryTests(unittest.TestCase):
         self.assertTrue(np.all(u_solution[:, 0] < 0.0))
         self.assertTrue(np.all(u_solution[:, 0] >= -2.0 - 1e-6))
 
+    def test_output_unaffected_by_speed_soft_constraint_flag(self):
+        # _fail_safe_fallback_trajectory operates entirely post-hoc on the
+        # rollout and _minimum_reachable_speed_profile_mps -- it must never
+        # reference speed_soft_constraint_enabled/weight/max_slack_mps, so
+        # its output should be identical regardless of that flag's value.
+        rollout_x, rollout_u = self._rollout(_bare_mpc(consecutive_failures=1).horizon_steps)
+        x0 = np.array([0.0, 2.5, 10.0, 0.3])
+
+        mpc_off = _bare_mpc(consecutive_failures=1)
+        mpc_off.speed_soft_constraint_enabled = False
+        x_off, u_off = mpc_off._fail_safe_fallback_trajectory(
+            x0=x0, rollout_x=rollout_x, rollout_u=rollout_u, current_acceleration_mps2=0.0,
+        )
+
+        mpc_on = _bare_mpc(consecutive_failures=1)
+        mpc_on.speed_soft_constraint_enabled = True
+        mpc_on.speed_soft_constraint_weight = 200.0
+        mpc_on.speed_soft_max_slack_mps = 3.0
+        x_on, u_on = mpc_on._fail_safe_fallback_trajectory(
+            x0=x0, rollout_x=rollout_x, rollout_u=rollout_u, current_acceleration_mps2=0.0,
+        )
+
+        np.testing.assert_allclose(x_off, x_on)
+        np.testing.assert_allclose(u_off, u_on)
+
     def test_at_or_above_threshold_applies_full_emergency_braking(self):
         mpc = _bare_mpc(
             consecutive_failures=5,
@@ -210,6 +235,10 @@ class ModeCostProfileTests(unittest.TestCase):
         mpc.road_boundary_margin_m = 0.5
         mpc.road_boundary_max_slack_m = 0.1
         mpc.lane_keep_boundary_weight = 10000.0
+        mpc.road_envelope_weight = 10000.0
+        mpc.road_envelope_max_slack_m = 0.10
+        mpc.speed_soft_constraint_weight = 200.0
+        mpc.speed_soft_max_slack_mps = 3.0
         mpc.mode_cost_profiles = {
             "intersection_turn": {
                 "lane_center_w0": 36.0,

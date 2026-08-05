@@ -24,7 +24,10 @@ if "carla" not in sys.modules:
     sys.modules["carla"] = fake_carla
 
 
-from opencda_bridge.cpx_mpc_planner import CPXMPCPlannerBridge
+from opencda_bridge.cpx_mpc_planner import (
+    CPXMPCPlannerBridge,
+    _adaptive_target_horizon_s,
+)
 from pipeline.reference_generator import ReferenceGenerator
 
 
@@ -117,6 +120,101 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
                 float(row["lane_change_progress"]) == 1.0
                 for row in bridge._route_tracking_lane_change_reference
             )
+        )
+
+    def test_heading_misalignment_delays_stabilization_handoff(self):
+        # current_lane_id/progress alone only capture that ego has crossed
+        # into the target lane's lateral extent -- heading can still be
+        # mid-turn. Starting the one-shot stabilization quintic while
+        # heading is far from the target lane's own direction forces it to
+        # reconcile a large heading gap over a short distance, producing a
+        # sharp overshoot-then-correct steering profile (this is what
+        # produced the observed post-lane-change lane-line touch). Confirm
+        # the handoff is withheld -- not failed, just delayed -- when
+        # heading is 30 degrees off a target lane reporting 0 degrees.
+        bridge = self._bridge()
+        bridge._route_tracking_lane_change_progress = 0.60
+        bridge._route_tracking_lane_change_reference = [
+            {
+                "x_ref_m": float(index + 1),
+                "y_ref_m": 3.5,
+                "heading_rad": 0.0,
+                "lane_change_progress": 0.60,
+            }
+            for index in range(30)
+        ]
+        bridge.reference_generator._map_waypoint_callback = (
+            lambda location: types.SimpleNamespace(
+                transform=types.SimpleNamespace(
+                    location=types.SimpleNamespace(
+                        x=location.x, y=location.y
+                    ),
+                    rotation=types.SimpleNamespace(yaw=0.0),
+                ),
+                lane_width=3.5,
+            )
+        )
+        stabilization_calls = []
+        bridge.reference_generator.target_lane_stabilization_samples = (
+            lambda **kwargs: stabilization_calls.append(kwargs) or []
+        )
+
+        reason = bridge._release_completed_lane_change_commitment(
+            current_lane_id=2,
+            ego_location=bridge.carla.Location(x=5.0, y=0.4),
+            ego_yaw_rad=math.radians(30.0),
+        )
+
+        self.assertEqual(reason, "")
+        self.assertEqual(stabilization_calls, [])
+        self.assertEqual(bridge._route_tracking_lane_change_phase, "executing")
+        self.assertTrue(bridge._route_tracking_lane_change_reference)
+
+    def test_heading_alignment_within_threshold_allows_stabilization_handoff(self):
+        bridge = self._bridge()
+        bridge._route_tracking_lane_change_progress = 0.60
+        bridge._route_tracking_lane_change_reference = [
+            {
+                "x_ref_m": float(index + 1),
+                "y_ref_m": 3.5,
+                "heading_rad": 0.0,
+                "lane_change_progress": 0.60,
+            }
+            for index in range(30)
+        ]
+        bridge.reference_generator._map_waypoint_callback = (
+            lambda location: types.SimpleNamespace(
+                transform=types.SimpleNamespace(
+                    location=types.SimpleNamespace(
+                        x=location.x, y=location.y
+                    ),
+                    rotation=types.SimpleNamespace(yaw=0.0),
+                ),
+                lane_width=3.5,
+            )
+        )
+        bridge.reference_generator.target_lane_stabilization_samples = (
+            lambda **_kwargs: [
+                {
+                    "x_ref_m": 5.8 + 0.2 * float(index),
+                    "y_ref_m": 0.0,
+                    "heading_rad": 0.0,
+                    "lane_id": 2,
+                }
+                for index in range(25)
+            ]
+        )
+
+        reason = bridge._release_completed_lane_change_commitment(
+            current_lane_id=2,
+            ego_location=bridge.carla.Location(x=5.0, y=0.4),
+            ego_yaw_rad=math.radians(5.0),
+        )
+
+        self.assertIn("target_lane_stabilization_started", reason)
+        self.assertEqual(
+            bridge._route_tracking_lane_change_phase,
+            "target_lane_stabilization",
         )
 
     def test_target_lane_entry_never_continues_old_quintic_when_handoff_fails(self):
@@ -244,6 +342,53 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
         )
         self.assertEqual(bridge._route_tracking_lane_change_reference, master)
 
+    def test_direct_tracking_progress_reflects_live_lag_not_stale_schedule(self):
+        # Under direct target-lane tracking, the per-sample "lane_change_progress"
+        # tag is a stale elapsed-time schedule (MPC's own QP, not the schedule,
+        # now determines the real transient path). If ego lags that schedule
+        # (e.g. steer-rate-limited), progress must reflect the real geometric
+        # lag -- not the inflated scheduled value -- otherwise commitment/
+        # completion gating (entry_min_progress/min_progress) could fire before
+        # the vehicle has actually crossed, or (if the schedule under-reports)
+        # never fire at all.
+        bridge = self._bridge()
+        master = []
+        pairs = []
+        for index in range(60):
+            scheduled_progress = min(1.0, float(index + 1) / 20.0)
+            master.append(
+                {
+                    "x_ref_m": 0.3 * float(index + 1),
+                    "y_ref_m": 3.5,
+                    "heading_rad": 0.0,
+                    "lane_id": 2,
+                    # Deliberately inflated vs. where ego will actually be,
+                    # simulating a schedule that has outrun real progress.
+                    "lane_change_progress": scheduled_progress,
+                }
+            )
+            pairs.append((
+                {"x_ref_m": 0.3 * float(index + 1), "y_ref_m": 0.0},
+                {"x_ref_m": 0.3 * float(index + 1), "y_ref_m": 3.5},
+            ))
+        bridge._route_tracking_lane_change_reference = master
+        bridge._route_tracking_lane_change_progress_pairs = pairs
+
+        # Ego is laterally only 30% of the way across (y=1.05 of a 3.5m gap),
+        # even though the nearest station's *scheduled* tag already claims
+        # 100% (index 19+ -> scheduled_progress=1.0).
+        window, _ = bridge._route_tracking_lane_change_window(
+            ego_location=bridge.carla.Location(x=6.0, y=1.05),
+            ego_yaw_rad=0.0,
+            target_speed_mps=3.0,
+            step_distance_m=0.3,
+        )
+
+        self.assertTrue(window)
+        self.assertAlmostEqual(
+            bridge._route_tracking_lane_change_progress, 0.30, places=2
+        )
+
     def test_validation_rejects_reference_over_25_degree_heading_error(self):
         bridge = self._bridge()
         bridge.reference_generator._map_waypoint_callback = lambda location: types.SimpleNamespace(
@@ -328,6 +473,61 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
             )
         ]
         self.assertLess(max(curvatures), 0.35)
+
+
+class AdaptiveTargetHorizonTests(unittest.TestCase):
+    _PROFILE_HORIZON_S = {
+        "lane_follow": 3.0,
+        "prepare_lane_change": 4.5,
+        "execute_lane_change": 4.5,
+        "intersection_turn": 1.5,
+        "stop": 2.0,
+        "recovery": 1.5,
+    }
+
+    def test_uses_the_active_mode_profile_when_no_obstacle_info(self):
+        for mode, expected in self._PROFILE_HORIZON_S.items():
+            with self.subTest(mode=mode):
+                self.assertEqual(
+                    _adaptive_target_horizon_s(
+                        mpc_cost_profile=mode,
+                        nearest_obstacle_distance_m=None,
+                        ego_speed_mps=3.0,
+                        profile_horizon_s=self._PROFILE_HORIZON_S,
+                    ),
+                    expected,
+                )
+
+    def test_unlisted_mode_falls_back_to_lane_follow(self):
+        self.assertEqual(
+            _adaptive_target_horizon_s(
+                mpc_cost_profile="some_unlisted_mode",
+                nearest_obstacle_distance_m=None,
+                ego_speed_mps=3.0,
+                profile_horizon_s=self._PROFILE_HORIZON_S,
+            ),
+            self._PROFILE_HORIZON_S["lane_follow"],
+        )
+
+    def test_nearby_obstacle_shortens_horizon_below_the_mode_base(self):
+        # 3 m/s ego, obstacle 3m ahead -> ~1s reaction time, well under
+        # execute_lane_change's 4.5s mode base.
+        target = _adaptive_target_horizon_s(
+            mpc_cost_profile="execute_lane_change",
+            nearest_obstacle_distance_m=3.0,
+            ego_speed_mps=3.0,
+            profile_horizon_s=self._PROFILE_HORIZON_S,
+        )
+        self.assertAlmostEqual(target, 1.0)
+
+    def test_distant_obstacle_does_not_shorten_horizon_below_the_mode_base(self):
+        target = _adaptive_target_horizon_s(
+            mpc_cost_profile="lane_follow",
+            nearest_obstacle_distance_m=200.0,
+            ego_speed_mps=3.0,
+            profile_horizon_s=self._PROFILE_HORIZON_S,
+        )
+        self.assertAlmostEqual(target, self._PROFILE_HORIZON_S["lane_follow"])
 
 
 if __name__ == "__main__":

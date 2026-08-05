@@ -62,9 +62,21 @@ class FinalReferenceGate:
             behavior_fsm_state=behavior_fsm_state,
             stop_goal_active=stop_goal_active,
         )
+        if mode == "lane_change" and bool(
+            self.config.get(
+                "route_tracking_lane_change_direct_target_tracking_enabled",
+                False,
+            )
+        ):
+            # Under direct target-lane tracking, MPC is handed the target
+            # lane's own (unblended) centerline -- its first sample
+            # legitimately sits close to a full lane width from ego at lock
+            # time, which the standard "lane_change" mode's tighter limit
+            # (sized for an already-ramping blend) would veto.
+            mode = "lane_change_direct"
         expected_lane_id = (
             int(target_lane_id)
-            if mode == "lane_change" and int(target_lane_id) != 0
+            if mode in ("lane_change", "lane_change_direct") and int(target_lane_id) != 0
             else int(current_lane_id)
         )
         contract = contract_from_config(

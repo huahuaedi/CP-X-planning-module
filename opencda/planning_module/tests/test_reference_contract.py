@@ -125,6 +125,56 @@ class ReferenceContractTest(unittest.TestCase):
         self.assertFalse(result.valid)
         self.assertIn("terminal_speed_not_zero", result.violations)
 
+    def test_lane_change_direct_mode_allows_full_lane_width_first_sample(self):
+        # Under direct target-lane tracking, MPC is handed the target lane's
+        # own (unblended) centerline -- its first sample legitimately sits
+        # close to a full lane width from ego at lock time. The standard
+        # "lane_change" mode's 1.25m limit (sized for an already-ramping
+        # blend) must reject that; the new "lane_change_direct" mode must
+        # accept it.
+        reference = [
+            {"x_ref_m": 1.0, "y_ref_m": 3.2, "lane_id": 2, "speed_ref_mps": 2.0},
+            {"x_ref_m": 2.0, "y_ref_m": 3.2, "lane_id": 2, "speed_ref_mps": 2.0},
+            {"x_ref_m": 3.0, "y_ref_m": 3.2, "lane_id": 2, "speed_ref_mps": 2.0},
+        ]
+        lane_change_contract = contract_from_config(
+            mode="lane_change",
+            expected_lane_id=1,
+            horizon_steps=3,
+            config={},
+            default_speed_mps=3.0,
+        )
+        blocked = validate_reference_contract(
+            reference_samples=reference,
+            destination_state=[3.0, 3.2, 2.0, 0.0, 2],
+            ego_state=[0.0, 0.0, 0.0, 0.0],
+            contract=lane_change_contract,
+            check_destination_body_lateral=False,
+        )
+        self.assertFalse(blocked.valid)
+        self.assertIn("first_lateral_out_of_contract", blocked.violations)
+
+        direct_contract = contract_from_config(
+            mode="lane_change_direct",
+            expected_lane_id=1,
+            horizon_steps=3,
+            config={},
+            default_speed_mps=3.0,
+        )
+        self.assertGreater(
+            direct_contract.max_first_lateral_abs_m,
+            lane_change_contract.max_first_lateral_abs_m,
+        )
+        self.assertTrue(direct_contract.allow_lane_transition)
+        allowed = validate_reference_contract(
+            reference_samples=reference,
+            destination_state=[3.0, 3.2, 2.0, 0.0, 2],
+            ego_state=[0.0, 0.0, 0.0, 0.0],
+            contract=direct_contract,
+            check_destination_body_lateral=False,
+        )
+        self.assertTrue(allowed.valid, allowed.reason())
+
     def test_intersection_turn_allows_route_branch_body_lateral(self):
         contract = contract_from_config(
             mode="intersection_turn",

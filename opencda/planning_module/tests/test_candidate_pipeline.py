@@ -1,4 +1,5 @@
 import importlib.util
+import math
 import pathlib
 import sys
 import types
@@ -241,6 +242,187 @@ class CandidatePipelineTest(unittest.TestCase):
         self.assertAlmostEqual(
             shaped[0]["lane_change_initial_progress"],
             0.6,
+        )
+
+    def test_lane_change_reference_blend_geometry_false_uses_raw_target_xy(self):
+        # blend_geometry=False lets MPC's own QP determine the transient
+        # lateral path (subject to its hard steer-rate/accel constraints)
+        # instead of being forced to track a pre-shaped geometric blend that
+        # can demand more steering rate than those constraints allow. The
+        # returned samples should carry the target lane's own x/y verbatim
+        # -- not interpolated toward source -- while progress bookkeeping
+        # (still needed by commitment/completion gating) stays populated.
+        source = [
+            {"x_ref_m": float(index + 1), "y_ref_m": 0.0, "heading_rad": 0.0}
+            for index in range(6)
+        ]
+        target = [
+            {"x_ref_m": float(index + 1), "y_ref_m": 3.5, "heading_rad": 0.0}
+            for index in range(6)
+        ]
+        shaped = candidate_pipeline.shape_lane_change_reference(
+            target_reference=target,
+            source_reference=source,
+            duration_s=4.0,
+            dt_s=0.5,
+            current_lane_id=1,
+            target_lane_id=2,
+            target_speed_mps=3.0,
+            blend_geometry=False,
+        )
+
+        self.assertEqual(len(shaped), 6)
+        self.assertTrue(all(
+            abs(float(row["y_ref_m"]) - 3.5) < 1.0e-9 for row in shaped
+        ))
+        self.assertTrue(all(
+            abs(float(row["x_ref_m"]) - float(index + 1)) < 1.0e-9
+            for index, row in enumerate(shaped)
+        ))
+        self.assertIn("lane_change_progress", shaped[0])
+        self.assertIn("lane_change_initial_progress", shaped[0])
+
+    @staticmethod
+    def _discrete_curvature_1pm(samples):
+        max_curvature = 0.0
+        for first, second in zip(samples[:-1], samples[1:]):
+            dx = float(second["x_ref_m"]) - float(first["x_ref_m"])
+            dy = float(second["y_ref_m"]) - float(first["y_ref_m"])
+            step_m = max(1.0e-6, math.hypot(dx, dy))
+            dtheta = math.atan2(
+                math.sin(float(second["heading_rad"]) - float(first["heading_rad"])),
+                math.cos(float(second["heading_rad"]) - float(first["heading_rad"])),
+            )
+            max_curvature = max(max_curvature, abs(dtheta) / step_m)
+        return max_curvature
+
+    def test_lane_change_duration_comfort_check_accepts_already_comfortable_duration(self):
+        source = [
+            {"x_ref_m": float(index + 1), "y_ref_m": 0.0, "heading_rad": 0.0}
+            for index in range(20)
+        ]
+        target = [
+            {"x_ref_m": float(index + 1), "y_ref_m": 3.5, "heading_rad": 0.0}
+            for index in range(20)
+        ]
+        duration_s, shaped, reason = candidate_pipeline.select_comfortable_lane_change_duration_s(
+            target_reference=target,
+            source_reference=source,
+            initial_duration_s=6.0,
+            duration_max_s=8.0,
+            dt_s=0.5,
+            current_lane_id=1,
+            target_lane_id=2,
+            target_speed_mps=3.0,
+            lateral_accel_limit_mps2=1.3,
+            curvature_fn=self._discrete_curvature_1pm,
+        )
+
+        self.assertEqual(duration_s, 6.0)
+        self.assertEqual(reason, "lane_change_duration_within_comfort_limit")
+        self.assertEqual(len(shaped), 20)
+
+    def test_lane_change_duration_comfort_check_widens_too_short_duration(self):
+        source = [
+            {"x_ref_m": float(index + 1), "y_ref_m": 0.0, "heading_rad": 0.0}
+            for index in range(20)
+        ]
+        target = [
+            {"x_ref_m": float(index + 1), "y_ref_m": 3.5, "heading_rad": 0.0}
+            for index in range(20)
+        ]
+        duration_s, shaped, reason = candidate_pipeline.select_comfortable_lane_change_duration_s(
+            target_reference=target,
+            source_reference=source,
+            initial_duration_s=1.5,
+            duration_max_s=8.0,
+            dt_s=0.5,
+            current_lane_id=1,
+            target_lane_id=2,
+            target_speed_mps=3.0,
+            lateral_accel_limit_mps2=1.3,
+            curvature_fn=self._discrete_curvature_1pm,
+        )
+
+        self.assertGreater(duration_s, 1.5)
+        self.assertEqual(reason, "lane_change_duration_within_comfort_limit")
+        implied_lateral_accel = 3.0 ** 2 * self._discrete_curvature_1pm(shaped)
+        self.assertLessEqual(implied_lateral_accel, 1.3 + 1.0e-6)
+
+    def test_lane_change_duration_comfort_check_caps_at_max_when_never_satisfied(self):
+        source = [
+            {"x_ref_m": float(index + 1), "y_ref_m": 0.0, "heading_rad": 0.0}
+            for index in range(20)
+        ]
+        target = [
+            {"x_ref_m": float(index + 1), "y_ref_m": 3.5, "heading_rad": 0.0}
+            for index in range(20)
+        ]
+        duration_s, shaped, reason = candidate_pipeline.select_comfortable_lane_change_duration_s(
+            target_reference=target,
+            source_reference=source,
+            initial_duration_s=1.5,
+            duration_max_s=1.5,
+            dt_s=0.5,
+            current_lane_id=1,
+            target_lane_id=2,
+            target_speed_mps=3.0,
+            lateral_accel_limit_mps2=1.3,
+            curvature_fn=self._discrete_curvature_1pm,
+        )
+
+        self.assertEqual(duration_s, 1.5)
+        self.assertEqual(reason, "lane_change_duration_capped_at_max")
+        self.assertEqual(len(shaped), 20)
+
+    def test_envelope_blocks_anchor_at_lock_position_and_span_lane_width(self):
+        source = [
+            {
+                "x_ref_m": float(index), "y_ref_m": 0.0, "heading_rad": 0.0,
+                "lane_width_m": 3.5, "road_left_width_m": 1.75, "road_right_width_m": 1.75,
+            }
+            for index in range(20)
+        ]
+        target = [
+            {
+                "x_ref_m": float(index), "y_ref_m": 3.5, "heading_rad": 0.0,
+                "lane_width_m": 3.5, "road_left_width_m": 1.75, "road_right_width_m": 1.75,
+            }
+            for index in range(20)
+        ]
+
+        blocks = candidate_pipeline.build_route_tracking_lane_change_envelope_blocks(
+            source_reference=source,
+            target_reference=target,
+            master_step_count=20,
+            step_distance_m=0.3,
+            road_boundary_margin_m=0.5,
+        )
+
+        self.assertEqual(len(blocks), 2)
+        source_block, target_block = blocks
+        # Back edge anchored at the lock position (x=0), extending forward.
+        self.assertAlmostEqual(
+            source_block.x_center_m - source_block.half_length_m, 0.0, places=6
+        )
+        # Target block offset from source by exactly the lane width, same x.
+        self.assertAlmostEqual(target_block.y_center_m - source_block.y_center_m, 3.5, places=6)
+        self.assertAlmostEqual(target_block.x_center_m, source_block.x_center_m, places=6)
+        # half_length covers the full locked master-array span.
+        full_length_m = (20 - 1) * 0.3
+        self.assertGreaterEqual(source_block.half_length_m, 0.5 * full_length_m)
+        # half_width reflects the lane half-width minus the boundary margin.
+        self.assertAlmostEqual(source_block.half_width_m, 1.75 - 0.5, places=6)
+
+    def test_envelope_blocks_empty_when_references_missing(self):
+        self.assertEqual(
+            candidate_pipeline.build_route_tracking_lane_change_envelope_blocks(
+                source_reference=[],
+                target_reference=[{"x_ref_m": 0.0, "y_ref_m": 0.0, "heading_rad": 0.0}],
+                master_step_count=20,
+                step_distance_m=0.3,
+            ),
+            [],
         )
 
     def test_selected_lane_change_has_only_configured_variants(self):

@@ -162,6 +162,9 @@ vehicle_base:
     route_tracking_destination_horizon_fraction: 0.9
     route_tracking_min_step_m: 0.10
     route_tracking_lane_change_duration_s: 4.0
+    route_tracking_lane_change_direct_target_tracking_enabled: false
+    route_tracking_lane_change_road_envelope_enabled: false
+    route_tracking_lane_change_duration_comfort_check_enabled: true
     route_tracking_recovery_heading_error_deg: 25.0
     route_tracking_recovery_speed_mps: 1.0
     route_tracking_recovery_rejoin_distance_m: 10.0
@@ -397,6 +400,9 @@ scenario:
         route_tracking_destination_horizon_fraction: 0.9
         route_tracking_min_step_m: 0.10
         route_tracking_lane_change_duration_s: 4.0
+        route_tracking_lane_change_direct_target_tracking_enabled: false
+        route_tracking_lane_change_road_envelope_enabled: false
+        route_tracking_lane_change_duration_comfort_check_enabled: true
         route_tracking_recovery_heading_error_deg: 25.0
         route_tracking_recovery_speed_mps: 1.0
         route_tracking_recovery_rejoin_distance_m: 10.0

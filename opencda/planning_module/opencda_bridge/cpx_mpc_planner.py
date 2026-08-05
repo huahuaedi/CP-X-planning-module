@@ -465,6 +465,14 @@ class CPXMPCPlannerBridge:
         self._route_tracking_lane_change_option = ""
         self._route_tracking_lane_change_progress = 0.0
         self._route_tracking_lane_change_reference: list[dict[str, object]] = []
+        self._route_tracking_lane_change_progress_pairs: list[
+            tuple[dict[str, object], dict[str, object]]
+        ] = []
+        self._route_tracking_lane_change_envelope_blocks = None
+        self._route_tracking_lane_change_envelope_epsilon0 = 0.0
+        self._route_tracking_lane_change_commitment_invalid_frames = 0
+        self._route_tracking_lane_change_duration_comfort_reason = ""
+        self._route_tracking_lane_change_resolved_duration_s = 0.0
         self._route_tracking_lane_change_progress_index = 0
         self._route_tracking_lane_change_source_lane_id = 0
         self._route_tracking_lane_change_target_lane_id = 0
@@ -725,6 +733,7 @@ class CPXMPCPlannerBridge:
             "candidate_mpc_probe_summary",
             "candidate_selected_trajectory_variant",
             "candidate_selected_lane_change_duration_s",
+            "candidate_selected_lane_change_duration_comfort_reason",
             "candidate_selected_lane_change_authorization_source",
             "candidate_selected_lane_change_initial_progress",
             "candidate_selected_lane_change_terminal_progress",
@@ -893,9 +902,11 @@ class CPXMPCPlannerBridge:
             "Cost_Repulsive",
             "Cost_Repulsive_Safe",
             "Cost_Repulsive_Collision",
+            "Cost_Repulsive_LogBarrier",
             "Cost_ref",
             "Cost_LaneCenter",
             "Cost_Control",
+            "Cost_VelocitySlack",
             "prediction_lane_step_resolved_count",
             "prediction_lane_step_none_count",
             "turn_boundary_recovery_active",
@@ -1807,6 +1818,9 @@ class CPXMPCPlannerBridge:
                 )
             )
             if bool(mpc_replan_executed):
+                road_envelope_payload_world = (
+                    self._current_route_tracking_lane_change_envelope_payload_world()
+                )
                 self.mpc.plan_trajectory(
                     current_state=current_state,
                     destination_state=destination_state,
@@ -1820,6 +1834,7 @@ class CPXMPCPlannerBridge:
                     current_steering_rad=float(self._last_steer_rad),
                     lane_center_reference_samples=lane_center_reference,
                     stop_goal_active=bool(mpc_stop_goal_active),
+                    road_envelope_payload_world=road_envelope_payload_world,
                 )
                 mpc_status = str(getattr(self.mpc, "_last_status", "")).strip().lower()
                 if mpc_status and mpc_status not in {"solved", "solved inaccurate"}:
@@ -2143,6 +2158,9 @@ class CPXMPCPlannerBridge:
             "candidate_mpc_probe_summary": reference_debug.get("candidate_mpc_probe_summary", ""),
             "candidate_selected_trajectory_variant": reference_debug.get("lane_change_trajectory_variant", ""),
             "candidate_selected_lane_change_duration_s": reference_debug.get("lane_change_duration_s", ""),
+            "candidate_selected_lane_change_duration_comfort_reason": reference_debug.get(
+                "lane_change_duration_comfort_reason", ""
+            ),
             "candidate_selected_lane_change_authorization_source": reference_debug.get(
                 "lane_change_authorization_source", ""
             ),
@@ -4040,6 +4058,12 @@ class CPXMPCPlannerBridge:
                             2.5,
                         )
                     ),
+                    max_position_step_m=float(
+                        self.config.get(
+                            "road_boundary_projection_max_position_step_m",
+                            0.5,
+                        )
+                    ),
                 )
                 occupancy = projection.occupancy
             else:
@@ -4306,9 +4330,13 @@ class CPXMPCPlannerBridge:
             "Cost_Repulsive_Collision": cost_terms.get(
                 "Cost_Repulsive_Collision", ""
             ),
+            "Cost_Repulsive_LogBarrier": cost_terms.get(
+                "Cost_Repulsive_LogBarrier", ""
+            ),
             "Cost_ref": cost_terms.get("Cost_ref", ""),
             "Cost_LaneCenter": cost_terms.get("Cost_LaneCenter", ""),
             "Cost_Control": cost_terms.get("Cost_Control", ""),
+            "Cost_VelocitySlack": cost_terms.get("Cost_VelocitySlack", ""),
             "prediction_lane_step_resolved_count": int(
                 self._prediction_lane_step_resolved_count
             ),
@@ -4832,9 +4860,24 @@ class CPXMPCPlannerBridge:
                 else ""
             ) + str(scenario_decision.reason)
         stop_goal_active = bool(stop_goal_active or scenario_decision.stop_goal_active)
+        # The route's current_road_option flips to LEFT/RIGHT purely off
+        # distance travelled along the GRP, with no awareness of whether a
+        # locked route-tracking lane change has actually finished converging
+        # (lane id matched, lateral/heading error settled). Handing off to
+        # the turn-reference generator before that happens lets it sample a
+        # waypoint far enough from ego's still-not-centered position to trip
+        # its own lateral contract check, with no recovery path -- keep
+        # tracking the locked lane-change reference a little longer instead;
+        # _route_tracking_lane_change_reference clears itself once the
+        # commitment is genuinely released (or abandoned as stale), so this
+        # naturally falls through on its own.
+        lane_change_commitment_pending_stabilization = bool(
+            self._route_tracking_lane_change_reference
+        )
         if (
             (str(route_turn_decision) or str(route_turn_prepare_decision))
             and not str(scenario_behavior_override)
+            and not bool(lane_change_commitment_pending_stabilization)
             and str(decision) not in {"stop_at_intersection", "stop_sign", "emergency_brake"}
         ):
             decision = str(route_turn_decision or route_turn_prepare_decision)
@@ -4883,17 +4926,18 @@ class CPXMPCPlannerBridge:
                     if str(behavior_override_reason)
                     else ""
                 ) + str(turn_latch_reason)
+        front_gap_m = self._front_gap_m(
+            ego_location=ego_location,
+            ego_yaw_rad=float(ego_yaw_rad),
+            object_snapshots=object_snapshots,
+        )
         speed_plan = build_speed_plan(
             scenario_decision=scenario_decision,
             behavior_decision=str(decision),
             requested_speed_mps=float(speed_ref_mps),
             ego_speed_mps=float(ego_speed_mps),
             config=dict(self.config),
-            front_gap_m=self._front_gap_m(
-                ego_location=ego_location,
-                ego_yaw_rad=float(ego_yaw_rad),
-                object_snapshots=object_snapshots,
-            ),
+            front_gap_m=front_gap_m,
         )
         speed_ref_mps = float(speed_plan.target_speed_mps)
         stop_goal_active = bool(stop_goal_active or speed_plan.stop_goal_active)
@@ -5312,6 +5356,12 @@ class CPXMPCPlannerBridge:
                 planner_input_frame.planning.route.next_macro_maneuver
             ),
             sim_time_s=float(sim_time_s),
+            nearest_obstacle_distance_m=(
+                float(front_gap_m)
+                if front_gap_m is not None and math.isfinite(float(front_gap_m))
+                else None
+            ),
+            ego_speed_mps=float(ego_speed_mps),
         )
         # Keep OpenCDA aligned with the standalone planning runner: the
         # reference pipeline owns lane-follow trimming, blending, jump freezing,
@@ -6062,13 +6112,19 @@ class CPXMPCPlannerBridge:
             ),
             "lane_change_duration_s": (
                 float(
-                    self.config.get(
+                    self._route_tracking_lane_change_resolved_duration_s
+                    or self.config.get(
                         "route_tracking_lane_change_duration_s",
                         4.0,
                     )
                 )
                 if bool(route_lane_change_active)
                 else 0.0
+            ),
+            "lane_change_duration_comfort_reason": (
+                str(self._route_tracking_lane_change_duration_comfort_reason)
+                if bool(route_lane_change_active)
+                else ""
             ),
             "lane_change_initial_progress": (
                 float(self._route_tracking_lane_change_progress)
@@ -6180,9 +6236,32 @@ class CPXMPCPlannerBridge:
                 )
             ),
         )
+        duration_comfort_check_enabled = bool(
+            self.config.get(
+                "route_tracking_lane_change_duration_comfort_check_enabled",
+                False,
+            )
+        )
+        duration_max_s = max(
+            float(resolved_duration_s),
+            float(
+                self.config.get(
+                    "route_tracking_lane_change_duration_max_s",
+                    8.0,
+                )
+            ),
+        )
+        # Size the fetched source/target arrays for whatever duration the
+        # comfort search might settle on -- shape_lane_change_reference can
+        # only blend as far as the arrays it's given.
+        master_steps_duration_s = (
+            float(duration_max_s)
+            if bool(duration_comfort_check_enabled)
+            else float(resolved_duration_s)
+        )
         master_steps = max(
             int(self.mpc.horizon_steps),
-            int(math.ceil(float(resolved_duration_s) / float(self.mpc.dt_s)))
+            int(math.ceil(float(master_steps_duration_s) / float(self.mpc.dt_s)))
             + int(self.mpc.horizon_steps),
         )
         source_reference = self.reference_generator.lane_center_samples(
@@ -6226,20 +6305,105 @@ class CPXMPCPlannerBridge:
                 f"target={len(target_reference)}:{target_reason}"
             )
         from opencda.planning_module.pipeline.candidate_pipeline import (
+            _align_target_reference_to_source,
+            select_comfortable_lane_change_duration_s,
             shape_lane_change_reference,
         )
 
-        locked = shape_lane_change_reference(
-            target_reference=target_reference,
-            source_reference=source_reference,
-            duration_s=float(resolved_duration_s),
-            dt_s=float(self.mpc.dt_s),
-            current_lane_id=int(current_lane_id),
-            target_lane_id=int(resolved_target_lane_id),
-            target_speed_mps=float(target_speed_mps),
-            ego_x_m=float(ego_location.x),
-            ego_y_m=float(ego_location.y),
-            initial_progress_floor=0.0,
+        direct_target_tracking_enabled = bool(
+            self.config.get(
+                "route_tracking_lane_change_direct_target_tracking_enabled",
+                False,
+            )
+        )
+        road_envelope_enabled = bool(
+            self.config.get(
+                "route_tracking_lane_change_road_envelope_enabled",
+                False,
+            )
+        )
+        if road_envelope_enabled:
+            from opencda.planning_module.pipeline.candidate_pipeline import (
+                build_route_tracking_lane_change_envelope_blocks,
+            )
+            from opencda.planning_module.MPC.lane_keep import (
+                road_envelope_conservativeness_correction,
+            )
+
+            self._route_tracking_lane_change_envelope_blocks = (
+                build_route_tracking_lane_change_envelope_blocks(
+                    source_reference=source_reference,
+                    target_reference=target_reference,
+                    master_step_count=int(master_steps),
+                    step_distance_m=float(step_distance_m),
+                    road_boundary_margin_m=float(
+                        getattr(self.mpc, "road_boundary_margin_m", 0.5)
+                    ),
+                    default_lane_width_m=float(
+                        getattr(self.mpc, "lane_width_m", 3.5)
+                    ),
+                )
+            )
+            self._route_tracking_lane_change_envelope_epsilon0 = (
+                road_envelope_conservativeness_correction(
+                    self._route_tracking_lane_change_envelope_blocks,
+                    rho=float(getattr(self.mpc, "road_envelope_rho", -8.0)),
+                )
+                if self._route_tracking_lane_change_envelope_blocks
+                else 0.0
+            )
+        else:
+            self._route_tracking_lane_change_envelope_blocks = None
+            self._route_tracking_lane_change_envelope_epsilon0 = 0.0
+        duration_comfort_reason = ""
+        if bool(duration_comfort_check_enabled) and not bool(direct_target_tracking_enabled):
+            resolved_duration_s, locked, duration_comfort_reason = (
+                select_comfortable_lane_change_duration_s(
+                    target_reference=target_reference,
+                    source_reference=source_reference,
+                    initial_duration_s=float(resolved_duration_s),
+                    duration_max_s=float(duration_max_s),
+                    dt_s=float(self.mpc.dt_s),
+                    current_lane_id=int(current_lane_id),
+                    target_lane_id=int(resolved_target_lane_id),
+                    target_speed_mps=float(target_speed_mps),
+                    lateral_accel_limit_mps2=float(
+                        self.config.get(
+                            "route_tracking_lane_change_lateral_accel_limit_mps2",
+                            1.3,
+                        )
+                    ),
+                    curvature_fn=self.reference_generator.discrete_curvature_1pm,
+                    ego_x_m=float(ego_location.x),
+                    ego_y_m=float(ego_location.y),
+                    initial_progress_floor=0.0,
+                    duration_growth_factor=float(
+                        self.config.get(
+                            "route_tracking_lane_change_duration_growth_factor",
+                            1.3,
+                        )
+                    ),
+                )
+            )
+        else:
+            locked = shape_lane_change_reference(
+                target_reference=target_reference,
+                source_reference=source_reference,
+                duration_s=float(resolved_duration_s),
+                dt_s=float(self.mpc.dt_s),
+                current_lane_id=int(current_lane_id),
+                target_lane_id=int(resolved_target_lane_id),
+                target_speed_mps=float(target_speed_mps),
+                ego_x_m=float(ego_location.x),
+                ego_y_m=float(ego_location.y),
+                initial_progress_floor=0.0,
+                blend_geometry=not bool(direct_target_tracking_enabled),
+            )
+        self._route_tracking_lane_change_duration_comfort_reason = str(
+            duration_comfort_reason
+        )
+        self._route_tracking_lane_change_resolved_duration_s = float(
+            resolved_duration_s
         )
         if len(locked) < int(self.mpc.horizon_steps):
             return f"lane_change_lock_failed:short_reference:{len(locked)}"
@@ -6247,6 +6411,24 @@ class CPXMPCPlannerBridge:
         self._route_tracking_lane_change_reference = [
             dict(sample) for sample in locked
         ]
+        if bool(direct_target_tracking_enabled):
+            # Under direct target-lane tracking, MPC's own QP -- not a
+            # pre-shaped geometric blend -- determines the transient path,
+            # so the per-sample "lane_change_progress" tag (a time schedule)
+            # no longer reflects genuine lateral crossing. Keep the aligned
+            # source/target pairs so the window search below can measure
+            # ego's real geometric progress each tick instead.
+            aligned_target = _align_target_reference_to_source(
+                source_reference=source_reference,
+                target_reference=target_reference,
+            )
+            pair_count = min(len(source_reference), len(aligned_target))
+            self._route_tracking_lane_change_progress_pairs = [
+                (dict(source_reference[index]), dict(aligned_target[index]))
+                for index in range(pair_count)
+            ]
+        else:
+            self._route_tracking_lane_change_progress_pairs = []
         self._route_tracking_lane_change_progress_index = 0
         self._route_tracking_lane_change_source_lane_id = int(current_lane_id)
         self._route_tracking_lane_change_target_lane_id = int(
@@ -6333,10 +6515,37 @@ class CPXMPCPlannerBridge:
                 best_index : best_index + int(self.mpc.horizon_steps)
             ]
         ]
-        if window:
+        progress_pairs = getattr(
+            self, "_route_tracking_lane_change_progress_pairs", []
+        )
+        if window and not progress_pairs:
             self._route_tracking_lane_change_progress = max(
                 float(self._route_tracking_lane_change_progress),
                 float(window[0].get("lane_change_progress", 0.0)),
+            )
+        if progress_pairs:
+            # Under direct target-lane tracking (progress_pairs populated),
+            # the per-sample "lane_change_progress" tag is a stale
+            # time-schedule, not a genuine crossing measurement -- taking
+            # its max against a live geometric read would let one bad
+            # (over-reported) schedule value permanently inflate progress,
+            # since this accumulator is monotonic. Measure live progress
+            # instead, monotonic only against its own prior value.
+            from opencda.planning_module.pipeline.candidate_pipeline import (
+                _lane_change_initial_progress,
+            )
+
+            pair_index = min(int(best_index), len(progress_pairs) - 1)
+            source_sample, target_sample = progress_pairs[pair_index]
+            live_progress = _lane_change_initial_progress(
+                source_sample=source_sample,
+                target_sample=target_sample,
+                ego_x_m=float(ego_location.x),
+                ego_y_m=float(ego_location.y),
+            )
+            self._route_tracking_lane_change_progress = max(
+                float(self._route_tracking_lane_change_progress),
+                float(live_progress),
             )
         while window and len(window) < int(self.mpc.horizon_steps):
             previous = dict(window[-1])
@@ -6503,6 +6712,12 @@ class CPXMPCPlannerBridge:
         self._route_tracking_lane_change_option = ""
         self._route_tracking_lane_change_progress = 0.0
         self._route_tracking_lane_change_reference = []
+        self._route_tracking_lane_change_progress_pairs = []
+        self._route_tracking_lane_change_envelope_blocks = None
+        self._route_tracking_lane_change_envelope_epsilon0 = 0.0
+        self._route_tracking_lane_change_commitment_invalid_frames = 0
+        self._route_tracking_lane_change_duration_comfort_reason = ""
+        self._route_tracking_lane_change_resolved_duration_s = 0.0
         self._route_tracking_lane_change_progress_index = 0
         self._route_tracking_lane_change_source_lane_id = 0
         self._route_tracking_lane_change_target_lane_id = 0
@@ -6510,6 +6725,21 @@ class CPXMPCPlannerBridge:
         self._route_tracking_lane_change_phase = "idle"
         self._route_tracking_lane_change_stabilization_frames = 0
         self._route_tracking_lane_change_completion_stable_frames = 0
+
+    def _current_route_tracking_lane_change_envelope_payload_world(
+        self,
+    ) -> Optional[Mapping[str, object]]:
+        if (
+            not self._route_tracking_lane_change_envelope_blocks
+            or str(getattr(self, "_route_tracking_lane_change_phase", "idle"))
+            != "executing"
+        ):
+            return None
+        return {
+            "blocks": self._route_tracking_lane_change_envelope_blocks,
+            "epsilon0": self._route_tracking_lane_change_envelope_epsilon0,
+            "rho": float(getattr(self.mpc, "road_envelope_rho", -8.0)),
+        }
 
     def _select_candidate_reference_for_mpc(
         self,
@@ -6798,7 +7028,13 @@ class CPXMPCPlannerBridge:
                     "lane_change_trajectory_variant": str(
                         getattr(intent, "trajectory_variant", "normal")
                     ),
-                    "lane_change_duration_s": float(lane_change_duration_s),
+                    "lane_change_duration_s": float(
+                        self._route_tracking_lane_change_resolved_duration_s
+                        or lane_change_duration_s
+                    ),
+                    "lane_change_duration_comfort_reason": str(
+                        self._route_tracking_lane_change_duration_comfort_reason
+                    ),
                     "lane_change_reference_profile": "quintic_time_blend",
                     "lane_change_authorization_source": (
                         "opportunistic"
@@ -7002,6 +7238,12 @@ class CPXMPCPlannerBridge:
                     "route_tracking_lane_change_target_lane_id": int(
                         self._route_tracking_lane_change_target_lane_id
                     ),
+                    "lane_change_duration_s": float(
+                        self._route_tracking_lane_change_resolved_duration_s
+                    ),
+                    "lane_change_duration_comfort_reason": str(
+                        self._route_tracking_lane_change_duration_comfort_reason
+                    ),
                 },
                 contract_result=committed_contract,
             )
@@ -7024,6 +7266,9 @@ class CPXMPCPlannerBridge:
             object_snapshots=object_snapshots,
             apply_mpc_probe_result=apply_mpc_probe_result,
             mark_mpc_probe_skipped=mark_mpc_probe_skipped,
+            road_envelope_payload_world=(
+                self._current_route_tracking_lane_change_envelope_payload_world()
+            ),
         )
         committed_decision = (
             "lane_change_left"
@@ -7278,12 +7523,61 @@ class CPXMPCPlannerBridge:
                 0.50,
             )
         )
-        if (
+        lane_and_progress_ready = bool(
             str(phase) != "target_lane_stabilization"
             and int(current_lane_id) == int(target_lane_id)
             and float(self._route_tracking_lane_change_progress)
             >= float(entry_min_progress)
-        ):
+        )
+        heading_ready = True
+        if lane_and_progress_ready:
+            # current_lane_id/progress alone only capture that the ego has
+            # crossed into the target lane's lateral extent -- the ego's
+            # heading can still be mid-turn at that instant. Stabilization
+            # hands off to a one-shot quintic connector whose start
+            # derivative is locked to whatever heading the ego has *right
+            # now*; starting it while heading is still far from the target
+            # lane's own direction forces that connector to reconcile a
+            # large heading gap over a short, fixed distance, producing a
+            # sharp, sustained steering correction that overshoots the
+            # centerline before settling. Require heading to have mostly
+            # caught up first; otherwise keep tracking the locked
+            # lane-change reference a little longer and re-check next tick.
+            target_waypoint = (
+                self.reference_generator._map_waypoint_from_location(
+                    ego_location
+                )
+            )
+            target_heading_rad = (
+                math.radians(
+                    float(target_waypoint.transform.rotation.yaw)
+                )
+                if target_waypoint is not None
+                else None
+            )
+            if target_heading_rad is not None:
+                heading_error_deg = abs(
+                    math.degrees(
+                        math.atan2(
+                            math.sin(
+                                float(ego_yaw_rad) - float(target_heading_rad)
+                            ),
+                            math.cos(
+                                float(ego_yaw_rad) - float(target_heading_rad)
+                            ),
+                        )
+                    )
+                )
+                max_heading_error_deg = float(
+                    self.config.get(
+                        "lane_change_target_lane_entry_max_heading_error_deg",
+                        10.0,
+                    )
+                )
+                heading_ready = bool(
+                    float(heading_error_deg) <= float(max_heading_error_deg)
+                )
+        if lane_and_progress_ready and bool(heading_ready):
             start_reason = self._start_target_lane_stabilization(
                 ego_location=ego_location,
                 ego_yaw_rad=float(ego_yaw_rad),
@@ -7557,6 +7851,7 @@ class CPXMPCPlannerBridge:
         object_snapshots: Sequence[Mapping[str, object]],
         apply_mpc_probe_result: Any,
         mark_mpc_probe_skipped: Any,
+        road_envelope_payload_world: Optional[Mapping[str, object]] = None,
     ) -> str:
         """Run side-effect-free MPC probes for the best keep/lane-change paths."""
 
@@ -7658,6 +7953,12 @@ class CPXMPCPlannerBridge:
                     stop_goal_active=bool(
                         getattr(intent, "stop_goal_active", False)
                     ),
+                    road_envelope_payload_world=(
+                        road_envelope_payload_world
+                        if str(getattr(intent, "name", ""))
+                        == "committed_lane_change_continuation"
+                        else None
+                    ),
                 )
                 self._candidate_mpc_probe_cache[cache_key] = dict(probe)
             apply_mpc_probe_result(
@@ -7723,6 +8024,23 @@ class CPXMPCPlannerBridge:
                 self.config.get("carla_waypoint_turn_connector_distance_m", 7.0)
             ),
             allow_route_rejoin=False,
+            # Turn connectors are short curved segments. A long MPC horizon
+            # can request more lookahead distance than the real connector
+            # has, and carla_waypoint_reference falls back to extrapolating
+            # straight ahead past the real curve when that happens -- bound
+            # how far that fallback is allowed to drift so MPC never chases
+            # a fictional straight tail instead of the real turn.
+            max_extrapolation_m=float(
+                self.config.get("carla_waypoint_turn_max_extrapolation_m", 2.0)
+            ),
+            # The parked tail has no real geometry behind it, so don't force
+            # a normal-width corridor onto it -- a road-boundary constraint
+            # built from a wrong-for-that-point corridor is what turned into
+            # a genuine QP infeasibility once the vehicle got far enough
+            # into the turn for its horizon to reach this tail.
+            extrapolated_lane_width_m=float(
+                self.config.get("carla_waypoint_turn_extrapolated_lane_width_m", 8.0)
+            ),
         )
         if not reference:
             return [], list(destination_state or []), str(reason)
@@ -7938,6 +8256,7 @@ class CPXMPCPlannerBridge:
                 and bool(committed_candidate_feasible)
                 and not bool(hard_safety_veto)
             ):
+                self._route_tracking_lane_change_commitment_invalid_frames = 0
                 terminal = dict(reference[-1])
                 selected_lane_id = int(
                     getattr(maneuver_commitment, "target_lane_id", current_lane_id)
@@ -7980,21 +8299,59 @@ class CPXMPCPlannerBridge:
                     if str(turn_reference_reason)
                     else ""
                 ) + "committed_candidate_hard_gate"
-                stabilization_recovery = bool(
-                    str(
+                self._route_tracking_lane_change_commitment_invalid_frames = (
+                    int(
                         getattr(
                             self,
-                            "_route_tracking_lane_change_phase",
-                            "",
+                            "_route_tracking_lane_change_commitment_invalid_frames",
+                            0,
                         )
                     )
-                    == "target_lane_stabilization"
-                    and int(current_lane_id)
-                    == int(
-                        getattr(
-                            self,
-                            "_route_tracking_lane_change_target_lane_id",
-                            0,
+                    + 1
+                )
+                commitment_invalid_timeout_frames = max(
+                    1,
+                    int(
+                        self.config.get(
+                            "lane_change_commitment_invalid_timeout_frames",
+                            40,
+                        )
+                    ),
+                )
+                # A commitment stuck contract-invalid tick after tick (e.g. the
+                # locked window's progress index drifts ahead of ego while
+                # blocked by traffic) has no other release path -- without this
+                # timeout it falls into the emergency-stop branch below forever,
+                # since _release_completed_lane_change_commitment only fires once
+                # ego actually reaches the target lane. Abandon it like a
+                # stabilization timeout: reset now so the next tick's candidate
+                # generation stops re-proposing this stale commitment even if
+                # the recovery reference below happens to fail this tick too.
+                stale_commitment_abandoned = bool(
+                    int(self._route_tracking_lane_change_commitment_invalid_frames)
+                    > int(commitment_invalid_timeout_frames)
+                )
+                if bool(stale_commitment_abandoned):
+                    turn_reference_reason += ":commitment_invalid_timeout_abandoned"
+                    self._reset_route_tracking_lane_change_reference()
+                stabilization_recovery = bool(
+                    bool(stale_commitment_abandoned)
+                    or (
+                        str(
+                            getattr(
+                                self,
+                                "_route_tracking_lane_change_phase",
+                                "",
+                            )
+                        )
+                        == "target_lane_stabilization"
+                        and int(current_lane_id)
+                        == int(
+                            getattr(
+                                self,
+                                "_route_tracking_lane_change_target_lane_id",
+                                0,
+                            )
                         )
                     )
                 )
@@ -8449,11 +8806,19 @@ class CPXMPCPlannerBridge:
             "stop_sign",
             "emergency_brake",
         }
+        direct_target_tracking_enabled = bool(
+            self.config.get(
+                "route_tracking_lane_change_direct_target_tracking_enabled",
+                False,
+            )
+        )
         contract_mode = (
             "emergency_stop"
             if normalized_decision == "emergency_brake"
             else "stop"
             if bool(stop_like)
+            else "lane_change_direct"
+            if bool(lane_change_active) and bool(direct_target_tracking_enabled)
             else "lane_change"
             if bool(lane_change_active)
             else "intersection_turn"
@@ -9003,6 +9368,8 @@ class CPXMPCPlannerBridge:
         planner_mode: str,
         next_macro_maneuver: str,
         sim_time_s: float,
+        nearest_obstacle_distance_m: Optional[float] = None,
+        ego_speed_mps: float = 0.0,
     ) -> None:
         requested = _mpc_cost_profile_for_behavior(
             behavior=behavior,
@@ -9025,6 +9392,25 @@ class CPXMPCPlannerBridge:
         if hasattr(self.mpc, "apply_mode_cost_profile"):
             self.active_mpc_cost_profile = str(
                 self.mpc.apply_mode_cost_profile(str(self.active_mpc_cost_profile))
+            )
+        if bool(
+            getattr(self.mpc, "adaptive_horizon_enabled", False)
+        ) and hasattr(self.mpc, "blend_toward_horizon_s"):
+            # adaptive_horizon_enabled/min_s/max_s live on the MPC instance
+            # (parsed from MPC/mpc.yaml, the same file horizon_s itself comes
+            # from) -- self.config here is the bridge/scenario config, a
+            # separate namespace that was never going to have that key.
+            profile_horizon_s = (
+                dict(self.config.get("adaptive_horizon_profile_s", {}))
+                or _DEFAULT_ADAPTIVE_HORIZON_PROFILE_S
+            )
+            self.mpc.blend_toward_horizon_s(
+                _adaptive_target_horizon_s(
+                    mpc_cost_profile=str(self.active_mpc_cost_profile),
+                    nearest_obstacle_distance_m=nearest_obstacle_distance_m,
+                    ego_speed_mps=float(ego_speed_mps),
+                    profile_horizon_s=profile_horizon_s,
+                )
             )
 
     def _load_mpc_config(self) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -10098,6 +10484,42 @@ def _mpc_cost_profile_for_behavior(
     if normalized_mode == "INTERSECTION" and normalized_maneuver in {"left", "right"}:
         return "intersection_turn"
     return "lane_follow"
+
+
+_DEFAULT_ADAPTIVE_HORIZON_PROFILE_S: dict[str, float] = {
+    "lane_follow": 3.0,
+    "prepare_lane_change": 4.5,
+    "execute_lane_change": 4.5,
+    "intersection_turn": 1.5,
+    "stop": 2.0,
+    "recovery": 1.5,
+}
+
+
+def _adaptive_target_horizon_s(
+    *,
+    mpc_cost_profile: str,
+    nearest_obstacle_distance_m: Optional[float],
+    ego_speed_mps: float,
+    profile_horizon_s: Mapping[str, float],
+) -> float:
+    """Pick a prediction-horizon target from the active behavior mode, then
+    shorten it further if a nearby obstacle needs quicker reaction -- a
+    human driver looks less far ahead through a tight turn than down an open
+    lane, and less still when something close needs immediate attention."""
+
+    base = float(
+        profile_horizon_s.get(
+            str(mpc_cost_profile),
+            profile_horizon_s.get("lane_follow", 3.0),
+        )
+    )
+    if nearest_obstacle_distance_m is not None and math.isfinite(
+        float(nearest_obstacle_distance_m)
+    ):
+        reaction_s = float(nearest_obstacle_distance_m) / max(0.5, float(ego_speed_mps))
+        base = min(base, max(1.0, reaction_s))
+    return float(base)
 
 
 def _select_mpc_cost_profile_with_hysteresis(

@@ -93,7 +93,7 @@ def contract_from_config(
             )
         ),
         require_zero_terminal_speed=bool(config.get(prefix + "require_zero_terminal_speed", normalized_mode == "stop")),
-        allow_lane_transition=bool(config.get(prefix + "allow_lane_transition", normalized_mode == "lane_change")),
+        allow_lane_transition=bool(config.get(prefix + "allow_lane_transition", normalized_mode in ("lane_change", "lane_change_direct"))),
         allow_route_branch=bool(config.get(prefix + "allow_route_branch", normalized_mode == "intersection_turn")),
         allow_padding=bool(config.get(prefix + "allow_padding", True)),
     )
@@ -287,6 +287,19 @@ def _mode_defaults(mode: str) -> Mapping[str, object]:
         "lane_change": {
             "min_first_forward_m": 0.2,
             "max_first_lateral_abs_m": 1.25,
+            "max_destination_lane_error_m": 0.75,
+            "max_destination_body_lateral_abs_m": None,
+        },
+        "lane_change_direct": {
+            # Used when MPC tracks the target lane's own (unblended)
+            # centerline directly instead of a pre-shaped source-to-target
+            # blend -- the first reference sample legitimately sits close to
+            # a full lane width from ego at lock time, so the "lane_change"
+            # mode's tighter 1.25m limit (sized for an already-ramping
+            # blend) would veto every such reference. Sized to cover one
+            # lane width plus margin.
+            "min_first_forward_m": 0.2,
+            "max_first_lateral_abs_m": 4.0,
             "max_destination_lane_error_m": 0.75,
             "max_destination_body_lateral_abs_m": None,
         },

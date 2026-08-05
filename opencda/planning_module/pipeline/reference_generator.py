@@ -481,6 +481,7 @@ class ReferenceGenerator:
         ego_half_length_m: float,
         safety_margin_m: float = 0.0,
         corridor_sample: Mapping[str, object] | None = None,
+        prefer_tracking_point: bool = False,
     ) -> LaneCorridorOccupancy:
         """Measure an oriented vehicle footprint in the local lane corridor."""
 
@@ -488,6 +489,7 @@ class ReferenceGenerator:
             sample=corridor_sample,
             x_m=float(x_m),
             y_m=float(y_m),
+            prefer_tracking_point=bool(prefer_tracking_point),
         )
         if geometry is None:
             return LaneCorridorOccupancy(
@@ -702,6 +704,7 @@ class ReferenceGenerator:
         safety_margin_m: float = 0.0,
         max_heading_step_rad: float = 0.04,
         continuity_reset_distance_m: float = 2.5,
+        max_position_step_m: float = 0.5,
     ) -> ReferenceCorridorProjection:
         """Project ego continuously onto the route-associated lane corridor."""
 
@@ -731,6 +734,7 @@ class ReferenceGenerator:
                     sample=sample,
                     x_m=float(sample_x_m),
                     y_m=float(sample_y_m),
+                    prefer_tracking_point=True,
                 )
             )
         previous = self._last_corridor_projection_geometry
@@ -794,6 +798,7 @@ class ReferenceGenerator:
                 ego_half_length_m=float(ego_half_length_m),
                 safety_margin_m=float(safety_margin_m),
                 corridor_sample=(samples[0] if samples else None),
+                prefer_tracking_point=True,
             )
             result = ReferenceCorridorProjection(
                 valid=bool(occupancy.valid),
@@ -836,6 +841,36 @@ class ReferenceGenerator:
             if float(center_jump_m) <= max(
                 0.1, float(continuity_reset_distance_m)
             ):
+                # Candidate selection above only *penalizes* (softly, and
+                # capped at continuity_reset_distance_m) jumping to a
+                # different segment/lane than last tick's projection -- it
+                # does not prevent one outright. Two near-parallel segments
+                # (e.g. source-lane vs target-lane during a lane change) can
+                # have almost identical raw distance scores, so the argmin
+                # can flip between them tick to tick. Previously only
+                # heading was rate-limited here; position was accepted as-is
+                # whenever the jump was under continuity_reset_distance_m,
+                # which is far larger than a real one-tick position change
+                # at driving speed -- that gap is what let a ~2m spurious
+                # jump straight through. Rate-limit position the same way
+                # heading already is.
+                conditioned_x_m = float(raw_geometry[0])
+                conditioned_y_m = float(raw_geometry[1])
+                position_limit_m = max(0.0, float(max_position_step_m))
+                if (
+                    float(position_limit_m) > 0.0
+                    and float(center_jump_m) > float(position_limit_m)
+                ):
+                    clamp_fraction = float(position_limit_m) / float(center_jump_m)
+                    conditioned_x_m = float(previous[0]) + clamp_fraction * (
+                        float(raw_geometry[0]) - float(previous[0])
+                    )
+                    conditioned_y_m = float(previous[1]) + clamp_fraction * (
+                        float(raw_geometry[1]) - float(previous[1])
+                    )
+                    continuity_limited = True
+
+                conditioned_heading_rad = float(raw_heading_rad)
                 heading_delta = self._wrap_angle_static(
                     float(raw_heading_rad) - float(previous[2])
                 )
@@ -844,19 +879,21 @@ class ReferenceGenerator:
                     float(heading_limit) > 0.0
                     and abs(float(heading_delta)) > float(heading_limit)
                 ):
-                    conditioned_geometry = (
-                        float(raw_geometry[0]),
-                        float(raw_geometry[1]),
-                        self._wrap_angle_static(
-                            float(previous[2])
-                            + math.copysign(
-                                float(heading_limit),
-                                float(heading_delta),
-                            )
-                        ),
-                        float(raw_geometry[3]),
+                    conditioned_heading_rad = self._wrap_angle_static(
+                        float(previous[2])
+                        + math.copysign(
+                            float(heading_limit),
+                            float(heading_delta),
+                        )
                     )
                     continuity_limited = True
+
+                conditioned_geometry = (
+                    float(conditioned_x_m),
+                    float(conditioned_y_m),
+                    float(conditioned_heading_rad),
+                    float(raw_geometry[3]),
+                )
             else:
                 self._last_corridor_projection_geometry = None
 
@@ -871,7 +908,7 @@ class ReferenceGenerator:
             geometry=conditioned_geometry,
         )
         reason = (
-            "reference_corridor_projection:heading_continuity_limited"
+            "reference_corridor_projection:continuity_limited"
             if bool(continuity_limited)
             else "reference_corridor_projection:continuous"
         )
@@ -1242,6 +1279,7 @@ class ReferenceGenerator:
         sample: Mapping[str, object] | None,
         x_m: float,
         y_m: float,
+        prefer_tracking_point: bool = False,
     ) -> tuple[float, float, float, float] | None:
         if isinstance(sample, Mapping):
             try:
@@ -1258,6 +1296,36 @@ class ReferenceGenerator:
                         float(sample["corridor_center_x_m"]),
                         float(sample["corridor_center_y_m"]),
                         float(sample["corridor_heading_rad"]),
+                        float(lane_width_m),
+                    )
+                heading_rad = sample.get("heading_rad", sample.get("psi_ref"))
+                if (
+                    bool(prefer_tracking_point)
+                    and lane_width_m > 0.0
+                    and heading_rad is not None
+                ):
+                    # No explicit corridor tag: this sample is a maneuver or
+                    # tracking-reference point (lane change, turn, recovery,
+                    # ...), not a route-manager lane-corridor sample. Falling
+                    # back to a live nearest-lane map lookup here is
+                    # ambiguous mid-maneuver -- the queried (x, y) can snap
+                    # to either the departure or the target lane, and
+                    # "distance to nearest static lane" is not a meaningful
+                    # concept while the vehicle is intentionally
+                    # transitioning between lanes (this produced a spurious
+                    # multi-meter "offset" that tracked the vehicle's own
+                    # heading change during a lane change, not real drift).
+                    # Use the tracking point itself as the corridor
+                    # center/heading so the projected offset reflects
+                    # genuine tracking error against the commanded path.
+                    # Callers that need an *independent* ground-truth check
+                    # against the true map lane (e.g. turn-swept-footprint
+                    # validation/correction) must leave this at its default
+                    # so they keep querying the live map below.
+                    return (
+                        float(x_m),
+                        float(y_m),
+                        float(heading_rad),
                         float(lane_width_m),
                     )
             except (TypeError, ValueError):
@@ -1351,6 +1419,12 @@ class ReferenceGenerator:
 
     def route_aligned_samples(self, **kwargs: Any) -> list[dict[str, float]]:
         return self._route_aligned_reference_samples(**kwargs)
+
+    def discrete_curvature_1pm(
+        self, reference_samples: Sequence[Mapping[str, object]]
+    ) -> float:
+        """Public accessor for the discrete curvature used by curvature_feasible_samples."""
+        return self._max_discrete_curvature_1pm(list(reference_samples or []))
 
     def curvature_feasible_samples(
         self,

@@ -12,8 +12,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import json
 import math
-from typing import Dict, Mapping, Optional, Sequence
+from typing import Callable, Dict, Mapping, Optional, Sequence
 
+from MPC.lane_keep import RoadEnvelopeBlock, normalize_lane_reference_sample
 from .reference_contract import ReferenceValidationResult
 from .stage_contracts import ManeuverCommitment
 
@@ -334,8 +335,18 @@ def shape_lane_change_reference(
     ego_x_m: Optional[float] = None,
     ego_y_m: Optional[float] = None,
     initial_progress_floor: float = 0.0,
+    blend_geometry: bool = True,
 ) -> list[Dict[str, object]]:
-    """Blend lane paths without resetting lateral progress every replan."""
+    """Blend lane paths without resetting lateral progress every replan.
+
+    When blend_geometry is False, the returned samples keep the target
+    lane's own (unblended) x/y -- only the progress bookkeeping below (which
+    other code relies on for commitment/completion gating) is still
+    computed. This lets MPC's own QP determine the transient path via its
+    hard dynamics/actuator constraints instead of tracking a pre-shaped
+    geometric blend that can demand more steering rate than those
+    constraints allow.
+    """
 
     target = [dict(sample) for sample in list(target_reference or [])]
     source = [dict(sample) for sample in list(source_reference or [])]
@@ -401,8 +412,12 @@ def shape_lane_change_reference(
         tx = float(target_sample.get("x_ref_m", target_sample.get("x", sx)))
         ty = float(target_sample.get("y_ref_m", target_sample.get("y", sy)))
         sample = dict(target_sample)
-        sample["x_ref_m"] = sx + float(alpha) * (tx - sx)
-        sample["y_ref_m"] = sy + float(alpha) * (ty - sy)
+        if bool(blend_geometry):
+            sample["x_ref_m"] = sx + float(alpha) * (tx - sx)
+            sample["y_ref_m"] = sy + float(alpha) * (ty - sy)
+        else:
+            sample["x_ref_m"] = float(tx)
+            sample["y_ref_m"] = float(ty)
         sample["x"] = float(sample["x_ref_m"])
         sample["y"] = float(sample["y_ref_m"])
         sample["lane_id"] = (
@@ -426,6 +441,67 @@ def shape_lane_change_reference(
         if math.hypot(dx, dy) > 1.0e-6:
             sample["heading_rad"] = math.atan2(dy, dx)
     return result
+
+
+def select_comfortable_lane_change_duration_s(
+    *,
+    target_reference: Sequence[Mapping[str, object]],
+    source_reference: Sequence[Mapping[str, object]],
+    initial_duration_s: float,
+    duration_max_s: float,
+    dt_s: float,
+    current_lane_id: int,
+    target_lane_id: int,
+    target_speed_mps: float,
+    lateral_accel_limit_mps2: float,
+    curvature_fn: Callable[[Sequence[Mapping[str, object]]], float],
+    ego_x_m: Optional[float] = None,
+    ego_y_m: Optional[float] = None,
+    initial_progress_floor: float = 0.0,
+    duration_growth_factor: float = 1.3,
+    max_iterations: int = 8,
+) -> tuple[float, list[Dict[str, object]], str]:
+    """Widen duration_s (never shrink it) until shape_lane_change_reference's
+    blended path keeps v^2*curvature within the comfort limit, or the max
+    duration cap is hit.
+
+    A fixed blend duration ignores how far the lane actually is or how fast
+    the vehicle is going, so a short duration can demand more lateral
+    acceleration than is comfortable. Widening the schedule spreads the same
+    lateral crossing over more distance/time, which only ever makes the path
+    gentler -- never a shorter, sharper one.
+    """
+
+    duration_s = max(float(dt_s), float(initial_duration_s))
+    duration_cap_s = max(float(duration_s), float(duration_max_s))
+    growth_factor = max(1.0 + 1.0e-3, float(duration_growth_factor))
+    attempts = max(1, int(max_iterations))
+    shaped: list[Dict[str, object]] = []
+    for attempt in range(attempts):
+        shaped = shape_lane_change_reference(
+            target_reference=target_reference,
+            source_reference=source_reference,
+            duration_s=float(duration_s),
+            dt_s=float(dt_s),
+            current_lane_id=int(current_lane_id),
+            target_lane_id=int(target_lane_id),
+            target_speed_mps=float(target_speed_mps),
+            ego_x_m=ego_x_m,
+            ego_y_m=ego_y_m,
+            initial_progress_floor=float(initial_progress_floor),
+            blend_geometry=True,
+        )
+        curvature_1pm = max(0.0, float(curvature_fn(shaped)))
+        implied_lateral_accel_mps2 = float(target_speed_mps) ** 2 * curvature_1pm
+        if float(implied_lateral_accel_mps2) <= float(lateral_accel_limit_mps2):
+            return float(duration_s), shaped, "lane_change_duration_within_comfort_limit"
+        # Return using *this* attempt's own (duration_s, shaped) pair, not a
+        # duration_s that was grown for a next attempt that never runs --
+        # otherwise the returned duration and shaped path would mismatch.
+        if float(duration_s) >= float(duration_cap_s) or attempt == attempts - 1:
+            return float(duration_s), shaped, "lane_change_duration_capped_at_max"
+        duration_s = min(float(duration_cap_s), float(duration_s) * float(growth_factor))
+    return float(duration_s), shaped, "lane_change_duration_capped_at_max"
 
 
 def _align_target_reference_to_source(
@@ -540,6 +616,76 @@ def _lane_change_initial_progress(
         return min(0.98, max(0.0, float(progress)))
     except Exception:
         return 0.0
+
+
+def build_route_tracking_lane_change_envelope_blocks(
+    *,
+    source_reference: Sequence[Mapping[str, object]],
+    target_reference: Sequence[Mapping[str, object]],
+    master_step_count: int,
+    step_distance_m: float,
+    road_boundary_margin_m: float = 0.5,
+    default_lane_width_m: float = 4.0,
+    length_pad_m: float = 3.0,
+    min_half_width_m: float = 0.3,
+) -> list[RoadEnvelopeBlock]:
+    """Build two static drivable-corridor blocks for a locked lane change.
+
+    One block anchors on the source lane, one on the target lane, both
+    computed once here (at lock time) and never moved again for the
+    duration of the maneuver. This is what lets a road-boundary constraint
+    built from these blocks stay satisfiable even as the *tracked
+    reference* switches from the source lane to the target lane mid-
+    maneuver -- unlike a single reference line, the union of these two
+    fixed blocks never jumps.
+    """
+
+    source = [dict(sample) for sample in list(source_reference or [])]
+    target = [dict(sample) for sample in list(target_reference or [])]
+    if not source or not target:
+        return []
+    aligned_target = _align_target_reference_to_source(
+        source_reference=source,
+        target_reference=target,
+    )
+    if not aligned_target:
+        return []
+
+    source_anchor = normalize_lane_reference_sample(
+        source[0],
+        default_lane_width_m=float(default_lane_width_m),
+    )
+    target_anchor = normalize_lane_reference_sample(
+        aligned_target[0],
+        default_lane_width_m=float(default_lane_width_m),
+    )
+    if source_anchor is None or target_anchor is None:
+        return []
+
+    full_length_m = max(0.0, float(master_step_count) - 1.0) * max(0.0, float(step_distance_m))
+    half_length_m = 0.5 * full_length_m + max(0.0, float(length_pad_m))
+    half_length_m = max(1.0, float(half_length_m))
+    margin_m = max(0.0, float(road_boundary_margin_m))
+
+    blocks: list[RoadEnvelopeBlock] = []
+    for anchor in (source_anchor, target_anchor):
+        half_width_m = max(
+            float(min_half_width_m),
+            0.5 * (float(anchor.left_road_width_m) + float(anchor.right_road_width_m)) - margin_m,
+        )
+        heading_rad = float(anchor.heading_rad)
+        center_x_m = float(anchor.x_center_m) + half_length_m * math.cos(heading_rad)
+        center_y_m = float(anchor.y_center_m) + half_length_m * math.sin(heading_rad)
+        blocks.append(
+            RoadEnvelopeBlock(
+                x_center_m=float(center_x_m),
+                y_center_m=float(center_y_m),
+                heading_rad=float(heading_rad),
+                half_length_m=float(half_length_m),
+                half_width_m=float(half_width_m),
+            )
+        )
+    return blocks
 
 
 def evaluate_candidate_reference(
