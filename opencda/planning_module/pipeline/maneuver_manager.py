@@ -46,6 +46,19 @@ class ManeuverManager:
         self.active_plan: ManeuverPlan | None = None
         self._next_id = 1
         self._last_output: list[dict[str, object]] = []
+        # A reference-source switch (e.g. the winning candidate flipping from
+        # a full-speed to a slowed-down variant) can change the reference's
+        # own commanded speed -- and therefore its forward extent/point
+        # count -- by a large amount in one step. Blending only the first 8
+        # points (the old default) isn't enough to hide a jump that size; it
+        # just compresses the discontinuity into a shorter, sharper ramp
+        # that still reads to MPC's lane-center cost as a near-step change.
+        # Spreading the handoff over more points trades a slightly longer
+        # transition for actually removing that step.
+        self.continuous_handoff_blend_count = max(
+            1,
+            int(self.config.get("maneuver_continuous_handoff_blend_count", 8)),
+        )
 
     def reset(self, reason: str = "reset") -> None:
         del reason
@@ -153,7 +166,11 @@ class ManeuverManager:
             if retained and bool(stop_goal_active):
                 geometry = retained[:len(incoming)]
             elif retained and source_changed:
-                geometry = self._continuous_handoff(retained, incoming)
+                geometry = self._continuous_handoff(
+                    retained,
+                    incoming,
+                    blend_count=int(self.continuous_handoff_blend_count),
+                )
             else:
                 geometry = self._geometry_only(incoming)
             plan.geometry = self._extend_geometry(geometry, incoming)
@@ -297,9 +314,9 @@ class ManeuverManager:
         )
 
     @classmethod
-    def _continuous_handoff(cls, retained, incoming):
+    def _continuous_handoff(cls, retained, incoming, blend_count: int = 8):
         count = min(len(retained), len(incoming))
-        blend_count = min(count, 8)
+        blend_count = min(count, max(1, int(blend_count)))
         output: list[dict[str, object]] = []
         for index in range(len(incoming)):
             sample = dict(incoming[index])

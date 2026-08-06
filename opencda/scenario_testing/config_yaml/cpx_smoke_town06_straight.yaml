@@ -43,8 +43,6 @@ vehicle_base:
     max_mpc_obstacles: 0
     full_allow_opportunistic_lane_change: false
     full_candidate_pipeline_enabled: true
-    full_reference_memory_enabled: true
-    full_trajectory_memory_enabled: true
     full_intersection_turn_prepare_enabled: false
     traffic_stop_approach_far_speed_cap_mps: 3.5
     traffic_stop_approach_near_speed_cap_mps: 2.5

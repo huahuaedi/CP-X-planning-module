@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any, Optional
 
 
@@ -57,9 +58,28 @@ class CarlaVelocitySteeringAdapter:
         self.max_brake_delta = max(
             0.0, float(cfg.get("velocity_adapter_max_brake_delta", 0.05))
         )
-        self.max_steer_delta = max(
-            0.0, float(cfg.get("velocity_adapter_max_steer_delta", 0.15))
-        )
+        self.max_steering_rate_rad_s = math.radians(max(
+            0.0,
+            float(cfg.get("velocity_adapter_max_steering_rate_deg_s", 25.0)),
+        ))
+        self.stop_steering_decay_rate_rad_s = math.radians(max(
+            0.0,
+            float(
+                cfg.get(
+                    "velocity_adapter_stop_steering_decay_rate_deg_s",
+                    12.0,
+                )
+            ),
+        ))
+        self.emergency_steering_decay_rate_rad_s = math.radians(max(
+            0.0,
+            float(
+                cfg.get(
+                    "velocity_adapter_emergency_steering_decay_rate_deg_s",
+                    25.0,
+                )
+            ),
+        ))
         self._integral_error = 0.0
         self._previous_time_s: Optional[float] = None
         self._last_control = None
@@ -73,13 +93,6 @@ class CarlaVelocitySteeringAdapter:
         max_steering_rad: float,
         carla_module: Any,
     ):
-        if bool(command.emergency_stop):
-            self._integral_error = 0.0
-            control = carla_module.VehicleControl(throttle=0.0, brake=1.0, steer=0.0)
-            self._last_control = control
-            self._previous_time_s = float(sim_time_s)
-            return control, "velocity_adapter_emergency_stop"
-
         dt_s = (
             0.05
             if self._previous_time_s is None
@@ -90,7 +103,12 @@ class CarlaVelocitySteeringAdapter:
         speed_error = float(target_speed) - float(actual_speed)
         stop_goal = bool(command.stop_goal_active) or target_speed <= 0.05
 
-        if bool(stop_goal):
+        if bool(command.emergency_stop):
+            self._integral_error = 0.0
+            throttle = 0.0
+            brake = 1.0
+            reason = "velocity_adapter_emergency_stop"
+        elif bool(stop_goal):
             self._integral_error = 0.0
             throttle = 0.0
             if actual_speed <= float(self.stop_hold_speed_mps):
@@ -136,30 +154,56 @@ class CarlaVelocitySteeringAdapter:
             brake = 0.0
             reason = "velocity_adapter_cruise_or_coast"
 
+        steering_limit_rad = max(1.0e-6, abs(float(max_steering_rad)))
+        desired_steering_rad = (
+            0.0
+            if bool(command.emergency_stop) or bool(stop_goal)
+            else min(
+                float(steering_limit_rad),
+                max(
+                    -float(steering_limit_rad),
+                    float(command.target_steering_rad),
+                ),
+            )
+        )
+        if self._last_control is not None:
+            if bool(command.emergency_stop):
+                throttle = 0.0
+                brake = 1.0
+            else:
+                throttle = self._limit_delta(
+                    throttle,
+                    float(getattr(self._last_control, "throttle", 0.0)),
+                    self.max_throttle_delta,
+                )
+                brake = self._limit_delta(
+                    brake,
+                    float(getattr(self._last_control, "brake", 0.0)),
+                    self.max_brake_delta,
+                )
+            previous_steering_rad = (
+                float(getattr(self._last_control, "steer", 0.0))
+                * float(steering_limit_rad)
+            )
+            steering_rate_rad_s = (
+                float(self.emergency_steering_decay_rate_rad_s)
+                if bool(command.emergency_stop)
+                else float(self.stop_steering_decay_rate_rad_s)
+                if bool(stop_goal)
+                else float(self.max_steering_rate_rad_s)
+            )
+            desired_steering_rad = self._limit_delta(
+                desired_steering_rad,
+                previous_steering_rad,
+                float(steering_rate_rad_s) * float(dt_s),
+            )
         steer = min(
             1.0,
             max(
                 -1.0,
-                float(command.target_steering_rad)
-                / max(1.0e-6, abs(float(max_steering_rad))),
+                float(desired_steering_rad) / float(steering_limit_rad),
             ),
         )
-        if self._last_control is not None:
-            throttle = self._limit_delta(
-                throttle,
-                float(getattr(self._last_control, "throttle", 0.0)),
-                self.max_throttle_delta,
-            )
-            brake = self._limit_delta(
-                brake,
-                float(getattr(self._last_control, "brake", 0.0)),
-                self.max_brake_delta,
-            )
-            steer = self._limit_delta(
-                steer,
-                float(getattr(self._last_control, "steer", 0.0)),
-                self.max_steer_delta,
-            )
         if brake > 1.0e-6:
             throttle = 0.0
         control = carla_module.VehicleControl(

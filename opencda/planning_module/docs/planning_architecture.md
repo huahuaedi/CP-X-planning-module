@@ -12,7 +12,8 @@ OpenCDA scenario / VehicleManager
   -> ReferenceGenerator
   -> ReferencePipeline (condition -> recover once -> final gate)
   -> MPC tracking
-  -> SafetySupervisor
+  -> Platform velocity/steering adapter
+  -> SafetySupervisor (final control authority)
   -> PlannerOutput / carla.VehicleControl
 ```
 
@@ -40,6 +41,20 @@ conditioning and immediately before the solver. A stop candidate without a
 valid reference produces an emergency stop. SafetySupervisor is the final
 control authority.
 
+## Stop semantics
+
+- `stop_at_intersection` and `stop_sign` set `normal_stop=True`, request a
+  zero-terminal-speed reference, and use bounded approach/hold braking.
+- Once a committed normal stop falls below the configured low-speed capture
+  threshold, MPC solving is suspended and a deterministic light hold brake is
+  used until the stop is released. Emergency braking remains a separate path.
+- `emergency_brake` sets `emergency_brake=True` and authorizes immediate
+  maximum braking.
+- Candidate hard gates and SafetySupervisor collision vetoes may escalate the
+  final control to emergency braking without rewriting the original behavior.
+  Diagnostics record `normal_stop_requested`, `emergency_brake_requested`, and
+  `emergency_brake_control_active` separately.
+
 ## Single-owner rules
 
 `full_cpx_mpc` uses the `unified_full_v1` architecture profile:
@@ -54,16 +69,20 @@ control authority.
 - Control time-alignment owner: `MPCControlBuffer`.
 - Final hazard and actuator-limit owner: `SafetySupervisor`.
 
-The profile disables the older full-mode reference memory, trajectory memory,
-OpenCDA-style stateful conditioner, low-speed lateral recovery, lane-follow
+The platform velocity/steering adapter runs before signal, road-boundary, and
+hazard supervision. No actuation mapper is allowed to regenerate a command
+after `SafetySupervisor`; the supervised command is the command returned to
+OpenCDA for `apply_control()`.
+
+The profile disables the OpenCDA-style stateful conditioner, low-speed lateral recovery, lane-follow
 speed recovery, negative-acceleration release, bridge-level dense-traffic
 lane-change lock, bridge-level overspeed correction, and the legacy
 pre-gate strict reference veto. Pre-gate validators may diagnose or repair;
 only `FinalReferenceGate` may reject the final reference. The overlapping
 state and veto authority were the main sources of oscillation and
 scenario-specific switch combinations.
-Legacy `opencda_reference_mpc` keeps its reference and trajectory memories.
-Those components no longer exist in the `full_cpx_mpc` object graph.
+Legacy `mode2`, `opencda_reference_mpc`, and their reference/trajectory
+memories have been removed. `full_cpx_mpc` is the only CP-X planner mode.
 
 The obsolete bridge-private launch, overspeed, negative-acceleration release,
 and lateral-recovery control guards have been removed. Signal debounce now

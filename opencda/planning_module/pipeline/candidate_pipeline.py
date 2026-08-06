@@ -44,6 +44,7 @@ class CandidateReferenceResult:
     feasibility_reason: str = ""
     feasibility_cost: float = 0.0
     total_cost: float = 0.0
+    risk_bucket: str = ""
 
     @property
     def feasible(self) -> bool:
@@ -98,6 +99,7 @@ def build_candidate_intents(
     lane_change_conservative_speed_scale: float = 0.7,
     lane_change_authorization_source: str = "route",
     lane_change_defer_cost: float = 10.0,
+    turn_obstacle_stop_defer_cost: float = 90.0,
 ) -> list[CandidateBehaviorIntent]:
     """Generate behavior candidates for the reference/MPC boundary."""
 
@@ -127,12 +129,12 @@ def build_candidate_intents(
         if key not in existing:
             intents.append(intent)
 
-    hard_stop_required = bool(traffic_stop_active) or str(selected_decision) in {
+    mandatory_stop_required = bool(traffic_stop_active) or str(selected_decision) in {
         "stop_at_intersection",
         "stop_sign",
         "emergency_brake",
     }
-    if bool(hard_stop_required):
+    if bool(mandatory_stop_required):
         add(CandidateBehaviorIntent(
             name="stop",
             decision=(
@@ -153,14 +155,37 @@ def build_candidate_intents(
     # stop candidate available, but do not erase an already authorized escape
     # lane. Candidate prediction/contract/MPC checks decide whether changing
     # lane is actually safer than stopping behind the obstacle.
+    turn_in_progress = str(selected_decision) in {
+        "intersection_turn_left",
+        "intersection_turn_right",
+    }
     if bool(stop_goal_active):
         add(CandidateBehaviorIntent(
             name="obstacle_stop",
             decision="stop_at_intersection",
             target_lane_id=int(current_lane_id),
             target_speed_mps=0.0,
-            base_cost=0.0,
-            reason="front_obstacle_stop_candidate",
+            # A turn's own reference generator is structurally different
+            # from the stop reference's (arc vs. straight-line heading), so
+            # winning this candidate for only a tick or two -- e.g. a
+            # vehicle briefly crossing close during an unprotected turn --
+            # forces two back-to-back reference-generator handoffs whose
+            # recomputed headings can jump 30+ degrees, well beyond what the
+            # position-only blend absorbs. Handicapping this candidate while
+            # a turn is already committed means a momentary proximity blip
+            # gets absorbed by the turn's own (continuous) speed reduction
+            # instead of a generator swap; a genuinely close/sustained
+            # threat still outweighs the handicap and wins.
+            base_cost=(
+                max(0.0, float(turn_obstacle_stop_defer_cost))
+                if bool(turn_in_progress)
+                else 0.0
+            ),
+            reason=(
+                "front_obstacle_stop_candidate_defer_turn_in_progress"
+                if bool(turn_in_progress)
+                else "front_obstacle_stop_candidate"
+            ),
             stop_goal_active=True,
             stop_target=(
                 dict(stop_target)
@@ -214,7 +239,22 @@ def build_candidate_intents(
         name="yield_slow_down",
         decision="lane_follow",
         target_lane_id=int(current_lane_id),
-        target_speed_mps=max(0.6, min(float(target_speed_mps), 0.55 * float(target_speed_mps))),
+        # The 0.6 m/s floor keeps this candidate from proposing an
+        # unreasonably slow creep when the baseline speed is comfortably
+        # above it. But once the baseline itself has already decayed below
+        # 0.6 (e.g. braking for a close lead vehicle/red light), the floor
+        # would make "yield" target a HIGHER speed than "keep_lane" itself --
+        # backwards for a candidate meant to be the more conservative option.
+        # That paces this candidate's own reference faster than the vehicle
+        # can actually be going, producing a reference whose points sit
+        # further ahead than ego's real trajectory reaches -- a large,
+        # sustained lane-center tracking-cost mismatch for as long as this
+        # candidate keeps winning. Capping at the baseline speed preserves
+        # the floor's purpose everywhere it doesn't invert the ordering.
+        target_speed_mps=min(
+            float(target_speed_mps),
+            max(0.6, 0.55 * float(target_speed_mps)),
+        ),
         base_cost=4.0 + (
             max(0.0, float(lane_change_defer_cost))
             if bool(lane_change_committed)
@@ -699,6 +739,8 @@ def evaluate_candidate_reference(
     contract_invalid_cost: float = 1000.0,
     infeasible_cost: float = 10000.0,
     lane_change_duration_cost_per_s: float = 0.75,
+    previous_risk_bucket: str = "",
+    risk_hysteresis_margin_m: float = 0.0,
 ) -> CandidateReferenceResult:
     """Attach lightweight feasibility and cost to a generated reference."""
 
@@ -722,14 +764,17 @@ def evaluate_candidate_reference(
             reasons.append("contract_invalid:" + str(contract_reason))
             cost += float(contract_invalid_cost)
 
-    lane_risk_cost, lane_risk_reason = _lane_change_risk_cost(
+    lane_risk_cost, lane_risk_reason, risk_bucket = _lane_change_risk_cost(
         lane_id=int(candidate.intent.target_lane_id),
         current_lane_id=int(current_lane_id),
         object_snapshots=object_snapshots,
         prediction_trajectories=prediction_trajectories,
         reference_samples=candidate.lane_center_reference,
         min_object_distance_m=float(min_object_distance_m),
+        previous_bucket=str(previous_risk_bucket),
+        hysteresis_margin_m=float(risk_hysteresis_margin_m),
     )
+    candidate.risk_bucket = str(risk_bucket)
     cost += float(lane_risk_cost)
     if lane_risk_reason:
         reasons.append(str(lane_risk_reason))
@@ -1003,16 +1048,46 @@ def _lane_change_risk_cost(
     prediction_trajectories: Mapping[str, Sequence[Mapping[str, object]]] | None,
     reference_samples: Sequence[Mapping[str, object]],
     min_object_distance_m: float,
-) -> tuple[float, str]:
+    previous_bucket: str = "",
+    hysteresis_margin_m: float = 0.0,
+) -> tuple[float, str, str]:
+    """Score a candidate's proximity risk, plus the discrete bucket it fell in.
+
+    min_pred_distance is computed against THIS candidate's own reference
+    (index-matched to a predicted obstacle trajectory), and two competing
+    same-lane candidates (e.g. a full-speed "keep lane" vs a slowed-down
+    "yield" variant) build references of different speed/extent. When their
+    total costs are close, tiny per-tick differences in that distance -- not
+    real obstacle motion -- can flip which discrete bucket (and therefore
+    which candidate/reference) wins every other tick, which then reads to
+    MPC as a discontinuous reference and shows up as steering noise.
+    hysteresis_margin_m widens the boundary only on the transition toward a
+    LESS severe bucket (matching previous_bucket), so escalating to a more
+    severe bucket stays instant while relaxing back requires clearing a
+    wider margin -- fast to react to real danger, slow to let go of it.
+    """
+
+    margin_m = max(0.0, float(hysteresis_margin_m))
+
+    def _relaxed_bound_m(bound_m: float, sticky_bucket: str) -> float:
+        return (
+            float(bound_m) + margin_m
+            if str(previous_bucket) == str(sticky_bucket)
+            else float(bound_m)
+        )
+
     if not reference_samples:
-        return 10000.0, "empty_reference"
+        return 10000.0, "empty_reference", "collision_risk"
     min_pred_distance = _min_prediction_distance_m(
         reference_samples=reference_samples,
         prediction_trajectories=prediction_trajectories,
     )
     if min_pred_distance is not None:
-        if float(min_pred_distance) < float(min_object_distance_m):
-            if int(lane_id) == int(current_lane_id):
+        same_lane = int(lane_id) == int(current_lane_id)
+        near_bucket = "lead_follow" if same_lane else "collision_risk"
+        near_bound_m = _relaxed_bound_m(min_object_distance_m, near_bucket)
+        if float(min_pred_distance) < near_bound_m:
+            if same_lane:
                 # A lead vehicle predicted on the ego lane is primarily a
                 # longitudinal-following constraint.  Rejecting the keep-lane
                 # candidate here forces the bridge to rebuild a lateral
@@ -1023,24 +1098,50 @@ def _lane_change_risk_cost(
                 return (
                     120.0,
                     f"candidate_prediction_lead_follow:{min_pred_distance:.2f}",
+                    "lead_follow",
                 )
-            return 10000.0, f"candidate_prediction_collision_risk:{min_pred_distance:.2f}"
-        if float(min_pred_distance) < 2.0 * float(min_object_distance_m):
-            return 60.0, f"candidate_prediction_near_object:{min_pred_distance:.2f}"
+            return (
+                10000.0,
+                f"candidate_prediction_collision_risk:{min_pred_distance:.2f}",
+                "collision_risk",
+            )
+        clear_bound_m = _relaxed_bound_m(
+            2.0 * float(min_object_distance_m), "near_object"
+        )
+        if float(min_pred_distance) < clear_bound_m:
+            return (
+                60.0,
+                f"candidate_prediction_near_object:{min_pred_distance:.2f}",
+                "near_object",
+            )
 
     if int(lane_id) == int(current_lane_id):
-        return 0.0, ""
+        return 0.0, "", "clear"
     min_distance = _min_static_obstacle_distance_m(
         reference_samples=reference_samples,
         object_snapshots=object_snapshots,
     )
     if min_distance is None:
-        return 0.0, ""
-    if float(min_distance) < float(min_object_distance_m):
-        return 10000.0, f"candidate_reference_collision_risk:{min_distance:.2f}"
-    if float(min_distance) < 2.0 * float(min_object_distance_m):
-        return 30.0, f"candidate_reference_near_object:{min_distance:.2f}"
-    return 0.0, ""
+        return 0.0, "", "clear"
+    static_near_bound_m = _relaxed_bound_m(
+        min_object_distance_m, "static_collision_risk"
+    )
+    if float(min_distance) < static_near_bound_m:
+        return (
+            10000.0,
+            f"candidate_reference_collision_risk:{min_distance:.2f}",
+            "static_collision_risk",
+        )
+    static_clear_bound_m = _relaxed_bound_m(
+        2.0 * float(min_object_distance_m), "static_near_object"
+    )
+    if float(min_distance) < static_clear_bound_m:
+        return (
+            30.0,
+            f"candidate_reference_near_object:{min_distance:.2f}",
+            "static_near_object",
+        )
+    return 0.0, "", "clear"
 
 
 def _min_prediction_distance_m(

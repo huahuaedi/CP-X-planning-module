@@ -510,15 +510,15 @@ class AdaptiveTargetHorizonTests(unittest.TestCase):
         )
 
     def test_nearby_obstacle_shortens_horizon_below_the_mode_base(self):
-        # 3 m/s ego, obstacle 3m ahead -> ~1s reaction time, well under
-        # execute_lane_change's 4.5s mode base.
+        # distance_reaction_s = 3.0/2.0 = 1.5, stopping_time_s = 3.0/2.0 = 1.5
+        # -> max is 1.5, well under execute_lane_change's 4.5s mode base.
         target = _adaptive_target_horizon_s(
             mpc_cost_profile="execute_lane_change",
             nearest_obstacle_distance_m=3.0,
             ego_speed_mps=3.0,
             profile_horizon_s=self._PROFILE_HORIZON_S,
         )
-        self.assertAlmostEqual(target, 1.0)
+        self.assertAlmostEqual(target, 1.5)
 
     def test_distant_obstacle_does_not_shorten_horizon_below_the_mode_base(self):
         target = _adaptive_target_horizon_s(
@@ -528,6 +528,37 @@ class AdaptiveTargetHorizonTests(unittest.TestCase):
             profile_horizon_s=self._PROFILE_HORIZON_S,
         )
         self.assertAlmostEqual(target, self._PROFILE_HORIZON_S["lane_follow"])
+
+    def test_slowing_to_a_stop_behind_a_close_obstacle_keeps_shrinking(self):
+        # The bug this fixes: as ego comfortably decelerates toward a near-
+        # stopped lead vehicle, a naive distance/ego_speed ratio blows up
+        # (dividing by ego's own shrinking speed) instead of continuing to
+        # shrink. distance_reaction_s (3.0/2.0=1.5) doesn't depend on ego's
+        # speed at all, so it keeps the target short even as ego crawls to
+        # a near-stop (0.1 m/s) close behind the obstacle.
+        target = _adaptive_target_horizon_s(
+            mpc_cost_profile="lane_follow",
+            nearest_obstacle_distance_m=3.0,
+            ego_speed_mps=0.1,
+            profile_horizon_s=self._PROFILE_HORIZON_S,
+        )
+        self.assertAlmostEqual(target, 1.5)
+
+    def test_fast_approach_to_a_close_obstacle_uses_the_larger_of_the_two_estimates(self):
+        # Ego hasn't started decelerating yet (still at speed) right next to
+        # a close obstacle: stopping_time_s (5.0/2.0=2.5) exceeds
+        # distance_reaction_s (5.0/2.0=2.5 here too, but check the max logic
+        # with a faster speed) -- use a speed high enough that
+        # stopping_time_s dominates.
+        target = _adaptive_target_horizon_s(
+            mpc_cost_profile="lane_follow",
+            nearest_obstacle_distance_m=5.0,
+            ego_speed_mps=8.0,
+            profile_horizon_s=self._PROFILE_HORIZON_S,
+        )
+        # distance_reaction_s = 5.0/2.0 = 2.5, stopping_time_s = 8.0/2.0 = 4.0
+        # -> max is 4.0, capped at lane_follow's own 3.0 base.
+        self.assertAlmostEqual(target, 3.0)
 
 
 if __name__ == "__main__":

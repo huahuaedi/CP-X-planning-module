@@ -5,8 +5,8 @@ description: |-
   2lane_freeway_simplified custom-map layout (same map/coordinates already
   used by cpx_mature_2lanefree_carla / single_2lanefree_carla /
   platoon_joining_2lanefree_carla), with the full CP-X pipeline
-  (`mode: full_cpx_mpc`) active instead of that scenario's `opencda_reference_mpc`
-  mode -- so behavior_planner's lane_safety scoring, candidate lane-change
+  (`mode: full_cpx_mpc`) active so behavior_planner's lane-safety scoring,
+  candidate lane-change
   evaluation, and route_authorization actually run.
   A single slow-moving vehicle is placed directly in the shared lane, well
   ahead of cav1's spawn point, with `auto_lane_change: false` (the repo-wide

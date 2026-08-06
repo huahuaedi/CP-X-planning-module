@@ -26,9 +26,7 @@ if "carla" not in sys.modules:
 
 from opencda_bridge.cpx_mpc_planner import (
     CPXMPCPlannerBridge,
-    _Mode2ObjectTrackMemory,
-    _Mode2ReferenceMemory,
-    _Mode2TrajectoryMemory,
+    _should_suspend_mpc_for_normal_stop,
 )
 from opencda_bridge.cp_provider import OpenCDACPProvider
 from pipeline.traffic_light_memory import TrafficLightMemory
@@ -38,6 +36,42 @@ from pipeline.reference_pipeline import ReferencePipeline, ReferencePipelineRequ
 
 
 class OpenCDABridgeInputFusionTests(unittest.TestCase):
+    def test_normal_stop_suspends_mpc_inside_low_speed_capture_region(self):
+        self.assertTrue(_should_suspend_mpc_for_normal_stop(
+            candidate_hard_gate_active=False,
+            stop_goal_active=True,
+            behavior_decision="stop_at_intersection",
+            ego_speed_mps=0.25,
+            suspend_speed_mps=0.30,
+        ))
+
+    def test_normal_stop_keeps_mpc_above_capture_speed(self):
+        self.assertFalse(_should_suspend_mpc_for_normal_stop(
+            candidate_hard_gate_active=False,
+            stop_goal_active=True,
+            behavior_decision="stop_sign",
+            ego_speed_mps=0.31,
+            suspend_speed_mps=0.30,
+        ))
+
+    def test_emergency_brake_never_uses_normal_stop_hold(self):
+        self.assertFalse(_should_suspend_mpc_for_normal_stop(
+            candidate_hard_gate_active=False,
+            stop_goal_active=True,
+            behavior_decision="emergency_brake",
+            ego_speed_mps=0.0,
+            suspend_speed_mps=0.30,
+        ))
+
+    def test_uncommitted_stop_does_not_suspend_mpc(self):
+        self.assertFalse(_should_suspend_mpc_for_normal_stop(
+            candidate_hard_gate_active=False,
+            stop_goal_active=False,
+            behavior_decision="stop_at_intersection",
+            ego_speed_mps=0.0,
+            suspend_speed_mps=0.30,
+        ))
+
     def test_cp_normalization_preserves_cooperative_provenance(self):
         snapshot = CPXMPCPlannerBridge._normalize_cp_obstacle_snapshot({
             "id": "native_opencda_multi_vantage:42",
@@ -120,8 +154,6 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
         bridge.route_manager = Mock()
         bridge.route_manager.set_destination.return_value = {"route": "ok"}
-        bridge._mode2_reference_memory = Mock()
-        bridge._mode2_trajectory_memory = Mock()
         bridge._lane_id_tracker = Mock()
         bridge.control_buffer = Mock()
         bridge._temporary_destination_state = [1.0, 2.0]
@@ -135,8 +167,6 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
             end_location={"x": 10.0, "y": 0.0, "z": 0.0},
         )
 
-        bridge._mode2_reference_memory.reset.assert_called_once_with()
-        bridge._mode2_trajectory_memory.reset.assert_called_once_with()
         bridge._lane_id_tracker.reset.assert_called_once_with()
         bridge.control_buffer.reset.assert_called_once_with(
             reason="destination_updated"
@@ -890,30 +920,6 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         self.assertIn(("101", "native_opencda_perception"), by_source)
         self.assertIn(("202", "native_opencda_v2x"), by_source)
 
-    def test_mode2_reference_cleanup_sorts_by_forward_distance(self):
-        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
-        bridge.config = {
-            "mode2_sort_reference_by_forward": True,
-            "mode2_min_reference_forward_spacing_m": 0.25,
-        }
-        ego_transform = types.SimpleNamespace(
-            location=types.SimpleNamespace(x=0.0, y=0.0),
-            rotation=types.SimpleNamespace(yaw=0.0),
-        )
-
-        cleaned = bridge._clean_mode2_reference_raw_points(
-            raw_points=[
-                (5.0, 0.0, 3.0, 1, 3.5),
-                (2.0, 0.0, 3.0, 1, 3.5),
-                (3.0, 0.0, 3.0, 1, 3.5),
-                (-1.0, 0.0, 3.0, 1, 3.5),
-                (2.05, 0.0, 3.0, 1, 3.5),
-            ],
-            ego_transform=ego_transform,
-        )
-
-        self.assertEqual([round(item[0], 2) for item in cleaned], [2.0, 3.0, 5.0])
-
     def test_global_route_summary_uses_planning_module_global_planner(self):
         bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
         bridge.vehicle_manager = types.SimpleNamespace(vehicle=types.SimpleNamespace(id=7))
@@ -938,67 +944,7 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         self.assertEqual(summary["current_road_option"], "LEFT")
         self.assertEqual(summary["next_macro_maneuver"], "Left Turn")
 
-    def test_mode2_stop_reference_prefers_cp_stop_line_over_moving_lane_samples(self):
-        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
-        bridge.config = {
-            "mode2_stop_reference_max_lateral_m": 1.5,
-            "mode2_default_stop_reference_m": 4.0,
-        }
-        bridge.mpc = types.SimpleNamespace(horizon_steps=20)
-
-        samples = bridge._mode2_stop_reference_samples(
-            ego_location=sys.modules["carla"].Location(0.0, 0.0, 0.0),
-            ego_yaw_rad=0.0,
-            lane_center_reference=[
-                {"x_ref_m": 5.0, "y_ref_m": 0.0, "lane_id": 1, "lane_width_m": 3.5},
-                {"x_ref_m": 6.0, "y_ref_m": 0.0, "lane_id": 1, "lane_width_m": 3.5},
-            ],
-            target_loc=None,
-            stop_target={"x_m": 2.0, "y_m": 0.0, "lane_id": 1},
-        )
-
-        self.assertGreaterEqual(len(samples), 2)
-        self.assertAlmostEqual(samples[-1]["x_ref_m"], 2.0)
-        self.assertAlmostEqual(samples[-1]["y_ref_m"], 0.0)
-
-    def test_mode2_stop_reference_uses_approach_speed_before_final_taper(self):
-        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
-        bridge.config = {
-            "mode2_stop_reference_max_lateral_m": 1.5,
-            "mode2_default_stop_reference_m": 4.0,
-        }
-        bridge.mpc = types.SimpleNamespace(horizon_steps=20)
-
-        samples = bridge._mode2_stop_reference_samples(
-            ego_location=sys.modules["carla"].Location(0.0, 0.0, 0.0),
-            ego_yaw_rad=0.0,
-            lane_center_reference=[],
-            target_loc=None,
-            stop_target={"x_m": 10.0, "y_m": 0.0, "lane_id": 1},
-            approach_speed_mps=2.0,
-        )
-
-        self.assertGreater(samples[1]["v_ref_mps"], 1.5)
-        self.assertAlmostEqual(samples[-1]["v_ref_mps"], 0.0)
-
-    def test_mode2_far_stop_does_not_force_early_pid(self):
-        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
-        bridge.config = {
-            "mode2_stop_approach_distance_m": 8.0,
-            "mode2_stop_mpc_max_speed_mps": 1.2,
-            "mode2_stop_mpc_max_lateral_m": 2.0,
-        }
-
-        should_use_pid = bridge._mode2_should_use_pid_for_stop(
-            ego_speed_mps=3.0,
-            ego_location=sys.modules["carla"].Location(0.0, 0.0, 0.0),
-            ego_yaw_rad=0.0,
-            destination_state=[20.0, 0.0, 0.0, 0.0, 0],
-        )
-
-        self.assertFalse(should_use_pid)
-
-    def test_mode2_traffic_memory_holds_red_through_unknown(self):
+    def test_traffic_memory_holds_red_through_unknown(self):
         memory = TrafficLightMemory(hold_unknown_s=0.8)
 
         state, stop_target, reason = memory.update(
@@ -1168,97 +1114,6 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         )
         self.assertEqual(state, "unknown")
         self.assertEqual(reason, "latched_carla_signal_actor_missing:42")
-
-    def test_mode2_object_memory_smooths_and_temporarily_holds_tracks(self):
-        memory = _Mode2ObjectTrackMemory(alpha=0.5, max_stale_s=0.4)
-
-        tracks, reason = memory.update(
-            object_snapshots=[{"vehicle_id": "7", "x": 0.0, "y": 0.0, "v": 2.0, "psi": 0.0}],
-            sim_time_s=1.0,
-        )
-        self.assertEqual(len(tracks), 1)
-        self.assertIn("object_memory_tracks=1", reason)
-
-        tracks, reason = memory.update(
-            object_snapshots=[{"vehicle_id": "7", "x": 2.0, "y": 0.0, "v": 4.0, "psi": 0.0}],
-            sim_time_s=1.1,
-        )
-        self.assertAlmostEqual(tracks[0]["x"], 1.0)
-        self.assertAlmostEqual(tracks[0]["v"], 3.0)
-        self.assertTrue(tracks[0]["object_memory_fresh"])
-
-        tracks, reason = memory.update(object_snapshots=[], sim_time_s=1.3)
-        self.assertEqual(len(tracks), 1)
-        self.assertFalse(tracks[0]["object_memory_fresh"])
-
-    def test_mode2_reference_memory_reuses_previous_on_large_jump(self):
-        memory = _Mode2ReferenceMemory(
-            max_first_point_jump_m=1.0,
-            max_destination_jump_m=2.0,
-            max_reuse_age_s=1.0,
-        )
-        ego = sys.modules["carla"].Location(0.0, 0.0, 0.0)
-        first_reference = [
-            {"x_ref_m": 2.0, "y_ref_m": 0.0},
-            {"x_ref_m": 3.0, "y_ref_m": 0.0},
-        ]
-        accepted, destination, reason = memory.stabilize(
-            reference=first_reference,
-            destination_state=[3.0, 0.0, 3.0, 0.0, 0],
-            ego_location=ego,
-            ego_yaw_rad=0.0,
-            stop_goal_active=False,
-            sim_time_s=1.0,
-        )
-        self.assertEqual(reason, "reference_memory_accept")
-
-        accepted, destination, reason = memory.stabilize(
-            reference=[
-                {"x_ref_m": 20.0, "y_ref_m": 0.0},
-                {"x_ref_m": 21.0, "y_ref_m": 0.0},
-            ],
-            destination_state=[21.0, 0.0, 3.0, 0.0, 0],
-            ego_location=ego,
-            ego_yaw_rad=0.0,
-            stop_goal_active=False,
-            sim_time_s=1.2,
-        )
-
-        self.assertTrue(reason.startswith("reference_memory_reuse_jump"))
-        self.assertEqual([sample["x_ref_m"] for sample in accepted], [2.0, 3.0])
-        self.assertEqual(destination[0], 3.0)
-
-    def test_mode2_trajectory_memory_blends_large_control_jump(self):
-        memory = _Mode2TrajectoryMemory(
-            max_accel_jump_mps2=1.0,
-            max_steer_jump_rad=0.1,
-            blend_alpha=0.5,
-            max_reuse_age_s=0.5,
-        )
-
-        def control_factory(accel, steer):
-            return types.SimpleNamespace(accel=accel, steer=steer)
-
-        control, accel, steer, reason = memory.accept_or_blend(
-            control=control_factory(0.0, 0.0),
-            accel_mps2=0.0,
-            steer_rad=0.0,
-            control_factory=control_factory,
-            sim_time_s=1.0,
-        )
-        self.assertEqual(reason, "trajectory_memory_accept")
-
-        control, accel, steer, reason = memory.accept_or_blend(
-            control=control_factory(3.0, 0.4),
-            accel_mps2=3.0,
-            steer_rad=0.4,
-            control_factory=control_factory,
-            sim_time_s=1.1,
-        )
-
-        self.assertTrue(reason.startswith("trajectory_memory_blend"))
-        self.assertAlmostEqual(accel, 1.5)
-        self.assertAlmostEqual(steer, 0.2)
 
     def test_cp_visibility_filter_rejects_hit_before_target(self):
         provider = OpenCDACPProvider.__new__(OpenCDACPProvider)

@@ -1027,6 +1027,38 @@ class AdaptiveHorizonTests(unittest.TestCase):
 
         self.assertEqual(index.horizon_steps, 40)
 
+    def test_small_repeated_blends_hold_steady_until_drift_accumulates(self):
+        mpc = MPC(*self._adaptive_mpc_config())
+        self.assertEqual(mpc.horizon_steps, 20)
+        self.assertEqual(mpc.adaptive_horizon_min_step_change, 3)
+
+        # Small alpha => the continuous blend target drifts by well under
+        # one step per call. horizon_steps must hold steady (preserving
+        # warm start) on the first two calls, only actually committing a
+        # new value once the accumulated drift reaches 3 steps.
+        mpc.blend_toward_horizon_s(3.0, blend_alpha=0.1)
+        self.assertEqual(mpc.horizon_steps, 20)
+
+        mpc.blend_toward_horizon_s(3.0, blend_alpha=0.1)
+        self.assertEqual(mpc.horizon_steps, 20)
+
+        mpc.blend_toward_horizon_s(3.0, blend_alpha=0.1)
+        self.assertEqual(mpc.horizon_steps, 23)
+
+        mpc.blend_toward_horizon_s(3.0, blend_alpha=0.1)
+        self.assertEqual(mpc.horizon_steps, 23)
+
+    def test_min_step_change_is_configurable(self):
+        mpc_cfg, road_cfg = self._adaptive_mpc_config()
+        mpc_cfg = dict(mpc_cfg)
+        mpc_cfg["adaptive_horizon_min_step_change"] = 1
+        mpc = MPC(mpc_cfg, road_cfg)
+        self.assertEqual(mpc.adaptive_horizon_min_step_change, 1)
+
+        # With a min_step_change of 1, even a single step of drift commits.
+        mpc.blend_toward_horizon_s(3.0, blend_alpha=0.1)
+        self.assertEqual(mpc.horizon_steps, 21)
+
 
 class CrossTrackLateralScaleTests(unittest.TestCase):
     def test_zero_at_and_below_the_suppression_bound(self):

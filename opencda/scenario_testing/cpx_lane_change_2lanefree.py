@@ -3,10 +3,9 @@
 
 Reuses the same map/coordinates as `cpx_mature_2lanefree_carla`
 (``opencda/assets/2lane_freeway_simplified``, ego spawn/destination already
-proven across four upstream OpenCDA demo scenarios), but runs the full CP-X
-pipeline (``mode: full_cpx_mpc``) instead of that scenario's
-``opencda_reference_mpc`` mode, and places a single slow vehicle directly in
-ego's own lane to force a lane-change decision. See
+proven across four upstream OpenCDA demo scenarios), runs the full CP-X
+pipeline (``mode: full_cpx_mpc``), and places a single slow vehicle directly
+in ego's own lane to force a lane-change decision. See
 ``config_yaml/cpx_lane_change_2lanefree.yaml`` for the scenario-specific
 reasoning.
 """

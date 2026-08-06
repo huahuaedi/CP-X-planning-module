@@ -21,7 +21,7 @@ mpc:
   # attributes on the MPC instance itself. Left unset in the scenario config,
   # _adaptive_target_horizon_s in cpx_mpc_planner.py falls back to
   # _DEFAULT_ADAPTIVE_HORIZON_PROFILE_S (lane_follow=3.0,
-  # prepare_lane_change/execute_lane_change=4.5, intersection_turn=1.5,
+  # prepare_lane_change/execute_lane_change=4.5, intersection_turn=2.2,
   # stop=2.0, recovery=1.5) -- the same values, so no scenario YAML change is
   # needed unless those defaults need overriding per scenario.
 
@@ -893,7 +893,16 @@ mpc:
       log_barrier_enabled: true
       # When true, the exponential collision-zone cost above is zeroed and
       # this term is the sole repulsive cost instead of an addition to it.
-      log_barrier_replace_exponential: false
+      # The exponential's relative sensitivity (d(lnJ)/drc) is constant
+      # everywhere -- ordinary same-lane low-speed following sits with rc
+      # hovering right around collision_distance_shift, where the
+      # already-substantial cost value gets multiplied by that constant
+      # sensitivity into 100x+ tick-to-tick swings (observed as a visible
+      # sideways bulge-and-recover in the planned trajectory). Softplus
+      # matches the exponential's decay far away but grows only ~linearly
+      # near/inside the zone, so the same rc noise produces a much smaller
+      # swing right where ordinary following operates.
+      log_barrier_replace_exponential: true
       w_log_barrier: 50.0
       # Steepness of the transition from ~0 cost to ~linear penalty around
       # rc == collision_distance_shift. Larger = sharper, more barrier-like.

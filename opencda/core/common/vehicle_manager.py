@@ -138,14 +138,7 @@ class VehicleManager(object):
                                             vehicle=vehicle,
                                             params=safety_config)
         cpx_requested = cpx_planner_enabled(config_yaml)
-        cpx_mode = str(
-            config_yaml.get('planner', {}).get('mode', 'full_cpx_mpc')
-        ).strip().lower()
-        cpx_full_pipeline_requested = bool(cpx_requested) and cpx_mode not in {
-            'opencda_reference_mpc',
-            'opencda_ref_mpc',
-            'mode2',
-        }
+        cpx_full_pipeline_requested = bool(cpx_requested)
         cpx_single_cav_supported = bool(cpx_full_pipeline_requested) and 'platooning' not in application
 
         # behavior agent / CP-X planner are mutually exclusive in full CP-X mode.
@@ -174,28 +167,15 @@ class VehicleManager(object):
         else:
             self.agent = BehaviorAgent(vehicle, carla_map, behavior_config)
 
-        if (
-                bool(cpx_requested)
-                and not bool(cpx_full_pipeline_requested)
-                and 'platooning' not in application):
-            self.cpx_planner = CPXMPCPlannerBridge(
-                vehicle_manager=self,
-                config=config_yaml.get('planner', {}),
-                map_planner=carla_map,
-            )
-            print(
-                "[OpenCDA VehicleManager] CP-X legacy OpenCDA-reference "
-                f"planner bridge enabled for vehicle {self.vehicle.id}."
-            )
-        elif bool(cpx_full_pipeline_requested) and not bool(cpx_single_cav_supported):
+        if bool(cpx_full_pipeline_requested) and not bool(cpx_single_cav_supported):
             print(
                 "[OpenCDA VehicleManager] CP-X full pipeline is currently "
                 "limited to single-CAV scenarios; using the OpenCDA planner "
                 f"for vehicle {self.vehicle.id}."
             )
 
-        # Control module. CP-X full pipeline returns carla.VehicleControl
-        # directly, so OpenCDA PID/ControlManager is only needed for legacy mode.
+        # CP-X returns carla.VehicleControl directly. OpenCDA's controller is
+        # only constructed for vehicles using OpenCDA's BehaviorAgent.
         if self.agent is not None:
             self.controller = ControlManager(control_config)
 
@@ -235,11 +215,7 @@ class VehicleManager(object):
         -------
         """
 
-        cpx_mode = str(getattr(self.cpx_planner, 'mode', '')).strip().lower()
-        cpx_full_pipeline_active = (
-            self.cpx_planner is not None
-            and cpx_mode not in {'opencda_reference_mpc', 'opencda_ref_mpc', 'mode2'}
-        )
+        cpx_full_pipeline_active = self.cpx_planner is not None
         if bool(cpx_full_pipeline_active):
             self.cpx_planner.set_destination(
                 start_location=start_location,
@@ -295,11 +271,7 @@ class VehicleManager(object):
                 map_manager=self.map_manager,
             )
 
-        cpx_mode = str(getattr(self.cpx_planner, 'mode', '')).strip().lower()
-        cpx_full_pipeline_active = (
-            self.cpx_planner is not None
-            and cpx_mode not in {'opencda_reference_mpc', 'opencda_ref_mpc', 'mode2'}
-        )
+        cpx_full_pipeline_active = self.cpx_planner is not None
         if not bool(cpx_full_pipeline_active):
             self.agent.update_information(ego_pos, ego_spd, objects)
             # pass position and speed info to controller

@@ -106,7 +106,6 @@ def build_decision_record(
     mpc_fallback_reason: object = "",
     control_guard_reason: object = "",
     control_buffer_reason: object = "",
-    trajectory_memory_reason: object = "",
     safety_supervisor_reason: object = "",
     applied_throttle: object = 0.0,
     applied_brake: object = 0.0,
@@ -195,14 +194,12 @@ def build_decision_record(
     add("MPCFallback", mpc_fallback_reason, "fallback_control")
 
     add("MPCControlBuffer", control_buffer_reason, "reuse_or_buffer_control")
-    add("TrajectoryMemory", trajectory_memory_reason, "smooth_or_reuse_control")
     add("MPCBridgeControlGuard", control_guard_reason, "clamp_control")
     add("SafetySupervisor", safety_supervisor_reason, "final_safety_filter")
 
     control_source = _control_source(
         control_guard_reason=control_guard_reason,
         mpc_fallback_reason=mpc_fallback_reason,
-        trajectory_memory_reason=trajectory_memory_reason,
         control_buffer_reason=control_buffer_reason,
     )
     return DecisionRecord(
@@ -250,10 +247,6 @@ def _is_routine_reason(reason: str) -> bool:
     if not text:
         return True
     routine_exact = {
-        "mode2",
-        "mode2_mpc_active",
-        "mode2_control_source:mpc",
-        "reference_memory_accept",
         "traffic_memory_green_release",
         "raw_stop",
     }
@@ -261,7 +254,6 @@ def _is_routine_reason(reason: str) -> bool:
         return True
     routine_prefixes = (
         "object_memory_tracks=",
-        "mode2_control_source:",
     )
     return any(text.startswith(prefix) for prefix in routine_prefixes)
 
@@ -292,17 +284,13 @@ def _control_source(
     *,
     control_guard_reason: object,
     mpc_fallback_reason: object,
-    trajectory_memory_reason: object,
     control_buffer_reason: object,
 ) -> str:
     guard = str(control_guard_reason or "")
     fallback = str(mpc_fallback_reason or "")
-    memory = str(trajectory_memory_reason or "")
     buffer_reason = str(control_buffer_reason or "")
     if "pid" in guard or "pid" in fallback:
         return "pid_fallback"
-    if "memory" in guard or "memory" in fallback or memory:
-        return "trajectory_memory"
     if "buffer" in guard or "buffer" in buffer_reason:
         return "mpc_buffer"
     if fallback:

@@ -35,22 +35,12 @@ vehicle_base:
   planner:
     enabled: true
     type: cpx_mpc
-    mode: opencda_reference_mpc
-    fallback_policy: opencda
+    mode: full_cpx_mpc
+    fallback_policy: emergency_stop
     target_speed_mps: 6.0
     lookahead_m: 22.0
     min_front_gap_m: 8.0
     max_mpc_obstacles: 4
-    mode2_use_opencda_trajectory_speed: true
-    mode2_min_tracking_speed_mps: 1.5
-    mode2_sort_reference_by_forward: true
-    mode2_min_reference_forward_spacing_m: 0.25
-    mode2_pid_hold_after_mpc_fail_s: 1.0
-    mode2_mpc_takeover_success_frames: 4
-    mode2_mpc_takeover_max_lateral_m: 1.2
-    mode2_mpc_takeover_max_steer_jump: 0.20
-    mode2_mpc_takeover_max_throttle_jump: 0.35
-    mode2_mpc_takeover_max_brake_jump: 0.35
     record_debug: true
     debug_output_dir: opencda/planning_module/opencda_bridge/debug_mature_2lane
     debug: true
@@ -77,4 +67,3 @@ scenario:
         local_planner:
           debug_trajectory: true
           debug: true
-

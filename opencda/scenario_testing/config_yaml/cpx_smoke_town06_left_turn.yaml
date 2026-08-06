@@ -45,8 +45,6 @@ vehicle_base:
     max_mpc_obstacles: 4
     full_allow_opportunistic_lane_change: false
     full_candidate_pipeline_enabled: true
-    full_reference_memory_enabled: true
-    full_trajectory_memory_enabled: true
     full_intersection_turn_prepare_enabled: true
     full_intersection_turn_prepare_lookahead_m: 22.0
     full_intersection_turn_prepare_min_m: 3.0

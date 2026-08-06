@@ -83,6 +83,58 @@ class CandidatePipelineTest(unittest.TestCase):
             for intent in intents
         ))
 
+    def test_obstacle_stop_is_deferred_while_a_turn_is_in_progress(self):
+        turn_intents = candidate_pipeline.build_candidate_intents(
+            selected_decision="intersection_turn_left",
+            selected_target_lane_id=1,
+            current_lane_id=1,
+            target_speed_mps=3.0,
+            candidate_lane_ids=[1],
+            lane_safety_scores={1: 1.0},
+            lane_prediction_risks={},
+            stop_goal_active=True,
+            traffic_stop_active=False,
+            lane_change_authorized=False,
+            lane_change_authorized_target_lane_id=0,
+            allow_lane_change_candidates=False,
+        )
+        obstacle_stop = next(
+            intent for intent in turn_intents if intent.name == "obstacle_stop"
+        )
+        self.assertGreater(obstacle_stop.base_cost, 0.0)
+        self.assertEqual(
+            obstacle_stop.reason,
+            "front_obstacle_stop_candidate_defer_turn_in_progress",
+        )
+        self.assertTrue(any(
+            intent.decision == "intersection_turn_left" for intent in turn_intents
+        ))
+
+        # The same trigger without an in-progress turn keeps the candidate
+        # undeferred -- only a committed turn gets this handicap.
+        lane_follow_intents = candidate_pipeline.build_candidate_intents(
+            selected_decision="lane_follow",
+            selected_target_lane_id=1,
+            current_lane_id=1,
+            target_speed_mps=3.0,
+            candidate_lane_ids=[1],
+            lane_safety_scores={1: 1.0},
+            lane_prediction_risks={},
+            stop_goal_active=True,
+            traffic_stop_active=False,
+            lane_change_authorized=False,
+            lane_change_authorized_target_lane_id=0,
+            allow_lane_change_candidates=False,
+        )
+        undeferred_obstacle_stop = next(
+            intent for intent in lane_follow_intents if intent.name == "obstacle_stop"
+        )
+        self.assertEqual(undeferred_obstacle_stop.base_cost, 0.0)
+        self.assertEqual(
+            undeferred_obstacle_stop.reason,
+            "front_obstacle_stop_candidate",
+        )
+
     def test_lane_change_candidate_requires_authorization(self):
         denied = candidate_pipeline.build_candidate_intents(
             selected_decision="lane_follow",

@@ -153,6 +153,72 @@ def export(input_csv: Path, output_dir: Path) -> None:
         axis.grid(alpha=0.25)
     _save(fig, output_dir, "03_speed_and_control")
 
+    pre_steer_deg = np.degrees(
+        _values(rows, "pre_supervisor_steer_cmd_rad", 0.0)
+    )
+    applied_steer = _values(rows, "applied_steer", 0.0)
+    applied_steer_rad = _values(rows, "platform_applied_steer_rad")
+    if not np.any(np.isfinite(applied_steer_rad)):
+        # Older logs predate the explicit physical applied-steering field.
+        # Infer the CARLA normalization scale from frames where target and
+        # applied steering agree; Town06's configured limit is 0.6 rad.
+        ratio_mask = (
+            np.isfinite(applied_steer)
+            & np.isfinite(_values(rows, "platform_target_steer_rad"))
+            & (np.abs(applied_steer) > 1.0e-3)
+        )
+        ratios = np.abs(
+            _values(rows, "platform_target_steer_rad")[ratio_mask]
+            / applied_steer[ratio_mask]
+        )
+        ratios = ratios[(ratios >= 0.1) & (ratios <= 1.5)]
+        steering_limit_rad = float(np.nanmedian(ratios)) if ratios.size else 0.6
+        applied_steer_rad = applied_steer * float(steering_limit_rad)
+    applied_steer_deg = np.degrees(applied_steer_rad)
+    valid_time = np.where(np.isfinite(time_s), time_s, np.arange(len(rows)) * 0.05)
+    if len(rows) >= 2:
+        dt_s = np.maximum(1.0e-3, np.diff(valid_time))
+        applied_steering_rate_deg_s = np.concatenate((
+            [0.0],
+            np.diff(applied_steer_deg) / dt_s,
+        ))
+    else:
+        applied_steering_rate_deg_s = np.zeros(len(rows), dtype=float)
+    fig, axes = plt.subplots(2, 1, figsize=(13, 7.0), sharex=True)
+    axes[0].plot(
+        time_s,
+        pre_steer_deg,
+        color="#6b46c1",
+        linewidth=1.2,
+        label="MPC steering command",
+    )
+    axes[0].plot(
+        time_s,
+        applied_steer_deg,
+        color="#2f855a",
+        linewidth=1.2,
+        label="Final CARLA applied steering",
+    )
+    axes[0].axhline(0.0, color="#718096", linewidth=0.8)
+    axes[0].set(ylabel="Angle (deg)", title="MPC Command vs. Final CARLA Steering")
+    axes[0].legend(ncol=2)
+    axes[1].plot(
+        time_s,
+        applied_steering_rate_deg_s,
+        color="#c05621",
+        label="Final applied steering rate",
+    )
+    axes[1].set(
+        xlabel="Simulation time (s)",
+        ylabel="Rate (deg/s)",
+        title="Steering-Rate Signal",
+    )
+    axes[1].legend()
+    _shade_stops(axes, rows, spans)
+    for axis in axes:
+        axis.grid(alpha=0.25)
+    _save(fig, output_dir, "03_steering_signal")
+
     fig, axes = plt.subplots(2, 1, figsize=(13, 7.0), sharex=True)
     axes[0].plot(time_s, _values(rows, "reference_first_lateral_m"), label="First-point lateral")
     axes[0].plot(time_s, _values(rows, "destination_lateral_m"), label="Destination lateral")
@@ -326,6 +392,11 @@ def export(input_csv: Path, output_dir: Path) -> None:
         ("Distance traveled", f"{distance_m:.2f} m"),
         ("Final destination distance", f"{destination_distance_m:.3f} m"),
         ("Average / maximum speed", f"{float(np.nanmean(speed)):.2f} / {float(np.nanmax(speed)):.2f} m/s"),
+        ("Maximum target steering angle", f"{float(np.nanmax(np.abs(pre_steer_deg))):.2f} deg"),
+        ("Maximum applied steering angle", f"{float(np.nanmax(np.abs(applied_steer_deg))):.2f} deg"),
+        ("Maximum applied CARLA steer", f"{float(np.nanmax(np.abs(applied_steer))):.3f}"),
+        ("Maximum absolute applied steering rate", f"{float(np.nanmax(np.abs(applied_steering_rate_deg_s))):.2f} deg/s"),
+        ("P95 absolute applied steering rate", f"{float(np.nanpercentile(np.abs(applied_steering_rate_deg_s), 95.0)):.2f} deg/s"),
         ("Collisions", str(int(collision_count))),
         ("Minimum finite TTC", f"{float(np.min(finite_ttc)):.2f} s" if finite_ttc.size else "N/A"),
         ("Maximum DRAC", f"{float(np.max(finite_drac)):.2f} m/s²" if finite_drac.size else "N/A"),

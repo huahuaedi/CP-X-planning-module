@@ -7,8 +7,8 @@ on the same signal.  A full-pipeline run now has one owner per concern:
 * control time alignment: MPC control buffer
 * final hazard/rate enforcement: SafetySupervisor
 
-Legacy modes remain available, but conflicting full-pipeline mechanisms are
-disabled before components are constructed.
+Removed legacy modes are rejected. Conflicting historical full-pipeline
+switches are disabled before components are constructed.
 """
 
 from __future__ import annotations
@@ -40,8 +40,6 @@ class ArchitectureProfile:
 
 
 _FULL_PIPELINE_SINGLE_OWNER_FLAGS = {
-    "full_reference_memory_enabled": False,
-    "full_trajectory_memory_enabled": False,
     "opencda_style_reference_conditioning_enabled": False,
     "low_speed_lateral_recovery_enabled": False,
     "lane_follow_speed_recovery_enabled": False,
@@ -66,13 +64,8 @@ def normalize_architecture_config(
     normalized = dict(config or {})
     mode = str(normalized.get("mode", "full_cpx_mpc")).strip().lower()
     if mode != "full_cpx_mpc":
-        return normalized, ArchitectureProfile(
-            name="legacy_mode",
-            behavior_owner="legacy_mode_behavior",
-            speed_owner="legacy_mode_speed",
-            reference_owner="legacy_mode_reference",
-            control_memory_owner="legacy_mode_memory",
-            safety_owner="SafetySupervisor",
+        raise ValueError(
+            f"Planner mode '{mode}' is unsupported; use 'full_cpx_mpc'."
         )
 
     overrides = []

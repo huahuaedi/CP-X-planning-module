@@ -1,0 +1,45 @@
+base_config: single_intersection_town06_carla.yaml
+
+description: |-
+  Town06 single-CAV route-required lane-change and left-turn validation.
+  The CARLA Global Route requires CHANGELANELEFT right at spawn and then
+  follows the continuous LEFT-turn connector onto the outgoing road.
+  Located at a different Town06 intersection than cpx_single_right_lane_turn
+  (found via GlobalRoutePlanner search over spawn-point pairs) so this is an
+  isolated left-side counterpart, not the same maneuver mirrored in place.
+  (An earlier candidate near x=500-650 sat in a complex interchange/ramp
+  area and got the ego stuck against static geometry with non-monotonic
+  route progress -- this one is a normal single intersection.)
+  The destination sits ~40m past the turn's outgoing-lane connector (still
+  LANEFOLLOW, verified via GlobalRoutePlanner.next() walking off the end of
+  the original ~108.7m route) instead of ending right at the turn -- the next
+  junction starts ~52m past the original endpoint, so this stays clear of it.
+  Background traffic overrides the base scenario's spawn range (x:[2,10],
+  y:[0,200]), which sits entirely outside this route's own x/y footprint
+  (spawn x=-10.75, destination x=64.38) and so put no traffic anywhere near
+  this ego; the override below spans the actual route instead.
+
+carla_traffic_manager:
+  random: true
+  vehicle_list: ~
+  range:
+    - [-20, 30, 130, 260, 5, 20, 30]
+
+scenario:
+  max_ticks: 5000
+  destination_tolerance_m: 3.0
+  single_cav_list:
+    - name: cav1
+      spawn_position: [-10.75, 162.52, 0.3, 0, 89.47, 0]
+      # CARLA GRP route from this spawn (original ~108.7m):
+      # CHANGELANELEFT -> LANEFOLLOW -> LEFT -> LANEFOLLOW, then extended
+      # ~40m further down the same outgoing LANEFOLLOW lane (~148.7m total).
+      destination: [64.38, 248.05, 0.3]
+      v2x:
+        communication_range: 60
+      behavior:
+        local_planner:
+          debug_trajectory: true
+          debug: true
+      planner:
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_single_left_lane_turn

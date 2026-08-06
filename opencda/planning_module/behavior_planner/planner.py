@@ -545,6 +545,7 @@ class RuleBasedBehaviorPlanner:
         nearest_front_obstacles_by_lane: Mapping[int, Mapping[str, object]] | None = None,
         lane_prediction_risks: Mapping[int, Mapping[str, object]] | None = None,
         preferred_target_lane_id: int | None = None,
+        lane_change_completion_allowed: bool = True,
     ) -> BehaviorCommand:
         """
         Run one planning cycle.
@@ -583,6 +584,10 @@ class RuleBasedBehaviorPlanner:
                                  the strategy layer. The FSM still validates
                                  safety and prediction risk before preparing
                                  or executing a lane change.
+        lane_change_completion_allowed : false while the downstream maneuver
+                                 manager still owns a locked lane-change
+                                 trajectory. This keeps both state machines on
+                                 the same geometric release boundary.
 
         Returns
         -------
@@ -794,7 +799,11 @@ class RuleBasedBehaviorPlanner:
         # -------------------------------------------------------------- #
         # Lane-change completion (checked first)                            #
         # -------------------------------------------------------------- #
-        if self._is_execute_lane_change_state() and self._target_lane_id is not None:
+        if (
+            bool(lane_change_completion_allowed)
+            and self._is_execute_lane_change_state()
+            and self._target_lane_id is not None
+        ):
             if self._lane_change_complete(
                 ego_lane_id=ego_lane_id,
                 target_lane_id=self._target_lane_id,

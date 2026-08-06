@@ -43,8 +43,6 @@ vehicle_base:
     max_mpc_obstacles: 0
     full_allow_opportunistic_lane_change: false
     full_candidate_pipeline_enabled: true
-    full_reference_memory_enabled: true
-    full_trajectory_memory_enabled: true
     traffic_stop_min_commit_distance_m: 10.0
     traffic_stop_commit_buffer_m: 4.0
     traffic_stop_approach_slow_distance_m: 22.0

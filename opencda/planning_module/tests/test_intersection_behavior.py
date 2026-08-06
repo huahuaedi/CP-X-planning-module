@@ -607,6 +607,55 @@ class RuleBasedBehaviorPlannerIntersectionTests(unittest.TestCase):
         )
         self.assertEqual(second["decision"], "lane_follow")
 
+    def test_lane_id_match_does_not_complete_lane_change_before_geometry_converges(self):
+        planner = RuleBasedBehaviorPlanner(
+            hysteresis_delta=0.05,
+            lateral_complete_m=0.35,
+            heading_complete_rad=0.10,
+        )
+
+        first = planner.update(
+            lane_safety_scores={1: 0.0, 2: 0.9},
+            ego_lane_id=1,
+            ego_lateral_offset_m=0.0,
+            ego_heading_error_rad=0.0,
+            mode="NORMAL",
+            route_optimal_lane_id=1,
+            next_macro_maneuver="straight",
+            front_obstacle_distance_by_lane={1: 4.0},
+        )
+        self.assertEqual(first["decision"], "lane_change_left")
+
+        not_converged = planner.update(
+            lane_safety_scores={1: 0.0, 2: 0.9},
+            ego_lane_id=2,
+            ego_lateral_offset_m=0.60,
+            ego_heading_error_rad=0.15,
+            mode="NORMAL",
+            route_optimal_lane_id=1,
+            next_macro_maneuver="straight",
+            front_obstacle_distance_by_lane={1: 4.0},
+            lane_change_completion_allowed=False,
+        )
+        self.assertEqual(not_converged["decision"], "lane_change_left")
+        self.assertEqual(
+            not_converged["lc_state"],
+            "EXECUTE_LANE_CHANGE_LEFT",
+        )
+
+        converged = planner.update(
+            lane_safety_scores={1: 0.0, 2: 0.9},
+            ego_lane_id=2,
+            ego_lateral_offset_m=0.10,
+            ego_heading_error_rad=0.03,
+            mode="NORMAL",
+            route_optimal_lane_id=1,
+            next_macro_maneuver="straight",
+            front_obstacle_distance_by_lane={1: 4.0},
+            lane_change_completion_allowed=True,
+        )
+        self.assertEqual(converged["decision"], "lane_follow")
+
     def test_normal_mode_holds_current_safe_lane_when_route_lane_becomes_safe_again(self):
         planner = RuleBasedBehaviorPlanner(hysteresis_delta=0.05)
 

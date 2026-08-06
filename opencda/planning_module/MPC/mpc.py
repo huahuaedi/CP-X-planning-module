@@ -262,6 +262,22 @@ class MPC:
             float(self.adaptive_horizon_min_s),
             float(mpc_cfg.get("adaptive_horizon_max_s", 5.0)),
         )
+        # blend_toward_horizon_s only actually applies a change once the
+        # blended value has drifted at least this many steps from the
+        # current horizon_steps. _build_shifted_previous_solution_seed drops
+        # the warm start outright on ANY horizon_steps change (a shape
+        # mismatch), so continuously drifting it by 1 step almost every tick
+        # (e.g. while a lead vehicle's distance shrinks smoothly) forces a
+        # cold-start solve nearly every tick, producing small solve-to-solve
+        # steering jitter even on an otherwise straight lane-follow. Holding
+        # steady between coarser jumps lets the warm start survive across
+        # most ticks.
+        self.adaptive_horizon_min_step_change = max(
+            1, int(mpc_cfg.get("adaptive_horizon_min_step_change", 3))
+        )
+        # Continuously-tracked blend target, independent of the committed
+        # (possibly held-steady) self.horizon_s -- see blend_toward_horizon_s.
+        self._adaptive_horizon_continuous_s = float(self.horizon_s)
 
         self.trajectory_generation_frequency_hz = max(
             1e-3,
@@ -830,8 +846,24 @@ class MPC:
 
         Clamped to [adaptive_horizon_min_s, adaptive_horizon_max_s]. No
         persisted OSQP problem depends on horizon_steps between calls (see
-        _build_qp), so changing it here needs no other special handling --
-        the next plan_trajectory call just builds a differently-sized QP.
+        _build_qp), so changing horizon_steps here needs no other special
+        handling -- the next plan_trajectory call just builds a
+        differently-sized QP.
+
+        However, _build_shifted_previous_solution_seed drops MPC's warm
+        start on ANY horizon_steps change (an exact-shape check), so
+        committing a new horizon_steps every single call -- e.g. while a
+        lead vehicle's distance shrinks smoothly and the target drifts by
+        a fraction of a step each tick -- forces a cold-start solve nearly
+        every tick, which shows up as small solve-to-solve steering noise
+        even during otherwise-straight lane_follow. To avoid that, the
+        continuous blend target is tracked every call (so it never lags
+        behind target_horizon_s), but self.horizon_steps/self.horizon_s --
+        the values actually used to build the QP -- are only updated once
+        the continuous target has drifted at least
+        adaptive_horizon_min_step_change steps away from the currently
+        committed value. Most ticks hold steady and keep their warm start;
+        only once the drift accumulates enough does the horizon jump.
         """
         alpha = (
             float(self.mode_cost_profile_blend_alpha)
@@ -843,9 +875,19 @@ class MPC:
             float(self.adaptive_horizon_max_s),
             max(float(self.adaptive_horizon_min_s), float(target_horizon_s)),
         )
-        blended = float(self.horizon_s) * (1.0 - alpha) + target * alpha
-        self.horizon_steps = max(1, int(round(blended / self.dt_s)))
-        self.horizon_s = float(self.horizon_steps * self.dt_s)
+        self._adaptive_horizon_continuous_s = (
+            float(self._adaptive_horizon_continuous_s) * (1.0 - alpha)
+            + target * alpha
+        )
+        candidate_steps = max(
+            1, int(round(self._adaptive_horizon_continuous_s / self.dt_s))
+        )
+        if (
+            abs(candidate_steps - self.horizon_steps)
+            >= self.adaptive_horizon_min_step_change
+        ):
+            self.horizon_steps = candidate_steps
+            self.horizon_s = float(self.horizon_steps * self.dt_s)
         return self.horizon_s
 
     def should_replan(self, sim_time_s: float) -> bool:
