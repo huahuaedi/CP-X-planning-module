@@ -10,10 +10,15 @@ The module has been tested locally with:
 
 - CARLA 0.9.12
 - Python 3.7
-- `town10` CARLA scenario
+- `town10` CARLA scenario (standalone `main.py` entry point)
 - MPC runtime loop generating `mpc_cost_history.csv` and `mpc_cost_plot.png`
 - behavior-planner tests for future trajectory risk and finite-state lane-change behavior
 - evaluation-metrics tests
+- the CP-X MPC planner integrated as an OpenCDA vehicle-manager planner
+  (`opencda.py -t <scenario> -v 0.9.12`), validated end-to-end on Town06
+  route-required lane-change/turn scenarios and signalized-intersection
+  lane-following with background traffic — see
+  [OpenCDA CP-X Entry Point](#opencda-cp-x-entry-point) below
 
 
 ## What This Repo Contains
@@ -173,6 +178,58 @@ python main.py town10_scenario_6
 ```
 
 The plain `town10` scenario can fall back to CARLA map spawn points if custom route anchors are missing from the loaded map.
+
+## OpenCDA CP-X Entry Point
+
+`main.py` (above) runs standalone planner-development scenarios directly.
+Separately, the CP-X MPC planner also integrates as an OpenCDA vehicle
+manager planner, launched from the repository root with `opencda.py`
+instead:
+
+```bash
+conda activate opencda_planning
+export CARLA_ROOT="$HOME/Downloads/MDrive/carla912"
+export PYTHONPATH="$CARLA_ROOT/PythonAPI:$CARLA_ROOT/PythonAPI/carla:$CARLA_ROOT/PythonAPI/carla/dist/carla-0.9.12-py3.7-linux-x86_64.egg:$PWD/opencda/planning_module:$PWD:$PYTHONPATH"
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+
+python opencda.py -t <scenario_name> -v 0.9.12
+```
+
+Optional environment variables for interactive debugging:
+
+```bash
+export OPENCDA_DEBUG_VIEW=1            # pygame debug HUD/overlay
+export OPENCDA_SPECTATOR_VIEW=planner  # chase view (default); "topdown" is the alternative
+```
+
+Three Town06 scenarios validate this CP-X/OpenCDA integration path. Each
+spawns a single CAV; unless noted, background traffic and vehicle config
+are inherited from `single_intersection_town06_carla.yaml`.
+
+| Scenario | What it validates |
+|---|---|
+| `cpx_single_right_lane_turn` | Route-required `CHANGELANERIGHT` before an intersection, followed by the continuous right-turn connector onto the outgoing road. |
+| `cpx_single_left_lane_turn` | Route-required `CHANGELANELEFT` right at spawn, followed by the continuous left-turn connector. The destination sits ~40m past the turn's outgoing lane instead of ending right at the turn, and this scenario overrides `carla_traffic_manager`'s spawn range so background traffic actually spawns near this ego (the base range doesn't cover this route's x/y footprint). |
+| `single_intersection_town06_carla` | Straight-line urban traffic-light behavior: the ego follows the southbound arterial through three signalized intersections with CARLA Traffic Manager background traffic. |
+
+```bash
+python opencda.py -t cpx_single_right_lane_turn -v 0.9.12
+python opencda.py -t cpx_single_left_lane_turn -v 0.9.12
+python opencda.py -t single_intersection_town06_carla -v 0.9.12
+```
+
+Each run writes per-tick planner debug CSV/JSONL to the scenario's
+`planner.debug_output_dir` (see its config under
+`opencda/scenario_testing/config_yaml/`). Turn that CSV into plots and a
+metrics report with:
+
+```bash
+python -m opencda.planning_module.tools.export_full_run_plots <debug_csv> <output_dir>
+```
+
+See [`opencda/planning_module/README.md`](opencda/planning_module/README.md)
+for the CP-X planning stack's architecture, directory layout, and behavior
+planner/MPC internals.
 
 ## Scenarios
 
