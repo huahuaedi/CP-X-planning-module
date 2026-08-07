@@ -1,6 +1,7 @@
 import sys
 import types
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 
@@ -33,9 +34,64 @@ from pipeline.traffic_light_memory import TrafficLightMemory
 from pipeline.reference_gate import FinalReferenceGate
 from pipeline.reference_generator import GeneratedReference, ReferenceGenerator
 from pipeline.reference_pipeline import ReferencePipeline, ReferencePipelineRequest
+from pipeline.route_manager import RouteReplanResult
 
 
 class OpenCDABridgeInputFusionTests(unittest.TestCase):
+    def test_turn_route_replan_refreshes_route_owned_state(self):
+        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
+        bridge.config = {"turn_route_replan_cooldown_s": 2.0}
+        bridge._route_replan_last_attempt_s = -float("inf")
+        bridge._route_replan_attempt_count = 0
+        bridge._route_replan_last_reason = ""
+        bridge._sim_time_s = lambda: 10.0
+        bridge.route_manager = Mock()
+        bridge.route_manager.replan_from.return_value = RouteReplanResult(
+            True, "carla_grp_route_replanned:test", 12
+        )
+        bridge.route_manager.active_route_summary = {"route": "new"}
+        bridge._temporary_destination_state = [1.0, 2.0]
+        bridge._previous_lane_center_reference = [{"x": 1.0}]
+        bridge._lane_reference_freeze_count = 4
+        bridge._reset_route_tracking_lane_change_reference = Mock()
+        bridge.maneuver_manager = Mock()
+        bridge.control_buffer = Mock()
+
+        attempted, succeeded, reason = bridge._attempt_turn_route_replan(
+            ego_location=SimpleNamespace(x=3.0, y=4.0, z=0.0)
+        )
+
+        self.assertTrue(attempted)
+        self.assertTrue(succeeded)
+        self.assertIn("replanned", reason)
+        self.assertEqual(bridge._active_route_summary, {"route": "new"})
+        self.assertIsNone(bridge._temporary_destination_state)
+        self.assertEqual(bridge._previous_lane_center_reference, [])
+        bridge.maneuver_manager.reset.assert_called_once_with(
+            reason="turn_route_replanned"
+        )
+        bridge.control_buffer.reset.assert_called_once_with(
+            reason="turn_route_replanned"
+        )
+
+    def test_turn_route_replan_respects_cooldown(self):
+        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
+        bridge.config = {"turn_route_replan_cooldown_s": 2.0}
+        bridge._route_replan_last_attempt_s = 9.0
+        bridge._route_replan_attempt_count = 1
+        bridge._route_replan_last_reason = ""
+        bridge._sim_time_s = lambda: 10.0
+        bridge.route_manager = Mock()
+
+        attempted, succeeded, reason = bridge._attempt_turn_route_replan(
+            ego_location=SimpleNamespace(x=3.0, y=4.0, z=0.0)
+        )
+
+        self.assertFalse(attempted)
+        self.assertFalse(succeeded)
+        self.assertIn("route_replan_cooldown", reason)
+        bridge.route_manager.replan_from.assert_not_called()
+
     def test_normal_stop_suspends_mpc_inside_low_speed_capture_region(self):
         self.assertTrue(_should_suspend_mpc_for_normal_stop(
             candidate_hard_gate_active=False,

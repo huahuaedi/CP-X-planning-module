@@ -49,6 +49,13 @@ mpc:
     min_steer_rate_rps: -0.35
     max_steer_rate_rps: 0.35
 
+    # Raised from the code default (15.0) to test cruise speeds up to
+    # ~35-60mph (15.6-26.8 m/s). Give some headroom above the highest
+    # target_speed_mps actually configured, so the target itself -- not
+    # this hard ceiling -- is the binding constraint.
+    min_velocity_mps: 0.0
+    max_velocity_mps: 30.0
+
   # Runtime rule-based behavior planner settings.
   behavior_planner_runtime:
     enabled: true

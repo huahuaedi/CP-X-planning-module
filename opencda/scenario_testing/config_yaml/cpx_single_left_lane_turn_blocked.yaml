@@ -1,0 +1,67 @@
+base_config: cpx_single_left_lane_turn.yaml
+
+description: |-
+  Same as cpx_single_left_lane_turn but with deterministic background
+  vehicles: five staggered blockers spanning the target (left) lane across
+  the whole mandatory CHANGELANELEFT window, and one lead vehicle ahead of
+  ego in its OWN (current) lane that ego follows for a while before the
+  missed-lane-change replan kicks in.
+  A single blocker vehicle isn't reliable: CARLA Traffic Manager's own
+  speed jitter can open a gap right when ego happens to check, so the
+  lane change sometimes still completes (confirmed -- reproduced both
+  outcomes across repeated runs of the single-blocker version). Five
+  vehicles 7m apart, all moving in lockstep (same vehicle_speed_perc), keep
+  a moving formation with no gap wide enough to pass the whole time,
+  regardless of exact timing.
+  Used to observe whether the planner detects the missed mandatory lane
+  change and falls back to a route replan once the original turn
+  connector becomes unreachable from the wrong lane.
+  Ego spawns at [-10.75, 162.52] heading +y (yaw 89.47); the left lane
+  measured ~3.5m over during a normal lane change (x settles around -7.25).
+  vehicle_list (not the random range flow) is used for all of these --
+  CARLA's own traffic-manager spawn path in sim_api.py takes vehicle_list
+  OR range, not both, so no other random background traffic spawns here.
+
+carla_traffic_manager:
+  vehicle_list:
+    # Target-lane blocker formation: five vehicles 7m apart, all crawling
+    # at the same speed so their relative spacing (and therefore the lack
+    # of any passable gap) holds for the whole approach, not just at the
+    # moment of spawn.
+    - spawn_position: [-7.25, 155.0, 0.3, 0, 89.47, 0]
+      vehicle_speed_perc: 0
+    - spawn_position: [-7.25, 162.0, 0.3, 0, 89.47, 0]
+      vehicle_speed_perc: 0
+    - spawn_position: [-7.25, 169.0, 0.3, 0, 89.47, 0]
+      vehicle_speed_perc: 0
+    - spawn_position: [-7.25, 176.0, 0.3, 0, 89.47, 0]
+      vehicle_speed_perc: 0
+    - spawn_position: [-7.25, 183.0, 0.3, 0, 89.47, 0]
+      vehicle_speed_perc: 0
+    # Lead vehicle in ego's own lane, spawned a bit ahead of ego (past the
+    # lane-change point at y~171-177) and moving well under the speed
+    # limit, so ego closes in on it and follows for a while before/while
+    # the missed lane change is discovered.
+    - spawn_position: [-10.75, 190.0, 0.3, 0, 89.47, 0]
+      vehicle_speed_perc: 40
+  range: ~
+
+scenario:
+  max_ticks: 5000
+  destination_tolerance_m: 3.0
+  single_cav_list:
+    # OmegaConf.merge replaces lists wholesale rather than deep-merging by
+    # index, so this repeats every field from cpx_single_left_lane_turn.yaml
+    # (not just the overridden debug_output_dir) -- same convention that
+    # file itself uses over single_intersection_town06_carla.yaml.
+    - name: cav1
+      spawn_position: [-10.75, 162.52, 0.3, 0, 89.47, 0]
+      destination: [64.38, 248.05, 0.3]
+      v2x:
+        communication_range: 60
+      behavior:
+        local_planner:
+          debug_trajectory: true
+          debug: true
+      planner:
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_single_left_lane_turn_blocked

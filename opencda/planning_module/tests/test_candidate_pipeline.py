@@ -179,6 +179,75 @@ class CandidatePipelineTest(unittest.TestCase):
             {3.2, 4.0, 5.5},
         )
 
+    def test_human_lane_change_clear_gap_preserves_cruise_speed(self):
+        intents = candidate_pipeline.build_candidate_intents(
+            selected_decision="lane_change_left",
+            selected_target_lane_id=2,
+            current_lane_id=1,
+            target_speed_mps=15.6464,
+            candidate_lane_ids=[1, 2],
+            lane_safety_scores={1: 1.0, 2: 1.0},
+            lane_prediction_risks={2: {
+                "risk": False,
+                "min_front_gap_m": 80.0,
+                "min_rear_gap_m": 60.0,
+            }},
+            stop_goal_active=False,
+            traffic_stop_active=False,
+            lane_change_authorized=True,
+            lane_change_authorized_target_lane_id=2,
+            allow_lane_change_candidates=True,
+            human_like_lane_change_enabled=True,
+            ego_speed_mps=15.0,
+            lane_width_m=3.5,
+            lane_change_available_distance_m=100.0,
+        )
+        lane_changes = [
+            intent for intent in intents
+            if intent.decision == "lane_change_left"
+        ]
+        self.assertEqual(len(lane_changes), 3)
+        self.assertTrue(all(
+            abs(intent.target_speed_mps - 15.6464) < 1.0e-6
+            for intent in lane_changes
+        ))
+        self.assertTrue(all(
+            3.0 <= intent.lane_change_duration_s <= 6.5
+            for intent in lane_changes
+        ))
+        self.assertLess(
+            next(x for x in lane_changes if x.trajectory_variant == "assertive").lane_change_duration_s,
+            next(x for x in lane_changes if x.trajectory_variant == "conservative").lane_change_duration_s,
+        )
+
+    def test_human_lane_change_only_slows_for_constraining_front_gap(self):
+        profiles = candidate_pipeline.build_human_lane_change_profiles(
+            ego_speed_mps=10.0,
+            lane_width_m=3.5,
+            target_lane_prediction_risk={
+                "risk": False,
+                "min_front_gap_m": 14.0,
+                "min_rear_gap_m": 50.0,
+            },
+        )
+        self.assertEqual(profiles[0].speed_scale, 1.0)
+        self.assertLess(profiles[1].speed_scale, 1.0)
+        self.assertLess(profiles[2].speed_scale, profiles[1].speed_scale)
+        self.assertIn("front_gap_mild_slowdown", profiles[1].reason)
+
+    def test_human_lane_change_does_not_slow_with_close_rear_vehicle(self):
+        profiles = candidate_pipeline.build_human_lane_change_profiles(
+            ego_speed_mps=10.0,
+            lane_width_m=3.5,
+            target_lane_prediction_risk={
+                "risk": False,
+                "min_front_gap_m": 14.0,
+                "min_rear_gap_m": 9.0,
+            },
+        )
+        self.assertTrue(all(profile.speed_scale == 1.0 for profile in profiles))
+        self.assertIn("rear_gap_maintain_speed", profiles[1].reason)
+
     def test_route_required_lane_change_penalizes_keep_lane_defer(self):
         intents = candidate_pipeline.build_candidate_intents(
             selected_decision="lane_change_right",

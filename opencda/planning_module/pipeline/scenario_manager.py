@@ -434,7 +434,9 @@ class CPXScenarioManager:
                 # junction.
                 behavior_override_decision="lane_follow",
                 behavior_override_lc_state="LANE_KEEP",
-                speed_cap_mps=float(self.turn_prepare_speed_cap_mps),
+                # SpeedPlanner owns the distance-based deceleration profile.
+                # PREPARE_TURN only reserves the maneuver direction.
+                speed_cap_mps=float(self.target_speed_mps),
                 reason=(
                     f"prepare_turn_{prepare_direction}:"
                     f"distance={float(upcoming_turn_distance_m):.2f}"

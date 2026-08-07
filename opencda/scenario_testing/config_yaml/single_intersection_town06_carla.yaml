@@ -57,14 +57,29 @@ vehicle_base:
     global_planner_strict: false
     publish_cp_message: true
     require_native_opencda_cp: true
-    target_speed_mps: 3.0
+    # Cruise target for the 35mph test stage (35mph = 15.6464 m/s). Raised
+    # progressively: 3.0 (original) -> 5.0 (first increase, validated against
+    # cpx_single_left_lane_turn's measured turn curvature comfort ceiling of
+    # ~4.7-5.75 m/s at 2-3 m/s^2 lateral accel) -> this. SpeedPlanner now
+    # preserves this cruise request on straights, scales turn preview from
+    # braking distance, and applies maneuver/traffic constraints separately.
+    # mpc.yaml's 30 m/s velocity ceiling also leaves room for the later
+    # 60mph (26.8224 m/s) test stage.
+    target_speed_mps: 15.6464
     velocity_steering_interface_enabled: true
     velocity_adapter_kp: 0.18
     velocity_adapter_ki: 0.025
     velocity_adapter_cruise_feedforward: 0.28
     velocity_adapter_speed_deadband_mps: 0.12
     velocity_adapter_brake_activation_error_mps: 0.35
-    velocity_adapter_max_throttle: 0.48
+    # Raised from 0.48: this ceiling was tuned for the original 3-5 m/s
+    # cruise baseline and was never raised alongside target_speed_mps to
+    # 35mph (15.6464). The velocity_steering_interface (kp/ki closed-loop
+    # controller, active since velocity_steering_interface_enabled=true)
+    # was correctly commanding more throttle to chase the speed error, but
+    # it saturated at this hard ceiling, so actual speed plateaued around
+    # ~4.2-4.3 m/s no matter how high the target was.
+    velocity_adapter_max_throttle: 0.85
     velocity_adapter_max_tracking_brake: 0.10
     velocity_adapter_max_stop_brake: 0.35
     velocity_adapter_max_steering_rate_deg_s: 25.0
@@ -80,9 +95,13 @@ vehicle_base:
     # uses measured acceleration as the MPC feedback state.
     actuator_compensation_enabled: true
     actuator_cruise_throttle_feedforward: 0.28
-    actuator_cruise_max_throttle: 0.55
-    actuator_speed_error_throttle_gain: 0.0
-    actuator_max_speed_error_throttle_boost: 0.0
+    # Raised from 0.55 for the same reason as velocity_adapter_max_throttle
+    # above; speed_error_throttle_gain/boost re-enabled so throttle keeps
+    # closing the gap instead of settling at a fixed feedforward once far
+    # below target.
+    actuator_cruise_max_throttle: 0.85
+    actuator_speed_error_throttle_gain: 0.05
+    actuator_max_speed_error_throttle_boost: 0.20
     actuator_speed_deadband_mps: 0.15
     actuator_tracking_brake_decel_per_unit_mps2: 14.0
     actuator_stop_brake_decel_per_unit_mps2: 10.0
@@ -157,6 +176,9 @@ vehicle_base:
     full_stop_guard_destination_forward_m: 6.0
     full_mpc_reference_stabilizer_enabled: true
     full_candidate_pipeline_enabled: true
+    human_like_lane_change_enabled: true
+    human_lane_change_min_duration_s: 3.0
+    human_lane_change_max_duration_s: 6.5
     route_tracking_baseline_enabled: false
     route_tracking_rejoin_distance_m: 7.0
     route_tracking_destination_arc_m: 8.0
@@ -181,9 +203,31 @@ vehicle_base:
     full_intersection_turn_prepare_enabled: true
     full_intersection_turn_prepare_lookahead_m: 22.0
     full_intersection_turn_prepare_min_m: 3.0
-    full_intersection_turn_speed_cap_mps: 2.0
-    full_intersection_turn_prepare_speed_cap_mps: 2.0
-    carla_waypoint_turn_speed_cap_mps: 2.0
+    full_intersection_turn_speed_cap_mps: 5.0
+    full_intersection_turn_prepare_speed_cap_mps: 5.0
+    turn_approach_comfort_decel_mps2: 2.5
+    turn_approach_entry_buffer_m: 5.0
+    turn_approach_preview_margin_m: 10.0
+    # Fixed, cruise-independent lane-change speed ceiling: raising cruise
+    # speed must not raise this. At 15.0 it sat almost level with the 35mph
+    # (15.6464 m/s) cruise target, so lane changes were attempted at ~14 m/s
+    # and never had enough distance/time to complete. 3.0 completed reliably
+    # but produced a hard step-drop from cruise once cruise could actually
+    # reach 7-15 m/s (the throttle ceiling fix let real speed get there);
+    # raised toward a value that still completes reliably while cutting the
+    # drop -- re-validate after any further change.
+    full_lane_change_speed_cap_mps: 6.0
+    # This governs the turn connector's own waypoint spacing (step_distance_m
+    # = max(carla_waypoint_turn_min_step_m, dt_s * this)), not a comfort
+    # speed -- raising it alongside cruise speed widened the connector's
+    # sampled path to ~0.5m/step, which cuts the inside of a tight turn
+    # enough to push the swept vehicle envelope outside the drivable
+    # corridor (confirmed: reverting this alone, independent of the
+    # per-turn curvature cap below, fixed a right-turn scenario that got
+    # permanently stuck mid-turn at 5.0). Keep this low so the connector
+    # stays finely sampled regardless of how fast a turn is actually taken;
+    # full_intersection_turn_speed_cap_mps governs the real comfort speed.
+    carla_waypoint_turn_speed_cap_mps: 2.2
     carla_waypoint_turn_min_step_m: 0.35
     carla_waypoint_turn_connector_distance_m: 7.0
     carla_waypoint_turn_anchor_to_ego_heading: false
@@ -288,14 +332,14 @@ scenario:
         global_planner_strict: false
         publish_cp_message: true
         require_native_opencda_cp: true
-        target_speed_mps: 3.0
+        target_speed_mps: 15.6464
         velocity_steering_interface_enabled: true
         velocity_adapter_kp: 0.18
         velocity_adapter_ki: 0.025
         velocity_adapter_cruise_feedforward: 0.28
         velocity_adapter_speed_deadband_mps: 0.12
         velocity_adapter_brake_activation_error_mps: 0.35
-        velocity_adapter_max_throttle: 0.48
+        velocity_adapter_max_throttle: 0.85
         velocity_adapter_max_tracking_brake: 0.10
         velocity_adapter_max_stop_brake: 0.35
         velocity_adapter_max_steering_rate_deg_s: 25.0
@@ -303,9 +347,9 @@ scenario:
         velocity_adapter_emergency_steering_decay_rate_deg_s: 25.0
         actuator_compensation_enabled: true
         actuator_cruise_throttle_feedforward: 0.28
-        actuator_cruise_max_throttle: 0.55
-        actuator_speed_error_throttle_gain: 0.0
-        actuator_max_speed_error_throttle_boost: 0.0
+        actuator_cruise_max_throttle: 0.85
+        actuator_speed_error_throttle_gain: 0.05
+        actuator_max_speed_error_throttle_boost: 0.20
         actuator_speed_deadband_mps: 0.15
         actuator_tracking_brake_decel_per_unit_mps2: 14.0
         actuator_stop_brake_decel_per_unit_mps2: 10.0
@@ -372,6 +416,9 @@ scenario:
         full_stop_guard_destination_forward_m: 6.0
         full_mpc_reference_stabilizer_enabled: true
         full_candidate_pipeline_enabled: true
+        human_like_lane_change_enabled: true
+        human_lane_change_min_duration_s: 3.0
+        human_lane_change_max_duration_s: 6.5
         route_tracking_baseline_enabled: false
         route_tracking_rejoin_distance_m: 7.0
         route_tracking_destination_arc_m: 8.0
@@ -395,9 +442,13 @@ scenario:
         full_intersection_turn_prepare_enabled: true
         full_intersection_turn_prepare_lookahead_m: 22.0
         full_intersection_turn_prepare_min_m: 3.0
-        full_intersection_turn_speed_cap_mps: 2.0
-        full_intersection_turn_prepare_speed_cap_mps: 2.0
-        carla_waypoint_turn_speed_cap_mps: 2.0
+        full_intersection_turn_speed_cap_mps: 5.0
+        full_intersection_turn_prepare_speed_cap_mps: 5.0
+        turn_approach_comfort_decel_mps2: 2.5
+        turn_approach_entry_buffer_m: 5.0
+        turn_approach_preview_margin_m: 10.0
+        full_lane_change_speed_cap_mps: 6.0
+        carla_waypoint_turn_speed_cap_mps: 2.2
         carla_waypoint_turn_min_step_m: 0.35
         carla_waypoint_turn_connector_distance_m: 7.0
         carla_waypoint_turn_anchor_to_ego_heading: false

@@ -25,6 +25,13 @@ class RouteManagerStatus:
         }
 
 
+@dataclass(frozen=True)
+class RouteReplanResult:
+    success: bool
+    reason: str
+    route_point_count: int = 0
+
+
 class CPXRouteManager:
     """Own destination, active global route, progress, and query diagnostics."""
 
@@ -130,6 +137,64 @@ class CPXRouteManager:
             )
         self._last_status = self._status_from_summary(self._active_route_summary)
         return self._active_route_summary
+
+    def replan_from(
+        self,
+        *,
+        start_point: Mapping[str, object],
+        trigger_reason: str,
+    ) -> RouteReplanResult:
+        """Atomically rebuild the route from ego to the existing destination."""
+
+        if self._goal_point is None:
+            return RouteReplanResult(False, "route_replan_goal_unavailable")
+        snapshot = {
+            "_active_route_summary": self._active_route_summary,
+            "_start_point": self._start_point,
+            "_fallback_route_points": self._fallback_route_points,
+            "_carla_route_entries": self._carla_route_entries,
+            "_carla_route_progress_index": self._carla_route_progress_index,
+            "_carla_route_progress_initialized": self._carla_route_progress_initialized,
+            "_carla_route_projection": self._carla_route_projection,
+            "_carla_route_sync_reason": self._carla_route_sync_reason,
+            "_carla_route_debug_reason": self._carla_route_debug_reason,
+            "_external_carla_route_active": self._external_carla_route_active,
+            "_last_status": self._last_status,
+        }
+        normalized_start = _point_dict(start_point)
+        try:
+            summary = self.global_planner.plan_route_from_locations(
+                start_location=normalized_start,
+                goal_location=self._goal_point,
+                replace_stored_route=True,
+            )
+            self._build_carla_route(
+                start_point=normalized_start,
+                goal_point=self._goal_point,
+            )
+            route_point_count = len(self._carla_route_nodes())
+            if route_point_count < 2:
+                raise RuntimeError(str(self._carla_route_debug_reason))
+            self._active_route_summary = summary
+            self._start_point = normalized_start
+            self._external_carla_route_active = False
+            self._fallback_route_points = []
+            self._last_status = self._status_from_summary(summary)
+            self._carla_route_debug_reason = (
+                f"carla_grp_route_replanned:{str(trigger_reason)}"
+            )
+            return RouteReplanResult(
+                True,
+                str(self._carla_route_debug_reason),
+                route_point_count=route_point_count,
+            )
+        except Exception as exc:
+            for name, value in snapshot.items():
+                setattr(self, name, value)
+            return RouteReplanResult(
+                False,
+                f"route_replan_failed:{str(trigger_reason)}:{exc}",
+            )
 
     def set_external_carla_route(self, route_entries: Sequence[Any]) -> None:
         """Use a runtime-provided CARLA/Leaderboard route as source of truth."""
@@ -950,6 +1015,10 @@ class CPXRouteManager:
     @property
     def last_status(self) -> RouteManagerStatus:
         return self._last_status
+
+    @property
+    def active_route_summary(self) -> Any:
+        return self._active_route_summary
 
     def _build_carla_route(
         self,

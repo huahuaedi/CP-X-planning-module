@@ -186,14 +186,6 @@ class OpenCDADebugViewer:
 
             self._draw_dotted_polyline(surface, mpc_points, color=(45, 185, 75), radius_px=3, dot_spacing_px=9)
 
-            destination = [
-                cpx_debug.get("destination_x", None),
-                cpx_debug.get("destination_y", None),
-            ]
-            destination_px = project(destination)
-            if destination_px is not None:
-                pygame.draw.circle(surface, (45, 145, 225), destination_px, 6)
-                pygame.draw.circle(surface, (15, 20, 24), destination_px, 6, width=1)
             self._draw_stable_route_minimap(
                 surface=surface,
                 route_points=cpx_debug.get("global_route_points", []),

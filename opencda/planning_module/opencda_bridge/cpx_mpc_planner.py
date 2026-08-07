@@ -22,6 +22,9 @@ import yaml
 from opencda.planning_module.pipeline.traffic_light_memory import (
     TrafficLightMemory,
 )
+from opencda.planning_module.utility.speed_profile import (
+    curvature_speed_cap_mps,
+)
 
 
 class _CarlaMapPlannerAdapter:
@@ -132,6 +135,10 @@ class CPXMPCPlannerBridge:
         self._full_last_behavior_mode_key = ""
         self._turn_latch_decision = ""
         self._turn_latch_until_sim_time_s = -float("inf")
+        self._route_replan_last_attempt_s = -float("inf")
+        self._route_replan_attempt_count = 0
+        self._route_replan_last_reason = "route_replan_not_requested"
+        self._last_required_lane_change_target_lane_id: Optional[int] = None
         self._route_tracking_lane_change_option = ""
         self._route_tracking_lane_change_progress = 0.0
         self._route_tracking_lane_change_reference: list[dict[str, object]] = []
@@ -302,7 +309,10 @@ class CPXMPCPlannerBridge:
             "speed_owner_requested_mps",
             "speed_owner_scenario_cap_mps",
             "speed_owner_turn_cap_mps",
+            "speed_owner_lane_change_cap_mps",
             "speed_owner_following_cap_mps",
+            "speed_owner_turn_approach_cap_mps",
+            "speed_owner_upcoming_turn_distance_m",
             "speed_owner_selected_target_mps",
             "speed_owner_limiting_owner",
             "speed_owner_active_constraints",
@@ -495,6 +505,10 @@ class CPXMPCPlannerBridge:
             "control_buffered_step_count",
             "mpc_replan_executed",
             "route_manager_status",
+            "route_replan_attempted",
+            "route_replan_succeeded",
+            "route_replan_attempt_count",
+            "route_replan_reason",
             "route_remaining_distance_m",
             "route_reached_destination",
             "global_planner_backend",
@@ -2086,6 +2100,16 @@ class CPXMPCPlannerBridge:
                 self.route_manager.last_status.as_dict(),
                 default=str,
             ),
+            "route_replan_attempted": reference_debug.get(
+                "route_replan_attempted", False
+            ),
+            "route_replan_succeeded": reference_debug.get(
+                "route_replan_succeeded", False
+            ),
+            "route_replan_attempt_count": int(
+                self._route_replan_attempt_count
+            ),
+            "route_replan_reason": str(self._route_replan_last_reason),
             "route_remaining_distance_m": float(
                 self.route_manager.last_status.remaining_distance_m
             ),
@@ -2143,8 +2167,17 @@ class CPXMPCPlannerBridge:
             "speed_owner_turn_cap_mps": reference_debug.get(
                 "speed_owner_turn_cap_mps", ""
             ),
+            "speed_owner_lane_change_cap_mps": reference_debug.get(
+                "speed_owner_lane_change_cap_mps", ""
+            ),
             "speed_owner_following_cap_mps": reference_debug.get(
                 "speed_owner_following_cap_mps", ""
+            ),
+            "speed_owner_turn_approach_cap_mps": reference_debug.get(
+                "speed_owner_turn_approach_cap_mps", ""
+            ),
+            "speed_owner_upcoming_turn_distance_m": reference_debug.get(
+                "speed_owner_upcoming_turn_distance_m", ""
             ),
             "speed_owner_selected_target_mps": reference_debug.get(
                 "speed_owner_selected_target_mps", ""
@@ -3205,7 +3238,10 @@ class CPXMPCPlannerBridge:
         from opencda.planning_module.pipeline.candidate_pipeline import (
             build_candidate_intents,
         )
-        from opencda.planning_module.pipeline.speed_planner import build_speed_plan
+        from opencda.planning_module.pipeline.speed_planner import (
+            build_speed_plan,
+            turn_approach_lookahead_m,
+        )
 
         sim_time_s = self._sim_time_s()
         adapter_output = self.input_adapter.build(
@@ -3234,6 +3270,46 @@ class CPXMPCPlannerBridge:
             authorize_route_lane_change,
         )
 
+        # These gates are meters-from-maneuver, but the time available to
+        # recover from a transient block (e.g. a background vehicle briefly
+        # dropping the target lane's safety score right when a route-required
+        # change is authorized) is distance/speed -- at a fixed distance, a
+        # faster ego has strictly less time to retry before crossing the
+        # "too close" line, so the same transient block that resolves fine
+        # at low speed can burn through the whole margin and permanently
+        # abandon the lane change at higher speed (confirmed via debug CSV on
+        # cpx_single_left_lane_turn: a ~7.6s block consumed a few meters at
+        # near-zero speed post-emergency-brake, but the same block duration
+        # at cruise speed would consume tens of meters instead). Scaling both
+        # bounds by a minimum retry-time margin keeps that recovery window
+        # roughly constant in TIME regardless of speed, instead of shrinking
+        # as speed increases. prep's margin is kept larger than latest's so
+        # the valid window (prep > latest) never inverts and permanently
+        # denies the maneuver.
+        route_lane_change_preparation_start_distance_m = max(
+            float(
+                self.config.get(
+                    "route_lane_change_preparation_start_distance_m", 45.0
+                )
+            ),
+            float(ego_speed_mps)
+            * float(
+                self.config.get(
+                    "route_lane_change_preparation_time_margin_s", 15.0
+                )
+            ),
+        )
+        route_lane_change_latest_start_distance_m = max(
+            float(
+                self.config.get("route_lane_change_latest_start_distance_m", 12.0)
+            ),
+            float(ego_speed_mps)
+            * float(
+                self.config.get(
+                    "route_lane_change_latest_retry_time_margin_s", 9.0
+                )
+            ),
+        )
         lane_change_authorization = authorize_route_lane_change(
             route_lane_change_allowed=bool(route_lane_change_allowed),
             current_lane_id=int(current_lane_id),
@@ -3245,10 +3321,10 @@ class CPXMPCPlannerBridge:
             lane_safety_scores=lane_safety_scores,
             lane_prediction_risks=dict(planner_input_frame.prediction.lane_prediction_risks),
             preparation_start_distance_m=float(
-                self.config.get("route_lane_change_preparation_start_distance_m", 45.0)
+                route_lane_change_preparation_start_distance_m
             ),
             latest_start_distance_m=float(
-                self.config.get("route_lane_change_latest_start_distance_m", 12.0)
+                route_lane_change_latest_start_distance_m
             ),
             target_safety_threshold=float(
                 self.config.get("route_lane_change_target_safety_threshold", 0.65)
@@ -3256,6 +3332,38 @@ class CPXMPCPlannerBridge:
             require_adjacent=bool(self.config.get("route_lane_change_require_adjacent", True)),
         )
         route_lane_change_required = bool(lane_change_authorization.required_by_route)
+        # If the route ever genuinely required a specific lane, remember it.
+        # The route's own next-macro-maneuver progression advances on
+        # arc-length along the original polyline regardless of which lane
+        # ego actually occupies, so once the requirement lapses (denied as
+        # "too close", or the route just quietly stops asking for it --
+        # "already_in_required_lane"/"route_maneuver_does_not_require_lane_
+        # change" can appear even though ego's own lane never changed,
+        # because route_optimal_lane_id drifted to match current_lane_id
+        # instead of the other way around) while ego is STILL in the lane it
+        # started in, the lane change was missed, not completed. Left alone,
+        # ego just keeps lane_follow-ing straight through and past the
+        # junction the plan needed it to turn at, off the swept/tested route
+        # corridor entirely (confirmed via debug CSV on a deterministic
+        # lane-blocking-vehicle test: ego sailed ~85m past its own
+        # destination with no lane change ever attempted and no replan, and
+        # the actor was later destroyed off-route). Treat a lapsed
+        # requirement the same as turn_reference_unavailable: request a
+        # fresh route from wherever ego actually is instead of continuing to
+        # chase a plan that assumed a lane change that never happened.
+        if bool(lane_change_authorization.required_by_route):
+            self._last_required_lane_change_target_lane_id = int(
+                lane_change_authorization.target_lane_id
+            )
+        elif self._last_required_lane_change_target_lane_id is not None:
+            if int(current_lane_id) == int(self._last_required_lane_change_target_lane_id):
+                self._last_required_lane_change_target_lane_id = None
+            elif bool(self.config.get("missed_lane_change_route_replan_enabled", True)):
+                self._attempt_turn_route_replan(
+                    ego_location=ego_location,
+                    trigger_reason="lane_change_missed_route_unreachable",
+                )
+                self._last_required_lane_change_target_lane_id = None
         prediction_risky_lane_count = 0
         for risk in dict(planner_input_frame.prediction.lane_prediction_risks).values():
             risk_mapping = dict(risk) if isinstance(risk, Mapping) else {}
@@ -3355,7 +3463,10 @@ class CPXMPCPlannerBridge:
             ego_y_m=float(ego_location.y),
             ego_heading_rad=float(ego_yaw_rad),
             lookahead_m=float(
-                self.config.get("scenario_turn_prepare_lookahead_m", 15.0)
+                turn_approach_lookahead_m(
+                    cruise_speed_mps=float(self.target_speed_mps),
+                    config=dict(self.config),
+                )
             ),
         )
         (
@@ -3714,15 +3825,6 @@ class CPXMPCPlannerBridge:
                 if str(decision).endswith("_left")
                 else "INTERSECTION_TURN_RIGHT"
             )
-            speed_ref_mps = min(
-                float(speed_ref_mps),
-                float(
-                    self.config.get(
-                        "full_intersection_turn_prepare_speed_cap_mps",
-                        self.config.get("full_intersection_turn_speed_cap_mps", 2.2),
-                    )
-                ),
-            )
             behavior_override_reason = (
                 str(behavior_override_reason) + ";"
                 if str(behavior_override_reason)
@@ -3765,6 +3867,12 @@ class CPXMPCPlannerBridge:
             ego_speed_mps=float(ego_speed_mps),
             config=dict(self.config),
             front_gap_m=front_gap_m,
+            upcoming_turn_direction=str(upcoming_turn_direction),
+            upcoming_turn_distance_m=(
+                None
+                if not math.isfinite(float(upcoming_turn_distance_m))
+                else float(upcoming_turn_distance_m)
+            ),
         )
         speed_ref_mps = float(speed_plan.target_speed_mps)
         stop_goal_active = bool(stop_goal_active or speed_plan.stop_goal_active)
@@ -4025,6 +4133,22 @@ class CPXMPCPlannerBridge:
                 turn_obstacle_stop_defer_cost=float(
                     self.config.get("candidate_turn_obstacle_stop_defer_cost", 90.0)
                 ),
+                human_like_lane_change_enabled=bool(
+                    self.config.get("human_like_lane_change_enabled", True)
+                ),
+                ego_speed_mps=float(ego_speed_mps),
+                lane_width_m=float(getattr(self.mpc, "lane_width_m", 3.5)),
+                lane_change_available_distance_m=(
+                    lane_change_authorization.distance_to_maneuver_m
+                    if bool(candidate_lane_change_authorized)
+                    else None
+                ),
+                human_lane_change_min_duration_s=float(
+                    self.config.get("human_lane_change_min_duration_s", 3.0)
+                ),
+                human_lane_change_max_duration_s=float(
+                    self.config.get("human_lane_change_max_duration_s", 6.5)
+                ),
             )
             (
                 decision,
@@ -4073,6 +4197,80 @@ class CPXMPCPlannerBridge:
                     else 0
                 ),
             )
+            # build_speed_plan's lane_change_cap/turn_cap (applied earlier,
+            # against the behavior planner's own raw decision) are
+            # overwritten by whatever speed_ref_mps the winning candidate
+            # carries -- build_candidate_intents's turn candidate uses
+            # target_speed_mps verbatim (see candidate_pipeline.py), so it
+            # isn't capped either. Re-apply both caps here against the FINAL
+            # decision. For lane changes this keeps the lateral S-curve
+            # decoupled from however unsettled the longitudinal speed still
+            # is (see cpx_single_left_lane_turn's lane boundary press); for
+            # turns this is the only place the configured
+            # full_intersection_turn_speed_cap_mps actually reaches the
+            # winning candidate at all -- confirmed via debug CSV at 35mph:
+            # speed climbed past 4 m/s through an entire intersection_turn_left
+            # with the cap doing nothing, because only build_speed_plan's
+            # (bypassed) turn_cap_mps was ever computed against it.
+            if str(decision) in {"lane_change_left", "lane_change_right"}:
+                lane_change_cap_mps = max(
+                    0.1,
+                    float(
+                        self.config.get("full_lane_change_speed_cap_mps", 3.0)
+                    ),
+                )
+                speed_ref_mps = min(float(speed_ref_mps), float(lane_change_cap_mps))
+            elif str(decision) in {"intersection_turn_left", "intersection_turn_right"}:
+                # full_intersection_turn_speed_cap_mps is a per-fleet ceiling,
+                # not a per-turn comfort speed: two turns at different
+                # intersections can have very different connector curvature
+                # (confirmed via debug CSV -- this route's right turn measured
+                # ~0.145 1/m vs. the left turn's ~0.091 1/m), so a single
+                # static cap that is comfortable for a gentle turn can still
+                # be too fast for a tighter one, causing the turn's swept
+                # vehicle envelope to exceed the drivable corridor and the
+                # candidate to be permanently rejected with no fallback.
+                # Derive this turn's own cap from its actual winning-candidate
+                # curvature and take the tighter of that and the static
+                # ceiling.
+                turn_ceiling_mps = max(
+                    0.1,
+                    float(
+                        self.config.get("full_intersection_turn_speed_cap_mps", 2.2)
+                    ),
+                )
+                turn_curvature_1pm = float(
+                    self.reference_generator.discrete_curvature_1pm(
+                        local_lane_center_reference
+                    )
+                )
+                turn_curvature_cap_mps = curvature_speed_cap_mps(
+                    curve_curvature_abs=float(turn_curvature_1pm),
+                    curve_min_curvature=max(
+                        0.0,
+                        float(
+                            self.config.get(
+                                "full_intersection_turn_curvature_min_curvature_1pm",
+                                0.01,
+                            )
+                        ),
+                    ),
+                    current_speed_mps=float(ego_speed_mps),
+                    curve_lateral_accel_limit_mps2=max(
+                        0.1,
+                        float(
+                            self.config.get(
+                                "full_intersection_turn_lateral_accel_comfort_mps2",
+                                2.5,
+                            )
+                        ),
+                    ),
+                    speed_enable_threshold_mps=0.0,
+                )
+                turn_cap_mps = float(turn_ceiling_mps)
+                if turn_curvature_cap_mps is not None:
+                    turn_cap_mps = min(turn_cap_mps, float(turn_curvature_cap_mps))
+                speed_ref_mps = min(float(speed_ref_mps), float(turn_cap_mps))
             # The upstream front-gap flag proposes an obstacle-stop candidate;
             # it must not remain a global stop latch after a safe lane-change
             # candidate wins. Traffic-control stops remain hard and exclusive.
@@ -5567,6 +5765,53 @@ class CPXMPCPlannerBridge:
         self._route_tracking_lane_change_stabilization_frames = 0
         self._route_tracking_lane_change_completion_stable_frames = 0
 
+    def _attempt_turn_route_replan(
+        self,
+        *,
+        ego_location: Any,
+        trigger_reason: str = "turn_reference_unavailable",
+    ) -> tuple[bool, bool, str]:
+        """Request a bounded route rebuild while preserving stop-on-failure."""
+
+        now_s = float(self._sim_time_s())
+        cooldown_s = max(
+            0.1,
+            float(self.config.get("turn_route_replan_cooldown_s", 2.0)),
+        )
+        elapsed_s = float(now_s) - float(self._route_replan_last_attempt_s)
+        if elapsed_s < cooldown_s:
+            reason = (
+                "route_replan_cooldown:"
+                f"remaining={float(cooldown_s - elapsed_s):.2f}"
+            )
+            self._route_replan_last_reason = str(reason)
+            return False, False, str(reason)
+
+        self._route_replan_last_attempt_s = float(now_s)
+        self._route_replan_attempt_count += 1
+        result = self.route_manager.replan_from(
+            start_point={
+                "x": float(ego_location.x),
+                "y": float(ego_location.y),
+                "z": float(getattr(ego_location, "z", 0.0)),
+            },
+            trigger_reason=str(trigger_reason),
+        )
+        self._route_replan_last_reason = str(result.reason)
+        if not bool(result.success):
+            return True, False, str(result.reason)
+
+        self._active_route_summary = self.route_manager.active_route_summary
+        self._temporary_destination_state = None
+        self._previous_lane_center_reference = []
+        self._lane_reference_freeze_count = 0
+        self._reset_route_tracking_lane_change_reference()
+        maneuver_manager = getattr(self, "maneuver_manager", None)
+        if maneuver_manager is not None:
+            maneuver_manager.reset(reason="turn_route_replanned")
+        self.control_buffer.reset(reason="turn_route_replanned")
+        return True, True, str(result.reason)
+
     def _current_route_tracking_lane_change_envelope_payload_world(
         self,
     ) -> Optional[Mapping[str, object]]:
@@ -6964,6 +7209,9 @@ class CPXMPCPlannerBridge:
     ) -> tuple[str, int, float, list[dict[str, object]], list[float], dict[str, object]]:
         """Return an explicit fallback candidate when every candidate is invalid."""
 
+        route_replan_attempted = False
+        route_replan_succeeded = False
+
         stop_like = str(baseline_decision or "").strip().lower() in {
             "stop_at_intersection",
             "stop_sign",
@@ -7027,6 +7275,65 @@ class CPXMPCPlannerBridge:
                     destination_state=destination,
                     lane_center_reference=reference,
                 )
+            if (
+                (not reference or turn_contract is None or not turn_contract.valid)
+                and bool(
+                self.config.get("turn_route_replan_enabled", True)
+                )
+            ):
+                (
+                    route_replan_attempted,
+                    route_replan_succeeded,
+                    route_replan_reason,
+                ) = self._attempt_turn_route_replan(
+                    ego_location=ego_location,
+                )
+                turn_reference_reason = ";".join(
+                    reason
+                    for reason in (
+                        str(turn_reference_reason),
+                        str(route_replan_reason),
+                    )
+                    if reason
+                )
+                if bool(route_replan_succeeded):
+                    reference, destination, retry_reason = (
+                        self._carla_waypoint_turn_reference(
+                            ego_location=ego_location,
+                            ego_yaw_rad=float(ego_yaw_rad),
+                            current_state=current_state,
+                            current_lane_id=int(current_lane_id),
+                            target_lane_id=int(
+                                baseline_target_lane_id or current_lane_id
+                            ),
+                            target_speed_mps=float(fallback_turn_speed_mps),
+                            destination_state=None,
+                        )
+                    )
+                    turn_reference_reason = ";".join(
+                        reason
+                        for reason in (
+                            str(turn_reference_reason),
+                            f"route_replan_retry:{str(retry_reason)}",
+                        )
+                        if reason
+                    )
+                    turn_contract = None
+                    if reference:
+                        turn_contract = self._validate_candidate_reference_contract(
+                            decision=str(baseline_decision),
+                            lc_state=(
+                                "INTERSECTION_TURN_LEFT"
+                                if str(baseline_decision).endswith("_left")
+                                else "INTERSECTION_TURN_RIGHT"
+                            ),
+                            current_lane_id=int(current_lane_id),
+                            speed_ref_mps=float(fallback_turn_speed_mps),
+                            stop_goal_active=False,
+                            current_state=current_state,
+                            destination_state=destination,
+                            lane_center_reference=reference,
+                        )
             if (
                 reference
                 and turn_contract is not None
@@ -7397,6 +7704,8 @@ class CPXMPCPlannerBridge:
             ),
             "mpc_reference_stabilizer_reason": str(reason),
             "carla_turn_reference_reason": str(turn_reference_reason),
+            "route_replan_attempted": bool(route_replan_attempted),
+            "route_replan_succeeded": bool(route_replan_succeeded),
         }
         debug.update(
             dict(

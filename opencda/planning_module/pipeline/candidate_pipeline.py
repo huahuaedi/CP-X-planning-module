@@ -76,6 +76,108 @@ class CandidateSelectionOutcome:
     reason: str
 
 
+@dataclass(frozen=True)
+class HumanLaneChangeProfile:
+    variant: str
+    duration_s: float
+    speed_scale: float
+    extra_cost: float
+    reason: str
+
+
+def build_human_lane_change_profiles(
+    *,
+    ego_speed_mps: float,
+    lane_width_m: float,
+    target_lane_prediction_risk: Mapping[str, object],
+    available_distance_m: Optional[float] = None,
+    minimum_duration_s: float = 3.0,
+    maximum_duration_s: float = 6.5,
+) -> tuple[HumanLaneChangeProfile, ...]:
+    """Build comfort-bounded lane-change styles without automatic braking.
+
+    A quintic lateral transition has peak acceleration proportional to
+    ``lane_width / duration**2`` and peak jerk proportional to
+    ``lane_width / duration**3``. Durations therefore come from physical
+    comfort limits; speed only changes the spatial length of the maneuver.
+    Longitudinal speed is preserved on a clear target lane and reduced only
+    when the predicted front gap is genuinely constraining.
+    """
+
+    speed = max(0.0, float(ego_speed_mps))
+    width = max(0.5, abs(float(lane_width_m)))
+    min_duration = max(1.0, float(minimum_duration_s))
+    max_duration = max(min_duration, float(maximum_duration_s))
+    risk = dict(target_lane_prediction_risk or {})
+
+    def duration_for_limits(accel_limit: float, jerk_limit: float) -> float:
+        accel_duration = math.sqrt(5.7735 * width / max(0.1, accel_limit))
+        jerk_duration = (60.0 * width / max(0.1, jerk_limit)) ** (1.0 / 3.0)
+        return min(max_duration, max(min_duration, accel_duration, jerk_duration))
+
+    front_gap = _finite_optional(risk.get("min_front_gap_m"))
+    rear_gap = _finite_optional(risk.get("min_rear_gap_m"))
+    desired_front_gap = 5.0 + 1.5 * speed
+    front_constrained = (
+        front_gap is not None and float(front_gap) < float(desired_front_gap + 6.0)
+    )
+    rear_constrained = rear_gap is not None and float(rear_gap) < max(10.0, 1.0 * speed)
+
+    normal_scale = 1.0
+    conservative_scale = 1.0
+    speed_reason = "clear_gap_maintain_speed"
+    if bool(front_constrained) and not bool(rear_constrained):
+        gap_ratio = max(
+            0.0,
+            min(1.0, (float(front_gap) - 5.0) / max(1.0, desired_front_gap)),
+        )
+        normal_scale = max(0.85, 0.85 + 0.15 * gap_ratio)
+        conservative_scale = max(0.75, 0.75 + 0.20 * gap_ratio)
+        speed_reason = "predicted_front_gap_mild_slowdown"
+    elif bool(rear_constrained):
+        # Slowing while a rear vehicle is close shrinks the rear gap. Keep
+        # speed and let authorization/prediction defer the maneuver if needed.
+        speed_reason = "predicted_rear_gap_maintain_speed"
+
+    assertive_duration = duration_for_limits(1.8, 4.0)
+    normal_duration = duration_for_limits(1.3, 2.5)
+    conservative_duration = duration_for_limits(1.0, 1.5)
+
+    urgency_reason = ""
+    if (
+        available_distance_m is not None
+        and math.isfinite(float(available_distance_m))
+        and speed > 0.5
+    ):
+        available_time_s = max(0.0, float(available_distance_m)) / speed
+        if available_time_s < normal_duration:
+            urgency_reason = ";route_distance_prefers_assertive"
+
+    return (
+        HumanLaneChangeProfile(
+            variant="assertive",
+            duration_s=float(assertive_duration),
+            speed_scale=1.0,
+            extra_cost=2.8 if urgency_reason else 3.2,
+            reason=f"human_profile:{speed_reason}{urgency_reason}",
+        ),
+        HumanLaneChangeProfile(
+            variant="normal",
+            duration_s=float(normal_duration),
+            speed_scale=float(normal_scale),
+            extra_cost=2.0 if not urgency_reason else 3.5,
+            reason=f"human_profile:{speed_reason}{urgency_reason}",
+        ),
+        HumanLaneChangeProfile(
+            variant="conservative",
+            duration_s=float(conservative_duration),
+            speed_scale=float(conservative_scale),
+            extra_cost=2.6 if not urgency_reason else 4.5,
+            reason=f"human_profile:{speed_reason}{urgency_reason}",
+        ),
+    )
+
+
 def build_candidate_intents(
     *,
     selected_decision: str,
@@ -100,6 +202,12 @@ def build_candidate_intents(
     lane_change_authorization_source: str = "route",
     lane_change_defer_cost: float = 10.0,
     turn_obstacle_stop_defer_cost: float = 90.0,
+    human_like_lane_change_enabled: bool = False,
+    ego_speed_mps: float = 0.0,
+    lane_width_m: float = 3.5,
+    lane_change_available_distance_m: Optional[float] = None,
+    human_lane_change_min_duration_s: float = 3.0,
+    human_lane_change_max_duration_s: float = 6.5,
 ) -> list[CandidateBehaviorIntent]:
     """Generate behavior candidates for the reference/MPC boundary."""
 
@@ -310,38 +418,43 @@ def build_candidate_intents(
                 lane_safety_scores=lane_safety_scores,
                 lane_prediction_risks=lane_prediction_risks,
             )
-            for variant, duration_s, speed_scale, extra_cost in (
-                (
-                    "assertive",
-                    lane_change_assertive_duration_s,
-                    lane_change_assertive_speed_scale,
-                    3.0,
-                ),
-                (
-                    "normal",
-                    lane_change_normal_duration_s,
-                    lane_change_normal_speed_scale,
-                    2.0,
-                ),
-                (
-                    "conservative",
-                    lane_change_conservative_duration_s,
-                    lane_change_conservative_speed_scale,
-                    2.5,
-                ),
-            ):
+            if bool(human_like_lane_change_enabled):
+                profiles = build_human_lane_change_profiles(
+                    ego_speed_mps=float(ego_speed_mps),
+                    lane_width_m=float(lane_width_m),
+                    target_lane_prediction_risk=dict(
+                        lane_prediction_risks.get(int(target_lane_id), {}) or {}
+                    ),
+                    available_distance_m=lane_change_available_distance_m,
+                    minimum_duration_s=float(human_lane_change_min_duration_s),
+                    maximum_duration_s=float(human_lane_change_max_duration_s),
+                )
+            else:
+                profiles = (
+                    HumanLaneChangeProfile("assertive", lane_change_assertive_duration_s, lane_change_assertive_speed_scale, 3.0, "legacy_profile"),
+                    HumanLaneChangeProfile("normal", lane_change_normal_duration_s, lane_change_normal_speed_scale, 2.0, "legacy_profile"),
+                    HumanLaneChangeProfile("conservative", lane_change_conservative_duration_s, lane_change_conservative_speed_scale, 2.5, "legacy_profile"),
+                )
+            for profile in profiles:
                 add(CandidateBehaviorIntent(
-                    name=f"{authorization_source}_{decision}_{variant}",
+                    name=f"{authorization_source}_{decision}_{profile.variant}",
                     decision=str(decision),
                     target_lane_id=int(target_lane_id),
                     target_speed_mps=max(
                         0.8,
-                        float(target_speed_mps) * float(speed_scale),
+                        float(target_speed_mps) * float(profile.speed_scale),
                     ),
-                    base_cost=float(extra_cost) + float(lane_cost),
-                    reason=f"{authorization_source}_lane_change_authorized",
-                    trajectory_variant=str(variant),
-                    lane_change_duration_s=float(duration_s),
+                    base_cost=float(profile.extra_cost) + float(lane_cost),
+                    reason=(
+                        f"{authorization_source}_lane_change_authorized"
+                        if str(profile.reason) == "legacy_profile"
+                        else (
+                            f"{authorization_source}_lane_change_authorized;"
+                            f"{profile.reason}"
+                        )
+                    ),
+                    trajectory_variant=str(profile.variant),
+                    lane_change_duration_s=float(profile.duration_s),
                 ))
 
     for lane_id in list(candidate_lane_ids or []):
@@ -1038,6 +1151,14 @@ def _lane_cost(
     risk_cost = 80.0 if bool(risk.get("risk", False)) else 0.0
     lane_change_cost = 5.0 if int(lane_id) != int(current_lane_id) else 0.0
     return float(10.0 * (1.0 - safety) + risk_cost + lane_change_cost)
+
+
+def _finite_optional(value: object) -> Optional[float]:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return float(number) if math.isfinite(number) else None
 
 
 def _lane_change_risk_cost(

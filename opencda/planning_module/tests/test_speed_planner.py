@@ -16,9 +16,29 @@ sys.modules[SPEC.name] = speed_planner
 SPEC.loader.exec_module(speed_planner)
 build_speed_plan = speed_planner.build_speed_plan
 enforce_speed_ceiling = speed_planner.enforce_speed_ceiling
+turn_approach_lookahead_m = speed_planner.turn_approach_lookahead_m
 
 
 class SpeedPlannerTest(unittest.TestCase):
+    def test_turn_preview_scales_with_cruise_speed(self):
+        config = {
+            "full_intersection_turn_speed_cap_mps": 5.0,
+            "turn_approach_comfort_decel_mps2": 2.5,
+            "turn_approach_entry_buffer_m": 5.0,
+            "turn_approach_preview_margin_m": 10.0,
+        }
+        preview_35_mph = turn_approach_lookahead_m(
+            cruise_speed_mps=15.6464,
+            config=config,
+        )
+        preview_60_mph = turn_approach_lookahead_m(
+            cruise_speed_mps=26.8224,
+            config=config,
+        )
+        self.assertGreater(preview_35_mph, 50.0)
+        self.assertGreater(preview_60_mph, 140.0)
+        self.assertGreater(preview_60_mph, preview_35_mph)
+
     @staticmethod
     def _legacy_result(
         *, scenario_cap, scenario_stop, decision, requested, ego_speed, front_gap
@@ -119,6 +139,104 @@ class SpeedPlannerTest(unittest.TestCase):
         self.assertEqual(plan.target_speed_mps, 2.2)
         self.assertEqual(plan.limiting_owner, "turn_cap")
         self.assertIn("turn_cap", plan.active_constraints)
+
+    def test_distant_upcoming_turn_preserves_cruise_speed(self):
+        plan = build_speed_plan(
+            scenario_decision=SimpleNamespace(
+                speed_cap_mps=None,
+                stop_goal_active=False,
+                reason="prepare_turn_right",
+            ),
+            behavior_decision="lane_follow",
+            requested_speed_mps=15.6464,
+            ego_speed_mps=15.0,
+            config={
+                "full_intersection_turn_speed_cap_mps": 5.0,
+                "turn_approach_comfort_decel_mps2": 2.5,
+                "turn_approach_entry_buffer_m": 5.0,
+            },
+            upcoming_turn_direction="right",
+            upcoming_turn_distance_m=100.0,
+        )
+        self.assertAlmostEqual(plan.target_speed_mps, 15.6464)
+        self.assertNotEqual(plan.limiting_owner, "turn_approach_cap")
+
+    def test_upcoming_turn_uses_distance_based_deceleration_cap(self):
+        plan = build_speed_plan(
+            scenario_decision=SimpleNamespace(
+                speed_cap_mps=None,
+                stop_goal_active=False,
+                reason="prepare_turn_right",
+            ),
+            behavior_decision="lane_follow",
+            requested_speed_mps=15.6464,
+            ego_speed_mps=15.0,
+            config={
+                "full_intersection_turn_speed_cap_mps": 5.0,
+                "turn_approach_comfort_decel_mps2": 2.5,
+                "turn_approach_entry_buffer_m": 5.0,
+            },
+            upcoming_turn_direction="right",
+            upcoming_turn_distance_m=35.0,
+        )
+        expected = math.sqrt(5.0 ** 2 + 2.0 * 2.5 * 30.0)
+        self.assertAlmostEqual(plan.target_speed_mps, expected)
+        self.assertEqual(plan.limiting_owner, "turn_approach_cap")
+        self.assertIn("speed_plan_turn_approach_cap", plan.reason)
+        self.assertEqual(plan.upcoming_turn_distance_m, 35.0)
+
+    def test_stop_overrides_turn_approach_cap(self):
+        plan = build_speed_plan(
+            scenario_decision=SimpleNamespace(
+                speed_cap_mps=0.0,
+                stop_goal_active=True,
+                reason="traffic_light_stop",
+            ),
+            behavior_decision="stop_at_intersection",
+            requested_speed_mps=15.6464,
+            ego_speed_mps=10.0,
+            config={"full_intersection_turn_speed_cap_mps": 5.0},
+            upcoming_turn_direction="right",
+            upcoming_turn_distance_m=35.0,
+        )
+        self.assertEqual(plan.target_speed_mps, 0.0)
+        self.assertTrue(plan.stop_goal_active)
+        self.assertEqual(plan.limiting_owner, "normal_stop")
+
+    def test_lane_change_cap_records_longitudinal_authority(self):
+        plan = build_speed_plan(
+            scenario_decision=SimpleNamespace(
+                speed_cap_mps=None,
+                stop_goal_active=False,
+                reason="",
+            ),
+            behavior_decision="lane_change_left",
+            requested_speed_mps=5.0,
+            ego_speed_mps=3.68,
+            config={"full_lane_change_speed_cap_mps": 3.0},
+            front_gap_m=None,
+        )
+        self.assertEqual(plan.target_speed_mps, 3.0)
+        self.assertEqual(plan.limiting_owner, "lane_change_cap")
+        self.assertIn("lane_change_cap", plan.active_constraints)
+        self.assertEqual(plan.lane_change_cap_mps, 3.0)
+        self.assertIn("speed_plan_lane_change_cap", plan.reason)
+
+    def test_lane_change_cap_does_not_raise_an_already_slower_request(self):
+        plan = build_speed_plan(
+            scenario_decision=SimpleNamespace(
+                speed_cap_mps=None,
+                stop_goal_active=False,
+                reason="",
+            ),
+            behavior_decision="lane_change_right",
+            requested_speed_mps=2.0,
+            ego_speed_mps=1.8,
+            config={"full_lane_change_speed_cap_mps": 3.0},
+            front_gap_m=None,
+        )
+        self.assertEqual(plan.target_speed_mps, 2.0)
+        self.assertNotEqual(plan.limiting_owner, "lane_change_cap")
 
     def test_instrumentation_is_behaviorally_equivalent_to_legacy_speed_logic(self):
         decisions = [

@@ -180,7 +180,10 @@ class CPXScenarioManagerTests(unittest.TestCase):
         self.assertEqual(decision.behavior_override_lc_state, "LANE_KEEP")
         self.assertEqual(decision.turn_direction, "right")
         self.assertFalse(decision.turn_latched)
-        self.assertEqual(decision.speed_cap_mps, 2.8)
+        # Scenario selection reserves the turn direction but does not impose
+        # an early fixed low-speed cap. SpeedPlanner owns distance-based
+        # deceleration toward the turn-entry speed.
+        self.assertEqual(decision.speed_cap_mps, 8.0)
 
     def test_red_far_is_approach_not_stop(self):
         manager = CPXScenarioManager({

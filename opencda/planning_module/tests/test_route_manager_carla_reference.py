@@ -825,6 +825,64 @@ class RouteManagerCarlaReferenceTest(unittest.TestCase):
         self.assertAlmostEqual(float(reference[0]["lane_width_m"]), 3.5)
         self.assertAlmostEqual(float(reference[-1]["lane_width_m"]), 8.0)
 
+    def test_replan_from_atomically_replaces_route_on_success(self):
+        summary = type(
+            "Summary",
+            (),
+            {"route_found": True, "route_waypoints": [(0.0, 0.0), (2.0, 0.0)]},
+        )()
+        planner = type(
+            "Planner",
+            (),
+            {"plan_route_from_locations": lambda self, **kwargs: summary},
+        )()
+        manager = CPXRouteManager(global_planner=planner)
+        manager._goal_point = {"x": 10.0, "y": 0.0, "z": 0.0}
+        manager._build_carla_route = lambda **kwargs: setattr(
+            manager,
+            "_carla_route_entries",
+            [(_Waypoint(2.0, 0.0), "LANEFOLLOW"), (_Waypoint(10.0, 0.0), "LANEFOLLOW")],
+        )
+
+        result = manager.replan_from(
+            start_point={"x": 2.0, "y": 0.0, "z": 0.0},
+            trigger_reason="turn_reference_unavailable",
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.route_point_count, 2)
+        self.assertEqual(manager._start_point["x"], 2.0)
+        self.assertIn("carla_grp_route_replanned", manager.carla_route_debug_reason)
+
+    def test_replan_from_restores_previous_route_on_failure(self):
+        planner = type(
+            "Planner",
+            (),
+            {"plan_route_from_locations": lambda self, **kwargs: object()},
+        )()
+        manager = CPXRouteManager(global_planner=planner)
+        old_entries = [
+            (_Waypoint(0.0, 0.0), "LANEFOLLOW"),
+            (_Waypoint(5.0, 0.0), "LANEFOLLOW"),
+        ]
+        manager._goal_point = {"x": 10.0, "y": 0.0, "z": 0.0}
+        manager._start_point = {"x": 0.0, "y": 0.0, "z": 0.0}
+        manager._carla_route_entries = old_entries
+        manager._carla_route_debug_reason = "old_route_ready"
+        manager._build_carla_route = lambda **kwargs: setattr(
+            manager, "_carla_route_entries", []
+        )
+
+        result = manager.replan_from(
+            start_point={"x": 2.0, "y": 1.0, "z": 0.0},
+            trigger_reason="turn_reference_unavailable",
+        )
+
+        self.assertFalse(result.success)
+        self.assertIs(manager._carla_route_entries, old_entries)
+        self.assertEqual(manager._start_point["x"], 0.0)
+        self.assertEqual(manager.carla_route_debug_reason, "old_route_ready")
+
 
 if __name__ == "__main__":
     unittest.main()
