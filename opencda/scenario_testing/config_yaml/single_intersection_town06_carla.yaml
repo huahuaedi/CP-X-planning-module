@@ -57,15 +57,12 @@ vehicle_base:
     global_planner_strict: false
     publish_cp_message: true
     require_native_opencda_cp: true
-    # Cruise target for the 35mph test stage (35mph = 15.6464 m/s). Raised
-    # progressively: 3.0 (original) -> 5.0 (first increase, validated against
-    # cpx_single_left_lane_turn's measured turn curvature comfort ceiling of
-    # ~4.7-5.75 m/s at 2-3 m/s^2 lateral accel) -> this. SpeedPlanner now
-    # preserves this cruise request on straights, scales turn preview from
-    # braking distance, and applies maneuver/traffic constraints separately.
-    # mpc.yaml's 30 m/s velocity ceiling also leaves room for the later
-    # 60mph (26.8224 m/s) test stage.
-    target_speed_mps: 15.6464
+    # Reverted to the historical default (3.0) after the 35mph (15.6464)
+    # test stage. The lane-change/turn caps, curvature-adaptive turn speed
+    # cap, throttle ceilings, and missed-lane-change replan trigger added
+    # during that test stage all stay in place -- they don't depend on this
+    # cruise value and are non-binding (higher than cruise) at 3.0.
+    target_speed_mps: 3.0
     velocity_steering_interface_enabled: true
     velocity_adapter_kp: 0.18
     velocity_adapter_ki: 0.025
@@ -332,7 +329,7 @@ scenario:
         global_planner_strict: false
         publish_cp_message: true
         require_native_opencda_cp: true
-        target_speed_mps: 15.6464
+        target_speed_mps: 3.0
         velocity_steering_interface_enabled: true
         velocity_adapter_kp: 0.18
         velocity_adapter_ki: 0.025
