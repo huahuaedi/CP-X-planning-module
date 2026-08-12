@@ -76,6 +76,7 @@ def authorize_route_lane_change(
     latest_start_distance_m: float,
     target_safety_threshold: float,
     require_adjacent: bool = True,
+    explicit_lane_change_start_distance_m: Optional[float] = None,
 ) -> LaneChangeAuthorization:
     if not bool(route_lane_change_allowed):
         return _denied("route_lane_change_not_allowed", next_macro_maneuver, remaining_distance_m, current_lane_id)
@@ -136,6 +137,18 @@ def authorize_route_lane_change(
         RouteManeuver.LANE_CHANGE_LEFT,
         RouteManeuver.LANE_CHANGE_RIGHT,
     }
+    if (
+        explicit_lane_change
+        and distance is not None
+        and explicit_lane_change_start_distance_m is not None
+        and float(distance) > float(explicit_lane_change_start_distance_m)
+    ):
+        return _denied(
+            "explicit_lane_change_trigger_too_far",
+            maneuver,
+            distance,
+            target_lane_id,
+        )
     if distance is not None and not explicit_lane_change:
         if float(distance) > float(preparation_start_distance_m):
             return _denied("maneuver_too_far_for_lane_change", maneuver, distance, target_lane_id)

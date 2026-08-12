@@ -158,6 +158,8 @@ class RouteManagerCarlaReferenceTest(unittest.TestCase):
 
         self.assertEqual(route_info["next_macro_maneuver"], "Lane Change Right")
         self.assertEqual(route_info["optimal_lane_id"], 2)
+        self.assertGreater(route_info["next_macro_distance_m"], 8.0)
+        self.assertLess(route_info["next_macro_distance_m"], 9.0)
         self.assertEqual(route_info["debug_reason"], "carla_grp_route_active")
         self.assertGreater(route_info["remaining_distance_m"], 20.0)
 
@@ -713,6 +715,30 @@ class RouteManagerCarlaReferenceTest(unittest.TestCase):
             start_index=0,
             fallback_lane_id=2,
             ego_waypoint=ego_lane2,
+        )
+
+        self.assertEqual(target_lane_id, 1)
+
+    def test_explicit_right_change_uses_adjacent_stable_id_when_remote_recount_differs(self):
+        """A remote maneuver waypoint can have a different local lane count.
+
+        The explicit CHANGELANERIGHT edge still means one physical hop right
+        from ego's stable lane 2; its independently recounted id must not
+        leak into route authorization as an impossible target such as 5.
+        """
+
+        ego_lane = _ConnectableWaypoint(0.0, 0.0, lane_id=2, road_id=1)
+        remote_lane = _ConnectableWaypoint(20.0, 0.0, lane_id=5, road_id=2)
+        nodes = [
+            (0.0, 0.0, 0.0, ego_lane, "LANEFOLLOW"),
+            (20.0, 0.0, 0.0, remote_lane, "CHANGELANERIGHT"),
+        ]
+
+        target_lane_id = _route_required_carla_lane_id(
+            nodes=nodes,
+            start_index=0,
+            fallback_lane_id=2,
+            ego_waypoint=ego_lane,
         )
 
         self.assertEqual(target_lane_id, 1)

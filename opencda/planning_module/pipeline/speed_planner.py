@@ -247,14 +247,19 @@ def build_speed_plan(
         # smoothing the transition into it -- keeps the lateral maneuver's
         # dynamics decoupled from however unsettled the longitudinal speed
         # still is.
-        lane_change_cap_mps = max(
-            0.1, float(config.get("full_lane_change_speed_cap_mps", 3.0))
-        )
-        active_constraints.append("lane_change_cap")
-        previous_cap = float(cap)
-        cap = min(float(cap), float(lane_change_cap_mps))
-        if float(cap) < previous_cap:
-            limiting_owner = "lane_change_cap"
+        # In curvature-aware mode the winning lane-change geometry owns this
+        # cap. At this stage no candidate reference exists yet, so applying a
+        # fixed cap here would discard the speed used to size the maneuver and
+        # make duration/curvature selection internally inconsistent.
+        if not bool(config.get("full_lane_change_dynamic_speed_cap_enabled", True)):
+            lane_change_cap_mps = max(
+                0.1, float(config.get("full_lane_change_speed_cap_mps", 3.0))
+            )
+            active_constraints.append("lane_change_cap")
+            previous_cap = float(cap)
+            cap = min(float(cap), float(lane_change_cap_mps))
+            if float(cap) < previous_cap:
+                limiting_owner = "lane_change_cap"
     following_active = False
     following_cap_mps = None
     following_gap_m = None
@@ -319,7 +324,10 @@ def build_speed_plan(
         reason = _join_reason(reason, "speed_plan_turn_cap")
     elif turn_approach_cap_mps is not None and turn_approach_cap_mps < requested:
         reason = _join_reason(reason, "speed_plan_turn_approach_cap")
-    if decision in {"lane_change_left", "lane_change_right"}:
+    if (
+        decision in {"lane_change_left", "lane_change_right"}
+        and lane_change_cap_mps is not None
+    ):
         reason = _join_reason(reason, "speed_plan_lane_change_cap")
     if stop_goal:
         reason = _join_reason(reason, "speed_plan_stop_zero")

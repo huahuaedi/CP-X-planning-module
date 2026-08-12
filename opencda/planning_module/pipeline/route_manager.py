@@ -408,6 +408,11 @@ class CPXRouteManager:
         options = [str(node[4]) for node in nodes[index + 1 : index + 81]]
         current_option = str(nodes[min(index + 1, len(nodes) - 1)][4])
         next_macro = _next_macro_from_carla_options(options)
+        next_macro_distance_m = _distance_to_next_carla_macro(
+            nodes=nodes,
+            start_index=int(index),
+            projection=self._carla_route_projection,
+        )
         optimal_lane_id = _route_required_carla_lane_id(
             nodes=nodes,
             start_index=int(index),
@@ -428,6 +433,7 @@ class CPXRouteManager:
             "optimal_lane_id": int(optimal_lane_id),
             "current_road_option": str(current_option),
             "next_macro_maneuver": str(next_macro),
+            "next_macro_distance_m": next_macro_distance_m,
             "debug_reason": "carla_grp_route_active",
             "remaining_distance_m": float(remaining),
             "reached_destination": bool(reached),
@@ -469,6 +475,11 @@ class CPXRouteManager:
         options = [str(node[4]) for node in nodes[index + 1 : index + 81]]
         current_option = str(nodes[min(index + 1, len(nodes) - 1)][4])
         next_macro = _next_macro_from_carla_options(options)
+        next_macro_distance_m = _distance_to_next_carla_macro(
+            nodes=nodes,
+            start_index=int(index),
+            projection=self._carla_route_projection,
+        )
         remaining = self._remaining_distance_on_fallback_route(
             x_m=float(x_m),
             y_m=float(y_m),
@@ -486,6 +497,7 @@ class CPXRouteManager:
             "optimal_lane_id": int(lane_id),
             "current_road_option": str(current_option),
             "next_macro_maneuver": str(next_macro),
+            "next_macro_distance_m": next_macro_distance_m,
             "debug_reason": "external_leaderboard_route_active",
             "remaining_distance_m": float(remaining),
             "reached_destination": bool(reached),
@@ -1937,6 +1949,42 @@ def _next_macro_from_carla_options(options: Sequence[str]) -> str:
     return "Continue Straight"
 
 
+def _distance_to_next_carla_macro(
+    *,
+    nodes: Sequence[Tuple[float, float, float, Any, str]],
+    start_index: int,
+    projection: Optional[Tuple[int, float, float, float, float]] = None,
+) -> Optional[float]:
+    """Along-route distance from ego projection to the next macro node."""
+
+    if len(nodes) < 2:
+        return None
+    index = min(max(0, int(start_index)), len(nodes) - 2)
+    if projection is not None:
+        previous_xy = (float(projection[1]), float(projection[2]))
+    else:
+        previous_xy = (float(nodes[index][0]), float(nodes[index][1]))
+    distance_m = 0.0
+    macro_options = {
+        "CHANGELANELEFT",
+        "CHANGELANERIGHT",
+        "LEFT",
+        "RIGHT",
+        "STRAIGHT",
+    }
+    for node in list(nodes[index + 1 : index + 81]):
+        current_xy = (float(node[0]), float(node[1]))
+        distance_m += math.hypot(
+            current_xy[0] - previous_xy[0],
+            current_xy[1] - previous_xy[1],
+        )
+        option = str(node[4] or "").strip().upper().replace("_", "")
+        if option in macro_options:
+            return float(distance_m)
+        previous_xy = current_xy
+    return None
+
+
 def _route_required_carla_lane_id(
     *,
     nodes: Sequence[Tuple[float, float, float, Any, str]],
@@ -1965,26 +2013,39 @@ def _route_required_carla_lane_id(
             if option in {"LEFT", "RIGHT", "STRAIGHT"}:
                 break
             continue
+        # A CARLA CHANGELANE option is an adjacent-lane edge, so its target
+        # is exactly one stable lane-id step from ego.  Do not let an
+        # independent canonical recount at the remote maneuver waypoint
+        # override that fact: on roads where lanes appear/disappear between
+        # ego and the maneuver point, that local recount can turn a physical
+        # 2 -> 1 right change into an impossible target such as 5.
+        expected_hop = 1 if option == "CHANGELANELEFT" else -1
         hop = None
         if ego_waypoint is not None:
             from utility.carla_lane_graph import lane_hop_offset
 
             hop = lane_hop_offset(ego_waypoint, node[3])
-        if hop is not None:
+        if hop is not None and int(hop) == int(expected_hop):
             candidate_lane_id = int(current_lane_id) + int(hop)
         else:
-            # No provable lane-to-lane connectivity to the maneuver point
-            # (ego_waypoint unavailable, or the hop search couldn't reach it)
-            # -- fall back to the previous local-recount behavior rather than
-            # silently dropping the maneuver.
-            candidate_lane_id = int(_canonical_carla_lane_id(node[3], current_lane_id))
+            local_candidate_lane_id = int(
+                _canonical_carla_lane_id(node[3], current_lane_id)
+            )
             raw_lane_id = int(getattr(node[3], "lane_id", 0) or 0)
             if (
-                candidate_lane_id == current_lane_id
+                local_candidate_lane_id == current_lane_id
                 and raw_lane_id > 0
-                and raw_lane_id != current_lane_id
+                and abs(int(raw_lane_id) - int(current_lane_id)) == 1
             ):
-                candidate_lane_id = int(raw_lane_id)
+                local_candidate_lane_id = int(raw_lane_id)
+            if abs(int(local_candidate_lane_id) - int(current_lane_id)) == 1:
+                # Compatibility for externally supplied/synthetic routes
+                # whose lane-id orientation is not the runtime stable-id
+                # convention, but whose target is still unambiguously
+                # adjacent.
+                candidate_lane_id = int(local_candidate_lane_id)
+            else:
+                candidate_lane_id = int(current_lane_id) + int(expected_hop)
         if candidate_lane_id != 0 and candidate_lane_id != current_lane_id:
             return int(candidate_lane_id)
     return int(current_lane_id)

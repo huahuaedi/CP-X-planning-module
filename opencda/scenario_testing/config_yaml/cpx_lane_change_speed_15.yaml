@@ -1,0 +1,13 @@
+base_config: cpx_lane_change_2lanefree.yaml
+
+description: Isolated repeatable lane-change test at 15 m/s.
+
+cpx_mature:
+  max_ticks: 1800
+
+vehicle_base:
+  planner:
+    target_speed_mps: 15.0
+    full_lane_change_dynamic_speed_cap_enabled: true
+    full_lane_change_speed_ceiling_mps: 15.0
+    debug_output_dir: opencda/planning_module/opencda_bridge/debug_cpx_lane_change_speed_15

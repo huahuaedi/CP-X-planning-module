@@ -283,6 +283,9 @@ class OpenCDAPlanningAdapter:
                 route_summary.get("next_macro_maneuver", "Continue Straight")
             ),
             current_road_option=str(route_summary.get("current_road_option", "")),
+            next_macro_distance_m=float(
+                route_summary.get("next_macro_distance_m", float("inf"))
+            ),
             remaining_distance_m=float(route_summary.get("remaining_distance_m", 0.0) or 0.0),
             remaining_points_count=len(route_points),
             route_found=bool(route_summary.get("route_found", False)),

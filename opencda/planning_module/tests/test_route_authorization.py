@@ -112,6 +112,36 @@ class RouteAuthorizationTest(unittest.TestCase):
         self.assertEqual(auth.direction, "right")
         self.assertEqual(auth.target_lane_id, 1)
 
+    def test_explicit_route_lane_change_waits_until_dynamic_start_distance(self):
+        common = dict(
+            route_lane_change_allowed=True,
+            current_lane_id=2,
+            route_required_lane_id=1,
+            next_macro_maneuver="Lane Change Right",
+            current_road_option="LANEFOLLOW",
+            available_lane_ids=[1, 2],
+            lane_safety_scores={1: 0.95},
+            lane_prediction_risks={},
+            preparation_start_distance_m=45.0,
+            latest_start_distance_m=12.0,
+            target_safety_threshold=0.65,
+            explicit_lane_change_start_distance_m=15.0,
+        )
+
+        waiting = authorize_route_lane_change(
+            remaining_distance_m=21.0,
+            **common,
+        )
+        ready = authorize_route_lane_change(
+            remaining_distance_m=14.0,
+            **common,
+        )
+
+        self.assertFalse(waiting.allowed)
+        self.assertEqual(waiting.reason, "explicit_lane_change_trigger_too_far")
+        self.assertTrue(ready.allowed)
+        self.assertEqual(ready.direction, "right")
+
     def test_normalize_straight(self):
         self.assertEqual(normalize_route_maneuver("Continue Straight"), RouteManeuver.GO_STRAIGHT)
 

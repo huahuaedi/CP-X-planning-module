@@ -300,6 +300,7 @@ class CPXMPCPlannerBridge:
             "yaw_deg",
             "speed_mps",
             "measured_accel_mps2",
+            "mpc_jerk_seed_accel_mps2",
             "target_speed_mps",
             "speed_plan_target_mps",
             "speed_plan_front_gap_m",
@@ -875,6 +876,18 @@ class CPXMPCPlannerBridge:
                 self.config.get(
                     "control_buffer_max_reference_anchor_jump_m",
                     0.75,
+                )
+            ),
+            max_predicted_speed_error_mps=float(
+                self.config.get(
+                    "control_buffer_max_predicted_speed_error_mps",
+                    0.75,
+                )
+            ),
+            max_target_speed_jump_mps=float(
+                self.config.get(
+                    "control_buffer_max_target_speed_jump_mps",
+                    1.0,
                 )
             ),
         )
@@ -1484,6 +1497,14 @@ class CPXMPCPlannerBridge:
             str(reference_debug.get("reference_source", "")),
             str(bool(mpc_stop_goal_active)),
             str(behavior_debug.get("traffic_signal_state", "")),
+            # A buffered control sequence was optimized against whichever
+            # vehicle _front_gap_m() picked as "ahead of me" -- if that
+            # identity changes (e.g. the source-lane vehicle a lane change
+            # was following drops out of the gate and a different, target-
+            # lane vehicle takes over), the old sequence's braking/following
+            # intent no longer means what it did when it was solved, even
+            # though decision/lc_state/target_lane haven't changed yet.
+            str(reference_debug.get("front_gap_actor_id", "")),
         ))
         reference_anchor_xy = (
             (
@@ -1503,6 +1524,13 @@ class CPXMPCPlannerBridge:
             if lane_center_reference
             else None
         )
+        # MPC constrains jerk between the previous control input and the new
+        # acceleration sequence. Seed that constraint with the acceleration
+        # command actually sent last tick, not the measured vehicle response.
+        # The latter contains actuator lag and can stay strongly negative
+        # after the speed target has recovered, otherwise forcing every new
+        # solve to continue braking until the vehicle is almost stationary.
+        mpc_jerk_seed_accel_mps2 = float(self._last_accel_mps2)
         if str(candidate_hard_gate_reason):
             self.control_buffer.reset(reason="control_buffer_reference_hard_veto")
         elif bool(stationary_traffic_stop_hold):
@@ -1567,7 +1595,7 @@ class CPXMPCPlannerBridge:
                             "prediction_trajectories", {}
                         ),
                     ),
-                    current_acceleration_mps2=float(measured_accel_mps2),
+                    current_acceleration_mps2=float(mpc_jerk_seed_accel_mps2),
                     current_steering_rad=float(self._last_steer_rad),
                     lane_center_reference_samples=lane_center_reference,
                     stop_goal_active=bool(mpc_stop_goal_active),
@@ -1579,12 +1607,22 @@ class CPXMPCPlannerBridge:
                 u_solution = getattr(self.mpc, "_last_u_solution", None)
                 if u_solution is None or len(u_solution) == 0:
                     raise RuntimeError("MPC did not expose a control solution")
+                x_solution = getattr(self.mpc, "_last_x_solution", None)
+                predicted_speed_sequence_mps = (
+                    None
+                    if x_solution is None or len(x_solution) == 0
+                    # Column 2 is speed; the (x, y) world-origin offset
+                    # baked into _last_x_solution doesn't touch it.
+                    else [float(state[2]) for state in x_solution]
+                )
                 self.control_buffer.update_from_solution(
                     u_solution=u_solution,
                     plan_time_s=float(sim_time_s),
                     dt_s=float(self.mpc.dt_s),
                     context_key=str(control_context_key),
                     reference_anchor_xy=reference_anchor_xy,
+                    predicted_speed_sequence_mps=predicted_speed_sequence_mps,
+                    target_speed_mps=float(speed_ref_mps),
                 )
                 accel_mps2 = float(u_solution[0, 0])
                 steer_rad = float(u_solution[0, 1])
@@ -1825,6 +1863,7 @@ class CPXMPCPlannerBridge:
             "yaw_deg": float(ego_transform.rotation.yaw),
             "speed_mps": float(ego_speed_mps),
             "measured_accel_mps2": float(measured_accel_mps2),
+            "mpc_jerk_seed_accel_mps2": float(mpc_jerk_seed_accel_mps2),
             "planner": "cpx_mpc",
             **platform_adapter_debug,
             "object_count": len(object_snapshots),
@@ -3310,13 +3349,19 @@ class CPXMPCPlannerBridge:
                 )
             ),
         )
+        explicit_lane_change_start_distance_m = max(
+            float(self.config.get("route_lane_change_min_trigger_distance_m", 8.0)),
+            float(ego_speed_mps)
+            * float(self.config.get("route_tracking_lane_change_duration_s", 4.0))
+            + float(self.config.get("route_lane_change_trigger_buffer_m", 3.0)),
+        )
         lane_change_authorization = authorize_route_lane_change(
             route_lane_change_allowed=bool(route_lane_change_allowed),
             current_lane_id=int(current_lane_id),
             route_required_lane_id=int(route_optimal_lane_id),
             next_macro_maneuver=str(route_context.next_macro_maneuver),
             current_road_option=str(route_context.current_road_option),
-            remaining_distance_m=float(route_context.remaining_distance_m),
+            remaining_distance_m=float(route_context.next_macro_distance_m),
             available_lane_ids=list(planner_input_frame.map_lane.allowed_lane_ids),
             lane_safety_scores=lane_safety_scores,
             lane_prediction_risks=dict(planner_input_frame.prediction.lane_prediction_risks),
@@ -3330,6 +3375,9 @@ class CPXMPCPlannerBridge:
                 self.config.get("route_lane_change_target_safety_threshold", 0.65)
             ),
             require_adjacent=bool(self.config.get("route_lane_change_require_adjacent", True)),
+            explicit_lane_change_start_distance_m=float(
+                explicit_lane_change_start_distance_m
+            ),
         )
         route_lane_change_required = bool(lane_change_authorization.required_by_route)
         # If the route ever genuinely required a specific lane, remember it.
@@ -3855,10 +3903,19 @@ class CPXMPCPlannerBridge:
                     if str(behavior_override_reason)
                     else ""
                 ) + str(turn_latch_reason)
-        front_gap_m = self._front_gap_m(
+        front_gap_m, front_gap_actor_id = self._front_gap_m(
             ego_location=ego_location,
             ego_yaw_rad=float(ego_yaw_rad),
             object_snapshots=object_snapshots,
+            lane_change_direction=(
+                "left" if str(decision) == "lane_change_left"
+                else "right" if str(decision) == "lane_change_right"
+                else ""
+            ),
+            lane_change_progress=float(
+                getattr(self, "_route_tracking_lane_change_progress", 0.0) or 0.0
+            ),
+            return_actor_id=True,
         )
         speed_plan = build_speed_plan(
             scenario_decision=scenario_decision,
@@ -4000,6 +4057,7 @@ class CPXMPCPlannerBridge:
             "intent_mode": reference_debug.get("reference_pipeline_intent_mode", ""),
             "fallback_reason": str(ref_output.last_reference_fallback_reason),
             "reference_source": "behavior_reference_pipeline",
+            "front_gap_actor_id": str(front_gap_actor_id or ""),
             "route_reference_allowed": bool(route_reference_allowed),
             "route_reference_gate_reason": str(route_reference_gate_reason),
             "route_lane_change_allowed": bool(route_lane_change_allowed),
@@ -4213,13 +4271,57 @@ class CPXMPCPlannerBridge:
             # with the cap doing nothing, because only build_speed_plan's
             # (bypassed) turn_cap_mps was ever computed against it.
             if str(decision) in {"lane_change_left", "lane_change_right"}:
+                lane_change_curvature_1pm = float(
+                    self.reference_generator.discrete_curvature_1pm(
+                        local_lane_center_reference
+                    )
+                )
+                lane_change_curvature_cap_mps = curvature_speed_cap_mps(
+                    curve_curvature_abs=float(lane_change_curvature_1pm),
+                    curve_min_curvature=max(
+                        0.0,
+                        float(
+                            self.config.get(
+                                "full_lane_change_curvature_min_curvature_1pm",
+                                0.002,
+                            )
+                        ),
+                    ),
+                    current_speed_mps=float(ego_speed_mps),
+                    curve_lateral_accel_limit_mps2=max(
+                        0.1,
+                        float(
+                            self.config.get(
+                                "route_tracking_lane_change_lateral_accel_limit_mps2",
+                                1.3,
+                            )
+                        ),
+                    ),
+                    speed_enable_threshold_mps=0.0,
+                )
                 lane_change_cap_mps = max(
                     0.1,
                     float(
-                        self.config.get("full_lane_change_speed_cap_mps", 3.0)
+                        self.config.get(
+                            "full_lane_change_speed_ceiling_mps",
+                            max(0.1, float(speed_ref_mps)),
+                        )
                     ),
                 )
+                if lane_change_curvature_cap_mps is not None:
+                    lane_change_cap_mps = min(
+                        float(lane_change_cap_mps),
+                        float(lane_change_curvature_cap_mps),
+                    )
                 speed_ref_mps = min(float(speed_ref_mps), float(lane_change_cap_mps))
+                reference_debug.update({
+                    "lane_change_reference_curvature_1pm": float(
+                        lane_change_curvature_1pm
+                    ),
+                    "lane_change_curvature_speed_cap_mps": float(
+                        lane_change_cap_mps
+                    ),
+                })
             elif str(decision) in {"intersection_turn_left", "intersection_turn_right"}:
                 # full_intersection_turn_speed_cap_mps is a per-fleet ceiling,
                 # not a per-turn comfort speed: two turns at different
@@ -9331,10 +9433,50 @@ class CPXMPCPlannerBridge:
         ego_location: carla.Location,
         ego_yaw_rad: float,
         object_snapshots: Sequence[Mapping[str, Any]],
-    ) -> Optional[float]:
+        *,
+        lane_change_direction: str = "",
+        lane_change_progress: float = 0.0,
+        return_actor_id: bool = False,
+    ):
+        """Nearest-ahead gap in ego's body frame.
+
+        Outside an active lane change (``lane_change_direction == ""``),
+        this is a plain nearest-ahead search within a +/-2.5 m lateral
+        gate -- unchanged from before.
+
+        During an active lane change ("left"/"right"), the source lane's
+        front vehicle must not be dropped the instant the maneuver starts
+        (ego hasn't moved yet -- it's still physically in the source lane),
+        but also must not keep braking ego once ego's body has actually
+        cleared it. This computes the source-lane gap and target-lane gap
+        *separately* (split at ego's current heading, not by lane_id) and
+        blends between them as a smooth function of ``lane_change_progress``
+        (alpha in [0, 1], 0 = still at the source lane center, 1 = at the
+        target lane center -- pass self._route_tracking_lane_change_progress):
+
+          - alpha <= alpha_clear: fully the source-lane gap. alpha_clear is
+            the progress at which ego's own body -- not just its center --
+            has crossed the source/target lane boundary, derived from
+            vehicle width and lane width, not a fixed distance or a
+            lane_id switch: alpha_clear = 0.5 + vehicle_width_m / (2 *
+            lane_width_m).
+          - alpha_clear < alpha < 1: smoothstep blend toward the
+            target-lane gap.
+          - alpha >= 1: fully the target-lane gap.
+
+        Sign convention (lateral = -dx*sin_h + dy*cos_h): validated against
+        the cpx_lane_change_speed_* scenarios -- positive lateral is the
+        left-hand side of ego's current heading.
+
+        ``return_actor_id=True`` also returns the id of whichever object
+        dominates the blended gap (None if neither side has one), so a
+        caller can detect "the object being used as my front-vehicle
+        reference just changed" even when the gap distance itself moves
+        smoothly -- see control_context_key in _run_full_cpx_pipeline_step.
+        """
+
         cos_h = math.cos(ego_yaw_rad)
         sin_h = math.sin(ego_yaw_rad)
-        best_gap = None
         ego_half_length_m = 2.25
         try:
             ego_half_length_m = max(
@@ -9343,28 +9485,107 @@ class CPXMPCPlannerBridge:
             )
         except Exception:
             pass
-        for snapshot in object_snapshots:
-            dx = float(snapshot.get("x", 0.0)) - float(ego_location.x)
-            dy = float(snapshot.get("y", 0.0)) - float(ego_location.y)
-            longitudinal = dx * cos_h + dy * sin_h
-            lateral = -dx * sin_h + dy * cos_h
-            if longitudinal <= 0.0 or abs(lateral) > 2.5:
-                continue
-            object_half_length_m = max(
-                0.0,
-                0.5 * float(snapshot.get("length_m", 4.5) or 4.5),
+
+        def _nearest_gap(
+            *, min_lateral_m: float, max_lateral_m: float
+        ) -> tuple[Optional[float], Optional[str]]:
+            best_gap = None
+            best_actor_id = None
+            for snapshot in object_snapshots:
+                dx = float(snapshot.get("x", 0.0)) - float(ego_location.x)
+                dy = float(snapshot.get("y", 0.0)) - float(ego_location.y)
+                longitudinal = dx * cos_h + dy * sin_h
+                lateral = -dx * sin_h + dy * cos_h
+                if (
+                    longitudinal <= 0.0
+                    or lateral < float(min_lateral_m)
+                    or lateral > float(max_lateral_m)
+                ):
+                    continue
+                object_half_length_m = max(
+                    0.0,
+                    0.5 * float(snapshot.get("length_m", 4.5) or 4.5),
+                )
+                clearance_m = max(
+                    0.0,
+                    float(longitudinal)
+                    - float(ego_half_length_m)
+                    - float(object_half_length_m),
+                )
+                if best_gap is None or float(clearance_m) < float(best_gap):
+                    best_gap = float(clearance_m)
+                    best_actor_id = self._object_track_id(snapshot)
+            return best_gap, best_actor_id
+
+        direction = str(lane_change_direction or "").strip().lower()
+        if direction not in {"left", "right"}:
+            best_gap, best_actor_id = _nearest_gap(
+                min_lateral_m=-2.5, max_lateral_m=2.5
             )
-            clearance_m = max(
-                0.0,
-                float(longitudinal)
-                - float(ego_half_length_m)
-                - float(object_half_length_m),
+            if bool(return_actor_id):
+                return best_gap, (
+                    None if best_gap is None else str(best_actor_id)
+                )
+            return best_gap
+
+        # A small overlap around the ego-heading split line keeps an object
+        # sitting right at the boundary visible to both searches, instead
+        # of a strict 0.0 cutoff creating a blind seam between them.
+        boundary_overlap_m = max(
+            0.0, float(self.config.get("lane_change_boundary_overlap_m", 0.75))
+        )
+        if direction == "left":
+            source_gap, source_actor_id = _nearest_gap(
+                min_lateral_m=-2.5, max_lateral_m=boundary_overlap_m
             )
-            best_gap = (
-                float(clearance_m)
-                if best_gap is None
-                else min(float(best_gap), float(clearance_m))
+            target_gap, target_actor_id = _nearest_gap(
+                min_lateral_m=-boundary_overlap_m, max_lateral_m=2.5
             )
+        else:
+            source_gap, source_actor_id = _nearest_gap(
+                min_lateral_m=-boundary_overlap_m, max_lateral_m=2.5
+            )
+            target_gap, target_actor_id = _nearest_gap(
+                min_lateral_m=-2.5, max_lateral_m=boundary_overlap_m
+            )
+
+        try:
+            vehicle_width_m = max(
+                0.5,
+                float(self.vehicle_manager.vehicle.bounding_box.extent.y) * 2.0,
+            )
+        except Exception:
+            vehicle_width_m = 2.0
+        lane_width_m = max(1.0, float(getattr(self.mpc, "lane_width_m", 3.5)))
+        alpha_clear = min(
+            0.95, 0.5 + float(vehicle_width_m) / (2.0 * float(lane_width_m))
+        )
+        alpha = max(0.0, min(1.0, float(lane_change_progress)))
+        if alpha <= alpha_clear:
+            blend_weight = 0.0
+        else:
+            span = max(1.0e-6, 1.0 - float(alpha_clear))
+            ramp = min(1.0, (float(alpha) - float(alpha_clear)) / float(span))
+            blend_weight = float(ramp) * float(ramp) * (3.0 - 2.0 * float(ramp))
+
+        _no_constraint_gap_m = 1.0e6
+        source_value = (
+            _no_constraint_gap_m if source_gap is None else float(source_gap)
+        )
+        target_value = (
+            _no_constraint_gap_m if target_gap is None else float(target_gap)
+        )
+        blended_gap = (
+            (1.0 - blend_weight) * source_value + blend_weight * target_value
+        )
+        best_gap = (
+            None if blended_gap >= 0.5 * _no_constraint_gap_m else float(blended_gap)
+        )
+        best_actor_id = (
+            target_actor_id if blend_weight >= 0.5 else source_actor_id
+        )
+        if bool(return_actor_id):
+            return best_gap, (None if best_gap is None else str(best_actor_id))
         return best_gap
 
     @staticmethod

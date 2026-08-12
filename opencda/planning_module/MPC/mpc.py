@@ -1571,6 +1571,21 @@ class MPC:
 
         The current ego state is matched to a nearby stage of the previous
         solution, then the remainder of that solution is shifted forward.
+
+        Only the state/control *dimensionality* (nx/nu) has to match --
+        horizon *length* does not. blend_toward_horizon_s changes
+        self.horizon_steps between calls (e.g. every lane change ramps the
+        horizon from the lane_follow profile's ~3s to the lane-change
+        profile's ~4.5s over several adaptive_horizon_min_step_change-sized
+        jumps); a stale exact-length check here used to force a cold-start
+        rebuild on every one of those jumps, discarding the previous
+        solution's speed/steering profile right as the maneuver's reference
+        geometry is at its most demanding. The index-clamping below
+        (``min(best_idx + k, prev_x.shape[0] - 1)``) already tolerates a
+        shorter/longer previous array by repeating its last stage, so once
+        x_seed/u_seed below are sized to the *current* horizon_steps
+        instead of copied from prev_x/prev_u's old shape, reuse across a
+        horizon-length change falls out for free.
         """
 
         if not bool(self.reference_use_previous_solution_seed):
@@ -1580,9 +1595,9 @@ class MPC:
 
         prev_x = self._previous_x_solution
         prev_u = self._previous_u_solution
-        if prev_x.shape != (self.horizon_steps + 1, self.nx):
+        if prev_x.ndim != 2 or prev_x.shape[0] < 1 or prev_x.shape[1] != self.nx:
             return None
-        if prev_u.shape != (self.horizon_steps, self.nu):
+        if prev_u.ndim != 2 or prev_u.shape[1] != self.nu:
             return None
 
         search_limit = min(
@@ -1614,8 +1629,8 @@ class MPC:
         if best_idx is None:
             return None
 
-        x_seed = np.zeros_like(prev_x)
-        u_seed = np.zeros_like(prev_u)
+        x_seed = np.zeros((self.horizon_steps + 1, self.nx), dtype=float)
+        u_seed = np.zeros((self.horizon_steps, self.nu), dtype=float)
         x_seed[0] = np.asarray(x0, dtype=float)
 
         for k in range(1, self.horizon_steps + 1):

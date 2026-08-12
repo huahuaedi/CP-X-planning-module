@@ -213,7 +213,10 @@ class SpeedPlannerTest(unittest.TestCase):
             behavior_decision="lane_change_left",
             requested_speed_mps=5.0,
             ego_speed_mps=3.68,
-            config={"full_lane_change_speed_cap_mps": 3.0},
+            config={
+                "full_lane_change_dynamic_speed_cap_enabled": False,
+                "full_lane_change_speed_cap_mps": 3.0,
+            },
             front_gap_m=None,
         )
         self.assertEqual(plan.target_speed_mps, 3.0)
@@ -221,6 +224,27 @@ class SpeedPlannerTest(unittest.TestCase):
         self.assertIn("lane_change_cap", plan.active_constraints)
         self.assertEqual(plan.lane_change_cap_mps, 3.0)
         self.assertIn("speed_plan_lane_change_cap", plan.reason)
+
+    def test_dynamic_lane_change_cap_waits_for_winning_reference_geometry(self):
+        plan = build_speed_plan(
+            scenario_decision=SimpleNamespace(
+                speed_cap_mps=None,
+                stop_goal_active=False,
+                reason="",
+            ),
+            behavior_decision="lane_change_left",
+            requested_speed_mps=15.0,
+            ego_speed_mps=12.0,
+            config={
+                "full_lane_change_dynamic_speed_cap_enabled": True,
+                "full_lane_change_speed_cap_mps": 3.0,
+            },
+            front_gap_m=None,
+        )
+        self.assertEqual(plan.target_speed_mps, 15.0)
+        self.assertIsNone(plan.lane_change_cap_mps)
+        self.assertNotIn("lane_change_cap", plan.active_constraints)
+        self.assertNotIn("speed_plan_lane_change_cap", plan.reason)
 
     def test_lane_change_cap_does_not_raise_an_already_slower_request(self):
         plan = build_speed_plan(
@@ -232,7 +256,10 @@ class SpeedPlannerTest(unittest.TestCase):
             behavior_decision="lane_change_right",
             requested_speed_mps=2.0,
             ego_speed_mps=1.8,
-            config={"full_lane_change_speed_cap_mps": 3.0},
+            config={
+                "full_lane_change_dynamic_speed_cap_enabled": False,
+                "full_lane_change_speed_cap_mps": 3.0,
+            },
             front_gap_m=None,
         )
         self.assertEqual(plan.target_speed_mps, 2.0)
