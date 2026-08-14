@@ -1554,6 +1554,8 @@ class CPXMPCPlannerBridge:
                 context_key=str(control_context_key),
                 reference_anchor_xy=reference_anchor_xy,
             )
+        failed_replan_buffer_reused = False
+        failed_replan_maneuver_steer_held = False
         try:
             if str(candidate_hard_gate_reason):
                 raise RuntimeError(str(candidate_hard_gate_reason))
@@ -1696,14 +1698,71 @@ class CPXMPCPlannerBridge:
                 accel_mps2 = float(self._last_accel_mps2)
                 steer_rad = 0.0
             else:
-                control = self._fallback_control(
-                    ego_transform=ego_transform,
-                    ego_speed_mps=ego_speed_mps,
-                    destination_state=destination_state,
-                    stop_goal_active=mpc_stop_goal_active,
+                normalized_behavior = str(
+                    behavior_debug.get("decision", "")
+                ).strip().lower()
+                maneuver_tracking_active = normalized_behavior in {
+                    "intersection_turn_left",
+                    "intersection_turn_right",
+                    "lane_change_left",
+                    "lane_change_right",
+                }
+                buffered_after_failure = (
+                    self.control_buffer.sample(
+                        sim_time_s=float(sim_time_s),
+                        context_key=str(control_context_key),
+                        reference_anchor_xy=reference_anchor_xy,
+                    )
+                    if (
+                        bool(maneuver_tracking_active)
+                        and not bool(mpc_stop_goal_active)
+                    )
+                    else None
                 )
-                accel_mps2 = self._last_accel_mps2
-                steer_rad = self._last_steer_rad
+                if buffered_after_failure is not None:
+                    (
+                        accel_mps2,
+                        steer_rad,
+                        _failed_replan_buffer_reason,
+                    ) = buffered_after_failure
+                    self._set_actuator_context(
+                        ego_speed_mps=float(ego_speed_mps),
+                        target_speed_mps=float(speed_ref_mps),
+                        stop_goal_active=False,
+                    )
+                    control = self._control_from_mpc(
+                        float(accel_mps2), float(steer_rad)
+                    )
+                    self._last_accel_mps2 = float(accel_mps2)
+                    self._last_steer_rad = float(steer_rad)
+                    failed_replan_buffer_reused = True
+                else:
+                    previous_valid_steer_rad = float(self._last_steer_rad)
+                    control = self._fallback_control(
+                        ego_transform=ego_transform,
+                        ego_speed_mps=ego_speed_mps,
+                        destination_state=destination_state,
+                        stop_goal_active=mpc_stop_goal_active,
+                    )
+                    accel_mps2 = self._last_accel_mps2
+                    steer_rad = self._last_steer_rad
+                    if bool(maneuver_tracking_active):
+                        # A failed maneuver solve must not transfer lateral
+                        # ownership to the destination-point fallback.  Hold
+                        # the last accepted steering command for this single
+                        # degraded frame; longitudinal fallback and the final
+                        # safety supervisor remain active.
+                        steer_rad = float(previous_valid_steer_rad)
+                        self._set_actuator_context(
+                            ego_speed_mps=float(ego_speed_mps),
+                            target_speed_mps=float(speed_ref_mps),
+                            stop_goal_active=False,
+                        )
+                        control = self._control_from_mpc(
+                            float(accel_mps2), float(steer_rad)
+                        )
+                        self._last_steer_rad = float(steer_rad)
+                        failed_replan_maneuver_steer_held = True
             if bool(hard_gate_active) and str(
                 behavior_debug.get("decision", "")
             ) == "emergency_brake":
@@ -1712,6 +1771,10 @@ class CPXMPCPlannerBridge:
                 mpc_status = (
                     "candidate_hard_gate"
                     if bool(hard_gate_active)
+                    else "buffer_reuse_after_failed_replan"
+                    if bool(failed_replan_buffer_reused)
+                    else "maneuver_steer_hold_after_failed_replan"
+                    if bool(failed_replan_maneuver_steer_held)
                     else str(getattr(self.mpc, "_last_status", str(exc)))
                 )
             if not self._warned:
@@ -7750,6 +7813,62 @@ class CPXMPCPlannerBridge:
             fallback_turn_speed_mps = float(
                 self.config.get("strict_turn_fallback_speed_mps", 0.8)
             )
+            turn_exit_stabilization_active = (
+                str(getattr(getattr(self, "_scenario_manager", None), "state", ""))
+                .strip()
+                .upper()
+                == "TURN_EXIT_STABILIZATION"
+            )
+            retained_turn_reference = (
+                self.maneuver_manager.retained_turn_continuation(
+                    ego_x_m=float(ego_location.x),
+                    ego_y_m=float(ego_location.y),
+                    target_speed_mps=float(
+                        max(
+                            fallback_turn_speed_mps,
+                            float(
+                                getattr(
+                                    getattr(self, "_scenario_manager", None),
+                                    "turn_speed_cap_mps",
+                                    fallback_turn_speed_mps,
+                                )
+                            ),
+                        )
+                    ),
+                    count=int(self.mpc.horizon_steps),
+                )
+                if bool(turn_exit_stabilization_active)
+                and not bool(hard_safety_veto)
+                else []
+            )
+            if retained_turn_reference:
+                terminal = dict(retained_turn_reference[-1])
+                speed_mps = float(
+                    retained_turn_reference[0].get(
+                        "speed_ref_mps",
+                        getattr(
+                            getattr(self, "_scenario_manager", None),
+                            "turn_speed_cap_mps",
+                            fallback_turn_speed_mps,
+                        ),
+                    )
+                )
+                reference = [dict(sample) for sample in retained_turn_reference]
+                destination = [
+                    float(terminal.get("x_ref_m", terminal.get("x", current_state[0]))),
+                    float(terminal.get("y_ref_m", terminal.get("y", current_state[1]))),
+                    float(speed_mps),
+                    float(terminal.get("heading_rad", current_state[3])),
+                    int(baseline_target_lane_id or current_lane_id),
+                ]
+                decision = str(baseline_decision)
+                selected_lane_id = int(baseline_target_lane_id or current_lane_id)
+                selected_name = "retained_turn_exit_continuation"
+                source = "unified_maneuver_turn_exit_continuation"
+                turn_reference_reason = "retained_turn_exit_geometry"
+            else:
+                reference = []
+                destination = []
             reference, destination, turn_reason = self._carla_waypoint_turn_reference(
                 ego_location=ego_location,
                 ego_yaw_rad=float(ego_yaw_rad),
@@ -7758,10 +7877,11 @@ class CPXMPCPlannerBridge:
                 target_lane_id=int(baseline_target_lane_id or current_lane_id),
                 target_speed_mps=float(fallback_turn_speed_mps),
                 destination_state=None,
-            )
-            turn_reference_reason = str(turn_reason)
+            ) if not retained_turn_reference else (reference, destination, "")
+            if not retained_turn_reference:
+                turn_reference_reason = str(turn_reason)
             turn_contract = None
-            if reference:
+            if reference and not retained_turn_reference:
                 turn_contract = self._validate_candidate_reference_contract(
                     decision=str(baseline_decision),
                     lc_state=(
@@ -7777,7 +7897,12 @@ class CPXMPCPlannerBridge:
                     lane_center_reference=reference,
                 )
             if (
-                (not reference or turn_contract is None or not turn_contract.valid)
+                not retained_turn_reference
+                and (
+                    not reference
+                    or turn_contract is None
+                    or not turn_contract.valid
+                )
                 and bool(
                 self.config.get("turn_route_replan_enabled", True)
                 )
@@ -7836,16 +7961,21 @@ class CPXMPCPlannerBridge:
                             lane_center_reference=reference,
                         )
             if (
-                reference
-                and turn_contract is not None
-                and bool(turn_contract.valid)
-                and not bool(hard_safety_veto)
+                bool(retained_turn_reference)
+                or (
+                    reference
+                    and turn_contract is not None
+                    and bool(turn_contract.valid)
+                    and not bool(hard_safety_veto)
+                )
             ):
                 decision = str(baseline_decision)
-                speed_mps = float(fallback_turn_speed_mps)
+                if not retained_turn_reference:
+                    speed_mps = float(fallback_turn_speed_mps)
                 selected_lane_id = int(baseline_target_lane_id or current_lane_id)
-                selected_name = "explicit_fallback_carla_route_turn"
-                source = "explicit_fallback_carla_grp_waypoint_turn"
+                if not retained_turn_reference:
+                    selected_name = "explicit_fallback_carla_route_turn"
+                    source = "explicit_fallback_carla_grp_waypoint_turn"
             else:
                 if bool(hard_safety_veto):
                     turn_reference_reason = (

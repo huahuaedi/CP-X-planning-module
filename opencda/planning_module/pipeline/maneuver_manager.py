@@ -65,6 +65,46 @@ class ManeuverManager:
         self.active_plan = None
         self._last_output = []
 
+    def retained_turn_continuation(
+        self,
+        *,
+        ego_x_m: float,
+        ego_y_m: float,
+        target_speed_mps: float,
+        count: int,
+    ) -> list[dict[str, object]]:
+        """Return the forward part of the currently owned turn geometry.
+
+        ScenarioManager intentionally keeps the turn authoritative during
+        TURN_EXIT_STABILIZATION.  Candidate generation can nevertheless have
+        a one-frame map/footprint contract miss after the route has advanced.
+        The already accepted maneuver geometry is the continuous reference
+        for that transient; rebuilding a fresh route or emergency-stop path
+        here changes ownership and produces a control spike.
+        """
+
+        plan = self.active_plan
+        if plan is None or str(plan.maneuver_type) != "intersection_turn":
+            return []
+        retained, retained_index = self._forward_window(
+            plan.geometry,
+            ego_x_m=float(ego_x_m),
+            ego_y_m=float(ego_y_m),
+            count=max(2, int(count)),
+            start_index=int(plan.progress_index),
+        )
+        if not retained:
+            return []
+        plan.progress_index = max(int(plan.progress_index), int(retained_index))
+        result = self._apply_velocity_profile(
+            retained,
+            [
+                {"speed_ref_mps": float(target_speed_mps)}
+                for _ in retained
+            ],
+        )
+        return [dict(sample) for sample in result]
+
     def update(
         self,
         *,
@@ -103,6 +143,7 @@ class ManeuverManager:
             self.active_plan is not None
             and self.active_plan.maneuver_type == "intersection_turn"
             and bool(route_advanced_to_lane_change)
+            and normalized_decision not in _TURN
         ):
             released_debug = {
                 "maneuver_geometry_release_reason": "route_advanced_to_lane_change",

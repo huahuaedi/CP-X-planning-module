@@ -201,6 +201,97 @@ class ManeuverManagerTests(unittest.TestCase):
         )
         self.assertIsNone(manager.active_plan)
 
+    def test_exit_stabilization_keeps_turn_geometry_after_route_advances(self):
+        manager = ManeuverManager()
+        turn = manager.update(
+            reference_samples=_reference(),
+            destination_state=[20.0, 0.0, 2.0, 0.0, 1],
+            decision="intersection_turn_left",
+            behavior_fsm_state="INTERSECTION_TURN_LEFT",
+            current_lane_id=1,
+            target_lane_id=1,
+            ego_x_m=0.0,
+            ego_y_m=0.0,
+            reference_source="turn",
+            route_current_option="LEFT",
+            route_next_maneuver="Turn Left",
+        )
+        held = manager.update(
+            reference_samples=_reference(0.2),
+            destination_state=[20.0, 0.2, 2.0, 0.0, 1],
+            decision="intersection_turn_left",
+            behavior_fsm_state="INTERSECTION_TURN_LEFT",
+            current_lane_id=1,
+            target_lane_id=1,
+            ego_x_m=5.0,
+            ego_y_m=0.0,
+            reference_source="turn_exit_stabilization",
+            route_current_option="LaneFollow",
+            route_next_maneuver="Lane Change Right",
+        )
+
+        self.assertTrue(turn.debug["maneuver_geometry_active"])
+        self.assertTrue(held.debug["maneuver_geometry_active"])
+        self.assertEqual(
+            held.debug["maneuver_geometry_id"],
+            turn.debug["maneuver_geometry_id"],
+        )
+        self.assertIsNotNone(manager.active_plan)
+
+    def test_retained_turn_continuation_uses_owned_geometry_and_new_speed(self):
+        manager = ManeuverManager()
+        manager.update(
+            reference_samples=_reference(0.5, 2.0),
+            destination_state=[20.0, 0.5, 2.0, 0.0, 1],
+            decision="intersection_turn_left",
+            behavior_fsm_state="INTERSECTION_TURN_LEFT",
+            current_lane_id=1,
+            target_lane_id=1,
+            ego_x_m=0.0,
+            ego_y_m=0.0,
+            reference_source="turn",
+            route_current_option="LEFT",
+        )
+
+        continuation = manager.retained_turn_continuation(
+            ego_x_m=5.0,
+            ego_y_m=0.5,
+            target_speed_mps=5.0,
+            count=8,
+        )
+
+        self.assertTrue(continuation)
+        self.assertLessEqual(len(continuation), 8)
+        self.assertTrue(all(
+            float(sample["speed_ref_mps"]) == 5.0
+            for sample in continuation
+        ))
+        self.assertGreaterEqual(float(continuation[0]["x_ref_m"]), 5.0)
+
+    def test_retained_turn_continuation_rejects_non_turn_owner(self):
+        manager = ManeuverManager()
+        manager.update(
+            reference_samples=_reference(0.0, 2.0),
+            destination_state=[20.0, 0.0, 2.0, 0.0, 2],
+            decision="lane_change_right",
+            behavior_fsm_state="EXECUTE_LANE_CHANGE_RIGHT",
+            current_lane_id=1,
+            target_lane_id=2,
+            ego_x_m=0.0,
+            ego_y_m=0.0,
+            reference_source="lane_change",
+        )
+
+        self.assertEqual(
+            manager.retained_turn_continuation(
+                ego_x_m=2.0,
+                ego_y_m=0.0,
+                target_speed_mps=3.0,
+                count=8,
+            ),
+            [],
+        )
+
     def test_completed_commitment_releases_lane_change_even_if_macro_lags(self):
         manager = ManeuverManager()
         manager.update(

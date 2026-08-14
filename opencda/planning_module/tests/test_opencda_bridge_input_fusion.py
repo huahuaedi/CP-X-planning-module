@@ -659,6 +659,67 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         self.assertEqual(debug["reference_source"], "explicit_fallback_ego_heading_stop")
         self.assertIn("candidate_collision_risk_veto", debug["carla_turn_reference_reason"])
 
+    def test_turn_exit_contract_miss_keeps_retained_turn_instead_of_stopping(self):
+        from pipeline.maneuver_manager import ManeuverManager
+
+        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
+        bridge.config = {}
+        bridge.mpc = types.SimpleNamespace(dt_s=0.1, horizon_steps=3)
+        bridge._scenario_manager = types.SimpleNamespace(
+            state="TURN_EXIT_STABILIZATION",
+            turn_speed_cap_mps=5.0,
+        )
+        bridge.maneuver_manager = ManeuverManager()
+        bridge.maneuver_manager.update(
+            reference_samples=[
+                {"x_ref_m": 1.0, "y_ref_m": 0.0, "heading_rad": 0.0, "speed_ref_mps": 5.0},
+                {"x_ref_m": 2.0, "y_ref_m": 0.1, "heading_rad": 0.1, "speed_ref_mps": 5.0},
+                {"x_ref_m": 3.0, "y_ref_m": 0.3, "heading_rad": 0.2, "speed_ref_mps": 5.0},
+            ],
+            destination_state=[3.0, 0.3, 5.0, 0.2, 1],
+            decision="intersection_turn_left",
+            behavior_fsm_state="INTERSECTION_TURN_LEFT",
+            current_lane_id=1,
+            target_lane_id=1,
+            ego_x_m=0.0,
+            ego_y_m=0.0,
+            reference_source="accepted_turn",
+            route_current_option="LEFT",
+        )
+
+        decision, _, speed_mps, reference, _, debug = (
+            bridge._explicit_fallback_candidate_for_mpc(
+                candidate_results=[
+                    types.SimpleNamespace(
+                        feasibility_reason=(
+                            "turn_swept_footprint:outside_drivable_union:"
+                            "min_clearance=-0.150"
+                        )
+                    )
+                ],
+                baseline_decision="intersection_turn_left",
+                baseline_target_lane_id=1,
+                current_lane_id=1,
+                current_state=[0.0, 0.0, 4.0, 0.0],
+                ego_location=sys.modules["carla"].Location(0.0, 0.0, 0.0),
+                ego_yaw_rad=0.0,
+                summarize_candidate_results=lambda _rows: "contract miss",
+                selection_reason="no_active_maneuver_commitment",
+            )
+        )
+
+        self.assertEqual(decision, "intersection_turn_left")
+        self.assertEqual(speed_mps, 5.0)
+        self.assertTrue(reference)
+        self.assertEqual(
+            debug["candidate_pipeline_selected"],
+            "retained_turn_exit_continuation",
+        )
+        self.assertEqual(
+            debug["reference_source"],
+            "unified_maneuver_turn_exit_continuation",
+        )
+
     def test_turn_stabilizer_does_not_treat_normal_curve_spacing_as_duplicate(self):
         bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
         bridge.config = {}

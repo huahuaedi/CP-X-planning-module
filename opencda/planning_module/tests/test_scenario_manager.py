@@ -333,8 +333,11 @@ class CPXScenarioManagerTests(unittest.TestCase):
         self.assertIn("turn_exit_alignment_hold", held.reason)
         self.assertEqual(released.state, LANE_FOLLOW)
 
-    def test_post_turn_lane_change_macro_releases_stale_turn_latch(self):
-        manager = CPXScenarioManager({"scenario_turn_exit_hold_s": 3.0})
+    def test_post_turn_lane_change_macro_waits_for_stable_exit_alignment(self):
+        manager = CPXScenarioManager({
+            "scenario_turn_exit_hold_s": 3.0,
+            "scenario_turn_exit_stable_frames": 3,
+        })
         manager.update(
             traffic_state="unknown",
             stop_target=None,
@@ -347,7 +350,7 @@ class CPXScenarioManagerTests(unittest.TestCase):
             sim_time_s=10.0,
         )
 
-        released = manager.update(
+        held_in_junction = manager.update(
             traffic_state="unknown",
             stop_target=None,
             stop_forward_m=0.0,
@@ -364,8 +367,33 @@ class CPXScenarioManagerTests(unittest.TestCase):
             turn_exit_aligned=False,
         )
 
-        self.assertEqual(released.state, LANE_FOLLOW)
-        self.assertEqual(released.behavior_override_decision, "")
+        self.assertEqual(held_in_junction.state, "TURN_EXIT_STABILIZATION")
+        self.assertEqual(
+            held_in_junction.behavior_override_decision,
+            "intersection_turn_left",
+        )
+
+        decisions = []
+        for frame in range(3):
+            decisions.append(manager.update(
+                traffic_state="unknown",
+                stop_target=None,
+                stop_forward_m=0.0,
+                stop_target_reliable=False,
+                ego_speed_mps=3.0,
+                ego_in_junction=False,
+                current_road_option="LaneFollow",
+                next_macro_maneuver="Lane Change Right",
+                sim_time_s=10.2 + 0.1 * frame,
+                turn_exit_alignment_valid=True,
+                turn_exit_aligned=True,
+                turn_exit_heading_error_rad=0.02,
+                turn_exit_lateral_m=0.1,
+            ))
+
+        self.assertEqual(decisions[0].state, "TURN_EXIT_STABILIZATION")
+        self.assertEqual(decisions[1].state, "TURN_EXIT_STABILIZATION")
+        self.assertEqual(decisions[2].state, LANE_FOLLOW)
         self.assertEqual(manager._turn_direction, "")
 
     def test_turn_exit_hold_prevents_early_lane_follow_contract_switch(self):

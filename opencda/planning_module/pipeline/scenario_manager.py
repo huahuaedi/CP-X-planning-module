@@ -18,6 +18,7 @@ TRAFFIC_LIGHT_APPROACH = "TRAFFIC_LIGHT_APPROACH"
 TRAFFIC_LIGHT_STOP = "TRAFFIC_LIGHT_STOP"
 PREPARE_TURN = "PREPARE_TURN"
 INTERSECTION_TURN = "INTERSECTION_TURN"
+TURN_EXIT_STABILIZATION = "TURN_EXIT_STABILIZATION"
 CREEP = "CREEP"
 BOUNDARY_RECOVERY = "BOUNDARY_RECOVERY"
 RECOVERY = "RECOVERY"
@@ -141,10 +142,14 @@ class CPXScenarioManager:
         self.turn_exit_hold_s = max(
             0.0, float(cfg.get("scenario_turn_exit_hold_s", 0.6))
         )
+        self.turn_exit_stable_frames = max(
+            1, int(cfg.get("scenario_turn_exit_stable_frames", 8))
+        )
         self._state = LANE_FOLLOW
         self._turn_direction = ""
         self._turn_latch_until_s = -float("inf")
         self._boundary_recovery_stable_frames = 0
+        self._turn_exit_stable_frames = 0
 
     @property
     def state(self) -> str:
@@ -155,6 +160,7 @@ class CPXScenarioManager:
         self._turn_direction = ""
         self._turn_latch_until_s = -float("inf")
         self._boundary_recovery_stable_frames = 0
+        self._turn_exit_stable_frames = 0
 
     def update(
         self,
@@ -412,10 +418,12 @@ class CPXScenarioManager:
         turn_exit_heading_error_rad: float,
         turn_exit_lateral_m: float,
     ) -> Optional[CPXScenarioDecision]:
-        # A decisive post-junction lane-change macro means the connector has
-        # already been consumed.  Do not let a stale CARLA LEFT/RIGHT road
-        # option or the exit-alignment latch keep owning behavior after the
-        # route graph has advanced to the next maneuver.
+        # Route progress can advance to the next lane-change edge before the
+        # vehicle and controller have converged to the outgoing lane. Keep
+        # the turn geometry authoritative until the physical exit alignment
+        # has remained valid for several consecutive frames; releasing on the
+        # first macro transition caused a turn-reference -> lane-follow jump
+        # and large alternating steering commands.
         next_macro = str(next_macro_maneuver or "").strip().lower().replace(" ", "_")
         post_turn_lane_change = next_macro in {
             "lane_change_left",
@@ -425,17 +433,53 @@ class CPXScenarioManager:
         }
         if (
             bool(post_turn_lane_change)
-            and self._state in {PREPARE_TURN, INTERSECTION_TURN, CREEP}
+            and self._state in {
+                PREPARE_TURN,
+                INTERSECTION_TURN,
+                TURN_EXIT_STABILIZATION,
+                CREEP,
+            }
         ):
-            # AD-map route progress is authoritative here. CARLA can keep
-            # projecting ego onto the junction connector for several metres
-            # after the route has already advanced to the outgoing lane-change
-            # edge; waiting for ego_in_junction=False retains the old turn and
-            # creates contradictory LEFT behavior / RIGHT geometry.
-            self._state = LANE_FOLLOW
-            self._turn_direction = ""
-            self._turn_latch_until_s = -float("inf")
-            return None
+            exit_aligned = bool(
+                not bool(ego_in_junction)
+                and bool(turn_exit_alignment_valid)
+                and bool(turn_exit_aligned)
+            )
+            self._turn_exit_stable_frames = (
+                int(self._turn_exit_stable_frames) + 1
+                if bool(exit_aligned)
+                else 0
+            )
+            if int(self._turn_exit_stable_frames) >= int(
+                self.turn_exit_stable_frames
+            ):
+                self._state = LANE_FOLLOW
+                self._turn_direction = ""
+                self._turn_latch_until_s = -float("inf")
+                self._turn_exit_stable_frames = 0
+                return None
+            direction = str(self._turn_direction or "").strip().lower()
+            if direction in {"left", "right"}:
+                self._state = TURN_EXIT_STABILIZATION
+                return CPXScenarioDecision(
+                    state=TURN_EXIT_STABILIZATION,
+                    behavior_signal_state="unknown",
+                    behavior_stop_target=None,
+                    behavior_override_decision=f"intersection_turn_{direction}",
+                    behavior_override_lc_state=(
+                        f"INTERSECTION_TURN_{direction.upper()}"
+                    ),
+                    speed_cap_mps=float(self.turn_speed_cap_mps),
+                    reason=(
+                        "turn_exit_stabilization:"
+                        f"stable_frames={int(self._turn_exit_stable_frames)}/"
+                        f"{int(self.turn_exit_stable_frames)}:"
+                        f"heading_error={float(turn_exit_heading_error_rad):.3f}:"
+                        f"lateral={float(turn_exit_lateral_m):.3f}"
+                    ),
+                    turn_direction=str(direction),
+                    turn_latched=True,
+                )
 
         direction = self._turn_direction_from_route_option(
             current_road_option=str(current_road_option)
@@ -476,6 +520,7 @@ class CPXScenarioManager:
         if direction:
             self._turn_direction = str(direction)
             self._turn_latch_until_s = float(sim_time_s) + float(self.turn_exit_hold_s)
+            self._turn_exit_stable_frames = 0
         elif (
             self._state in {PREPARE_TURN, INTERSECTION_TURN, CREEP}
             and (
