@@ -26,6 +26,8 @@ from opencda.core.common.rsu_manager import RSUManager
 from opencda.core.common.cav_world import CavWorld
 from opencda.scenario_testing.utils.customized_map_api import \
     load_customized_world, bcolors
+from opencda.scenario_testing.utils.destination_extension import \
+    resolve_destination_extension
 
 
 def _resolve_traffic_manager_port(traffic_config):
@@ -308,6 +310,34 @@ class ScenarioManager:
 
         for i, cav_config in enumerate(
                 self.scenario_params['scenario']['single_cav_list']):
+            extension_m = float(cav_config.get(
+                'destination_lane_extension_m', 0.0))
+            if extension_m > 0.0 and not bool(cav_config.get(
+                    '_destination_lane_extension_applied', False)):
+                original_destination = list(cav_config['destination'])
+                resolved_destination, remaining_m = resolve_destination_extension(
+                    self.carla_map,
+                    original_destination,
+                    extension_m,
+                    step_m=float(cav_config.get(
+                        'destination_lane_extension_step_m', 2.0)),
+                    location_factory=carla.Location,
+                )
+                cav_config['destination'] = resolved_destination
+                cav_config['_destination_lane_extension_applied'] = True
+                print(
+                    "[OpenCDA ScenarioManager] Extended destination along "
+                    "its lane by %.1fm: (%.2f, %.2f) -> (%.2f, %.2f)%s"
+                    % (
+                        extension_m,
+                        float(original_destination[0]),
+                        float(original_destination[1]),
+                        float(resolved_destination[0]),
+                        float(resolved_destination[1]),
+                        " [lane ended %.1fm early]" % remaining_m
+                        if remaining_m > 0.25 else "",
+                    )
+                )
             # in case the cav wants to join a platoon later
             # it will be empty dictionary for single cav application
             platoon_base = OmegaConf.create({'platoon': self.scenario_params.get('platoon_base',{})})

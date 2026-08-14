@@ -38,6 +38,13 @@ def _reference(y_offset=0.0, speed=2.0):
 
 
 class ManeuverManagerTests(unittest.TestCase):
+    def test_extend_geometry_does_not_append_the_same_path_back_to_its_start(self):
+        geometry = ManeuverManager._extend_geometry(_reference(), _reference())
+
+        xs = [float(sample["x_ref_m"]) for sample in geometry]
+        self.assertEqual(len(xs), 20)
+        self.assertTrue(all(second > first for first, second in zip(xs, xs[1:])))
+
     def test_keeps_one_owner_across_lane_change_stabilization_and_turn(self):
         manager = ManeuverManager()
         lane_change = manager.update(
@@ -155,6 +162,79 @@ class ManeuverManagerTests(unittest.TestCase):
 
         self.assertFalse(released.debug["maneuver_geometry_active"])
         self.assertEqual(manager.active_plan, None)
+
+    def test_lane_change_macro_releases_stale_intersection_geometry(self):
+        manager = ManeuverManager()
+        turn = manager.update(
+            reference_samples=_reference(),
+            destination_state=[20.0, 0.0, 2.0, 0.0, 1],
+            decision="intersection_turn_left",
+            behavior_fsm_state="INTERSECTION_TURN_LEFT",
+            current_lane_id=1,
+            target_lane_id=1,
+            ego_x_m=0.0,
+            ego_y_m=0.0,
+            reference_source="turn",
+            route_current_option="LEFT",
+            route_next_maneuver="Turn Left",
+        )
+        released = manager.update(
+            reference_samples=_reference(1.0),
+            destination_state=[20.0, 1.0, 2.0, 0.0, 1],
+            decision="lane_follow",
+            behavior_fsm_state="LANE_KEEP",
+            current_lane_id=1,
+            target_lane_id=1,
+            ego_x_m=5.0,
+            ego_y_m=0.0,
+            reference_source="lane_follow",
+            # CARLA can still report LEFT while AD-map has advanced.
+            route_current_option="LEFT",
+            route_next_maneuver="Lane Change Right",
+        )
+
+        self.assertTrue(turn.debug["maneuver_geometry_active"])
+        self.assertFalse(released.debug["maneuver_geometry_active"])
+        self.assertEqual(
+            released.debug["maneuver_geometry_release_reason"],
+            "route_advanced_to_lane_change",
+        )
+        self.assertIsNone(manager.active_plan)
+
+    def test_completed_commitment_releases_lane_change_even_if_macro_lags(self):
+        manager = ManeuverManager()
+        manager.update(
+            reference_samples=_reference(),
+            destination_state=[20.0, 0.0, 2.0, 0.0, 1],
+            decision="lane_change_right",
+            behavior_fsm_state="EXECUTE_LANE_CHANGE_RIGHT",
+            current_lane_id=1,
+            target_lane_id=1,
+            ego_x_m=0.0,
+            ego_y_m=0.0,
+            reference_source="locked_lane_change",
+            route_next_maneuver="Lane Change Right",
+            lane_change_commitment_active=True,
+        )
+        released = manager.update(
+            reference_samples=_reference(),
+            destination_state=[20.0, 0.0, 2.0, 0.0, 1],
+            decision="lane_follow",
+            behavior_fsm_state="LANE_KEEP",
+            current_lane_id=1,
+            target_lane_id=1,
+            ego_x_m=10.0,
+            ego_y_m=0.0,
+            reference_source="lane_follow",
+            route_next_maneuver="Lane Change Right",
+            lane_change_commitment_active=False,
+        )
+
+        self.assertFalse(released.debug["maneuver_geometry_active"])
+        self.assertEqual(
+            released.debug["maneuver_geometry_release_reason"],
+            "lane_change_commitment_complete",
+        )
 
 
 if __name__ == "__main__":

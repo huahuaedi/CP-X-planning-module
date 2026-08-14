@@ -200,6 +200,7 @@ def build_candidate_intents(
     lane_change_normal_speed_scale: float = 0.9,
     lane_change_conservative_speed_scale: float = 0.7,
     lane_change_authorization_source: str = "route",
+    lane_change_authorization_direction: str = "",
     lane_change_defer_cost: float = 10.0,
     turn_obstacle_stop_defer_cost: float = 90.0,
     human_like_lane_change_enabled: bool = False,
@@ -396,7 +397,21 @@ def build_candidate_intents(
 
     if bool(allow_lane_change_candidates) and bool(lane_change_authorized):
         target_lane_id = int(lane_change_authorized_target_lane_id or 0)
-        if target_lane_id != 0 and target_lane_id != int(current_lane_id):
+        authorized_direction = str(
+            lane_change_authorization_direction or ""
+        ).strip().lower()
+        # AD-map can prove that two distinct topology lanes are adjacent even
+        # when CARLA's lossy local canonical numbering calls both of them 1.
+        # In that case the explicit direction owns geometry selection and a
+        # same-number target must not suppress the route-required candidate.
+        topology_alias_target = bool(
+            target_lane_id == int(current_lane_id)
+            and authorized_direction in {"left", "right"}
+        )
+        if target_lane_id != 0 and (
+            target_lane_id != int(current_lane_id)
+            or bool(topology_alias_target)
+        ):
             authorization_source = str(
                 lane_change_authorization_source or "route"
             ).strip().lower()
@@ -408,6 +423,10 @@ def build_candidate_intents(
                 and str(selected_decision) in {"lane_change_left", "lane_change_right"}
                 else (
                     "lane_change_left"
+                    if authorized_direction == "left"
+                    else "lane_change_right"
+                    if authorized_direction == "right"
+                    else "lane_change_left"
                     if target_lane_id > int(current_lane_id)
                     else "lane_change_right"
                 )
@@ -468,7 +487,12 @@ def build_candidate_intents(
             continue
         if not bool(lane_change_authorized) or candidate_lane_id != int(lane_change_authorized_target_lane_id or 0):
             continue
-        decision = "lane_change_left" if candidate_lane_id > int(current_lane_id) else "lane_change_right"
+        authorized_direction = str(lane_change_authorization_direction or "").strip().lower()
+        decision = (
+            f"lane_change_{authorized_direction}"
+            if authorized_direction in {"left", "right"}
+            else "lane_change_left" if candidate_lane_id > int(current_lane_id) else "lane_change_right"
+        )
         # The authorized target already owns assertive/normal/conservative
         # variants above. Other lanes remain forbidden by the authorization
         # boundary and must not leak into reference generation.
@@ -629,6 +653,19 @@ def select_comfortable_lane_change_duration_s(
     duration_cap_s = max(float(duration_s), float(duration_max_s))
     growth_factor = max(1.0 + 1.0e-3, float(duration_growth_factor))
     attempts = max(1, int(max_iterations))
+    aligned_target = _align_target_reference_to_source(
+        source_reference=source_reference,
+        target_reference=target_reference,
+    )
+    # The road's own curvature is handled by the longitudinal curvature
+    # speed envelope.  Only curvature added by the lateral blend belongs in
+    # the lane-change duration comfort check; otherwise a curved target road
+    # can never be "fixed" by widening the maneuver and every change is
+    # incorrectly stretched to duration_max_s.
+    baseline_curvature_1pm = max(
+        max(0.0, float(curvature_fn(source_reference))),
+        max(0.0, float(curvature_fn(aligned_target))),
+    )
     shaped: list[Dict[str, object]] = []
     for attempt in range(attempts):
         shaped = shape_lane_change_reference(
@@ -645,7 +682,13 @@ def select_comfortable_lane_change_duration_s(
             blend_geometry=True,
         )
         curvature_1pm = max(0.0, float(curvature_fn(shaped)))
-        implied_lateral_accel_mps2 = float(target_speed_mps) ** 2 * curvature_1pm
+        added_curvature_1pm = max(
+            0.0,
+            float(curvature_1pm) - float(baseline_curvature_1pm),
+        )
+        implied_lateral_accel_mps2 = (
+            float(target_speed_mps) ** 2 * float(added_curvature_1pm)
+        )
         if float(implied_lateral_accel_mps2) <= float(lateral_accel_limit_mps2):
             return float(duration_s), shaped, "lane_change_duration_within_comfort_limit"
         # Return using *this* attempt's own (duration_s, shaped) pair, not a
@@ -655,6 +698,29 @@ def select_comfortable_lane_change_duration_s(
             return float(duration_s), shaped, "lane_change_duration_capped_at_max"
         duration_s = min(float(duration_cap_s), float(duration_s) * float(growth_factor))
     return float(duration_s), shaped, "lane_change_duration_capped_at_max"
+
+
+def predicted_lane_change_average_speed_mps(
+    *,
+    ego_speed_mps: float,
+    target_speed_mps: float,
+    duration_s: float,
+    acceleration_limit_mps2: float = 2.0,
+) -> float:
+    """Average reachable speed used to convert maneuver time to distance."""
+
+    ego_speed = max(0.0, float(ego_speed_mps))
+    target_speed = max(0.0, float(target_speed_mps))
+    duration = max(0.0, float(duration_s))
+    acceleration = max(0.0, float(acceleration_limit_mps2))
+    reachable_end_speed = min(
+        float(target_speed),
+        float(ego_speed) + float(acceleration) * float(duration),
+    )
+    return max(
+        0.5,
+        0.5 * (float(ego_speed) + float(reachable_end_speed)),
+    )
 
 
 def _align_target_reference_to_source(
@@ -739,6 +805,149 @@ def _sample_separation_sq(
         return float((target_x - source_x) ** 2 + (target_y - source_y) ** 2)
     except Exception:
         return 0.0
+
+
+def route_lane_change_target_anchor(
+    *,
+    map_planner: object,
+    route_points: Sequence[Sequence[float]],
+    ego_x_m: float,
+    ego_y_m: float,
+    z_m: float = 0.0,
+    nominal_step_m: float = 1.0,
+) -> tuple[object | None, str]:
+    """Find the continuous target-lane anchor after a route lateral edge.
+
+    CARLA GRP encodes a lane change as one long lateral segment between two
+    otherwise approximately unit-spaced lane-center polylines.  The point
+    after that segment identifies the physical target lane even when both
+    lanes share the same canonical lane id.  Walking that waypoint backward
+    to the ego station gives a continuous target centerline for trajectory
+    generation, without feeding the lateral jump itself to MPC.
+    """
+
+    points = [list(point) for point in list(route_points or []) if len(point) >= 2]
+    if len(points) < 3 or map_planner is None:
+        return None, "target_anchor_missing_route"
+    nearest_index = min(
+        range(len(points)),
+        key=lambda index: (
+            (float(points[index][0]) - float(ego_x_m)) ** 2
+            + (float(points[index][1]) - float(ego_y_m)) ** 2
+        ),
+    )
+    normal_steps = []
+    for first, second in zip(points[:-1], points[1:]):
+        distance_m = math.hypot(
+            float(second[0]) - float(first[0]),
+            float(second[1]) - float(first[1]),
+        )
+        if distance_m > 1.0e-3:
+            normal_steps.append(float(distance_m))
+    if not normal_steps:
+        return None, "target_anchor_zero_length_route"
+    sorted_steps = sorted(normal_steps)
+    median_step_m = float(sorted_steps[len(sorted_steps) // 2])
+    jump_threshold_m = max(
+        2.0 * max(0.25, float(nominal_step_m)),
+        1.5 * float(median_step_m),
+    )
+    target_index = None
+    for index in range(max(0, nearest_index), len(points) - 1):
+        distance_m = math.hypot(
+            float(points[index + 1][0]) - float(points[index][0]),
+            float(points[index + 1][1]) - float(points[index][1]),
+        )
+        if float(distance_m) >= float(jump_threshold_m):
+            target_index = int(index) + 1
+            break
+    if target_index is None:
+        return None, "target_anchor_no_lateral_route_edge"
+
+    target_point = points[target_index]
+    target_waypoint = map_planner.get_waypoint({
+        "x": float(target_point[0]),
+        "y": float(target_point[1]),
+        "z": float(target_point[2]) if len(target_point) >= 3 else float(z_m),
+    })
+    if target_waypoint is None:
+        return None, "target_anchor_projection_failed"
+
+    best_waypoint = target_waypoint
+    best_distance_m = math.hypot(
+        float(target_waypoint.transform.location.x) - float(ego_x_m),
+        float(target_waypoint.transform.location.y) - float(ego_y_m),
+    )
+    current = target_waypoint
+    step_m = max(0.5, float(nominal_step_m))
+    for _ in range(120):
+        previous = list(current.previous(float(step_m)) or [])
+        if not previous:
+            break
+        candidate = min(
+            previous,
+            key=lambda waypoint: math.hypot(
+                float(waypoint.transform.location.x) - float(ego_x_m),
+                float(waypoint.transform.location.y) - float(ego_y_m),
+            ),
+        )
+        candidate_distance_m = math.hypot(
+            float(candidate.transform.location.x) - float(ego_x_m),
+            float(candidate.transform.location.y) - float(ego_y_m),
+        )
+        if float(candidate_distance_m) + 1.0e-3 < float(best_distance_m):
+            best_waypoint = candidate
+            best_distance_m = float(candidate_distance_m)
+            current = candidate
+            continue
+        break
+    return best_waypoint, "target_anchor_from_post_change_lane"
+
+
+def physical_adjacent_direction(
+    *,
+    ego_waypoint: object,
+    target_waypoint: object,
+) -> tuple[str, str]:
+    """Resolve route target side in CARLA's physical waypoint topology."""
+
+    if ego_waypoint is None or target_waypoint is None:
+        return "", "physical_direction_missing_waypoint"
+    target_location = getattr(
+        getattr(target_waypoint, "transform", None), "location", None
+    )
+    if target_location is None:
+        return "", "physical_direction_missing_target_location"
+
+    matches: list[tuple[float, str]] = []
+    for direction, accessor_name in (
+        ("left", "get_left_lane"),
+        ("right", "get_right_lane"),
+    ):
+        accessor = getattr(ego_waypoint, accessor_name, None)
+        try:
+            adjacent = accessor() if callable(accessor) else None
+        except Exception:
+            adjacent = None
+        location = getattr(getattr(adjacent, "transform", None), "location", None)
+        if location is None:
+            continue
+        distance_m = math.hypot(
+            float(location.x) - float(target_location.x),
+            float(location.y) - float(target_location.y),
+        )
+        matches.append((float(distance_m), str(direction)))
+    if not matches:
+        return "", "physical_direction_no_adjacent_lane"
+    matches.sort(key=lambda item: item[0])
+    best_distance_m, best_direction = matches[0]
+    lane_width_m = max(
+        2.0,
+        float(getattr(ego_waypoint, "lane_width", 3.5) or 3.5),
+    )
+    if float(best_distance_m) > float(lane_width_m):
+        return "", "physical_direction_target_not_adjacent"
+    return str(best_direction), "physical_direction_from_carla_adjacency"
 
 
 def _lane_change_initial_progress(

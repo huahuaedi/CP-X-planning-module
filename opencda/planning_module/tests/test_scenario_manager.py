@@ -22,7 +22,7 @@ class CPXScenarioManagerTests(unittest.TestCase):
             stop_forward_m=0.0,
             stop_target_reliable=False,
             ego_speed_mps=0.4,
-            ego_in_junction=True,
+            ego_in_junction=False,
             current_road_option="RIGHT",
             next_macro_maneuver="right",
             sim_time_s=10.0,
@@ -137,7 +137,7 @@ class CPXScenarioManagerTests(unittest.TestCase):
             stop_forward_m=5.0,
             stop_target_reliable=True,
             ego_speed_mps=1.0,
-            ego_in_junction=False,
+            ego_in_junction=True,
             current_road_option="RIGHT",
             next_macro_maneuver="right",
             sim_time_s=1.0,
@@ -332,6 +332,41 @@ class CPXScenarioManagerTests(unittest.TestCase):
         self.assertEqual(held.state, INTERSECTION_TURN)
         self.assertIn("turn_exit_alignment_hold", held.reason)
         self.assertEqual(released.state, LANE_FOLLOW)
+
+    def test_post_turn_lane_change_macro_releases_stale_turn_latch(self):
+        manager = CPXScenarioManager({"scenario_turn_exit_hold_s": 3.0})
+        manager.update(
+            traffic_state="unknown",
+            stop_target=None,
+            stop_forward_m=0.0,
+            stop_target_reliable=False,
+            ego_speed_mps=3.0,
+            ego_in_junction=True,
+            current_road_option="LEFT",
+            next_macro_maneuver="Turn Left",
+            sim_time_s=10.0,
+        )
+
+        released = manager.update(
+            traffic_state="unknown",
+            stop_target=None,
+            stop_forward_m=0.0,
+            stop_target_reliable=False,
+            ego_speed_mps=3.0,
+            ego_in_junction=True,
+            # Both the CARLA route option and junction flag can lag behind
+            # the AD-map macro at a segment boundary.
+            current_road_option="LEFT",
+            next_macro_maneuver="Lane Change Right",
+            sim_time_s=10.1,
+            upcoming_turn_direction="right",
+            turn_exit_alignment_valid=True,
+            turn_exit_aligned=False,
+        )
+
+        self.assertEqual(released.state, LANE_FOLLOW)
+        self.assertEqual(released.behavior_override_decision, "")
+        self.assertEqual(manager._turn_direction, "")
 
     def test_turn_exit_hold_prevents_early_lane_follow_contract_switch(self):
         manager = CPXScenarioManager({

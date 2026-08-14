@@ -31,6 +31,46 @@ sys.modules[CANDIDATE_SPEC.name] = candidate_pipeline
 CANDIDATE_SPEC.loader.exec_module(candidate_pipeline)
 
 
+class _Location:
+    def __init__(self, x, y, z=0.0):
+        self.x = float(x)
+        self.y = float(y)
+        self.z = float(z)
+
+
+class _Transform:
+    def __init__(self, x, y):
+        self.location = _Location(x, y)
+
+
+class _Waypoint:
+    def __init__(self, x, y, previous=None, left=None, right=None):
+        self.transform = _Transform(x, y)
+        self._previous = previous
+        self._left = left
+        self._right = right
+        self.lane_width = 3.5
+
+    def previous(self, _distance):
+        return [] if self._previous is None else [self._previous]
+
+    def get_left_lane(self):
+        return self._left
+
+    def get_right_lane(self):
+        return self._right
+
+
+class _MapPlanner:
+    def __init__(self, projected_waypoint):
+        self.projected_waypoint = projected_waypoint
+        self.request = None
+
+    def get_waypoint(self, request):
+        self.request = request
+        return self.projected_waypoint
+
+
 class _ContractResult:
     def __init__(self, valid=True, reason=""):
         self.valid = bool(valid)
@@ -41,6 +81,100 @@ class _ContractResult:
 
 
 class CandidatePipelineTest(unittest.TestCase):
+    def test_physical_direction_overrides_opaque_topology_sign(self):
+        physical_left = _Waypoint(1.0, 3.5)
+        physical_right = _Waypoint(1.0, -3.5)
+        ego = _Waypoint(1.0, 0.0, left=physical_left, right=physical_right)
+
+        direction, reason = candidate_pipeline.physical_adjacent_direction(
+            ego_waypoint=ego,
+            target_waypoint=_Waypoint(1.1, 3.45),
+        )
+
+        self.assertEqual(direction, "left")
+        self.assertEqual(reason, "physical_direction_from_carla_adjacency")
+
+    def test_route_lane_change_anchor_uses_post_jump_physical_lane(self):
+        target_ego_station = _Waypoint(1.0, 3.5)
+        target_mid = _Waypoint(2.0, 3.5, previous=target_ego_station)
+        target_after_jump = _Waypoint(3.0, 3.5, previous=target_mid)
+        map_planner = _MapPlanner(target_after_jump)
+
+        anchor, reason = candidate_pipeline.route_lane_change_target_anchor(
+            map_planner=map_planner,
+            route_points=[
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [3.0, 0.0, 0.0],
+                [3.0, 3.5, 0.0],
+                [4.0, 3.5, 0.0],
+            ],
+            ego_x_m=1.0,
+            ego_y_m=0.0,
+            nominal_step_m=1.0,
+        )
+
+        self.assertIs(anchor, target_ego_station)
+        self.assertEqual(reason, "target_anchor_from_post_change_lane")
+        self.assertAlmostEqual(float(map_planner.request["x"]), 3.0)
+        self.assertAlmostEqual(float(map_planner.request["y"]), 3.5)
+
+    def test_route_lane_change_anchor_requires_lateral_route_edge(self):
+        anchor, reason = candidate_pipeline.route_lane_change_target_anchor(
+            map_planner=_MapPlanner(_Waypoint(2.0, 0.0)),
+            route_points=[[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]],
+            ego_x_m=0.0,
+            ego_y_m=0.0,
+            nominal_step_m=1.0,
+        )
+
+        self.assertIsNone(anchor)
+        self.assertEqual(reason, "target_anchor_no_lateral_route_edge")
+
+    def test_topology_direction_builds_lane_change_when_local_ids_collide(self):
+        intents = candidate_pipeline.build_candidate_intents(
+            selected_decision="lane_follow",
+            selected_target_lane_id=1,
+            current_lane_id=1,
+            target_speed_mps=12.0,
+            candidate_lane_ids=[1],
+            lane_safety_scores={1: 1.0},
+            lane_prediction_risks={1: {}},
+            stop_goal_active=False,
+            traffic_stop_active=False,
+            lane_change_authorized=True,
+            lane_change_authorized_target_lane_id=1,
+            allow_lane_change_candidates=True,
+            lane_change_authorization_direction="right",
+        )
+
+        lane_changes = [
+            intent for intent in intents
+            if intent.decision == "lane_change_right"
+        ]
+        self.assertTrue(lane_changes)
+        self.assertTrue(all(intent.target_lane_id == 1 for intent in lane_changes))
+
+    def test_authorized_direction_does_not_depend_on_opaque_lane_id_order(self):
+        intents = candidate_pipeline.build_candidate_intents(
+            selected_decision="lane_follow",
+            selected_target_lane_id=900,
+            current_lane_id=900,
+            target_speed_mps=12.0,
+            candidate_lane_ids=[900, 120],
+            lane_safety_scores={900: 1.0, 120: 1.0},
+            lane_prediction_risks={900: {}, 120: {}},
+            stop_goal_active=False,
+            traffic_stop_active=False,
+            lane_change_authorized=True,
+            lane_change_authorized_target_lane_id=120,
+            allow_lane_change_candidates=True,
+            lane_change_authorization_direction="left",
+        )
+        lane_changes = [intent for intent in intents if intent.target_lane_id == 120]
+        self.assertTrue(lane_changes)
+        self.assertTrue(all(intent.decision == "lane_change_left" for intent in lane_changes))
     def test_traffic_stop_candidate_has_hard_priority(self):
         intents = candidate_pipeline.build_candidate_intents(
             selected_decision="lane_follow",
@@ -495,6 +629,48 @@ class CandidatePipelineTest(unittest.TestCase):
         self.assertEqual(duration_s, 1.5)
         self.assertEqual(reason, "lane_change_duration_capped_at_max")
         self.assertEqual(len(shaped), 20)
+
+    def test_road_curvature_does_not_force_lane_change_to_max_duration(self):
+        source = [
+            {"x_ref_m": float(index), "y_ref_m": 0.0, "heading_rad": 0.02 * index}
+            for index in range(20)
+        ]
+        target = [
+            {"x_ref_m": float(index), "y_ref_m": 3.5, "heading_rad": 0.02 * index}
+            for index in range(20)
+        ]
+
+        duration_s, shaped, reason = (
+            candidate_pipeline.select_comfortable_lane_change_duration_s(
+                target_reference=target,
+                source_reference=source,
+                initial_duration_s=4.0,
+                duration_max_s=8.0,
+                dt_s=0.1,
+                current_lane_id=1,
+                target_lane_id=2,
+                target_speed_mps=12.0,
+                lateral_accel_limit_mps2=1.3,
+                # Model a curved road whose baseline curvature is unchanged
+                # by the lateral maneuver.
+                curvature_fn=lambda _samples: 0.037,
+            )
+        )
+
+        self.assertEqual(duration_s, 4.0)
+        self.assertEqual(reason, "lane_change_duration_within_comfort_limit")
+        self.assertTrue(shaped)
+
+    def test_lane_change_distance_uses_reachable_average_speed(self):
+        average_speed = candidate_pipeline.predicted_lane_change_average_speed_mps(
+            ego_speed_mps=4.5,
+            target_speed_mps=12.0,
+            duration_s=3.75,
+            acceleration_limit_mps2=2.0,
+        )
+
+        self.assertAlmostEqual(average_speed, 8.25)
+        self.assertLess(average_speed, 12.0)
 
     def test_envelope_blocks_anchor_at_lock_position_and_span_lane_width(self):
         source = [

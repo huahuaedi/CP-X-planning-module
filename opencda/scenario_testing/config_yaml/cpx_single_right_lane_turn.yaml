@@ -1,20 +1,21 @@
 base_config: single_intersection_town06_carla.yaml
 
-description: |-
-  Town06 single-CAV route-required lane-change and right-turn validation.
-  The CARLA Global Route requires CHANGELANERIGHT before the intersection and
-  then follows the continuous RIGHT-turn connector onto the outgoing road.
-  Background traffic is inherited from single_intersection_town06_carla.
+vehicle_base:
+  behavior:
+    max_speed: 50
+    ignore_traffic_light: true
+    collision_time_ahead: 2.0
 
 scenario:
   max_ticks: 5000
   destination_tolerance_m: 3.0
   single_cav_list:
     - name: cav1
-      spawn_position: [6.31, 125.03, 0.3, 0, -92, 0]
-      # Previously used by single_intersection_town06_carla. CARLA GRP route:
-      # LANEFOLLOW -> CHANGELANERIGHT -> LANEFOLLOW -> RIGHT -> LANEFOLLOW.
-      destination: [50.0, 52.38, 0.3]
+      spawn_position: [225.10, -20.1, 0.3, 0, 179.8, 0]
+      # Keep the validated route anchor, then follow that exact lane's CARLA
+      # successors so higher-speed lane changes have room to stabilize.
+      destination: [6.3, -46.9, 0.3]
+      destination_lane_extension_m: 50.0
       v2x:
         communication_range: 60
       behavior:
@@ -22,4 +23,8 @@ scenario:
           debug_trajectory: true
           debug: true
       planner:
-        debug_output_dir: opencda/planning_module/opencda_bridge/debug_single_right_lane_turn
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_right_turn_highspeed
+        target_speed_mps: 12.0
+        ignore_traffic_control: true
+        global_planner_mode: dij
+        global_planner_strict: true

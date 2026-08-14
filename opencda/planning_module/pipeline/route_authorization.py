@@ -77,6 +77,10 @@ def authorize_route_lane_change(
     target_safety_threshold: float,
     require_adjacent: bool = True,
     explicit_lane_change_start_distance_m: Optional[float] = None,
+    adjacent_lane_directions: Optional[Mapping[int, str]] = None,
+    topology_current_lane_id: int = 0,
+    topology_target_lane_id: int = 0,
+    topology_lane_offset: int = 0,
 ) -> LaneChangeAuthorization:
     if not bool(route_lane_change_allowed):
         return _denied("route_lane_change_not_allowed", next_macro_maneuver, remaining_distance_m, current_lane_id)
@@ -97,7 +101,13 @@ def authorize_route_lane_change(
         return _denied("already_in_turn_connector", maneuver, remaining_distance_m, current_lane_id)
     if target_lane_id == 0:
         return _denied("missing_required_lane_id", maneuver, remaining_distance_m, current_lane_id)
-    if target_lane_id == current_lane_id:
+    topology_requires_change = bool(
+        int(topology_current_lane_id or 0) != 0
+        and int(topology_target_lane_id or 0) != 0
+        and int(topology_current_lane_id) != int(topology_target_lane_id)
+        and int(topology_lane_offset or 0) != 0
+    )
+    if target_lane_id == current_lane_id and not bool(topology_requires_change):
         return LaneChangeAuthorization(
             allowed=False,
             direction=None,
@@ -118,11 +128,25 @@ def authorize_route_lane_change(
             available.add(normalized_lane_id)
     if target_lane_id not in available:
         return _denied("required_lane_not_available", maneuver, remaining_distance_m, target_lane_id)
-    lane_delta = int(target_lane_id) - int(current_lane_id)
-    if bool(require_adjacent) and abs(int(lane_delta)) != 1:
+    topology_directions = {
+        int(lane_id): str(direction).strip().lower()
+        for lane_id, direction in dict(adjacent_lane_directions or {}).items()
+        if str(direction).strip().lower() in {"left", "right"}
+    }
+    topology_offset_direction = (
+        "left" if int(topology_lane_offset or 0) > 0
+        else "right" if int(topology_lane_offset or 0) < 0
+        else None
+    )
+    if bool(topology_requires_change) and topology_offset_direction:
+        expected_direction = str(topology_offset_direction)
+    elif topology_directions:
+        expected_direction = topology_directions.get(int(target_lane_id))
+    else:
+        lane_delta = int(target_lane_id) - int(current_lane_id)
+        expected_direction = _direction_for_delta(lane_delta)
+    if bool(require_adjacent) and expected_direction not in {"left", "right"}:
         return _denied("required_lane_not_adjacent", maneuver, remaining_distance_m, target_lane_id)
-
-    expected_direction = _direction_for_delta(lane_delta)
     if maneuver == RouteManeuver.TURN_LEFT and expected_direction != "left":
         return _denied("required_lane_direction_mismatch_left_turn", maneuver, remaining_distance_m, target_lane_id)
     if maneuver == RouteManeuver.TURN_RIGHT and expected_direction != "right":
@@ -165,7 +189,11 @@ def authorize_route_lane_change(
     return LaneChangeAuthorization(
         allowed=True,
         direction=str(expected_direction),
-        reason="route_lane_change_authorized",
+        reason=(
+            "route_lane_change_authorized_by_topology"
+            if bool(topology_requires_change)
+            else "route_lane_change_authorized"
+        ),
         required_by_route=True,
         distance_to_maneuver_m=distance,
         target_lane_id=int(target_lane_id),

@@ -184,6 +184,43 @@ class ReferencePipelineSweptFootprintTests(unittest.TestCase):
         self.assertFalse(result.accepted)
         self.assertIn("first_lateral_out_of_contract", result.gate.reason)
 
+    def test_lane_change_destination_is_aligned_after_reference_cleaning(self):
+        pipeline = self._pipeline(lane_width_m=3.5)
+        reference = [
+            {
+                "x_ref_m": float(index + 1),
+                "y_ref_m": 0.5 * float(index + 1),
+                "heading_rad": 0.0,
+                "lane_id": 2,
+                "speed_ref_mps": 1.0,
+            }
+            for index in range(4)
+        ]
+        request = ReferencePipelineRequest(
+            destination_state=[4.0, 3.5, 1.0, 0.0, 2],
+            reference_samples=reference,
+            current_state=[0.0, 0.0, 1.0, 0.0],
+            ego_location=carla.Location(x=0.0, y=0.0, z=0.0),
+            ego_yaw_rad=0.0,
+            ego_speed_mps=1.0,
+            target_speed_mps=1.0,
+            behavior_decision="lane_change_left",
+            behavior_fsm_state="EXECUTE_LANE_CHANGE_LEFT",
+            current_lane_id=1,
+            target_lane_id=2,
+            stop_goal_active=False,
+            route_points=(),
+        )
+
+        result = pipeline.finalize(request)
+
+        self.assertTrue(result.accepted, result.gate.reason)
+        self.assertEqual(result.destination_state[:2], [4.0, 2.0])
+        self.assertIn(
+            "lane_change_destination_aligned_to_reference",
+            result.conditioning_reason,
+        )
+
     def test_pipeline_accepts_improving_boundary_recovery_from_invalid_start(self):
         pipeline = self._pipeline(lane_width_m=3.5)
         pipeline.horizon_steps = 20

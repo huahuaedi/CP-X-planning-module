@@ -55,6 +55,7 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
         bridge._route_tracking_lane_change_completed_option = ""
         bridge._route_tracking_lane_change_completion_stable_frames = 0
         bridge._route_tracking_lane_change_completion_debug = {}
+        bridge._lane_id_discontinuity_since_lock = False
         bridge.carla = sys.modules["carla"]
         bridge.reference_generator = ReferenceGenerator(
             config=bridge.config,
@@ -82,7 +83,7 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
                 "x_ref_m": float(index + 1),
                 "y_ref_m": 3.5,
                 "heading_rad": 0.0,
-                "lane_change_progress": 0.60,
+                "lane_change_progress": 1.0,
             }
             for index in range(30)
         ]
@@ -100,7 +101,7 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
 
         reason = bridge._release_completed_lane_change_commitment(
             current_lane_id=2,
-            ego_location=bridge.carla.Location(x=5.0, y=0.4),
+            ego_location=bridge.carla.Location(x=5.0, y=3.2),
             ego_yaw_rad=0.02,
         )
 
@@ -122,6 +123,56 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
             )
         )
 
+    def test_committed_right_change_cannot_publish_lane_keep_fsm(self):
+        state = CPXMPCPlannerBridge._normalized_final_lc_state(
+            decision="lane_change_right",
+            lc_state="LANE_KEEP",
+            lane_change_phase="executing",
+        )
+
+        self.assertEqual(state, "EXECUTE_LANE_CHANGE_RIGHT")
+
+    def test_lane_id_change_does_not_stabilize_between_lane_centers(self):
+        bridge = self._bridge()
+        bridge._route_tracking_lane_change_progress = 0.60
+        bridge._route_tracking_lane_change_reference = [
+            {
+                "x_ref_m": float(index + 1),
+                "y_ref_m": 3.5,
+                "heading_rad": 0.0,
+                "lane_change_progress": 1.0,
+            }
+            for index in range(30)
+        ]
+        stabilization_calls = []
+        bridge.reference_generator.target_lane_stabilization_samples = (
+            lambda **kwargs: stabilization_calls.append(kwargs) or []
+        )
+
+        reason = bridge._release_completed_lane_change_commitment(
+            current_lane_id=2,
+            ego_location=bridge.carla.Location(x=5.0, y=0.4),
+            ego_yaw_rad=0.02,
+        )
+
+        self.assertEqual(reason, "")
+        self.assertEqual(stabilization_calls, [])
+        self.assertEqual(bridge._route_tracking_lane_change_phase, "executing")
+        self.assertFalse(
+            bridge._route_tracking_lane_change_completion_debug[
+                "lane_change_stabilization_geometry_ready"
+            ]
+        )
+
+    def test_committed_change_publishes_stabilization_phase(self):
+        state = CPXMPCPlannerBridge._normalized_final_lc_state(
+            decision="lane_change_right",
+            lc_state="LANE_KEEP",
+            lane_change_phase="target_lane_stabilization",
+        )
+
+        self.assertEqual(state, "TARGET_LANE_STABILIZATION")
+
     def test_heading_misalignment_delays_stabilization_handoff(self):
         # current_lane_id/progress alone only capture that ego has crossed
         # into the target lane's lateral extent -- heading can still be
@@ -139,7 +190,7 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
                 "x_ref_m": float(index + 1),
                 "y_ref_m": 3.5,
                 "heading_rad": 0.0,
-                "lane_change_progress": 0.60,
+                "lane_change_progress": 1.0,
             }
             for index in range(30)
         ]
@@ -161,7 +212,7 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
 
         reason = bridge._release_completed_lane_change_commitment(
             current_lane_id=2,
-            ego_location=bridge.carla.Location(x=5.0, y=0.4),
+            ego_location=bridge.carla.Location(x=5.0, y=3.2),
             ego_yaw_rad=math.radians(30.0),
         )
 
@@ -178,7 +229,7 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
                 "x_ref_m": float(index + 1),
                 "y_ref_m": 3.5,
                 "heading_rad": 0.0,
-                "lane_change_progress": 0.60,
+                "lane_change_progress": 1.0,
             }
             for index in range(30)
         ]
@@ -207,7 +258,7 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
 
         reason = bridge._release_completed_lane_change_commitment(
             current_lane_id=2,
-            ego_location=bridge.carla.Location(x=5.0, y=0.4),
+            ego_location=bridge.carla.Location(x=5.0, y=3.2),
             ego_yaw_rad=math.radians(5.0),
         )
 
@@ -225,7 +276,7 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
                 "x_ref_m": float(index + 1),
                 "y_ref_m": 3.5,
                 "heading_rad": 0.0,
-                "lane_change_progress": 0.60,
+                "lane_change_progress": 1.0,
             }
             for index in range(30)
         ]
@@ -235,7 +286,7 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
 
         reason = bridge._release_completed_lane_change_commitment(
             current_lane_id=2,
-            ego_location=bridge.carla.Location(x=5.0, y=0.4),
+            ego_location=bridge.carla.Location(x=5.0, y=3.2),
             ego_yaw_rad=0.02,
         )
 

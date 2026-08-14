@@ -5,7 +5,13 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from utility.global_planner import AStarGlobalPlanner, RoutePlanSummary, WaypointNode
+from utility.global_planner import (
+    INVALID_LANE_ID,
+    AStarGlobalPlanner,
+    CustomGlobalPlannerAdapter,
+    RoutePlanSummary,
+    WaypointNode,
+)
 from utility.carla_lane_graph import (
     StableLaneIdTracker,
     canonical_lane_id_for_waypoint,
@@ -657,6 +663,70 @@ class LaneContextConsistencyTests(unittest.TestCase):
 
         self.assertEqual(after_turn, 2)
 
+    def test_stable_lane_id_tracker_reports_discontinuity_on_unconnected_jump(self):
+        old_road_right = _DummyWaypoint(road_id=1, section_id=0, lane_id=1, x_m=0.0, y_m=0.0)
+        old_road = _DummyWaypoint(road_id=1, section_id=0, lane_id=2, x_m=0.0, y_m=3.5)
+        old_road_right.set_neighbors(left=old_road)
+        old_road.set_neighbors(right=old_road_right)
+        new_road = _DummyWaypoint(road_id=9, section_id=0, lane_id=1, x_m=200.0, y_m=200.0)
+
+        events = []
+        tracker = StableLaneIdTracker(discontinuity_confirm_frames=1)
+        tracker.update(old_road, on_discontinuity=lambda **kwargs: events.append(kwargs))
+        tracker.update(new_road, on_discontinuity=lambda **kwargs: events.append(kwargs))
+
+        self.assertEqual(len(events), 1)
+        self.assertIs(events[0]["previous_waypoint"], old_road)
+        self.assertEqual(events[0]["previous_lane_id"], 2)
+        self.assertIs(events[0]["new_waypoint"], new_road)
+
+    def test_stable_lane_id_tracker_debounces_transient_road_projection_flip(self):
+        road_a = _DummyWaypoint(road_id=1, section_id=0, lane_id=-5, x_m=0.0, y_m=0.0)
+        connector = _DummyWaypoint(road_id=9, section_id=0, lane_id=1, x_m=0.1, y_m=0.0)
+        tracker = StableLaneIdTracker(discontinuity_confirm_frames=3)
+
+        self.assertEqual(tracker.update(road_a), 1)
+        self.assertEqual(tracker.update(connector), 1)
+        # CARLA projects back to the original road on the next tick: no
+        # externally visible 1<->2-style identity flip and no re-anchor.
+        self.assertEqual(tracker.update(road_a), 1)
+        self.assertIs(tracker._waypoint, road_a)
+
+    def test_stable_lane_id_tracker_reanchors_persistent_road_transition(self):
+        old_right = _DummyWaypoint(road_id=1, section_id=0, lane_id=1, x_m=0.0, y_m=0.0)
+        old_lane = _DummyWaypoint(road_id=1, section_id=0, lane_id=2, x_m=0.0, y_m=3.5)
+        old_right.set_neighbors(left=old_lane)
+        old_lane.set_neighbors(right=old_right)
+        new_lane = _DummyWaypoint(road_id=9, section_id=0, lane_id=1, x_m=1.0, y_m=3.5)
+        tracker = StableLaneIdTracker(discontinuity_confirm_frames=3)
+
+        self.assertEqual(tracker.update(old_lane), 2)
+        self.assertEqual(tracker.update(new_lane), 2)
+        self.assertEqual(tracker.update(new_lane), 2)
+        self.assertEqual(tracker.update(new_lane), 1)
+
+    def test_stable_lane_id_tracker_does_not_report_discontinuity_on_first_update(self):
+        first_waypoint = _DummyWaypoint(road_id=1, section_id=0, lane_id=1, x_m=0.0, y_m=0.0)
+
+        events = []
+        tracker = StableLaneIdTracker()
+        tracker.update(first_waypoint, on_discontinuity=lambda **kwargs: events.append(kwargs))
+
+        self.assertEqual(events, [])
+
+    def test_stable_lane_id_tracker_does_not_report_discontinuity_on_normal_hop(self):
+        right_wp = _DummyWaypoint(road_id=1, section_id=0, lane_id=1, x_m=0.0, y_m=0.0)
+        left_wp = _DummyWaypoint(road_id=1, section_id=0, lane_id=2, x_m=3.5, y_m=0.0)
+        right_wp.set_neighbors(left=left_wp)
+        left_wp.set_neighbors(right=right_wp)
+
+        events = []
+        tracker = StableLaneIdTracker()
+        tracker.update(right_wp, on_discontinuity=lambda **kwargs: events.append(kwargs))
+        tracker.update(left_wp, on_discontinuity=lambda **kwargs: events.append(kwargs))
+
+        self.assertEqual(events, [])
+
     def test_local_lane_context_uses_heading_to_pick_same_direction_lane(self):
         planner = object.__new__(AStarGlobalPlanner)
         planner._world_map = None
@@ -895,6 +965,140 @@ class LaneContextConsistencyTests(unittest.TestCase):
         self.assertEqual(str(lower_context["road_id"]), "8:0")
         self.assertEqual(int(upper_context["lane_id"]), 1)
         self.assertEqual(str(upper_context["road_id"]), "9:0")
+
+
+class _FakeAdMapWaypoint:
+    """Stub for `Global_Planner.global_planner.Waypoint`'s public surface --
+    `.left()`/`.right()`, not CARLA's `get_left_lane()`/`get_right_lane()`."""
+
+    def __init__(
+        self,
+        *,
+        ad_lane_id,
+        road_id,
+        section_id,
+        lane_id,
+        x_m=0.0,
+        y_m=0.0,
+        is_intersection=False,
+        lane_width_m=3.5,
+        heading=0.0,
+    ):
+        self.ad_lane_id = ad_lane_id
+        self.road_id = road_id
+        self.section_id = section_id
+        self.lane_id = lane_id
+        self.is_intersection = is_intersection
+        self.lane_width_m = lane_width_m
+        self.heading = heading
+        self.position = {"x": float(x_m), "y": float(y_m), "z": 0.0}
+        self._left = None
+        self._right = None
+        self._next = []
+        self._previous = []
+
+    def left(self):
+        return self._left
+
+    def right(self):
+        return self._right
+
+    def next(self, distance_m):
+        del distance_m
+        return list(self._next)
+
+    def previous(self, distance_m):
+        del distance_m
+        return list(self._previous)
+
+
+class _FakeAdMapCore:
+    def __init__(self, waypoint):
+        self._waypoint = waypoint
+
+    def get_waypoint(self, position, search_radius_m=None):
+        del position, search_radius_m
+        return self._waypoint
+
+
+class CustomAdapterLocalLaneContextTests(unittest.TestCase):
+    """`CustomGlobalPlannerAdapter.get_local_lane_context` must key identity
+    and lane-change eligibility off AD-map's own persistent `ad_lane_id` and
+    real `.left()`/`.right()` adjacency, not `canonical_lane_waypoints()` --
+    which is written against CARLA's `get_left_lane()`/`get_right_lane()`
+    method names and silently no-ops into a one-element list against this
+    Waypoint type, so before this fix `lane_id` was always 1 and
+    `can_change_left`/`can_change_right` were always False here regardless
+    of the vehicle's actual position."""
+
+    @staticmethod
+    def _adapter(waypoint) -> CustomGlobalPlannerAdapter:
+        adapter = object.__new__(CustomGlobalPlannerAdapter)
+        adapter.core = _FakeAdMapCore(waypoint)
+        adapter._lane_context_lock = threading.Lock()
+        adapter._lane_context_cache = None
+        return adapter
+
+    def test_lane_id_uses_persistent_ad_map_identity_not_local_recount(self):
+        waypoint = _FakeAdMapWaypoint(ad_lane_id=555, road_id=7, section_id=0, lane_id=2)
+        adapter = self._adapter(waypoint)
+
+        context = adapter.get_local_lane_context(x_m=0.0, y_m=0.0)
+
+        self.assertEqual(int(context["lane_id"]), 555)
+        self.assertEqual(int(context["ad_lane_id"]), 555)
+
+    def test_local_lane_graph_tracks_adjacent_corridor_across_successor(self):
+        ego = _FakeAdMapWaypoint(ad_lane_id=100, road_id=1, section_id=0, lane_id=1)
+        current_successor = _FakeAdMapWaypoint(ad_lane_id=200, road_id=2, section_id=0, lane_id=1)
+        right = _FakeAdMapWaypoint(ad_lane_id=101, road_id=1, section_id=0, lane_id=2)
+        right_successor = _FakeAdMapWaypoint(ad_lane_id=201, road_id=2, section_id=0, lane_id=2)
+        ego._right = right
+        ego._next = [current_successor]
+        right._next = [right_successor]
+        adapter = self._adapter(ego)
+
+        graph = adapter.get_local_lane_graph(
+            x_m=0.0,
+            y_m=0.0,
+            forward_distance_m=100.0,
+            backward_distance_m=0.0,
+            sample_step_m=10.0,
+        )
+
+        self.assertEqual(graph["lane_to_offset"][200], 0)
+        self.assertEqual(graph["lane_to_offset"][201], -1)
+
+    def test_can_change_left_and_right_reflect_real_adjacency(self):
+        right_wp = _FakeAdMapWaypoint(ad_lane_id=101, road_id=7, section_id=0, lane_id=1, x_m=0.0, y_m=0.0)
+        middle_wp = _FakeAdMapWaypoint(ad_lane_id=102, road_id=7, section_id=0, lane_id=2, x_m=3.5, y_m=0.0)
+        left_wp = _FakeAdMapWaypoint(ad_lane_id=103, road_id=7, section_id=0, lane_id=3, x_m=7.0, y_m=0.0)
+        right_wp._left = middle_wp
+        middle_wp._right = right_wp
+        middle_wp._left = left_wp
+        left_wp._right = middle_wp
+
+        middle_context = self._adapter(middle_wp).get_local_lane_context(x_m=3.5, y_m=0.0)
+        self.assertEqual(int(middle_context["lane_id"]), 102)
+        self.assertTrue(bool(middle_context["can_change_left"]))
+        self.assertTrue(bool(middle_context["can_change_right"]))
+        self.assertEqual(list(middle_context["lane_ids"]), [101, 102, 103])
+        self.assertEqual(int(middle_context["display_lane_index"]), 2)
+
+        right_context = self._adapter(right_wp).get_local_lane_context(x_m=0.0, y_m=0.0)
+        self.assertTrue(bool(right_context["can_change_left"]))
+        self.assertFalse(bool(right_context["can_change_right"]))
+        self.assertEqual(int(right_context["display_lane_index"]), 1)
+
+    def test_missing_waypoint_returns_invalid_context(self):
+        adapter = self._adapter(None)
+
+        context = adapter.get_local_lane_context(x_m=0.0, y_m=0.0)
+
+        self.assertEqual(context["lane_id"], INVALID_LANE_ID)
+        self.assertEqual(context["display_lane_index"], INVALID_LANE_ID)
+        self.assertFalse(bool(context["can_change_left"]))
+        self.assertFalse(bool(context["can_change_right"]))
 
 
 class CarlaBlockedLaneRerouteTests(unittest.TestCase):

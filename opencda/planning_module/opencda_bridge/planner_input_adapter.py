@@ -96,6 +96,9 @@ class OpenCDARuntimePort:
     def traffic_context_from_cp_control(self, **kwargs):
         return self._bridge._traffic_context_from_cp_control(**kwargs)
 
+    def record_lane_id_discontinuity(self, **kwargs):
+        return self._bridge._record_lane_id_discontinuity(**kwargs)
+
 
 class OpenCDAPlanningAdapter:
     """Build PlannerInputFrame from a native OpenCDA VehicleManager snapshot."""
@@ -139,7 +142,15 @@ class OpenCDAPlanningAdapter:
         # changes id when real get_left_lane()/get_right_lane() adjacency
         # proves the vehicle's raw lane changed, so it stays a stable
         # identity across the whole route -- see StableLaneIdTracker.
-        current_lane_id = int(bridge._lane_id_tracker.update(ego_waypoint))
+        # ``reference_map`` is deliberately CARLA-only. AD-map identities
+        # live in route_summary/topology_map and must never leak into the
+        # geometry-facing local lane-id namespace.
+        current_lane_id = int(
+            bridge._lane_id_tracker.update(
+                ego_waypoint,
+                on_discontinuity=bridge.record_lane_id_discontinuity,
+            )
+        )
         if current_lane_id == 0:
             current_lane_id = 1
         lane_ids = [
@@ -285,6 +296,8 @@ class OpenCDAPlanningAdapter:
             current_road_option=str(route_summary.get("current_road_option", "")),
             next_macro_distance_m=float(
                 route_summary.get("next_macro_distance_m", float("inf"))
+                if route_summary.get("next_macro_distance_m", None) is not None
+                else float("inf")
             ),
             remaining_distance_m=float(route_summary.get("remaining_distance_m", 0.0) or 0.0),
             remaining_points_count=len(route_points),
@@ -301,7 +314,13 @@ class OpenCDAPlanningAdapter:
                     lane_id=int(current_lane_id),
                     road_id=int(getattr(ego_waypoint, "road_id", 0) or 0),
                     section_id=int(getattr(ego_waypoint, "section_id", 0) or 0),
-                    in_junction=bool(getattr(ego_waypoint, "is_junction", False)),
+                    in_junction=bool(
+                        getattr(
+                            ego_waypoint,
+                            "is_junction",
+                            getattr(ego_waypoint, "is_intersection", False),
+                        )
+                    ),
                 ),
                 route=route_context,
                 traffic_control=traffic_control_context,
@@ -315,7 +334,13 @@ class OpenCDAPlanningAdapter:
                 section_id=int(getattr(ego_waypoint, "section_id", 0) or 0),
                 lane_count=len(lane_ids),
                 allowed_lane_ids=list(lane_ids),
-                in_junction=bool(getattr(ego_waypoint, "is_junction", False)),
+                in_junction=bool(
+                    getattr(
+                        ego_waypoint,
+                        "is_junction",
+                        getattr(ego_waypoint, "is_intersection", False),
+                    )
+                ),
                 route_lane_id=int(route_optimal_lane_id),
                 route_maneuver=str(route_context.next_macro_maneuver),
             ),

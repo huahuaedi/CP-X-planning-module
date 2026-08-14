@@ -567,6 +567,34 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
 
         self.assertIn("emergency_brake_direct_control", reason)
 
+    def test_geometry_hard_gate_does_not_request_emergency_stop(self):
+        from opencda.planning_module.opencda_bridge.cpx_mpc_planner import (
+            _hard_gate_requires_emergency_stop,
+        )
+
+        self.assertFalse(_hard_gate_requires_emergency_stop(
+            fallback_reason=(
+                "candidate_hard_gate:lane_change_left:"
+                "final_reference_gate:destination_lane_error_out_of_contract"
+            ),
+            behavior_decision="lane_change_left",
+            stop_goal_active=False,
+        ))
+
+    def test_collision_hard_gate_still_requests_emergency_stop(self):
+        from opencda.planning_module.opencda_bridge.cpx_mpc_planner import (
+            _hard_gate_requires_emergency_stop,
+        )
+
+        self.assertTrue(_hard_gate_requires_emergency_stop(
+            fallback_reason=(
+                "candidate_hard_gate:lane_change_left:"
+                "candidate_prediction_collision_risk"
+            ),
+            behavior_decision="lane_change_left",
+            stop_goal_active=False,
+        ))
+
     def test_turn_explicit_fallback_hard_stops_on_prediction_collision_veto(self):
         bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
         bridge.config = {}
@@ -999,6 +1027,53 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         self.assertEqual(summary["optimal_lane_id"], 2)
         self.assertEqual(summary["current_road_option"], "LEFT")
         self.assertEqual(summary["next_macro_maneuver"], "Left Turn")
+
+    def test_admap_target_is_projected_to_local_carla_lane_by_right_contact(self):
+        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
+        bridge.vehicle_manager = types.SimpleNamespace(vehicle=types.SimpleNamespace(id=7))
+        bridge.global_planner_backend = "custom_admap_dijkstra"
+        carla_right = types.SimpleNamespace(
+            road_id=1,
+            section_id=0,
+            lane_id=-2,
+            get_left_lane=lambda: None,
+            get_right_lane=lambda: None,
+        )
+        carla_current = types.SimpleNamespace(
+            road_id=1,
+            section_id=0,
+            lane_id=-1,
+            get_left_lane=lambda: None,
+            get_right_lane=lambda: carla_right,
+            next=lambda _distance: [],
+        )
+        carla_right.get_left_lane = lambda: carla_current
+        bridge.global_planner = types.SimpleNamespace(
+            get_local_lane_graph=lambda *_args, **_kwargs: {
+                "ego_ad_lane_id": 500145,
+                "lane_to_offset": {500145: 0, 500144: -1},
+            },
+            get_current_route_info=lambda **_: types.SimpleNamespace(
+                route_found=True,
+                optimal_lane_id=500144,
+                current_road_option="LANEFOLLOW",
+                next_macro_maneuver="Lane Change Right",
+                next_macro_distance_m=30.0,
+                distance_to_destination_m=100.0,
+            ),
+        )
+
+        summary = bridge._planning_module_global_route_summary(
+            ego_location=sys.modules["carla"].Location(0.0, 0.0, 0.0),
+            ego_heading_rad=0.0,
+            fallback_lane_id=2,
+            ego_waypoint=carla_current,
+        )
+
+        self.assertEqual(summary["optimal_lane_id"], 1)
+        self.assertEqual(summary["ad_current_lane_id"], 500145)
+        self.assertEqual(summary["ad_target_lane_id"], 500144)
+        self.assertEqual(summary["lane_change_offset"], -1)
 
     def test_traffic_memory_holds_red_through_unknown(self):
         memory = TrafficLightMemory(hold_unknown_s=0.8)

@@ -166,11 +166,24 @@ def build_speed_plan(
     front_gap_m: Optional[float] = None,
     upcoming_turn_direction: str = "",
     upcoming_turn_distance_m: Optional[float] = None,
+    lane_change_commitment_active: bool = False,
 ) -> SpeedPlan:
     """Return the speed target owned by the scenario/behavior layer."""
 
     requested = max(0.0, float(requested_speed_mps))
     scenario_cap = getattr(scenario_decision, "speed_cap_mps", None)
+    scenario_state = str(getattr(scenario_decision, "state", "") or "").strip().upper()
+    # PREPARE_TURN may become visible while a route-required lane change is
+    # still executing.  It is a preview for the next maneuver, not authority
+    # to slow (or stop) the current locked maneuver.  Traffic-control stops
+    # remain active because their state/stop_goal is not PREPARE_TURN.
+    suppress_turn_preparation = bool(
+        lane_change_commitment_active
+        and scenario_state == "PREPARE_TURN"
+        and not bool(getattr(scenario_decision, "stop_goal_active", False))
+    )
+    if bool(suppress_turn_preparation):
+        scenario_cap = None
     scenario_cap_value = (
         None if scenario_cap is None else max(0.0, float(scenario_cap))
     )
@@ -200,6 +213,7 @@ def build_speed_plan(
         finite_turn_distance_m is not None
         and decision not in {"intersection_turn_left", "intersection_turn_right"}
         and not stop_goal
+        and not bool(lane_change_commitment_active)
     ):
         turn_entry_speed_mps = max(
             0.1,

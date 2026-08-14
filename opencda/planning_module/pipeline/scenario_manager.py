@@ -412,6 +412,31 @@ class CPXScenarioManager:
         turn_exit_heading_error_rad: float,
         turn_exit_lateral_m: float,
     ) -> Optional[CPXScenarioDecision]:
+        # A decisive post-junction lane-change macro means the connector has
+        # already been consumed.  Do not let a stale CARLA LEFT/RIGHT road
+        # option or the exit-alignment latch keep owning behavior after the
+        # route graph has advanced to the next maneuver.
+        next_macro = str(next_macro_maneuver or "").strip().lower().replace(" ", "_")
+        post_turn_lane_change = next_macro in {
+            "lane_change_left",
+            "lane_change_right",
+            "change_lane_left",
+            "change_lane_right",
+        }
+        if (
+            bool(post_turn_lane_change)
+            and self._state in {PREPARE_TURN, INTERSECTION_TURN, CREEP}
+        ):
+            # AD-map route progress is authoritative here. CARLA can keep
+            # projecting ego onto the junction connector for several metres
+            # after the route has already advanced to the outgoing lane-change
+            # edge; waiting for ego_in_junction=False retains the old turn and
+            # creates contradictory LEFT behavior / RIGHT geometry.
+            self._state = LANE_FOLLOW
+            self._turn_direction = ""
+            self._turn_latch_until_s = -float("inf")
+            return None
+
         direction = self._turn_direction_from_route_option(
             current_road_option=str(current_road_option)
         )

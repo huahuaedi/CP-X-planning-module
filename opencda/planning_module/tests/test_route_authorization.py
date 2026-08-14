@@ -16,6 +16,75 @@ RouteManeuver = route_authorization.RouteManeuver
 
 
 class RouteAuthorizationTest(unittest.TestCase):
+    def test_ad_topology_nonzero_offset_overrides_colliding_local_lane_ids(self):
+        auth = authorize_route_lane_change(
+            route_lane_change_allowed=True,
+            current_lane_id=1,
+            route_required_lane_id=1,
+            next_macro_maneuver="Lane Change Right",
+            current_road_option="LANEFOLLOW",
+            remaining_distance_m=5.0,
+            available_lane_ids=[1],
+            lane_safety_scores={1: 1.0},
+            lane_prediction_risks={1: {}},
+            preparation_start_distance_m=45.0,
+            latest_start_distance_m=12.0,
+            target_safety_threshold=0.65,
+            explicit_lane_change_start_distance_m=20.0,
+            topology_current_lane_id=540156,
+            topology_target_lane_id=540155,
+            topology_lane_offset=-1,
+        )
+
+        self.assertTrue(auth.allowed)
+        self.assertTrue(auth.required_by_route)
+        self.assertEqual(auth.direction, "right")
+        self.assertEqual(
+            auth.reason,
+            "route_lane_change_authorized_by_topology",
+        )
+
+    def test_opaque_ad_lane_ids_use_explicit_topology_direction(self):
+        auth = authorize_route_lane_change(
+            route_lane_change_allowed=True,
+            current_lane_id=900,
+            route_required_lane_id=120,
+            next_macro_maneuver="lane_change_left",
+            current_road_option="lane_follow",
+            remaining_distance_m=10.0,
+            available_lane_ids=[900, 120],
+            lane_safety_scores={120: 1.0},
+            lane_prediction_risks={120: {}},
+            preparation_start_distance_m=45.0,
+            latest_start_distance_m=5.0,
+            target_safety_threshold=0.65,
+            require_adjacent=True,
+            explicit_lane_change_start_distance_m=20.0,
+            adjacent_lane_directions={120: "left"},
+        )
+        self.assertTrue(auth.allowed)
+        self.assertEqual(auth.direction, "left")
+
+    def test_opaque_ad_lane_id_not_in_contact_graph_is_not_adjacent(self):
+        auth = authorize_route_lane_change(
+            route_lane_change_allowed=True,
+            current_lane_id=900,
+            route_required_lane_id=901,
+            next_macro_maneuver="lane_change_left",
+            current_road_option="lane_follow",
+            remaining_distance_m=10.0,
+            available_lane_ids=[900, 901],
+            lane_safety_scores={901: 1.0},
+            lane_prediction_risks={901: {}},
+            preparation_start_distance_m=45.0,
+            latest_start_distance_m=5.0,
+            target_safety_threshold=0.65,
+            require_adjacent=True,
+            explicit_lane_change_start_distance_m=20.0,
+            adjacent_lane_directions={120: "left"},
+        )
+        self.assertFalse(auth.allowed)
+        self.assertEqual(auth.reason, "required_lane_not_adjacent")
     def test_continue_straight_never_requires_lane_change(self):
         auth = authorize_route_lane_change(
             route_lane_change_allowed=True,

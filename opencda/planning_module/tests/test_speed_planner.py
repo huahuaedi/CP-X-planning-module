@@ -320,6 +320,49 @@ class SpeedPlannerTest(unittest.TestCase):
         self.assertEqual(result.reference_samples[1]["speed_ref_mps"], 2.5)
         self.assertTrue(result.applied)
 
+    def test_committed_lane_change_ignores_prepare_turn_speed_caps(self):
+        plan = build_speed_plan(
+            scenario_decision=SimpleNamespace(
+                state="PREPARE_TURN",
+                speed_cap_mps=2.0,
+                stop_goal_active=False,
+                reason="turn_prepare",
+            ),
+            behavior_decision="lane_change_right",
+            requested_speed_mps=12.0,
+            ego_speed_mps=11.0,
+            config={
+                "full_intersection_turn_speed_cap_mps": 2.2,
+                "turn_approach_comfort_decel_mps2": 2.5,
+                "turn_approach_entry_buffer_m": 5.0,
+            },
+            upcoming_turn_direction="right",
+            upcoming_turn_distance_m=20.0,
+            lane_change_commitment_active=True,
+        )
+
+        self.assertEqual(plan.target_speed_mps, 12.0)
+        self.assertIsNone(plan.scenario_cap_mps)
+        self.assertIsNone(plan.turn_approach_cap_mps)
+
+    def test_committed_lane_change_does_not_suppress_real_stop(self):
+        plan = build_speed_plan(
+            scenario_decision=SimpleNamespace(
+                state="TRAFFIC_LIGHT_STOP",
+                speed_cap_mps=0.0,
+                stop_goal_active=True,
+                reason="red_light",
+            ),
+            behavior_decision="lane_change_right",
+            requested_speed_mps=12.0,
+            ego_speed_mps=11.0,
+            config={},
+            lane_change_commitment_active=True,
+        )
+
+        self.assertEqual(plan.target_speed_mps, 0.0)
+        self.assertTrue(plan.stop_goal_active)
+
     def test_speed_ceiling_preserves_candidate_slowdown_and_geometry(self):
         result = enforce_speed_ceiling(
             proposed_target_mps=1.5,

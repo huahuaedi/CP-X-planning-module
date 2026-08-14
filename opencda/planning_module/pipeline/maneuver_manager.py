@@ -80,10 +80,52 @@ class ManeuverManager:
         route_current_option: str = "",
         route_next_maneuver: str = "",
         stop_goal_active: bool = False,
+        lane_change_commitment_active: bool | None = None,
     ) -> ManeuverReferenceResult:
         incoming = [dict(sample) for sample in list(reference_samples or [])]
         normalized_decision = str(decision or "").strip().lower()
         phase = self._phase(normalized_decision, behavior_fsm_state, stop_goal_active)
+        normalized_route_next = (
+            str(route_next_maneuver or "")
+            .strip()
+            .lower()
+            .replace("-", "_")
+            .replace(" ", "_")
+        )
+        route_advanced_to_lane_change = normalized_route_next in {
+            "lane_change_left",
+            "lane_change_right",
+            "change_lane_left",
+            "change_lane_right",
+        }
+        released_debug: dict[str, object] = {}
+        if (
+            self.active_plan is not None
+            and self.active_plan.maneuver_type == "intersection_turn"
+            and bool(route_advanced_to_lane_change)
+        ):
+            released_debug = {
+                "maneuver_geometry_release_reason": "route_advanced_to_lane_change",
+                "maneuver_geometry_released_id": str(
+                    self.active_plan.maneuver_id
+                ),
+            }
+            self.active_plan = None
+            self._last_output = []
+        if (
+            self.active_plan is not None
+            and self.active_plan.maneuver_type in {"lane_change", "lane_change_to_turn"}
+            and normalized_decision not in _LANE_CHANGE
+            and lane_change_commitment_active is False
+        ):
+            released_debug = {
+                "maneuver_geometry_release_reason": "lane_change_commitment_complete",
+                "maneuver_geometry_released_id": str(
+                    self.active_plan.maneuver_id
+                ),
+            }
+            self.active_plan = None
+            self._last_output = []
         direction = self._direction(
             normalized_decision,
             route_current_option,
@@ -126,10 +168,12 @@ class ManeuverManager:
 
         if self.active_plan is None:
             self._last_output = []
+            inactive_debug = self._inactive_debug()
+            inactive_debug.update(released_debug)
             return ManeuverReferenceResult(
                 reference_samples=incoming,
                 destination_state=list(destination_state or []),
-                debug=self._inactive_debug(),
+                debug=inactive_debug,
             )
 
         if not should_continue and not should_start:
@@ -334,7 +378,22 @@ class ManeuverManager:
     @classmethod
     def _extend_geometry(cls, base, incoming):
         result = [dict(sample) for sample in list(base or [])]
-        for sample in list(incoming or []):
+        source = [dict(sample) for sample in list(incoming or [])]
+        if result and source:
+            # Continue after the incoming point nearest the retained
+            # endpoint.  Iterating from source[0] appends the whole path a
+            # second time whenever base already contains incoming, creating
+            # a terminal->start loop and an artificial ~180 degree heading
+            # reversal once the forward window reaches that seam.
+            lx, ly = cls._xy(result[-1])
+            nearest = min(
+                range(len(source)),
+                key=lambda index: (
+                    cls._xy(source[index])[0] - lx
+                ) ** 2 + (cls._xy(source[index])[1] - ly) ** 2,
+            )
+            source = source[nearest + 1 :]
+        for sample in source:
             if not result:
                 result.append(dict(sample))
                 continue

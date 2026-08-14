@@ -175,6 +175,80 @@ class ReferenceContractTest(unittest.TestCase):
         )
         self.assertTrue(allowed.valid, allowed.reason())
 
+    def test_lane_change_destination_accepts_its_transition_segment(self):
+        contract = contract_from_config(
+            mode="lane_change",
+            expected_lane_id=2,
+            horizon_steps=4,
+            config={},
+            default_speed_mps=4.0,
+        )
+        reference = [
+            {
+                "x_ref_m": 1.0,
+                "y_ref_m": 0.02,
+                "lane_id": 1,
+                "lane_transition_kind": "lateral_lane_change",
+                "speed_ref_mps": 3.0,
+            },
+            {
+                "x_ref_m": 2.0,
+                "y_ref_m": 0.08,
+                "lane_id": 1,
+                "lane_transition_kind": "lateral_lane_change",
+                "speed_ref_mps": 3.0,
+            },
+            {
+                "x_ref_m": 3.0,
+                "y_ref_m": 0.18,
+                "lane_id": 2,
+                "lane_transition_kind": "lateral_lane_change",
+                "speed_ref_mps": 3.0,
+            },
+            {
+                "x_ref_m": 4.0,
+                "y_ref_m": 0.32,
+                "lane_id": 2,
+                "lane_transition_kind": "lateral_lane_change",
+                "speed_ref_mps": 3.0,
+            },
+        ]
+
+        result = validate_reference_contract(
+            reference_samples=reference,
+            destination_state=[2.0, 0.08, 3.0, 0.0, 2],
+            ego_state=[0.0, 0.0, 3.0, 0.0],
+            contract=contract,
+            check_destination_body_lateral=False,
+        )
+
+        self.assertTrue(result.valid, result.reason())
+        self.assertAlmostEqual(result.destination_lane_error_m, 0.0)
+
+    def test_lane_follow_does_not_accept_lateral_transition_marker(self):
+        contract = self._lane_follow_contract()
+        reference = [
+            {
+                "x_ref_m": float(index + 1),
+                "y_ref_m": 0.0,
+                "lane_id": 1,
+                "lane_transition_kind": "lateral_lane_change",
+                "speed_ref_mps": 2.0,
+            }
+            for index in range(3)
+        ]
+
+        result = validate_reference_contract(
+            reference_samples=reference,
+            destination_state=[2.0, 2.0, 2.0, 0.0, 2],
+            ego_state=[0.0, 0.0, 2.0, 0.0],
+            contract=contract,
+            check_destination_body_lateral=False,
+        )
+
+        self.assertFalse(result.valid)
+        self.assertIn("destination_lane_error_out_of_contract", result.violations)
+
     def test_intersection_turn_allows_route_branch_body_lateral(self):
         contract = contract_from_config(
             mode="intersection_turn",
