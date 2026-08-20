@@ -3,8 +3,8 @@ base_config: cpx_profile_full_default.yaml
 description: |-
   Lane-change cooperative-perception test scenario on OpenCDA's proven
   2lane_freeway_simplified custom-map layout (same map/coordinates already
-  used by cpx_mature_2lanefree_carla / single_2lanefree_carla /
-  platoon_joining_2lanefree_carla), with the full CP-X pipeline
+  used by single_2lanefree_carla and platoon_joining_2lanefree_carla), with
+  the full CP-X pipeline
   (`mode: full_cpx_mpc`) active so behavior_planner's lane-safety scoring,
   candidate lane-change
   evaluation, and route_authorization actually run.
@@ -65,8 +65,7 @@ vehicle_base:
 # Single slow vehicle parked in ego's own lane (y=8.3, same lane cav1 spawns
 # in), 170m ahead of cav1's spawn point. auto_lane_change defaults to false
 # (see default.yaml) so it will NOT move out of ego's way -- ego must change
-# to the adjacent lane (y=4.8, 3.5m to the right, the same lane spacing
-# already used by cpx_mature_2lanefree_carla's background traffic) to pass.
+# to the adjacent lane (y=4.8, 3.5m to the right) to pass.
 # vehicle_speed_perc: 90 means ~10% of the speed limit (crawling), not a
 # literal zero-velocity static prop, since OpenCDA's Traffic Manager does not
 # reliably support 100%.
