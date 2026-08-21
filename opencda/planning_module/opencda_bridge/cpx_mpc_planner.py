@@ -1862,6 +1862,15 @@ class CPXMPCPlannerBridge:
                 road_envelope_payload_world = (
                     self._current_route_tracking_lane_change_envelope_payload_world()
                 )
+                if road_envelope_payload_world is None:
+                    road_envelope_payload_world = (
+                        self._rolling_turn_envelope_payload_world(
+                            behavior_decision=str(
+                                behavior_debug.get("decision", "")
+                            ),
+                            reference_samples=lane_center_reference,
+                        )
+                    )
                 self.mpc.plan_trajectory(
                     current_state=current_state,
                     destination_state=destination_state,
@@ -2010,10 +2019,35 @@ class CPXMPCPlannerBridge:
                     if bool(maneuver_tracking_active):
                         # A failed maneuver solve must not transfer lateral
                         # ownership to the destination-point fallback.  Hold
-                        # the last accepted steering command for this single
-                        # degraded frame; longitudinal fallback and the final
-                        # safety supervisor remain active.
-                        steer_rad = float(previous_valid_steer_rad)
+                        # the last accepted steering direction only briefly.
+                        # Once the optimized buffer has already expired,
+                        # repeatedly holding the full turn command can drive
+                        # the vehicle off-road forever (the diagnosed Town06
+                        # vegetation collision). Decay it toward neutral so a
+                        # prolonged solver outage is fail-passive laterally.
+                        failed_steer_decay = (
+                            max(
+                                0.0,
+                                min(
+                                    1.0,
+                                    float(
+                                        self.config.get(
+                                            "turn_failed_replan_steer_decay",
+                                            0.65,
+                                        )
+                                    ),
+                                ),
+                            )
+                            if normalized_behavior in {
+                                "intersection_turn_left",
+                                "intersection_turn_right",
+                            }
+                            else 1.0
+                        )
+                        steer_rad = (
+                            float(previous_valid_steer_rad)
+                            * float(failed_steer_decay)
+                        )
                         self._set_actuator_context(
                             ego_speed_mps=float(ego_speed_mps),
                             target_speed_mps=float(speed_ref_mps),
@@ -5347,16 +5381,16 @@ class CPXMPCPlannerBridge:
                     else 0
                 ),
             )
-            # build_speed_plan's lane_change_cap/turn_cap (applied earlier,
-            # against the behavior planner's own raw decision) are
-            # overwritten by whatever speed_ref_mps the winning candidate
-            # carries -- build_candidate_intents's turn candidate uses
-            # target_speed_mps verbatim (see candidate_pipeline.py), so it
-            # isn't capped either. Re-apply both caps here against the FINAL
-            # decision. For lane changes this keeps the lateral S-curve
-            # decoupled from however unsettled the longitudinal speed still
-            # is (see cpx_single_left_lane_turn's lane boundary press); for
-            # turns this is the only place the configured
+            # Candidate selection owns maneuver geometry, never longitudinal
+            # authority.  In particular, do not re-cap a lane-change speed
+            # here after SpeedPlanner has selected it.  The curvature-derived
+            # value remains diagnostic so a future unified SpeedPlanner can
+            # consume it explicitly, but it must not silently rewrite the MPC
+            # entry target.  Turns retain their safety cap below because the
+            # final turn decision is not known when the earlier speed plan is
+            # built; moving that input upstream is a separate change.
+            #
+            # For turns this is the only place the configured
             # full_intersection_turn_speed_cap_mps actually reaches the
             # winning candidate at all -- confirmed via debug CSV at 35mph:
             # speed climbed past 4 m/s through an entire intersection_turn_left
@@ -5391,28 +5425,16 @@ class CPXMPCPlannerBridge:
                     ),
                     speed_enable_threshold_mps=0.0,
                 )
-                lane_change_cap_mps = max(
-                    0.1,
-                    float(
-                        self.config.get(
-                            "full_lane_change_speed_ceiling_mps",
-                            max(0.1, float(speed_ref_mps)),
-                        )
-                    ),
-                )
-                if lane_change_curvature_cap_mps is not None:
-                    lane_change_cap_mps = min(
-                        float(lane_change_cap_mps),
-                        float(lane_change_curvature_cap_mps),
-                    )
-                speed_ref_mps = min(float(speed_ref_mps), float(lane_change_cap_mps))
                 reference_debug.update({
                     "lane_change_reference_curvature_1pm": float(
                         lane_change_curvature_1pm
                     ),
-                    "lane_change_curvature_speed_cap_mps": float(
-                        lane_change_cap_mps
+                    "lane_change_curvature_speed_advisory_mps": (
+                        ""
+                        if lane_change_curvature_cap_mps is None
+                        else float(lane_change_curvature_cap_mps)
                     ),
+                    "lane_change_longitudinal_authority": "SpeedPlanner",
                 })
             elif str(decision) in {"intersection_turn_left", "intersection_turn_right"}:
                 # full_intersection_turn_speed_cap_mps is a per-fleet ceiling,
@@ -7304,6 +7326,86 @@ class CPXMPCPlannerBridge:
             "blocks": self._route_tracking_lane_change_envelope_blocks,
             "epsilon0": self._route_tracking_lane_change_envelope_epsilon0,
             "rho": float(getattr(self.mpc, "road_envelope_rho", -8.0)),
+        }
+
+    def _rolling_turn_envelope_payload_world(
+        self,
+        *,
+        behavior_decision: str,
+        reference_samples: Sequence[Mapping[str, object]],
+    ) -> Optional[Mapping[str, object]]:
+        """Build an MPC road envelope for only the current turn horizon."""
+
+        if str(behavior_decision or "").strip().lower() not in {
+            "intersection_turn_left",
+            "intersection_turn_right",
+        }:
+            return None
+        if not bool(self.config.get("turn_mpc_road_envelope_enabled", True)):
+            return None
+        from opencda.planning_module.pipeline.candidate_pipeline import (
+            build_turn_reference_envelope_blocks,
+        )
+        from opencda.planning_module.MPC.lane_keep import (
+            road_envelope_conservativeness_correction,
+        )
+
+        vehicle = getattr(getattr(self, "vehicle_manager", None), "vehicle", None)
+        extent = getattr(getattr(vehicle, "bounding_box", None), "extent", None)
+        ego_half_width_m = max(
+            0.1,
+            float(
+                getattr(
+                    extent,
+                    "y",
+                    self.config.get("metrics_ego_half_width_m", 1.0),
+                )
+            ),
+        )
+        blocks = build_turn_reference_envelope_blocks(
+            reference_samples=reference_samples,
+            ego_half_width_m=float(ego_half_width_m),
+            safety_margin_m=max(
+                0.0,
+                float(
+                    self.config.get(
+                        "turn_mpc_road_envelope_safety_margin_m",
+                        self.config.get(
+                            "reference_contract_turn_boundary_margin_m",
+                            0.15,
+                        ),
+                    )
+                ),
+            ),
+            default_lane_width_m=float(getattr(self.mpc, "lane_width_m", 3.5)),
+            longitudinal_overlap_m=max(
+                0.0,
+                float(self.config.get("turn_mpc_road_envelope_overlap_m", 0.75)),
+            ),
+        )
+        if not blocks:
+            return None
+        rho = float(getattr(self.mpc, "road_envelope_rho", -8.0))
+        return {
+            "blocks": blocks,
+            "epsilon0": road_envelope_conservativeness_correction(
+                blocks,
+                rho=float(rho),
+            ),
+            "rho": float(rho),
+            # This is recovery slack, not extra drivable width.  Keeping the
+            # 10k envelope penalty means MPC still prefers the body-safe tube,
+            # while the larger ceiling prevents a small tracking error at the
+            # turn apex from making the entire QP mathematically infeasible.
+            "max_slack_m": max(
+                0.10,
+                float(
+                    self.config.get(
+                        "turn_mpc_road_envelope_recovery_slack_m",
+                        1.5,
+                    )
+                ),
+            ),
         }
 
     def _select_candidate_reference_for_mpc(

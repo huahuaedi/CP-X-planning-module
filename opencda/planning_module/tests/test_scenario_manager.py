@@ -345,6 +345,48 @@ class CPXScenarioManagerTests(unittest.TestCase):
             "intersection_turn_left",
         )
 
+    def test_large_junction_polygon_activates_lead_in_without_early_exit(self):
+        manager = CPXScenarioManager({
+            "scenario_turn_exit_stable_frames": 1,
+        })
+        lead_in = manager.update(
+            traffic_state="unknown",
+            stop_target=None,
+            stop_forward_m=0.0,
+            stop_target_reliable=False,
+            ego_speed_mps=5.0,
+            # Town06 marks the entry road as junction well before the route
+            # actually reaches its LEFT connector.
+            ego_in_junction=True,
+            current_road_option="LaneFollow",
+            next_macro_maneuver="left",
+            sim_time_s=1.0,
+            upcoming_turn_direction="left",
+            upcoming_turn_distance_m=12.95,
+            turn_exit_alignment_valid=True,
+            turn_exit_aligned=True,
+        )
+        held = manager.update(
+            traffic_state="unknown",
+            stop_target=None,
+            stop_forward_m=0.0,
+            stop_target_reliable=False,
+            ego_speed_mps=5.0,
+            ego_in_junction=True,
+            current_road_option="LaneFollow",
+            next_macro_maneuver="left",
+            sim_time_s=1.05,
+            upcoming_turn_direction="left",
+            upcoming_turn_distance_m=12.5,
+            turn_exit_alignment_valid=True,
+            turn_exit_aligned=True,
+        )
+
+        self.assertEqual(lead_in.state, INTERSECTION_TURN)
+        self.assertEqual(held.state, INTERSECTION_TURN)
+        self.assertFalse(manager._turn_connector_seen)
+        self.assertNotEqual(held.state, TURN_EXIT_STABILIZATION)
+
     def test_turn_exit_waits_for_outgoing_route_alignment(self):
         manager = CPXScenarioManager({
             "scenario_turn_exit_hold_s": 0.5,

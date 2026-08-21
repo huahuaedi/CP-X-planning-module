@@ -159,6 +159,7 @@ class CPXScenarioManager:
         self._state = LANE_FOLLOW
         self._turn_direction = ""
         self._turn_latch_until_s = -float("inf")
+        self._turn_connector_seen = False
         self._boundary_recovery_stable_frames = 0
         self._turn_exit_stable_frames = 0
 
@@ -170,6 +171,7 @@ class CPXScenarioManager:
         self._state = LANE_FOLLOW
         self._turn_direction = ""
         self._turn_latch_until_s = -float("inf")
+        self._turn_connector_seen = False
         self._boundary_recovery_stable_frames = 0
         self._turn_exit_stable_frames = 0
 
@@ -288,6 +290,7 @@ class CPXScenarioManager:
 
         self._state = LANE_FOLLOW
         self._turn_direction = ""
+        self._turn_connector_seen = False
         return CPXScenarioDecision(
             state=LANE_FOLLOW,
             behavior_signal_state="unknown",
@@ -479,6 +482,7 @@ class CPXScenarioManager:
         }
         if (
             bool(turn_execution_active)
+            and bool(self._turn_connector_seen)
             and not self._turn_direction_from_route_option(current_road_option)
         ):
             exit_aligned = bool(
@@ -497,6 +501,7 @@ class CPXScenarioManager:
                 self._state = LANE_FOLLOW
                 self._turn_direction = ""
                 self._turn_latch_until_s = -float("inf")
+                self._turn_connector_seen = False
                 self._turn_exit_stable_frames = 0
                 return None
             direction = str(self._turn_direction or "").strip().lower()
@@ -564,12 +569,20 @@ class CPXScenarioManager:
                 turn_direction=str(prepare_direction),
                 turn_latched=False,
             )
+        connector_direction = str(direction)
         if not direction and bool(ego_in_junction):
+            # CARLA's junction polygon begins before the actual connector.
+            # It is nevertheless the correct point to activate a turn
+            # reference with a straight lead-in. Do not mark the connector as
+            # seen until the route option itself becomes LEFT/RIGHT; that
+            # distinction prevents the premature TURN_EXIT observed earlier.
             direction = self._turn_direction_from_macro(
                 next_macro_maneuver=str(next_macro_maneuver)
             )
         if direction:
             self._turn_direction = str(direction)
+            if connector_direction:
+                self._turn_connector_seen = True
             self._turn_latch_until_s = float(sim_time_s) + float(self.turn_exit_hold_s)
             self._turn_exit_stable_frames = 0
         elif (

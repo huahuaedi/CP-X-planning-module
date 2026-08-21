@@ -481,10 +481,12 @@ def build_candidate_intents(
                     name=f"{authorization_source}_{decision}_{profile.variant}",
                     decision=str(decision),
                     target_lane_id=int(target_lane_id),
-                    target_speed_mps=max(
-                        0.8,
-                        float(target_speed_mps) * float(profile.speed_scale),
-                    ),
+                    # A lane-change candidate owns lateral geometry, duration
+                    # and ranking cost only.  Longitudinal authority belongs
+                    # to SpeedPlanner; profile.speed_scale is retained as a
+                    # geometry/ranking descriptor but must not rewrite the
+                    # commanded speed.
+                    target_speed_mps=float(target_speed_mps),
                     base_cost=float(profile.extra_cost) + float(lane_cost),
                     reason=(
                         f"{authorization_source}_lane_change_authorized"
@@ -1158,6 +1160,81 @@ def build_route_tracking_lane_change_envelope_blocks(
                 heading_rad=float(heading_rad),
                 half_length_m=float(half_length_m),
                 half_width_m=float(half_width_m),
+            )
+        )
+    return blocks
+
+
+def build_turn_reference_envelope_blocks(
+    *,
+    reference_samples: Sequence[Mapping[str, object]],
+    ego_half_width_m: float,
+    safety_margin_m: float = 0.15,
+    default_lane_width_m: float = 3.5,
+    longitudinal_overlap_m: float = 0.75,
+    min_half_width_m: float = 0.15,
+) -> list[RoadEnvelopeBlock]:
+    """Build a rolling center-feasibility tube around a turn reference.
+
+    The blocks describe only the current MPC horizon.  Unlike the old locked
+    turn envelope, they are rebuilt from the current rolling reference so the
+    constraint cannot become stale while the ego progresses through a
+    junction.  Each block is shrunk by the ego half-width and safety margin;
+    the full swept-body contract remains the reference admission check.
+    """
+
+    normalized = [
+        normalize_lane_reference_sample(
+            sample,
+            default_lane_width_m=float(default_lane_width_m),
+        )
+        for sample in list(reference_samples or [])
+    ]
+    normalized = [sample for sample in normalized if sample is not None]
+    if len(normalized) < 2:
+        return []
+    clearance_m = max(0.0, float(ego_half_width_m)) + max(
+        0.0, float(safety_margin_m)
+    )
+    overlap_m = max(0.0, float(longitudinal_overlap_m))
+    blocks: list[RoadEnvelopeBlock] = []
+    for first, second in zip(normalized[:-1], normalized[1:]):
+        dx_m = float(second.x_center_m) - float(first.x_center_m)
+        dy_m = float(second.y_center_m) - float(first.y_center_m)
+        segment_length_m = math.hypot(float(dx_m), float(dy_m))
+        if float(segment_length_m) <= 1.0e-4:
+            continue
+        heading_rad = math.atan2(float(dy_m), float(dx_m))
+        road_center_offset_m = 0.5 * (
+            float(first.road_center_offset_m)
+            + float(second.road_center_offset_m)
+        )
+        normal_x = -math.sin(float(heading_rad))
+        normal_y = math.cos(float(heading_rad))
+        center_x_m = 0.5 * (
+            float(first.x_center_m) + float(second.x_center_m)
+        ) + float(road_center_offset_m) * float(normal_x)
+        center_y_m = 0.5 * (
+            float(first.y_center_m) + float(second.y_center_m)
+        ) + float(road_center_offset_m) * float(normal_y)
+        road_half_width_m = 0.25 * (
+            float(first.road_left_width_m)
+            + float(first.road_right_width_m)
+            + float(second.road_left_width_m)
+            + float(second.road_right_width_m)
+        )
+        blocks.append(
+            RoadEnvelopeBlock(
+                x_center_m=float(center_x_m),
+                y_center_m=float(center_y_m),
+                heading_rad=float(heading_rad),
+                half_length_m=(
+                    0.5 * float(segment_length_m) + float(overlap_m)
+                ),
+                half_width_m=max(
+                    float(min_half_width_m),
+                    float(road_half_width_m) - float(clearance_m),
+                ),
             )
         )
     return blocks

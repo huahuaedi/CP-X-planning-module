@@ -829,6 +829,61 @@ class CandidatePipelineTest(unittest.TestCase):
             [],
         )
 
+    def test_turn_envelope_is_rolling_and_reserves_vehicle_width(self):
+        reference = [
+            {
+                "x_ref_m": 0.0,
+                "y_ref_m": 0.0,
+                "heading_rad": 0.0,
+                "lane_width_m": 3.5,
+                "road_left_width_m": 1.75,
+                "road_right_width_m": 1.75,
+            },
+            {
+                "x_ref_m": 1.0,
+                "y_ref_m": 0.2,
+                "heading_rad": 0.2,
+                "lane_width_m": 3.5,
+                "road_left_width_m": 1.75,
+                "road_right_width_m": 1.75,
+            },
+            {
+                "x_ref_m": 1.8,
+                "y_ref_m": 0.8,
+                "heading_rad": 0.6,
+                "lane_width_m": 3.5,
+                "road_left_width_m": 1.75,
+                "road_right_width_m": 1.75,
+            },
+        ]
+
+        blocks = candidate_pipeline.build_turn_reference_envelope_blocks(
+            reference_samples=reference,
+            ego_half_width_m=1.05,
+            safety_margin_m=0.15,
+            longitudinal_overlap_m=0.75,
+        )
+
+        self.assertEqual(len(blocks), 2)
+        self.assertAlmostEqual(blocks[0].half_width_m, 0.55, places=6)
+        self.assertAlmostEqual(blocks[1].half_width_m, 0.55, places=6)
+        self.assertNotAlmostEqual(
+            blocks[0].heading_rad,
+            blocks[1].heading_rad,
+            places=3,
+        )
+        # Rebuilding from a later rolling window must not retain the first
+        # segment from the old horizon.
+        later = candidate_pipeline.build_turn_reference_envelope_blocks(
+            reference_samples=reference[1:],
+            ego_half_width_m=1.05,
+            safety_margin_m=0.15,
+            longitudinal_overlap_m=0.75,
+        )
+        self.assertEqual(len(later), 1)
+        self.assertAlmostEqual(later[0].x_center_m, blocks[1].x_center_m)
+        self.assertAlmostEqual(later[0].y_center_m, blocks[1].y_center_m)
+
     def test_selected_lane_change_has_only_configured_variants(self):
         intents = candidate_pipeline.build_candidate_intents(
             selected_decision="lane_change_left",
@@ -856,6 +911,10 @@ class CandidatePipelineTest(unittest.TestCase):
         self.assertEqual(
             [intent.lane_change_duration_s for intent in lane_changes],
             [3.0, 4.5, 6.0],
+        )
+        self.assertEqual(
+            [intent.target_speed_mps for intent in lane_changes],
+            [4.0, 4.0, 4.0],
         )
         self.assertTrue(all(
             intent.name.startswith("opportunistic_lane_change_left_")

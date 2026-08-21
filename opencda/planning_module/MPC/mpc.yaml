@@ -783,7 +783,9 @@ mpc:
     # active that tick (the diagnosed cause of a primal-infeasible QP right
     # at the reference-switch instant).
     road_envelope:
-      enabled: false
+      # The constraint remains dormant unless the bridge supplies explicit
+      # lane-change or rolling-turn envelope blocks for the current horizon.
+      enabled: true
       # Quadratic penalty weight on the envelope slack.
       w_envelope: 10000.0
       # Hard-ish cap on envelope slack [m].

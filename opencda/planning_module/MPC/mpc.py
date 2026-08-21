@@ -2865,8 +2865,15 @@ class MPC:
                         -np.inf,
                         float(dg_dx * stage_x0_m + dg_dy * stage_y0_m - h0),
                     )
+                    # A rolling turn tube may need more recovery room than a
+                    # locked lane-change envelope.  Let the payload override
+                    # only the slack ceiling; the same large quadratic weight
+                    # still drives the solution back into the road tube.
                     envelope_max_slack_m = float(
-                        getattr(self, "road_envelope_max_slack_m", np.inf)
+                        road_envelope_blocks.get(
+                            "max_slack_m",
+                            getattr(self, "road_envelope_max_slack_m", np.inf),
+                        )
                     )
                     envelope_slack_upper = (
                         float(envelope_max_slack_m)
@@ -3552,6 +3559,12 @@ class MPC:
                     "rho": float(
                         road_envelope_payload_world.get(
                             "rho", getattr(self, "road_envelope_rho", -8.0)
+                        )
+                    ),
+                    "max_slack_m": float(
+                        road_envelope_payload_world.get(
+                            "max_slack_m",
+                            getattr(self, "road_envelope_max_slack_m", 0.10),
                         )
                     ),
                 }
