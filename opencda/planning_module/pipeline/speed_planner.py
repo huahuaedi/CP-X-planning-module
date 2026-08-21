@@ -346,7 +346,26 @@ def build_speed_plan(
             0.0,
             float(config.get("following_minimum_speed_mps", 0.35)),
         )
-        desired_gap_m = standstill_gap_m + time_headway_s * max(0.0, float(ego_speed_mps))
+        # Time-headway spacing keyed on ego's own speed alone can't tell
+        # "leader cruising same speed" from "leader accelerating away" --
+        # both look identical (same ego_speed_mps), so a real, growing gap
+        # to a lead vehicle that is pulling away still reads as "too close
+        # for my speed" and triggers a needless slowdown. Key it on closing
+        # speed (ego minus the obstacle ahead) instead, floored at 0 so a
+        # leader that is stationary or faster than ego never *shrinks* the
+        # buffer below the plain standstill_gap_m -- this only ever relaxes
+        # today's requirement when the leader is genuinely pulling away, the
+        # same standard "constant time-gap" ACC policy uses.
+        closing_speed_for_desired_gap_mps = max(
+            0.0,
+            float(ego_speed_mps)
+            - (
+                0.0
+                if front_obstacle_speed_mps is None
+                else max(0.0, float(front_obstacle_speed_mps))
+            ),
+        )
+        desired_gap_m = standstill_gap_m + time_headway_s * closing_speed_for_desired_gap_mps
         free_gap_m = desired_gap_m + free_gap_margin_m
         emergency_standstill_buffer_m = max(
             0.0,

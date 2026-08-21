@@ -74,6 +74,23 @@ def _static_obstacle_cooldown_policy(
     return "cooldown_stop", True
 
 
+def _lane_change_execution_active(
+        *, reference_locked: bool, phase: object) -> bool:
+    """Return whether a committed lane change still owns route execution.
+
+    The route progress tracker is allowed to observe a temporarily lapsed lane
+    change requirement while ego follows the locked lateral trajectory.  That
+    lapse must not be interpreted as a missed maneuver until the trajectory is
+    released.  The phase check also protects the stabilization hand-off, where
+    the semantic route instruction may already have advanced.
+    """
+    normalized_phase = str(phase or "").strip().lower()
+    return bool(reference_locked) or normalized_phase in {
+        "executing",
+        "target_lane_stabilization",
+    }
+
+
 def _select_static_obstacle_local_avoidance_lane(
     *,
     current_lane_id: int,
@@ -4034,6 +4051,18 @@ class CPXMPCPlannerBridge:
             ):
                 self._last_required_lane_change_target_lane_id = None
                 self._last_required_lane_change_target_ad_lane_id = None
+            elif _lane_change_execution_active(
+                reference_locked=bool(
+                    self._route_tracking_lane_change_reference
+                ),
+                phase=self._route_tracking_lane_change_phase,
+            ):
+                # The route instruction can advance before the locked
+                # trajectory has physically reached its target lane.  Keep
+                # the remembered requirement and let the committed geometry
+                # finish; otherwise a mid-maneuver route replan resets the
+                # reference and produces a one-frame lane-follow interruption.
+                pass
             elif bool(self.config.get("missed_lane_change_route_replan_enabled", True)):
                 self._attempt_turn_route_replan(
                     ego_location=ego_location,
@@ -8375,32 +8404,19 @@ class CPXMPCPlannerBridge:
             and abs(float(stabilization_entry_lateral_error_m))
             <= float(stabilization_entry_max_lateral_error_m)
         )
-        # Plain equality is the fast/normal path: while StableLaneIdTracker
-        # keeps proving real adjacency, current_lane_id and target_lane_id
-        # live in the same continuously-hopped numbering, so equality is a
-        # reliable, nearly-free confirmation that ego occupies the intended
-        # physical lane. But if a discontinuity forced a re-anchor since
-        # this commitment was locked (a road/section boundary crossed mid
-        # maneuver -- see StableLaneIdTracker/_record_lane_id_discontinuity),
-        # current_lane_id no longer shares that numbering with the
-        # already-locked target_lane_id, so equality can spuriously stay
-        # false even after ego has genuinely arrived. Once that is known,
-        # fall back to trusting stabilization_geometry_ready alone (tight
-        # lateral tolerance + progress already required below) instead of
-        # blocking stabilization entry until a timeout releases it.
-        lane_id_ready = bool(
-            int(current_lane_id) == int(target_lane_id)
-            or bool(self._lane_id_discontinuity_since_lock)
-        )
-        lane_and_progress_ready = bool(
+        # Lane IDs identify the source/target topology but do not own motion
+        # phase transitions.  Enter stabilization only from continuous
+        # progress and convergence to the locked target corridor.  This is
+        # robust both when the map ID flips early and when a road-boundary
+        # re-anchor changes the ID namespace during the maneuver.
+        geometry_and_progress_ready = bool(
             str(phase) != "target_lane_stabilization"
-            and bool(lane_id_ready)
             and float(self._route_tracking_lane_change_progress)
             >= float(entry_min_progress)
             and bool(stabilization_geometry_ready)
         )
         heading_ready = True
-        if lane_and_progress_ready:
+        if geometry_and_progress_ready:
             # current_lane_id/progress alone only capture that the ego has
             # crossed into the target lane's lateral extent -- the ego's
             # heading can still be mid-turn at that instant. Stabilization
@@ -8447,7 +8463,7 @@ class CPXMPCPlannerBridge:
                 heading_ready = bool(
                     float(heading_error_deg) <= float(max_heading_error_deg)
                 )
-        if lane_and_progress_ready and bool(heading_ready):
+        if geometry_and_progress_ready and bool(heading_ready):
             start_reason = self._start_target_lane_stabilization(
                 ego_location=ego_location,
                 ego_yaw_rad=float(ego_yaw_rad),

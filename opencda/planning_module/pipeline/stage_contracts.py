@@ -83,7 +83,14 @@ def evaluate_lane_change_completion(
     max_heading_error_rad: float = math.radians(8.0),
     required_stable_frames: int = 5,
 ) -> LaneChangeCompletion:
-    """Require geometric convergence, not a discrete map-lane transition."""
+    """Require convergence to the locked target geometry.
+
+    ``target_lane_matches`` is semantic evidence/debug information only.  A
+    map matcher may change ID before the vehicle has converged, or re-anchor
+    to a different ID namespace across a road boundary.  The committed
+    reference, progress, footprint clearance, lateral error and heading are
+    the authoritative execution/completion signals.
+    """
 
     terminal_samples = [
         sample
@@ -124,8 +131,6 @@ def evaluate_lane_change_completion(
     )
     heading_error_rad = _wrap_angle(float(ego_heading_rad) - target_heading_rad)
     converged = bool(
-        bool(target_lane_matches)
-        and
         float(progress) >= float(min_progress)
         and abs(float(lateral_error_m)) <= float(max_lateral_error_m)
         and abs(float(heading_error_rad)) <= float(max_heading_error_rad)
@@ -136,7 +141,11 @@ def evaluate_lane_change_completion(
     required_frames = max(1, int(required_stable_frames))
     complete = bool(stable_frames >= required_frames)
     reason = (
-        "lane_change_geometrically_complete"
+        (
+            "lane_change_geometrically_complete"
+            if bool(target_lane_matches)
+            else "lane_change_geometrically_complete_lane_id_mismatch"
+        )
         if complete
         else "lane_change_completion_converging"
         if converged

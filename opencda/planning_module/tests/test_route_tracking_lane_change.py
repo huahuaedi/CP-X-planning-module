@@ -123,11 +123,11 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
             )
         )
 
-    def test_id_mismatch_without_discontinuity_blocks_stabilization_entry(self):
-        # Same geometry/progress as the passing case above, but
-        # current_lane_id (3) disagrees with the locked target_lane_id (2)
-        # and no discontinuity has been recorded since the lock -- the
-        # mismatch is trusted, so entry must stay blocked.
+    def test_id_mismatch_does_not_block_geometric_stabilization_entry(self):
+        # Lane IDs identify the locked target but do not control execution
+        # phase.  Geometry/progress can prove arrival even when map matching
+        # has re-anchored to another ID namespace without a discontinuity
+        # event being observable by this component.
         bridge = self._bridge()
         bridge._route_tracking_lane_change_progress = 0.60
         bridge._route_tracking_lane_change_reference = [
@@ -139,6 +139,17 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
             }
             for index in range(30)
         ]
+        bridge.reference_generator.target_lane_stabilization_samples = (
+            lambda **_kwargs: [
+                {
+                    "x_ref_m": 5.8 + 0.2 * float(index),
+                    "y_ref_m": 0.0,
+                    "heading_rad": 0.0,
+                    "lane_id": 2,
+                }
+                for index in range(25)
+            ]
+        )
 
         reason = bridge._release_completed_lane_change_commitment(
             current_lane_id=3,
@@ -146,10 +157,10 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
             ego_yaw_rad=0.02,
         )
 
-        self.assertNotIn("target_lane_stabilization_started", reason)
+        self.assertIn("target_lane_stabilization_started", reason)
         self.assertEqual(
             bridge._route_tracking_lane_change_phase,
-            "executing",
+            "target_lane_stabilization",
         )
 
     def test_discontinuity_since_lock_allows_stabilization_entry_despite_id_mismatch(self):
