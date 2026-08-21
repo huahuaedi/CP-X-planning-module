@@ -27,7 +27,9 @@ if "carla" not in sys.modules:
 
 from opencda_bridge.cpx_mpc_planner import (
     CPXMPCPlannerBridge,
+    _select_static_obstacle_local_avoidance_lane,
     _should_suspend_mpc_for_normal_stop,
+    _static_obstacle_cooldown_policy,
 )
 from opencda_bridge.cp_provider import OpenCDACPProvider
 from pipeline.traffic_light_memory import TrafficLightMemory
@@ -38,6 +40,106 @@ from pipeline.route_manager import RouteReplanResult
 
 
 class OpenCDABridgeInputFusionTests(unittest.TestCase):
+    def test_static_obstacle_local_avoidance_selects_safest_adjacent_lane(self):
+        selected = _select_static_obstacle_local_avoidance_lane(
+            current_lane_id=2,
+            available_lane_ids=[1, 2, 3],
+            lane_safety_scores={1: 0.72, 2: 0.1, 3: 0.91},
+            lane_prediction_risks={1: {"risk": False}, 3: {"risk": False}},
+            minimum_safety_score=0.55,
+        )
+
+        self.assertEqual(selected, 3)
+
+    def test_static_obstacle_local_avoidance_rejects_prediction_risk(self):
+        selected = _select_static_obstacle_local_avoidance_lane(
+            current_lane_id=1,
+            available_lane_ids=[1, 2],
+            lane_safety_scores={1: 0.1, 2: 0.95},
+            lane_prediction_risks={2: {"risk": True}},
+            minimum_safety_score=0.55,
+        )
+
+        self.assertIsNone(selected)
+
+    def test_new_static_obstacle_encounter_holds_stop_during_cooldown(self):
+        status, stop_active = _static_obstacle_cooldown_policy(
+            failed_latched=False,
+            route_transition_pending=False,
+        )
+
+        self.assertEqual(status, "cooldown_stop")
+        self.assertTrue(stop_active)
+
+    def test_continuous_observation_after_success_can_enter_replanned_route(self):
+        status, stop_active = _static_obstacle_cooldown_policy(
+            failed_latched=False,
+            route_transition_pending=True,
+        )
+
+        self.assertEqual(status, "cooldown_route_transition")
+        self.assertFalse(stop_active)
+
+    def test_nearest_front_obstacle_by_lane_keeps_speed_and_identity(self):
+        nearest = CPXMPCPlannerBridge._nearest_front_obstacle_by_lane(
+            ego_snapshot={"x": 0.0, "y": 0.0, "psi": 0.0},
+            obstacle_snapshots=[
+                {"track_id": "far", "x": 12.0, "y": 0.0, "v": 0.0},
+                {"track_id": "near", "x": 5.0, "y": 0.0, "v": 0.2},
+                {"track_id": "rear", "x": -2.0, "y": 0.0, "v": 0.0},
+            ],
+            lane_assignments={"far": 1, "near": 1, "rear": 1},
+            available_lane_ids=[1],
+        )
+
+        self.assertEqual(nearest[1]["vehicle_id"], "near")
+        self.assertAlmostEqual(float(nearest[1]["front_distance_m"]), 5.0)
+        self.assertAlmostEqual(float(nearest[1]["v"]), 0.2)
+
+    def test_static_obstacle_route_replan_blocks_lane_and_resets_route_state(self):
+        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
+        bridge.config = {"static_obstacle_replan_cooldown_s": 2.0}
+        bridge.behavior_runtime_cfg = {}
+        bridge._static_obstacle_replan_last_attempt_s = -float("inf")
+        bridge._static_obstacle_replan_reason = "not_requested"
+        bridge._static_obstacle_blocked_lane_id = ""
+        bridge._sim_time_s = lambda: 10.0
+        bridge.global_planner = Mock()
+        bridge.global_planner.block_lane_at_position.return_value = 17
+        bridge.route_manager = Mock()
+        bridge.route_manager.replan_from.return_value = RouteReplanResult(
+            True, "carla_grp_route_replanned:static_obstacle", 12
+        )
+        bridge.route_manager.active_route_summary = {"route": "new"}
+        bridge._temporary_destination_state = [1.0, 2.0]
+        bridge._previous_lane_center_reference = [{"x": 1.0}]
+        bridge._lane_reference_freeze_count = 4
+        bridge._last_required_lane_change_target_lane_id = 2
+        bridge._reset_route_tracking_lane_change_reference = Mock()
+        bridge._lane_id_tracker = Mock()
+        bridge.maneuver_manager = Mock()
+        bridge.control_buffer = Mock()
+        bridge.mpc = Mock()
+
+        attempted, succeeded, reason = bridge._attempt_static_obstacle_route_replan(
+            ego_location=SimpleNamespace(x=3.0, y=4.0, z=0.0),
+            obstacle={"x": 8.0, "y": 4.0, "z": 0.0},
+        )
+
+        self.assertTrue(attempted)
+        self.assertTrue(succeeded)
+        self.assertIn("replanned", reason)
+        bridge.global_planner.block_lane_at_position.assert_called_once()
+        bridge.route_manager.replan_from.assert_called_once()
+        self.assertEqual(bridge._active_route_summary, {"route": "new"})
+        self.assertEqual(bridge._static_obstacle_blocked_lane_id, 17)
+        bridge.maneuver_manager.reset.assert_called_once_with(
+            reason="static_obstacle_route_replanned"
+        )
+        bridge.control_buffer.reset.assert_called_once_with(
+            reason="static_obstacle_route_replanned"
+        )
+
     def test_turn_route_replan_refreshes_route_owned_state(self):
         bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
         bridge.config = {"turn_route_replan_cooldown_s": 2.0}
@@ -1123,6 +1225,9 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
                 distance_to_destination_m=100.0,
             ),
         )
+        bridge.route_manager = types.SimpleNamespace(
+            accept_authoritative_route_summary=Mock()
+        )
 
         summary = bridge._planning_module_global_route_summary(
             ego_location=sys.modules["carla"].Location(0.0, 0.0, 0.0),
@@ -1135,6 +1240,9 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         self.assertEqual(summary["ad_current_lane_id"], 500145)
         self.assertEqual(summary["ad_target_lane_id"], 500144)
         self.assertEqual(summary["lane_change_offset"], -1)
+        bridge.route_manager.accept_authoritative_route_summary.assert_called_once()
+        _, kwargs = bridge.route_manager.accept_authoritative_route_summary.call_args
+        self.assertEqual(kwargs["debug_reason"], "admap_authoritative_route_active")
 
     def test_traffic_memory_holds_red_through_unknown(self):
         memory = TrafficLightMemory(hold_unknown_s=0.8)
@@ -1382,6 +1490,89 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
 
         self.assertFalse(visible)
         self.assertEqual(reason, "occluded_by_actor:20")
+
+    def test_obstacle_sharing_ego_lane_gets_ego_tracked_id_not_fresh_recount(self):
+        # ego and the obstacle are the same physical lane (same road_id +
+        # raw lane_id, proven via lane_hop_offset's 0-hop identity match --
+        # no get_left_lane()/get_right_lane() linkage needed for that), but
+        # a bare per-tick canonical_lane_id_for_waypoint recount at each
+        # waypoint disagrees (each is locally the only lane it can see,
+        # simulating a road/section boundary StableLaneIdTracker already
+        # bridged for ego but a fresh recount has not re-settled on). The
+        # obstacle must be keyed by ego's tracked id, not its own recount.
+        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
+        ego_waypoint = types.SimpleNamespace(
+            road_id=1,
+            section_id=0,
+            lane_id=2,
+            get_left_lane=lambda: None,
+            get_right_lane=lambda: None,
+        )
+        obstacle_waypoint = types.SimpleNamespace(
+            road_id=1,
+            section_id=1,
+            lane_id=2,
+            get_left_lane=lambda: None,
+            get_right_lane=lambda: None,
+        )
+        bridge.reference_map = types.SimpleNamespace(
+            get_waypoint=lambda _pos: obstacle_waypoint
+        )
+
+        assignments = bridge._assign_obstacles_to_lanes(
+            [{"vehicle_id": "front_car", "x": 10.0, "y": 0.0, "z": 0.0}],
+            ego_waypoint=ego_waypoint,
+            ego_lane_id=5,
+        )
+
+        self.assertEqual(assignments["front_car"], 5)
+
+    def test_obstacle_in_different_lane_still_uses_fresh_recount(self):
+        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
+        ego_waypoint = types.SimpleNamespace(
+            road_id=1,
+            section_id=0,
+            lane_id=2,
+            get_left_lane=lambda: None,
+            get_right_lane=lambda: None,
+        )
+        obstacle_waypoint = types.SimpleNamespace(
+            road_id=9,
+            section_id=0,
+            lane_id=1,
+            get_left_lane=lambda: None,
+            get_right_lane=lambda: None,
+        )
+        bridge.reference_map = types.SimpleNamespace(
+            get_waypoint=lambda _pos: obstacle_waypoint
+        )
+
+        assignments = bridge._assign_obstacles_to_lanes(
+            [{"vehicle_id": "other_lane_car", "x": 10.0, "y": 3.5, "z": 0.0}],
+            ego_waypoint=ego_waypoint,
+            ego_lane_id=5,
+        )
+
+        self.assertEqual(assignments["other_lane_car"], 1)
+
+    def test_missing_ego_context_falls_back_to_fresh_recount(self):
+        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
+        obstacle_waypoint = types.SimpleNamespace(
+            road_id=1,
+            section_id=0,
+            lane_id=2,
+            get_left_lane=lambda: None,
+            get_right_lane=lambda: None,
+        )
+        bridge.reference_map = types.SimpleNamespace(
+            get_waypoint=lambda _pos: obstacle_waypoint
+        )
+
+        assignments = bridge._assign_obstacles_to_lanes(
+            [{"vehicle_id": "car", "x": 10.0, "y": 0.0, "z": 0.0}],
+        )
+
+        self.assertEqual(assignments["car"], 1)
 
 
 if __name__ == "__main__":

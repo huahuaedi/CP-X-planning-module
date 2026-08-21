@@ -1,0 +1,30 @@
+base_config: cpx_profile_full_default.yaml
+
+cpx_mature:
+  map_mode: town
+  town: Town05
+  max_ticks: 5000
+  destination_tolerance_m: 3.0
+  run_opencda_evaluation: false
+
+vehicle_base:
+  planner:
+    global_planner_xodr_path: Global_Planner/maps/Town05.xodr
+
+scenario:
+  single_cav_list:
+    - name: cav1
+      spawn_position: [-43.7, 39.6, 0.3, 0, -90.3, 0]
+      destination: [-18.8,-84.4, 0.3]
+      v2x:
+        communication_range: 60
+      behavior:
+        local_planner:
+          debug_trajectory: true
+          debug: true
+      planner:
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_highspeed_town05_turn
+        target_speed_mps: 5.0
+        global_planner_mode: dij
+        global_planner_strict: true
+        ignore_traffic_control: true

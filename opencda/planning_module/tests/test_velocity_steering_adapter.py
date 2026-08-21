@@ -115,6 +115,44 @@ class VelocitySteeringAdapterTest(unittest.TestCase):
         self.assertLess(emergency.steer, 0.0)
         self.assertGreater(emergency.steer, moving.steer)
 
+    def test_throttle_delta_matches_legacy_value_at_the_reference_tick(self):
+        # velocity_adapter_max_throttle_delta=0.08 is expressed against the
+        # 0.05s reference tick -- calling at exactly that dt must reproduce
+        # the pre-dt-aware flat delta unchanged.
+        adapter = CarlaVelocitySteeringAdapter({
+            "velocity_adapter_max_throttle_delta": 0.08,
+        })
+        adapter._last_control = _Control(throttle=0.0)
+        adapter._previous_time_s = 10.0
+
+        control, _ = adapter.run_step(
+            command=VelocitySteeringCommand(10.0, 0.0),
+            actual_speed_mps=0.0,
+            sim_time_s=10.05,
+            max_steering_rad=0.6,
+            carla_module=_Carla,
+        )
+
+        self.assertAlmostEqual(control.throttle, 0.08)
+
+    def test_throttle_delta_scales_with_measured_dt(self):
+        adapter = CarlaVelocitySteeringAdapter({
+            "velocity_adapter_max_throttle_delta": 0.08,
+        })
+        adapter._last_control = _Control(throttle=0.0)
+        adapter._previous_time_s = 10.0
+
+        control, _ = adapter.run_step(
+            command=VelocitySteeringCommand(10.0, 0.0),
+            actual_speed_mps=0.0,
+            sim_time_s=10.20,
+            max_steering_rad=0.6,
+            carla_module=_Carla,
+        )
+
+        # 4x the reference 0.05s tick -> 4x the allowed delta.
+        self.assertAlmostEqual(control.throttle, 0.32)
+
 
 if __name__ == "__main__":
     unittest.main()

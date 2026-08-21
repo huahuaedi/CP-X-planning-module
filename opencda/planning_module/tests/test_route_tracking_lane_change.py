@@ -123,6 +123,77 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
             )
         )
 
+    def test_id_mismatch_without_discontinuity_blocks_stabilization_entry(self):
+        # Same geometry/progress as the passing case above, but
+        # current_lane_id (3) disagrees with the locked target_lane_id (2)
+        # and no discontinuity has been recorded since the lock -- the
+        # mismatch is trusted, so entry must stay blocked.
+        bridge = self._bridge()
+        bridge._route_tracking_lane_change_progress = 0.60
+        bridge._route_tracking_lane_change_reference = [
+            {
+                "x_ref_m": float(index + 1),
+                "y_ref_m": 3.5,
+                "heading_rad": 0.0,
+                "lane_change_progress": 1.0,
+            }
+            for index in range(30)
+        ]
+
+        reason = bridge._release_completed_lane_change_commitment(
+            current_lane_id=3,
+            ego_location=bridge.carla.Location(x=5.0, y=3.2),
+            ego_yaw_rad=0.02,
+        )
+
+        self.assertNotIn("target_lane_stabilization_started", reason)
+        self.assertEqual(
+            bridge._route_tracking_lane_change_phase,
+            "executing",
+        )
+
+    def test_discontinuity_since_lock_allows_stabilization_entry_despite_id_mismatch(self):
+        # Same mismatch as above, but a lane-id discontinuity was recorded
+        # since this commitment was locked (a road/section boundary the
+        # tracker could not bridge) -- current_lane_id and target_lane_id no
+        # longer share a numbering, so the id check must not keep blocking a
+        # vehicle that the geometry gate already confirms has arrived.
+        bridge = self._bridge()
+        bridge._route_tracking_lane_change_progress = 0.60
+        bridge._lane_id_discontinuity_since_lock = True
+        bridge._route_tracking_lane_change_reference = [
+            {
+                "x_ref_m": float(index + 1),
+                "y_ref_m": 3.5,
+                "heading_rad": 0.0,
+                "lane_change_progress": 1.0,
+            }
+            for index in range(30)
+        ]
+        bridge.reference_generator.target_lane_stabilization_samples = (
+            lambda **_kwargs: [
+                {
+                    "x_ref_m": 5.8 + 0.2 * float(index),
+                    "y_ref_m": 0.0,
+                    "heading_rad": 0.0,
+                    "lane_id": 2,
+                }
+                for index in range(25)
+            ]
+        )
+
+        reason = bridge._release_completed_lane_change_commitment(
+            current_lane_id=3,
+            ego_location=bridge.carla.Location(x=5.0, y=3.2),
+            ego_yaw_rad=0.02,
+        )
+
+        self.assertIn("target_lane_stabilization_started", reason)
+        self.assertEqual(
+            bridge._route_tracking_lane_change_phase,
+            "target_lane_stabilization",
+        )
+
     def test_committed_right_change_cannot_publish_lane_keep_fsm(self):
         state = CPXMPCPlannerBridge._normalized_final_lc_state(
             decision="lane_change_right",

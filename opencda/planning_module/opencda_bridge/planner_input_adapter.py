@@ -72,8 +72,8 @@ class OpenCDARuntimePort:
     def sim_time_s(self) -> float:
         return float(self._bridge._sim_time_s())
 
-    def assign_obstacles_to_lanes(self, snapshots):
-        return self._bridge._assign_obstacles_to_lanes(snapshots)
+    def assign_obstacles_to_lanes(self, snapshots, **kwargs):
+        return self._bridge._assign_obstacles_to_lanes(snapshots, **kwargs)
 
     def lane_step_fn(self):
         return self._bridge._obstacle_lane_step_fn()
@@ -261,7 +261,11 @@ class OpenCDAPlanningAdapter:
             signal_context=signal_context,
             stop_target=stop_target,
         )
-        lane_assignments = bridge.assign_obstacles_to_lanes(tracked_obstacles)
+        lane_assignments = bridge.assign_obstacles_to_lanes(
+            tracked_obstacles,
+            ego_waypoint=ego_waypoint,
+            ego_lane_id=int(current_lane_id),
+        )
         lane_safety_scores = bridge.lane_safety_scorer.compute_lane_scores(
             ego_snapshot=ego_snapshot,
             obstacle_snapshots=tracked_obstacles,

@@ -11,11 +11,96 @@ sys.modules["route_authorization"] = route_authorization
 _SPEC.loader.exec_module(route_authorization)
 
 authorize_route_lane_change = route_authorization.authorize_route_lane_change
+suppress_lane_change_for_lateral_owner = route_authorization.suppress_lane_change_for_lateral_owner
+lane_change_target_reached = route_authorization.lane_change_target_reached
 normalize_route_maneuver = route_authorization.normalize_route_maneuver
 RouteManeuver = route_authorization.RouteManeuver
 
 
 class RouteAuthorizationTest(unittest.TestCase):
+    def test_completion_uses_zero_offset_across_ad_road_segments(self):
+        self.assertTrue(lane_change_target_reached(
+            current_lane_id=1,
+            remembered_target_lane_id=2,
+            current_ad_lane_id=11640144,
+            remembered_target_ad_lane_id=500144,
+            target_in_local_frame=True,
+            target_lane_offset=0,
+        ))
+
+    def test_nonzero_offset_is_not_completed_when_target_is_visible(self):
+        self.assertFalse(lane_change_target_reached(
+            current_lane_id=1,
+            remembered_target_lane_id=2,
+            current_ad_lane_id=11640145,
+            remembered_target_ad_lane_id=500144,
+            target_in_local_frame=True,
+            target_lane_offset=-1,
+        ))
+
+    def test_completion_prefers_ad_identity_over_colliding_local_ids(self):
+        self.assertTrue(lane_change_target_reached(
+            current_lane_id=2,
+            remembered_target_lane_id=1,
+            current_ad_lane_id=540155,
+            remembered_target_ad_lane_id=540155,
+        ))
+
+    def test_completion_does_not_mix_ad_and_local_identity_domains(self):
+        self.assertFalse(lane_change_target_reached(
+            current_lane_id=1,
+            remembered_target_lane_id=1,
+            current_ad_lane_id=540156,
+            remembered_target_ad_lane_id=540155,
+        ))
+
+    def test_completion_falls_back_to_local_ids_without_ad_identity(self):
+        self.assertTrue(lane_change_target_reached(
+            current_lane_id=2,
+            remembered_target_lane_id=2,
+        ))
+
+    def test_turn_exit_stabilization_has_exclusive_lateral_authority(self):
+        authorization = route_authorization.LaneChangeAuthorization(
+            allowed=True,
+            direction="right",
+            reason="route_lane_change_authorized_by_topology",
+            required_by_route=True,
+            distance_to_maneuver_m=8.0,
+            target_lane_id=2,
+            maneuver="lane_change_right",
+        )
+        suppressed = suppress_lane_change_for_lateral_owner(
+            authorization,
+            owner_state="TURN_EXIT_STABILIZATION",
+        )
+        self.assertFalse(suppressed.allowed)
+        self.assertTrue(suppressed.required_by_route)
+        self.assertEqual(suppressed.direction, "right")
+        self.assertEqual(suppressed.target_lane_id, 2)
+        self.assertEqual(
+            suppressed.reason,
+            "scenario_lateral_owner:turn_exit_stabilization",
+        )
+
+    def test_lane_follow_keeps_route_authorization(self):
+        authorization = route_authorization.LaneChangeAuthorization(
+            allowed=True,
+            direction="right",
+            reason="route_lane_change_authorized_by_topology",
+            required_by_route=True,
+            distance_to_maneuver_m=8.0,
+            target_lane_id=2,
+            maneuver="lane_change_right",
+        )
+        self.assertIs(
+            suppress_lane_change_for_lateral_owner(
+                authorization,
+                owner_state="LANE_FOLLOW",
+            ),
+            authorization,
+        )
+
     def test_ad_topology_nonzero_offset_overrides_colliding_local_lane_ids(self):
         auth = authorize_route_lane_change(
             route_lane_change_allowed=True,

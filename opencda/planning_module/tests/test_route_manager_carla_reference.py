@@ -1,4 +1,5 @@
 import math
+import types
 import unittest
 
 from opencda.planning_module.pipeline.route_manager import (
@@ -73,6 +74,55 @@ class _ConnectableWaypoint(_Waypoint):
 
 
 class RouteManagerCarlaReferenceTest(unittest.TestCase):
+    def test_static_obstacle_replan_uses_blocked_summary_geometry_not_fresh_grp(self):
+        summary = type(
+            "Summary",
+            (),
+            {
+                "route_found": True,
+                "route_waypoints": [(0.0, 4.0), (2.0, 4.0), (5.0, 4.0)],
+                "road_options": ["LANEFOLLOW", "CHANGELANELEFT", "LANEFOLLOW"],
+            },
+        )()
+        planner = type(
+            "Planner",
+            (),
+            {"plan_route_from_locations": lambda self, **kwargs: summary},
+        )()
+
+        class _Map:
+            @staticmethod
+            def get_waypoint(location):
+                return _Waypoint(location.x, location.y)
+
+        class _Carla:
+            Location = _Location
+
+        manager = CPXRouteManager(
+            global_planner=planner,
+            carla_map=_Map(),
+            carla_api=_Carla(),
+        )
+        manager._goal_point = {"x": 10.0, "y": 4.0, "z": 0.0}
+        manager._build_carla_route = lambda **kwargs: self.fail(
+            "static obstacle replan must not rebuild an unblocked GRP route"
+        )
+
+        result = manager.replan_from(
+            start_point={"x": 0.0, "y": 0.0, "z": 0.0},
+            trigger_reason="static_obstacle",
+        )
+
+        self.assertTrue(result.success)
+        nodes = manager._carla_route_nodes()
+        self.assertEqual([(node[0], node[1]) for node in nodes], [
+            (0.0, 4.0),
+            (2.0, 4.0),
+            (5.0, 4.0),
+        ])
+        self.assertEqual(nodes[1][4], "CHANGELANELEFT")
+        self.assertIn("blocked_summary_route_replanned", result.reason)
+
     def test_boundary_aware_smoothing_never_leaves_shrunk_corridor(self):
         raw = [
             {
@@ -200,6 +250,39 @@ class RouteManagerCarlaReferenceTest(unittest.TestCase):
             manager.carla_route_debug_reason,
             "external_leaderboard_route_ready",
         )
+
+    def test_external_mission_geometry_is_registered_with_semantic_backend(self):
+        class _Map:
+            @staticmethod
+            def get_waypoint(location):
+                return _Waypoint(location.x, location.y, lane_id=1, road_id=7)
+
+        class _SemanticPlanner:
+            def __init__(self):
+                self.imported_points = None
+
+            def register_imported_route(self, points):
+                self.imported_points = [list(point) for point in points]
+                return types.SimpleNamespace(
+                    route_found=True,
+                    route_waypoints=[list(point) for point in points],
+                    distance_to_destination_m=10.0,
+                )
+
+        planner = _SemanticPlanner()
+        manager = CPXRouteManager(global_planner=planner, carla_map=_Map())
+        manager.set_external_carla_route([
+            (_Transform(0.0, 0.0), "LANEFOLLOW"),
+            (_Transform(5.0, 0.0), "STRAIGHT"),
+            (_Transform(10.0, 0.0), "LANEFOLLOW"),
+        ])
+
+        self.assertEqual(planner.imported_points, [
+            [0.0, 0.0, 0.0],
+            [5.0, 0.0, 0.0],
+            [10.0, 0.0, 0.0],
+        ])
+        self.assertIsNotNone(manager.active_route_summary)
 
     def test_reports_upcoming_carla_turn_before_current_segment(self):
         manager = CPXRouteManager(global_planner=object())
@@ -475,6 +558,35 @@ class RouteManagerCarlaReferenceTest(unittest.TestCase):
             (2.0, 0.0),
             (3.0, 2.0),
         ])
+
+    def test_authoritative_admap_summary_owns_progress_status(self):
+        manager = CPXRouteManager(global_planner=object(), reached_distance_m=3.0)
+        manager._fallback_route_points = [[0.0, 0.0], [10.0, 0.0]]
+        manager._last_status.remaining_distance_m = 999.0
+
+        status = manager.accept_authoritative_route_summary(
+            types.SimpleNamespace(
+                route_found=True,
+                distance_to_destination_m=42.5,
+                route_waypoints=[object(), object(), object()],
+            ),
+            debug_reason="admap_authoritative_route_active",
+        )
+
+        self.assertEqual(status.remaining_distance_m, 42.5)
+        self.assertFalse(status.reached_destination)
+        self.assertEqual(status.route_point_count, 3)
+        self.assertEqual(status.debug_reason, "admap_authoritative_route_active")
+
+        status = manager.accept_authoritative_route_summary(
+            types.SimpleNamespace(
+                route_found=True,
+                distance_to_destination_m=2.5,
+                route_waypoints=[object(), object()],
+            ),
+            debug_reason="admap_authoritative_route_active",
+        )
+        self.assertTrue(status.reached_destination)
 
     def test_smoothed_connector_has_unique_points_and_continuous_headings(self):
         manager = CPXRouteManager(

@@ -163,6 +163,42 @@ class GlobalPlanner:
             enu_position=best_candidate["center_point"],
         )
 
+    def get_waypoint_candidates(
+        self,
+        position,
+        search_radius_m: float | None = None,
+    ) -> list[dict]:
+        """Return all nearby lane projections for diagnostic map matching.
+
+        Unlike :meth:`get_waypoint`, this method does not choose a lane.  It
+        exposes the geometry/map-match evidence so a stateful matcher can add
+        heading, topology, and history costs before assigning lane identity.
+        """
+
+        self._ensure_loaded()
+        enu_point = backend.create_enu_point(self.to_enu(position))
+        candidates = self._build_route_candidates(
+            enu_point,
+            search_radius_m
+            if search_radius_m is not None
+            else self.default_search_radius_m,
+        )
+        result = []
+        for candidate in candidates:
+            waypoint = self._make_waypoint_from_lane_offset(
+                candidate["lane_id"],
+                candidate["parametric_offset"],
+                enu_position=candidate["center_point"],
+            )
+            result.append({
+                "waypoint": waypoint,
+                "ad_lane_id": int(candidate["lane_id"]),
+                "snap_distance_m": float(candidate["snap_distance"]),
+                "is_in_lane": bool(candidate["is_in_lane"]),
+                "probability": float(candidate["probability"]),
+            })
+        return result
+
     def get_lane_centerline(self, lane_id: int) -> list[Waypoint]:
         """Return cached lane-center waypoints for one AD lane id.
 

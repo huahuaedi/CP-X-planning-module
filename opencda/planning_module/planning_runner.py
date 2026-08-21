@@ -1476,6 +1476,7 @@ def _global_route_reference_allowed(
         "stop_at_intersection",
         "stop_sign",
         "emergency_brake",
+        "static_obstacle_stop",
         "lane_change_left",
         "lane_change_right",
     }:
@@ -3141,7 +3142,7 @@ def _ensure_rolling_destination_speed(
     destination_state = list(temporary_destination_state)
     if len(destination_state) < 3:
         return destination_state, float(active_plan_max_velocity_mps)
-    if bool(final_goal_stop_active) or bool(is_fixed_stop_decision(current_behavior)):
+    if bool(final_goal_stop_active) or bool(is_stop_decision(current_behavior)):
         return destination_state, float(active_plan_max_velocity_mps)
 
     desired_speed_mps = max(
@@ -3178,7 +3179,7 @@ def _stabilize_temporary_destination(
         or len(destination_state) < 4
         or len(previous_destination_state) < 4
         or bool(final_goal_stop_active)
-        or bool(is_fixed_stop_decision(current_behavior))
+        or bool(is_stop_decision(current_behavior))
     ):
         return destination_state
 
@@ -3343,7 +3344,7 @@ def _keep_temporary_destination_ahead(
         len(destination_state) < 4
         or len(ego_state) < 4
         or bool(final_goal_stop_active)
-        or bool(is_fixed_stop_decision(current_behavior))
+        or bool(is_stop_decision(current_behavior))
     ):
         return destination_state
 
@@ -3567,7 +3568,7 @@ def _motion_target_type_label(
     behavior = str(normalize_behavior_decision(current_behavior))
     if bool(final_goal_stop_active):
         return "FINAL_GOAL"
-    if bool(is_fixed_stop_decision(behavior)) or stop_target_state is not None:
+    if bool(is_stop_decision(behavior)) or stop_target_state is not None:
         return "STOP_TARGET"
     if behavior in {"lane_change_left", "lane_change_right"}:
         return "LANE_CHANGE_TARGET"
@@ -3587,7 +3588,7 @@ def _mpc_cost_profile_for_behavior(
     normalized_lc_state = str(planner_lc_state or "").strip().upper()
     normalized_mode = str(planner_mode or "").strip().upper()
     normalized_maneuver = str(next_macro_maneuver or "straight").strip().lower()
-    if bool(is_fixed_stop_decision(normalized_behavior)):
+    if bool(is_fixed_stop_decision(normalized_behavior)) or normalized_behavior == "static_obstacle_stop":
         return "stop"
     if bool(is_emergency_brake_decision(normalized_behavior)):
         return "recovery"
@@ -4713,6 +4714,13 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
     # "reroute".  Forces one immediate MPC replan to execute the reroute,
     # then clears — preventing 20 Hz forced replanning while reroute is active.
     _reroute_execution_pending: bool = False
+    # Static blockers are routed around at the global-route level.  Keep the
+    # attempt state outside the replan block so a failed search holds the
+    # vehicle stopped until either the blocker disappears or a retry succeeds.
+    last_static_obstacle_replan_time_s = -float("inf")
+    static_obstacle_replan_failed_latched = False
+    static_obstacle_replan_status = "idle"
+    handled_static_obstacle_ids: set[str] = set()
     planned_trajectory: List[List[float]] = []
     _cached_blocking_obstacle_id: str = ""
     _cached_decision_reason: str = ""
@@ -4985,6 +4993,15 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
             key="intersection_static_obstacle_replan_cooldown_s",
             legacy_key="intersection_static_obstacle_replan_cooldown_s",
             default=1.0,
+        )
+    )
+    static_obstacle_replan_enabled = bool(
+        _behavior_runtime_value(
+            behavior_runtime_cfg,
+            rule_planner_cfg,
+            key="intersection_static_obstacle_replan_enabled",
+            legacy_key="intersection_static_obstacle_replan_enabled",
+            default=True,
         )
     )
     traffic_light_stop_cfg = dict(
@@ -6154,6 +6171,156 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                 temp_mode_str = (
                     "INTERSECTION" if float(raw_temp_mode_value) > 0.5 else "NORMAL"
                 )
+                intersection_front_obstacle = nearest_front_obstacles_by_lane.get(
+                    int(current_lane_id),
+                    None,
+                )
+                current_lane_safety = float(
+                    lane_scores.get(int(current_lane_id), 1.0)
+                )
+                intersection_obstacle_response = evaluate_intersection_obstacle_response(
+                    mode=str(temp_mode_str),
+                    front_obstacle_speed_mps=(
+                        None
+                        if intersection_front_obstacle is None
+                        else float(intersection_front_obstacle.get("v", 0.0))
+                    ),
+                    original_max_velocity_mps=float(original_max_velocity_mps),
+                    moving_obstacle_speed_threshold_mps=float(
+                        moving_obstacle_speed_threshold_mps
+                    ),
+                    route_lane_safety_score=float(current_lane_safety),
+                    static_obstacle_replan_lane_safety_threshold=float(
+                        static_obstacle_replan_lane_safety_threshold
+                    ),
+                )
+
+                # The behavior helper has always exposed this request, but it
+                # used to be ignored by the runner.  Consume it before behavior
+                # selection so the current planning frame sees the replacement
+                # route atomically.  A failed search latches a zero-speed cap;
+                # retrying is rate-limited, and removing the blocker releases
+                # the latch.
+                static_replan_requested = bool(
+                    static_obstacle_replan_enabled
+                    and intersection_obstacle_response.get(
+                        "request_static_obstacle_replan", False
+                    )
+                )
+                blocking_obstacle_id = (
+                    ""
+                    if intersection_front_obstacle is None
+                    else str(
+                        intersection_front_obstacle.get(
+                            "vehicle_id",
+                            intersection_front_obstacle.get("id", ""),
+                        )
+                        or ""
+                    )
+                )
+                if not blocking_obstacle_id and intersection_front_obstacle is not None:
+                    blocking_obstacle_id = (
+                        "xy:"
+                        f"{float(intersection_front_obstacle.get('x', 0.0)):.1f}:"
+                        f"{float(intersection_front_obstacle.get('y', 0.0)):.1f}"
+                    )
+                blocker_already_rerouted = bool(
+                    blocking_obstacle_id
+                    and blocking_obstacle_id in handled_static_obstacle_ids
+                )
+                if not bool(static_replan_requested):
+                    static_obstacle_replan_failed_latched = False
+                    static_obstacle_replan_status = "idle"
+                elif bool(blocker_already_rerouted):
+                    static_obstacle_replan_failed_latched = False
+                    static_obstacle_replan_status = "route_active"
+                elif (
+                    float(sim_time_s) - float(last_static_obstacle_replan_time_s)
+                    >= max(0.0, float(static_obstacle_replan_cooldown_s))
+                ):
+                    last_static_obstacle_replan_time_s = float(sim_time_s)
+                    static_obstacle_replan_status = "attempting"
+                    rerouted_route_summary, rerouted_route_points = (
+                        _replan_route_around_static_intersection_obstacle(
+                            global_planner=global_planner,
+                            ego_transform=ego_transform,
+                            goal_location=global_route_goal_location,
+                            blocked_obstacle_snapshot=intersection_front_obstacle,
+                            blocked_lane_id=int(current_lane_id),
+                        )
+                    )
+                    if (
+                        rerouted_route_summary is not None
+                        and len(rerouted_route_points) >= 2
+                    ):
+                        print(
+                            "[STATIC OBSTACLE] Global reroute succeeded "
+                            f"for blocker={blocking_obstacle_id or '<unknown>'} "
+                            f"({len(rerouted_route_points)} route points)."
+                        )
+                        if blocking_obstacle_id:
+                            handled_static_obstacle_ids.add(blocking_obstacle_id)
+                        static_obstacle_replan_failed_latched = False
+                        static_obstacle_replan_status = "succeeded"
+                        active_global_route_points = [
+                            [float(point[0]), float(point[1])]
+                            for point in rerouted_route_points
+                            if isinstance(point, Sequence) and len(point) >= 2
+                        ]
+                        current_route_summary = global_planner.get_current_route_info(
+                            x_m=float(ego_state[0]),
+                            y_m=float(ego_state[1]),
+                            query_key="ego",
+                        )
+                        planning_temporary_route_summary = current_route_summary
+                        planning_next_maneuver = normalize_macro_maneuver(
+                            getattr(
+                                planning_temporary_route_summary,
+                                "next_macro_maneuver",
+                                "straight",
+                            )
+                        )
+                        planning_optimal_lane_id, _pre_junction_optimal_lane_id = (
+                            _resolved_route_lane_hint(
+                                raw_route_lane_id=getattr(
+                                    planning_temporary_route_summary,
+                                    "optimal_lane_id",
+                                    0,
+                                ),
+                                current_lane_id=int(current_lane_id),
+                                selected_lane_id=int(selected_lane_id),
+                                allowed_lane_ids=local_allowed_lane_ids,
+                                ego_in_junction=bool(ego_in_junction),
+                                pre_junction_route_lane_id=int(
+                                    _pre_junction_optimal_lane_id
+                                ),
+                            )
+                        )
+                        # The old route's maneuver and MPC states cannot be
+                        # continued safely against the replacement topology.
+                        if hasattr(rule_planner, "_reset_lane_change_state"):
+                            rule_planner._reset_lane_change_state(
+                                reason="static_obstacle_global_reroute"
+                            )
+                        selected_lane_id = int(current_lane_id)
+                        cached_control_sequence = None
+                        cached_control_step_idx = 0
+                        planned_trajectory = []
+                        previous_lane_center_reference = []
+                        reroute_route_follow_latched = True
+                        last_world_debug_route_draw_time_s = -float("inf")
+                        if hasattr(mpc, "clear_previous_solution_seed"):
+                            mpc.clear_previous_solution_seed()
+                    else:
+                        print(
+                            "[STATIC OBSTACLE] Global reroute failed; holding "
+                            f"stop for blocker={blocking_obstacle_id or '<unknown>'}."
+                        )
+                        static_obstacle_replan_failed_latched = True
+                        static_obstacle_replan_status = "failed_stop"
+                elif bool(static_obstacle_replan_failed_latched):
+                    static_obstacle_replan_status = "cooldown_stop"
+
                 candidate_frame = evaluate_behavior_candidates(
                     lane_safety_scores=lane_scores,
                     lane_prediction_risks=lane_prediction_risks,
@@ -6215,35 +6382,14 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                         if cached_candidate_detail_summary
                         else f"hold:{lane_change_hold_reason}"
                     )
-                intersection_front_obstacle = nearest_front_obstacles_by_lane.get(
-                    int(current_lane_id),
-                    None,
-                )
-                current_lane_safety = float(
-                    lane_scores.get(int(current_lane_id), 1.0)
-                )
-                intersection_obstacle_response = evaluate_intersection_obstacle_response(
-                    mode=str(temp_mode_str),
-                    front_obstacle_speed_mps=(
-                        None
-                        if intersection_front_obstacle is None
-                        else float(intersection_front_obstacle.get("v", 0.0))
-                    ),
-                    original_max_velocity_mps=float(original_max_velocity_mps),
-                    moving_obstacle_speed_threshold_mps=float(
-                        moving_obstacle_speed_threshold_mps
-                    ),
-                    route_lane_safety_score=float(current_lane_safety),
-                    static_obstacle_replan_lane_safety_threshold=float(
-                        static_obstacle_replan_lane_safety_threshold
-                    ),
-                )
                 behavior_target_max_velocity_mps = float(
                     intersection_obstacle_response.get(
                         "speed_cap_mps",
                         float(original_max_velocity_mps),
                     )
                 )
+                if bool(static_obstacle_replan_failed_latched):
+                    behavior_target_max_velocity_mps = 0.0
                 current_target_v_mps = float(behavior_target_max_velocity_mps)
 
                 # ---- IDM car-following: compute desired accel toward lead -- #
@@ -6406,6 +6552,9 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                     nearest_front_obstacles_by_lane=nearest_front_obstacles_by_lane,
                     lane_prediction_risks=lane_prediction_risks,
                     preferred_target_lane_id=candidate_preferred_target_lane_id,
+                    static_obstacle_stop_active=bool(
+                        static_obstacle_replan_failed_latched
+                    ),
                 )
                 cached_planner_decision = str(planner_output.get("decision", "lane_follow"))
                 cached_planner_lc_state = str(planner_output.get("lc_state", rule_planner.lc_state))
@@ -7042,7 +7191,7 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                         ),
                     )
                 traffic_control_lane_lock_active = bool(
-                    bool(is_fixed_stop_decision(current_applied_behavior))
+                    bool(is_stop_decision(current_applied_behavior))
                     or str(traffic_signal_state or "unknown").strip().lower() in {"red", "yellow", "stop"}
                     or float(sim_time_s) < float(stop_release_temp_smooth_until_sim_time_s)
                 )
@@ -7533,7 +7682,7 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                             _temp_forward_value is not None
                             and float(_temp_forward_value) < float(min_temp_forward_m)
                             and not bool(final_goal_stop_active)
-                            and not bool(is_fixed_stop_decision(current_applied_behavior))
+                            and not bool(is_stop_decision(current_applied_behavior))
                         ):
                             _temp_validation_status = "failed"
                             _temp_validation_reason = "behind_or_too_close"
@@ -7542,7 +7691,7 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                             and abs(float(_temp_lateral_value)) > max(0.0, float(max_temp_lateral_m))
                             and normalized_temp_behavior not in {"lane_change_left", "lane_change_right"}
                             and not bool(final_goal_stop_active)
-                            and not bool(is_fixed_stop_decision(current_applied_behavior))
+                            and not bool(is_stop_decision(current_applied_behavior))
                         ):
                             _temp_validation_status = "failed"
                             _temp_validation_reason = "lateral_too_far"
@@ -7724,7 +7873,7 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                         should_follow_global_route_lane=bool(should_follow_global_route_lane_for_reference),
                     )
                 )
-                if bool(is_fixed_stop_decision(current_applied_behavior)):
+                if bool(is_stop_decision(current_applied_behavior)):
                     fixed_stop_lane_id = int(selected_lane_id or current_lane_id)
                     reference_target_lane_id = _clamp_lane_id_to_allowed(
                         int(fixed_stop_lane_id),
@@ -7857,7 +8006,7 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                 idm_cap_mps = idm_following_speed_cap_mps(
                     idm_accel_mps2=_idm_accel,
                     idm_gap_m=float(_idm_gap_m),
-                    is_fixed_stop=bool(is_fixed_stop_decision(current_applied_behavior)),
+                    is_fixed_stop=bool(is_stop_decision(current_applied_behavior)),
                     stop_decision_active=bool(idm_stop_decision_active),
                     signal_state=str(traffic_light_debug.get("signal_state", "unknown")),
                     idm_non_stop_buffer_m=float(behavior_runtime_cfg.get("idm_non_stop_buffer_m", 3.0)),
@@ -7901,7 +8050,7 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                 )
 
                 stop_cap_mps = stop_profile_speed_cap_mps(
-                    is_fixed_stop=bool(is_fixed_stop_decision(current_applied_behavior)),
+                    is_fixed_stop=bool(is_stop_decision(current_applied_behavior)),
                     stop_target_distance_m=stop_target_distance_m,
                     current_speed_mps=float(ego_state[2]),
                     min_acceleration_mps2=float(mpc.constraints.min_acceleration_mps2),
@@ -8030,7 +8179,7 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                     ),
                 )
                 reference_jump_cap_mps = reference_jump_speed_cap_mps(
-                    is_fixed_stop=bool(is_fixed_stop_decision(current_applied_behavior)),
+                    is_fixed_stop=bool(is_stop_decision(current_applied_behavior)),
                     last_reference_jump_m=float(last_reference_jump_m),
                     reference_jump_speed_cap_threshold_m=max(
                         0.0,
@@ -8112,7 +8261,7 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                     current_steering_rad=float(current_steering_rad),
                     lane_center_waypoints=[],
                     lane_center_reference_samples=local_lane_center_reference,
-                    stop_goal_active=bool(is_fixed_stop_decision(current_applied_behavior)),
+                    stop_goal_active=bool(is_stop_decision(current_applied_behavior)),
                 )
                 _append_mpc_cost_sample(
                     cost_history=mpc_cost_history,
@@ -8367,6 +8516,10 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                 ),
                 "path_speed_cap_active": int(bool(path_speed_cap_active)),
                 "path_speed_cap_reason": str(path_speed_cap_reason),
+                "static_obstacle_replan_status": str(static_obstacle_replan_status),
+                "static_obstacle_replan_failed_stop": int(
+                    bool(static_obstacle_replan_failed_latched)
+                ),
                 "collision_recovery_active": int(bool(collision_recovery_active)),
                 "collision_count": int(current_collision_count),
                 "last_collision_actor_type": str(
@@ -8594,6 +8747,8 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
                     "mpc_cost_profile", "requested_mpc_cost_profile",
                     "mpc_cost_profile_switch_reason", "mpc_cost_profile_elapsed_s",
                     "path_speed_cap_active", "path_speed_cap_reason",
+                    "static_obstacle_replan_status",
+                    "static_obstacle_replan_failed_stop",
                     "collision_recovery_active", "collision_count",
                     "last_collision_actor_type", "last_collision_impulse_magnitude",
                     "terminal_stop_constraint_candidate",

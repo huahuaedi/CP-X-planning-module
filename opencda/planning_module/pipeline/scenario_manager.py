@@ -12,6 +12,8 @@ from dataclasses import dataclass
 import math
 from typing import Mapping, Optional
 
+from .speed_planner import turn_approach_lookahead_m
+
 
 LANE_FOLLOW = "LANE_FOLLOW"
 TRAFFIC_LIGHT_APPROACH = "TRAFFIC_LIGHT_APPROACH"
@@ -117,6 +119,15 @@ class CPXScenarioManager:
             self.turn_speed_cap_mps,
             float(cfg.get("scenario_turn_prepare_speed_cap_mps", 2.8)),
         )
+        # Route may advertise the next macro maneuver for the whole remaining
+        # route.  PREPARE_TURN is a local scenario state, so it must use the
+        # same dynamic preview contract as SpeedPlanner/RouteManager.
+        self.turn_prepare_lookahead_m = float(
+            turn_approach_lookahead_m(
+                cruise_speed_mps=float(self.target_speed_mps),
+                config=cfg,
+            )
+        )
         self.creep_speed_cap_mps = max(
             0.1, float(cfg.get("scenario_creep_speed_cap_mps", 0.9))
         )
@@ -197,6 +208,43 @@ class CPXScenarioManager:
                 traffic_stop_forward_m=float(stop_forward_m),
                 traffic_stop_commit_distance_m=self._commit_distance(float(ego_speed_mps)),
                 reason="collision_hazard_recovery",
+            )
+
+        # Once the connector turn owns lateral motion, keep that ownership
+        # through physical exit stabilization.  A downstream traffic light
+        # must not replace the turn reference with lane-follow while the ego
+        # is still rotating/converging onto the outgoing lane.
+        turn_execution_active = self._state in {
+            INTERSECTION_TURN,
+            TURN_EXIT_STABILIZATION,
+            CREEP,
+        }
+        if bool(turn_execution_active):
+            turn_decision = self._intersection_turn_decision(
+                ego_in_junction=bool(ego_in_junction),
+                current_road_option=str(current_road_option),
+                next_macro_maneuver=str(next_macro_maneuver),
+                sim_time_s=float(sim_time_s),
+                upcoming_turn_direction=str(upcoming_turn_direction),
+                upcoming_turn_distance_m=float(upcoming_turn_distance_m),
+                reference_geometry_bad=bool(reference_geometry_bad),
+                turn_exit_alignment_valid=bool(turn_exit_alignment_valid),
+                turn_exit_aligned=bool(turn_exit_aligned),
+                turn_exit_heading_error_rad=float(turn_exit_heading_error_rad),
+                turn_exit_lateral_m=float(turn_exit_lateral_m),
+            )
+            if turn_decision is not None:
+                return turn_decision
+            # Physical exit convergence completed in this update.  Publish a
+            # neutral transition frame and let traffic-light/lane-follow
+            # ownership resume on the next tick; otherwise a connector-side
+            # route hint can immediately re-enter PREPARE_TURN.
+            return CPXScenarioDecision(
+                state=LANE_FOLLOW,
+                behavior_signal_state="unknown",
+                behavior_stop_target=None,
+                speed_cap_mps=float(self.target_speed_mps),
+                reason="turn_exit_stabilized",
             )
 
         signal_decision = self._traffic_light_decision(
@@ -424,21 +472,14 @@ class CPXScenarioManager:
         # has remained valid for several consecutive frames; releasing on the
         # first macro transition caused a turn-reference -> lane-follow jump
         # and large alternating steering commands.
-        next_macro = str(next_macro_maneuver or "").strip().lower().replace(" ", "_")
-        post_turn_lane_change = next_macro in {
-            "lane_change_left",
-            "lane_change_right",
-            "change_lane_left",
-            "change_lane_right",
+        turn_execution_active = self._state in {
+            INTERSECTION_TURN,
+            TURN_EXIT_STABILIZATION,
+            CREEP,
         }
         if (
-            bool(post_turn_lane_change)
-            and self._state in {
-                PREPARE_TURN,
-                INTERSECTION_TURN,
-                TURN_EXIT_STABILIZATION,
-                CREEP,
-            }
+            bool(turn_execution_active)
+            and not self._turn_direction_from_route_option(current_road_option)
         ):
             exit_aligned = bool(
                 not bool(ego_in_junction)
@@ -487,7 +528,17 @@ class CPXScenarioManager:
         prepare_direction = str(upcoming_turn_direction or "").strip().lower()
         if prepare_direction not in {"left", "right"}:
             prepare_direction = ""
-        if not direction and prepare_direction and not bool(ego_in_junction):
+        prepare_distance_valid = bool(
+            math.isfinite(float(upcoming_turn_distance_m))
+            and 0.0 <= float(upcoming_turn_distance_m)
+            <= float(self.turn_prepare_lookahead_m)
+        )
+        if (
+            not direction
+            and prepare_direction
+            and prepare_distance_valid
+            and not bool(ego_in_junction)
+        ):
             self._state = PREPARE_TURN
             self._turn_direction = str(prepare_direction)
             self._turn_latch_until_s = (

@@ -9,6 +9,7 @@ from opencda.planning_module.pipeline.scenario_manager import (
     PREPARE_TURN,
     TRAFFIC_LIGHT_APPROACH,
     TRAFFIC_LIGHT_STOP,
+    TURN_EXIT_STABILIZATION,
 )
 
 
@@ -185,6 +186,29 @@ class CPXScenarioManagerTests(unittest.TestCase):
         # deceleration toward the turn-entry speed.
         self.assertEqual(decision.speed_cap_mps, 8.0)
 
+    def test_far_macro_turn_does_not_enter_prepare_turn(self):
+        manager = CPXScenarioManager({
+            "target_speed_mps": 5.0,
+            "scenario_turn_prepare_lookahead_m": 15.0,
+        })
+
+        decision = manager.update(
+            traffic_state="unknown",
+            stop_target=None,
+            stop_forward_m=0.0,
+            stop_target_reliable=False,
+            ego_speed_mps=5.0,
+            ego_in_junction=False,
+            current_road_option="LANEFOLLOW",
+            next_macro_maneuver="Turn Left",
+            sim_time_s=1.0,
+            upcoming_turn_direction="left",
+            upcoming_turn_distance_m=121.98,
+        )
+
+        self.assertEqual(decision.state, LANE_FOLLOW)
+        self.assertEqual(decision.behavior_override_decision, "")
+
     def test_red_far_is_approach_not_stop(self):
         manager = CPXScenarioManager({
             "target_speed_mps": 8.0,
@@ -236,6 +260,7 @@ class CPXScenarioManagerTests(unittest.TestCase):
         manager = CPXScenarioManager({
             "full_intersection_turn_speed_cap_mps": 2.2,
             "scenario_turn_exit_hold_s": 1.0,
+            "scenario_turn_exit_stable_frames": 2,
         })
 
         first = manager.update(
@@ -259,6 +284,8 @@ class CPXScenarioManagerTests(unittest.TestCase):
             current_road_option="LaneFollow",
             next_macro_maneuver="straight",
             sim_time_s=10.5,
+            turn_exit_alignment_valid=True,
+            turn_exit_aligned=True,
         )
         third = manager.update(
             traffic_state="unknown",
@@ -270,17 +297,58 @@ class CPXScenarioManagerTests(unittest.TestCase):
             current_road_option="LaneFollow",
             next_macro_maneuver="straight",
             sim_time_s=12.0,
+            turn_exit_alignment_valid=True,
+            turn_exit_aligned=True,
         )
 
         self.assertEqual(first.state, INTERSECTION_TURN)
         self.assertEqual(first.behavior_override_decision, "intersection_turn_left")
-        self.assertEqual(second.state, INTERSECTION_TURN)
+        self.assertEqual(second.state, TURN_EXIT_STABILIZATION)
         self.assertEqual(second.behavior_override_decision, "intersection_turn_left")
         self.assertEqual(third.state, LANE_FOLLOW)
+
+    def test_active_turn_is_not_preempted_by_downstream_red_light(self):
+        manager = CPXScenarioManager({
+            "scenario_turn_exit_stable_frames": 3,
+        })
+        manager.update(
+            traffic_state="unknown",
+            stop_target=None,
+            stop_forward_m=0.0,
+            stop_target_reliable=False,
+            ego_speed_mps=2.0,
+            ego_in_junction=True,
+            current_road_option="LEFT",
+            next_macro_maneuver="Turn Left",
+            sim_time_s=1.0,
+        )
+
+        decision = manager.update(
+            traffic_state="red",
+            stop_target={"x_m": 53.0, "y_m": 0.0},
+            stop_forward_m=53.0,
+            stop_target_reliable=True,
+            ego_speed_mps=2.0,
+            ego_in_junction=False,
+            current_road_option="STRAIGHT",
+            next_macro_maneuver="Continue Straight",
+            sim_time_s=1.1,
+            turn_exit_alignment_valid=True,
+            turn_exit_aligned=False,
+            turn_exit_heading_error_rad=0.2,
+            turn_exit_lateral_m=0.8,
+        )
+
+        self.assertEqual(decision.state, TURN_EXIT_STABILIZATION)
+        self.assertEqual(
+            decision.behavior_override_decision,
+            "intersection_turn_left",
+        )
 
     def test_turn_exit_waits_for_outgoing_route_alignment(self):
         manager = CPXScenarioManager({
             "scenario_turn_exit_hold_s": 0.5,
+            "scenario_turn_exit_stable_frames": 1,
         })
         manager.update(
             traffic_state="unknown",
@@ -329,8 +397,8 @@ class CPXScenarioManagerTests(unittest.TestCase):
             turn_exit_lateral_m=0.2,
         )
 
-        self.assertEqual(held.state, INTERSECTION_TURN)
-        self.assertIn("turn_exit_alignment_hold", held.reason)
+        self.assertEqual(held.state, TURN_EXIT_STABILIZATION)
+        self.assertIn("turn_exit_stabilization", held.reason)
         self.assertEqual(released.state, LANE_FOLLOW)
 
     def test_post_turn_lane_change_macro_waits_for_stable_exit_alignment(self):
@@ -367,7 +435,7 @@ class CPXScenarioManagerTests(unittest.TestCase):
             turn_exit_aligned=False,
         )
 
-        self.assertEqual(held_in_junction.state, "TURN_EXIT_STABILIZATION")
+        self.assertEqual(held_in_junction.state, INTERSECTION_TURN)
         self.assertEqual(
             held_in_junction.behavior_override_decision,
             "intersection_turn_left",
@@ -399,6 +467,7 @@ class CPXScenarioManagerTests(unittest.TestCase):
     def test_turn_exit_hold_prevents_early_lane_follow_contract_switch(self):
         manager = CPXScenarioManager({
             "scenario_turn_exit_hold_s": 3.0,
+            "scenario_turn_exit_stable_frames": 2,
         })
         manager.update(
             traffic_state="unknown",
@@ -439,7 +508,7 @@ class CPXScenarioManagerTests(unittest.TestCase):
             turn_exit_aligned=True,
         )
 
-        self.assertEqual(held.state, INTERSECTION_TURN)
+        self.assertEqual(held.state, TURN_EXIT_STABILIZATION)
         self.assertEqual(
             held.behavior_override_decision,
             "intersection_turn_right",

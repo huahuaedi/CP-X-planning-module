@@ -61,6 +61,52 @@ def normalize_route_maneuver(value: object) -> RouteManeuver:
     return RouteManeuver.UNKNOWN
 
 
+def suppress_lane_change_for_lateral_owner(
+    authorization: LaneChangeAuthorization,
+    *,
+    owner_state: object,
+) -> LaneChangeAuthorization:
+    """Give an active turn/recovery state exclusive lateral authority."""
+
+    state = str(owner_state or "").strip().upper()
+    exclusive_states = {
+        "PREPARE_TURN",
+        "INTERSECTION_TURN",
+        "TURN_EXIT_STABILIZATION",
+        "CREEP",
+        "BOUNDARY_RECOVERY",
+    }
+    if not bool(authorization.allowed) or state not in exclusive_states:
+        return authorization
+    return LaneChangeAuthorization(
+        allowed=False,
+        direction=authorization.direction,
+        reason=f"scenario_lateral_owner:{state.lower()}",
+        required_by_route=bool(authorization.required_by_route),
+        distance_to_maneuver_m=authorization.distance_to_maneuver_m,
+        target_lane_id=int(authorization.target_lane_id),
+        maneuver=str(authorization.maneuver),
+    )
+
+
+def lane_change_target_reached(
+    *,
+    current_lane_id: int,
+    remembered_target_lane_id: int,
+    current_ad_lane_id: int = 0,
+    remembered_target_ad_lane_id: int = 0,
+    target_in_local_frame: bool = False,
+    target_lane_offset: int = 0,
+) -> bool:
+    """Resolve completion by corridor relation, then stable identity."""
+
+    if bool(target_in_local_frame) and int(target_lane_offset) == 0:
+        return True
+    if int(current_ad_lane_id or 0) != 0 and int(remembered_target_ad_lane_id or 0) != 0:
+        return int(current_ad_lane_id) == int(remembered_target_ad_lane_id)
+    return int(current_lane_id or 0) == int(remembered_target_lane_id or 0)
+
+
 def authorize_route_lane_change(
     *,
     route_lane_change_allowed: bool,
@@ -81,6 +127,7 @@ def authorize_route_lane_change(
     topology_current_lane_id: int = 0,
     topology_target_lane_id: int = 0,
     topology_lane_offset: int = 0,
+    topology_target_in_local_frame: bool = True,
 ) -> LaneChangeAuthorization:
     if not bool(route_lane_change_allowed):
         return _denied("route_lane_change_not_allowed", next_macro_maneuver, remaining_distance_m, current_lane_id)
@@ -107,6 +154,18 @@ def authorize_route_lane_change(
         and int(topology_current_lane_id) != int(topology_target_lane_id)
         and int(topology_lane_offset or 0) != 0
     )
+    if (
+        int(topology_current_lane_id or 0) != 0
+        and int(topology_target_lane_id or 0) != 0
+        and int(topology_current_lane_id) != int(topology_target_lane_id)
+        and not bool(topology_target_in_local_frame)
+    ):
+        return _denied(
+            "route_target_outside_local_frame",
+            maneuver,
+            remaining_distance_m,
+            target_lane_id,
+        )
     if target_lane_id == current_lane_id and not bool(topology_requires_change):
         return LaneChangeAuthorization(
             allowed=False,

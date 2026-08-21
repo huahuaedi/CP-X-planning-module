@@ -5,12 +5,74 @@ from carla_scenario.runner import (
     _lane_safety_assignment_for_obstacle,
     _merge_tracker_predictions,
     _nearest_front_obstacle_by_lane,
+    _replan_route_around_static_intersection_obstacle,
     _should_force_intersection_reroute,
     _static_obstacle_replan_candidate_lane_ids,
 )
 
 
+class _FakeLocation:
+    x = 1.0
+    y = 2.0
+    z = 0.0
+
+
+class _FakeTransform:
+    location = _FakeLocation()
+
+
+class _FakeRouteSummary:
+    def __init__(self, *, route_found=True):
+        self.route_found = bool(route_found)
+        self.route_waypoints = [[1.0, 2.0], [5.0, 6.0]]
+
+
+class _FakeGlobalPlanner:
+    def __init__(self, *, route_found=True):
+        self.route_found = bool(route_found)
+        self.blocked_position = None
+        self.trace_args = None
+
+    def block_lane_at_position(self, position):
+        self.blocked_position = dict(position)
+        return 17
+
+    def trace_route(self, start, goal, *, replace_stored_route=False):
+        self.trace_args = (dict(start), dict(goal), bool(replace_stored_route))
+        return _FakeRouteSummary(route_found=self.route_found)
+
+
 class RunnerObstacleFilterTests(unittest.TestCase):
+    def test_static_obstacle_replan_blocks_lane_and_atomically_replaces_route(self):
+        planner = _FakeGlobalPlanner()
+
+        route_summary, route_points = _replan_route_around_static_intersection_obstacle(
+            global_planner=planner,
+            ego_transform=_FakeTransform(),
+            goal_location=_FakeLocation(),
+            blocked_obstacle_snapshot={"x": 3.0, "y": 4.0, "z": 0.0},
+            blocked_lane_id=1,
+        )
+
+        self.assertIsNotNone(route_summary)
+        self.assertEqual(route_points, [[1.0, 2.0], [5.0, 6.0]])
+        self.assertEqual(planner.blocked_position, {"x": 3.0, "y": 4.0, "z": 0.0})
+        self.assertTrue(bool(planner.trace_args[2]))
+
+    def test_static_obstacle_replan_returns_no_route_when_search_fails(self):
+        planner = _FakeGlobalPlanner(route_found=False)
+
+        route_summary, route_points = _replan_route_around_static_intersection_obstacle(
+            global_planner=planner,
+            ego_transform=_FakeTransform(),
+            goal_location=_FakeLocation(),
+            blocked_obstacle_snapshot={"x": 3.0, "y": 4.0, "z": 0.0},
+            blocked_lane_id=1,
+        )
+
+        self.assertIsNone(route_summary)
+        self.assertEqual(route_points, [])
+
     def test_filters_out_obstacles_on_different_vertical_level(self):
         filtered = _filter_obstacle_snapshots_by_vertical_overlap(
             ego_z_m=0.5,

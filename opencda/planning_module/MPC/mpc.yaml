@@ -119,7 +119,37 @@ mpc:
 
     # In INTERSECTION mode, trigger a static-obstacle global reroute only
     # when the route-optimal lane safety score drops below this threshold.
+    intersection_static_obstacle_replan_enabled: true
     intersection_static_obstacle_replan_lane_safety_threshold: 0.5
+
+    # Static blockers are handled locally first: the behavior/candidate
+    # pipeline may borrow one prediction-safe adjacent lane, otherwise ego
+    # stops behind the obstacle.  Ordinary obstacles do not mutate the map or
+    # global route. Global replan is reserved for an explicit road-closure
+    # policy/cooperative event and therefore remains disabled by default.
+    static_obstacle_replan_enabled: true
+    static_obstacle_replan_normal_mode_enabled: true
+    static_obstacle_local_avoidance_enabled: true
+    static_obstacle_local_lane_min_safety_score: 0.55
+    static_obstacle_global_replan_enabled: false
+    # full_candidate_reference_min_object_distance_m (below) sizes lateral
+    # gaps for negotiating with moving traffic; applied unmodified it makes
+    # a local-avoidance lane-change permanently infeasible, since the
+    # candidate necessarily passes within a couple meters of the very
+    # obstacle it exists to route around, in a lane only ~3.5m wide.  This
+    # is a tighter, dedicated clearance used only for the candidate whose
+    # target lane is the selected local-avoidance lane.
+    static_obstacle_local_avoidance_min_object_distance_m: 0.8
+    candidate_local_obstacle_stop_defer_cost: 25.0
+    # Spatial lane-change geometry must not collapse when ego is stopped.
+    # The speed planner may still start from 0 m/s; these floors are used only
+    # to size the quintic path that MPC will track.
+    lane_change_min_geometry_speed_mps: 2.0
+    lane_change_min_length_m: 10.0
+    static_obstacle_speed_threshold_mps: 0.5
+    static_obstacle_replan_lane_safety_threshold: 0.5
+    static_obstacle_blocked_confirm_s: 1.0
+    static_obstacle_replan_cooldown_s: 2.0
 
     # Minimum time [s] between consecutive static-obstacle route replans
     # while the ego remains in INTERSECTION mode.

@@ -1,0 +1,18 @@
+base_config: cpx_highspeed_town05_turn.yaml
+
+description: Map-layer regression across Town05 turn connectors and road segments.
+
+vehicle_base:
+  planner:
+    global_planner_strict: true
+
+scenario:
+  single_cav_list:
+    - name: cav1
+      spawn_position: [-43.7, 39.6, 0.3, 0, -90.3, 0]
+      destination: [-18.8, -84.4, 0.3]
+      v2x:
+        communication_range: 60
+      planner:
+        debug_output_dir: opencda/planning_module/opencda_bridge/mapreg_town05_turn
+        target_speed_mps: 5.0

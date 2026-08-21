@@ -42,6 +42,15 @@ class BehaviorCommandInvariantEnforcementTests(unittest.TestCase):
         self.assertEqual(int(result["target_lane_id"]), 1)
         self.assertEqual(int(result["selected_lane_id"]), 1)
 
+    def test_static_obstacle_stop_target_lane_is_forced_to_ego_lane(self):
+        result = self._corrected(
+            "static_obstacle_stop", target_lane_id=9, ego_lane_id=4
+        )
+
+        self.assertEqual(result["decision"], "static_obstacle_stop")
+        self.assertEqual(int(result["target_lane_id"]), 4)
+        self.assertEqual(int(result["selected_lane_id"]), 4)
+
     def test_already_consistent_stop_command_is_left_untouched(self):
         result = self._corrected("stop_at_intersection", target_lane_id=2, ego_lane_id=2)
 

@@ -8,6 +8,51 @@ from behavior_planner.planner import (
 
 
 class RuleBasedBehaviorPlannerIntersectionTests(unittest.TestCase):
+    def test_confirmed_static_obstacle_local_avoidance_enters_execute_immediately(self):
+        planner = RuleBasedBehaviorPlanner(
+            lane_keep_min_hold_s=10.0,
+            prepare_lane_change_min_hold_s=10.0,
+        )
+
+        result = planner.update(
+            lane_safety_scores={1: 0.1, 2: 0.95},
+            ego_lane_id=1,
+            selected_lane_id=1,
+            mode="NORMAL",
+            route_optimal_lane_id=1,
+            current_time_s=1.0,
+            lane_prediction_risks={2: {"risk": False}},
+            preferred_target_lane_id=2,
+            local_avoidance_target_lane_id=2,
+        )
+
+        self.assertEqual(result["decision"], "lane_change_left")
+        self.assertEqual(result["target_lane_id"], 2)
+        self.assertEqual(result["lc_state"], "EXECUTE_LANE_CHANGE_LEFT")
+
+    def test_static_obstacle_replan_failure_has_independent_stop_state(self):
+        planner = RuleBasedBehaviorPlanner()
+
+        blocked = planner.update(
+            lane_safety_scores={1: 0.0},
+            ego_lane_id=1,
+            mode="INTERSECTION",
+            static_obstacle_stop_active=True,
+        )
+        released = planner.update(
+            lane_safety_scores={1: 1.0},
+            ego_lane_id=1,
+            mode="INTERSECTION",
+            traffic_signal_state="green",
+            static_obstacle_stop_active=False,
+        )
+
+        self.assertEqual(blocked["decision"], "static_obstacle_stop")
+        self.assertEqual(blocked["lc_state"], "STATIC_OBSTACLE_STOP")
+        self.assertEqual(int(blocked["target_lane_id"]), 1)
+        self.assertEqual(released["decision"], "lane_follow")
+        self.assertNotEqual(released["lc_state"], "STATIC_OBSTACLE_STOP")
+
     def test_intersection_lane_follow_maneuver_after_reaching_leftmost_turn_lane(self):
         maneuver = intersection_route_follow_maneuver(
             mode="INTERSECTION",
@@ -783,6 +828,53 @@ class RuleBasedBehaviorPlannerIntersectionTests(unittest.TestCase):
         self.assertFalse(bool(response["follow_moving_obstacle"]))
         self.assertFalse(bool(response["request_static_obstacle_replan"]))
         self.assertAlmostEqual(float(response["speed_cap_mps"]), 8.0)
+
+
+class DisplayLaneChangeDirectionTests(unittest.TestCase):
+    """`_candidate_record` debug/rejected-candidate labels must agree with
+    what `_start_one_step_lane_change`/`_adjacent_lane_id` would actually
+    drive -- position within this tick's available_lane_ids, not raw id
+    magnitude, since ego_lane_id can be a StableLaneIdTracker-held id that
+    no longer numerically lines up with a fresh recount."""
+
+    def test_uses_list_position_when_both_ids_are_available(self):
+        # Raw magnitude would say "right" (5 < 9), but position in this
+        # tick's available list says "left" -- position must win.
+        decision = RuleBasedBehaviorPlanner._display_lane_change_direction(
+            desired_lane_id=9,
+            ego_lane_id=5,
+            available_lane_ids=[5, 9],
+        )
+
+        self.assertEqual(decision, "lane_change_left")
+
+    def test_falls_back_to_raw_magnitude_when_ego_id_is_stale(self):
+        # ego_lane_id is not in the freshly-built available list (e.g. a
+        # StableLaneIdTracker id that survived a road-boundary re-anchor
+        # elsewhere) -- there is no position to compare, so this falls back
+        # to the old magnitude comparison rather than raising.
+        decision = RuleBasedBehaviorPlanner._display_lane_change_direction(
+            desired_lane_id=2,
+            ego_lane_id=99,
+            available_lane_ids=[1, 2, 3],
+        )
+
+        self.assertEqual(decision, "lane_change_right")
+
+    def test_agrees_with_adjacent_lane_id_direction(self):
+        available = [1, 2, 3]
+        target_from_left = RuleBasedBehaviorPlanner._adjacent_lane_id(
+            reference_lane_id=2,
+            available_lane_ids=available,
+            direction="left",
+        )
+        decision = RuleBasedBehaviorPlanner._display_lane_change_direction(
+            desired_lane_id=target_from_left,
+            ego_lane_id=2,
+            available_lane_ids=available,
+        )
+
+        self.assertEqual(decision, "lane_change_left")
 
 
 if __name__ == "__main__":

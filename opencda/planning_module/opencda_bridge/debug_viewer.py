@@ -15,8 +15,46 @@ except Exception:  # pragma: no cover - optional debug dependency
     pygame = None
 
 
+_HUD_TEXT_COLOR = (235, 235, 235)
+_HUD_ALERT_COLOR = (255, 120, 60)
+
+# Display-layer heuristics only (not enforcement thresholds -- nothing in
+# the planning pipeline compares against these). Picked to flag a jump a
+# human would find visually surprising on the topdown/chase view, not to
+# match any contract/safety limit.
+_HUD_ALERT_POINT_JUMP_M = 0.5
+_HUD_ALERT_HEADING_JUMP_DEG = 5.0
+
+
 def _csv_count(value: object) -> int:
     return len([item for item in str(value or "").split(",") if item.strip()])
+
+
+def _safe_float(value: object) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _ref_source_kind(cpx_debug: dict) -> str:
+    """Name which of the three reference-producing paths is live this tick.
+
+    ``ref=`` below shows whatever value happens to be in
+    ``final_reference_geometry_source`` (only set while ManeuverManager's
+    unified geometry is active) or, failing that, the plain
+    ``reference_source`` -- the same field slot silently carries a
+    different underlying source depending on which path ran, which is
+    exactly what made a past HUD snapshot ambiguous to read without the
+    full debug payload. This names the path explicitly instead.
+    """
+
+    if str(cpx_debug.get("reference_pipeline_stage", "")) == "explicit_fallback":
+        return "explicit_fallback"
+    if str(cpx_debug.get("final_reference_geometry_source", "")):
+        return "maneuver"
+    return "default"
 
 
 class OpenCDADebugViewer:
@@ -379,9 +417,11 @@ class OpenCDADebugViewer:
                 y = int(round(float(start[1]) + ratio * dy))
                 pygame.draw.circle(surface, color, (x, y), int(radius_px))
 
-    def _build_hud_lines(self, vehicle_managers: Sequence[Any]) -> list[str]:
+    def _build_hud_lines(
+        self, vehicle_managers: Sequence[Any]
+    ) -> list[tuple[str, bool]]:
         if not vehicle_managers:
-            return ["OPEN-CDA + CP-X", "No vehicle manager available"]
+            return [("OPEN-CDA + CP-X", False), ("No vehicle manager available", False)]
         ego_vm = vehicle_managers[0]
         vehicle = ego_vm.vehicle
         transform = vehicle.get_transform()
@@ -389,47 +429,64 @@ class OpenCDADebugViewer:
         speed_mps = float((velocity.x ** 2 + velocity.y ** 2 + velocity.z ** 2) ** 0.5)
         objects = getattr(ego_vm.perception_manager, "objects", {}) or {}
         cpx_debug = getattr(getattr(ego_vm, "cpx_planner", None), "last_debug", {}) or {}
+
+        point_jump_m = _safe_float(cpx_debug.get("maneuver_first_point_jump_m", ""))
+        heading_jump_deg = _safe_float(
+            cpx_debug.get("maneuver_first_heading_jump_deg", "")
+        )
+        maneuver_jump_alert = bool(
+            (point_jump_m is not None and point_jump_m > _HUD_ALERT_POINT_JUMP_M)
+            or (
+                heading_jump_deg is not None
+                and abs(heading_jump_deg) > _HUD_ALERT_HEADING_JUMP_DEG
+            )
+        )
+        mpc_status = str(cpx_debug.get("mpc_status", ""))
+        mpc_status_alert = bool(mpc_status) and "solved" not in mpc_status.lower()
+        ref_fallback_alert = bool(str(cpx_debug.get("reference_pipeline_fallback", "")))
+
         return [
-            "OPEN-CDA + CP-X",
-            f"vehicle_id={vehicle.id}  planner={'CP-X MPC' if getattr(ego_vm, 'cpx_planner', None) else 'OpenCDA default'}",
-            f"speed={speed_mps:.2f} m/s  loc=({transform.location.x:.1f}, {transform.location.y:.1f}) yaw={transform.rotation.yaw:.1f}",
-            f"objects={len(objects.get('vehicles', []) or [])}  traffic_lights={len(objects.get('traffic_lights', []) or [])}  v2x_nearby={len(getattr(ego_vm.v2x_manager, 'cav_nearby', {}) or {})}",
-            f"cp_source={cpx_debug.get('cp_provider_source', '')}  native_cp={cpx_debug.get('native_opencda_available', '')}  cp_obs={cpx_debug.get('cp_obstacle_count', '')} cp_ctrl={cpx_debug.get('cp_control_count', '')}",
-            f"cp_shared observers={cpx_debug.get('cp_observer_cav_count', '')} ids={cpx_debug.get('cp_observer_cav_ids', '')} multi_seen={cpx_debug.get('cp_multi_observer_obstacle_count', '')}",
-            f"cp_visibility enabled={cpx_debug.get('cp_visibility_filter_enabled', '')} backend={cpx_debug.get('cp_visibility_backend', '')} blind_shared={cpx_debug.get('cp_blind_spot_shared_count', '')} actors={cpx_debug.get('cp_blind_spot_shared_actor_ids', '')}",
-            f"cp_vru pedestrians={cpx_debug.get('cp_pedestrian_count', '')} blind={cpx_debug.get('cp_blind_spot_pedestrian_count', '')} predicted={_csv_count(cpx_debug.get('cp_prediction_used_pedestrian_ids', ''))} candidate_relevant={_csv_count(cpx_debug.get('cp_candidate_relevant_pedestrian_ids', ''))}",
-            f"maneuver owner={cpx_debug.get('maneuver_geometry_owner', '')} id={cpx_debug.get('maneuver_geometry_id', '')} phase={cpx_debug.get('maneuver_geometry_phase', '')} jump={cpx_debug.get('maneuver_first_point_jump_m', '')}m heading_jump={cpx_debug.get('maneuver_first_heading_jump_deg', '')}deg",
-            f"behavior={cpx_debug.get('behavior_decision', '')}  fsm={cpx_debug.get('behavior_fsm_state', '')}  target_lane={cpx_debug.get('behavior_target_lane_id', '')}",
-            f"scenario={cpx_debug.get('scenario_fsm_state', '')}  turn_ahead={cpx_debug.get('carla_upcoming_turn_direction', '')} dist={cpx_debug.get('carla_upcoming_turn_distance_m', '')}",
-            f"lane current={cpx_debug.get('current_lane_id', '')}  dest_lane={cpx_debug.get('destination_lane_id', '')}",
-            f"ref={cpx_debug.get('final_reference_geometry_source', cpx_debug.get('reference_source', ''))}  stage={cpx_debug.get('reference_pipeline_stage', '')}  intent={cpx_debug.get('reference_pipeline_intent', '')}",
-            f"ref_geom first_fwd={cpx_debug.get('reference_first_forward_m', '')} first_lat={cpx_debug.get('reference_first_lateral_m', '')} lane_pts={len(cpx_debug.get('lane_reference_points', []) or [])}",
-            f"ref_fallback={cpx_debug.get('reference_pipeline_fallback', '')}",
-            f"front_gap={cpx_debug.get('front_gap_m', '')}  stop_goal={cpx_debug.get('stop_goal_active', '')}",
-            f"traffic raw={cpx_debug.get('traffic_signal_raw_state', '')} memory={cpx_debug.get('traffic_signal_filtered_state', '')} behavior={cpx_debug.get('traffic_signal_behavior_state', cpx_debug.get('traffic_signal_state', ''))} from_cp={cpx_debug.get('traffic_control_from_cp', '')}",
-            f"planner_input cp_ctrl={cpx_debug.get('planner_input_cp_traffic_control_count', '')} pred_risk={cpx_debug.get('planner_input_prediction_risky_lane_count', '')} objs={cpx_debug.get('planner_input_perception_planning_count', '')}",
-            f"mpc_status={cpx_debug.get('mpc_status', '')}  solve_ms={cpx_debug.get('mpc_solve_time_ms', '')} profile={cpx_debug.get('mpc_cost_profile', '')}",
-            f"decision={cpx_debug.get('decision_final_action', '')} source={cpx_debug.get('decision_control_source', '')} veto={cpx_debug.get('decision_veto_count', '')}",
-            f"cmd a={cpx_debug.get('accel_cmd_mps2', '')}  steer={cpx_debug.get('steer_cmd_rad', '')}",
-            f"target=({cpx_debug.get('destination_x', '')}, {cpx_debug.get('destination_y', '')}) v_ref={cpx_debug.get('target_speed_mps', '')}",
-            f"mpc_fallback={cpx_debug.get('mpc_fallback_reason', '')}",
+            ("OPEN-CDA + CP-X", False),
+            (f"vehicle_id={vehicle.id}  planner={'CP-X MPC' if getattr(ego_vm, 'cpx_planner', None) else 'OpenCDA default'}", False),
+            (f"speed={speed_mps:.2f} m/s  loc=({transform.location.x:.1f}, {transform.location.y:.1f}) yaw={transform.rotation.yaw:.1f}", False),
+            (f"objects={len(objects.get('vehicles', []) or [])}  traffic_lights={len(objects.get('traffic_lights', []) or [])}  v2x_nearby={len(getattr(ego_vm.v2x_manager, 'cav_nearby', {}) or {})}", False),
+            (f"cp_source={cpx_debug.get('cp_provider_source', '')}  native_cp={cpx_debug.get('native_opencda_available', '')}  cp_obs={cpx_debug.get('cp_obstacle_count', '')} cp_ctrl={cpx_debug.get('cp_control_count', '')}", False),
+            (f"cp_shared observers={cpx_debug.get('cp_observer_cav_count', '')} ids={cpx_debug.get('cp_observer_cav_ids', '')} multi_seen={cpx_debug.get('cp_multi_observer_obstacle_count', '')}", False),
+            (f"cp_visibility enabled={cpx_debug.get('cp_visibility_filter_enabled', '')} backend={cpx_debug.get('cp_visibility_backend', '')} blind_shared={cpx_debug.get('cp_blind_spot_shared_count', '')} actors={cpx_debug.get('cp_blind_spot_shared_actor_ids', '')}", False),
+            (f"cp_vru pedestrians={cpx_debug.get('cp_pedestrian_count', '')} blind={cpx_debug.get('cp_blind_spot_pedestrian_count', '')} predicted={_csv_count(cpx_debug.get('cp_prediction_used_pedestrian_ids', ''))} candidate_relevant={_csv_count(cpx_debug.get('cp_candidate_relevant_pedestrian_ids', ''))}", False),
+            (f"maneuver owner={cpx_debug.get('maneuver_geometry_owner', '')} id={cpx_debug.get('maneuver_geometry_id', '')} phase={cpx_debug.get('maneuver_geometry_phase', '')} jump={cpx_debug.get('maneuver_first_point_jump_m', '')}m heading_jump={cpx_debug.get('maneuver_first_heading_jump_deg', '')}deg", maneuver_jump_alert),
+            (f"behavior={cpx_debug.get('behavior_decision', '')}  fsm={cpx_debug.get('behavior_fsm_state', '')}  target_lane={cpx_debug.get('behavior_target_lane_id', '')}", False),
+            (f"scenario={cpx_debug.get('scenario_fsm_state', '')}  turn_ahead={cpx_debug.get('carla_upcoming_turn_direction', '')} dist={cpx_debug.get('carla_upcoming_turn_distance_m', '')}", False),
+            (f"lane current={cpx_debug.get('current_lane_id', '')}  dest_lane={cpx_debug.get('destination_lane_id', '')}", False),
+            (f"ref={cpx_debug.get('final_reference_geometry_source', cpx_debug.get('reference_source', ''))}  ref_source_kind={_ref_source_kind(cpx_debug)}  stage={cpx_debug.get('reference_pipeline_stage', '')}  intent={cpx_debug.get('reference_pipeline_intent', '')}", False),
+            (f"ref_geom first_fwd={cpx_debug.get('reference_first_forward_m', '')} first_lat={cpx_debug.get('reference_first_lateral_m', '')} lane_pts={len(cpx_debug.get('lane_reference_points', []) or [])}", False),
+            (f"ref_fallback={cpx_debug.get('reference_pipeline_fallback', '')}", ref_fallback_alert),
+            (f"front_gap={cpx_debug.get('front_gap_m', '')}  stop_goal={cpx_debug.get('stop_goal_active', '')}", False),
+            (f"traffic raw={cpx_debug.get('traffic_signal_raw_state', '')} memory={cpx_debug.get('traffic_signal_filtered_state', '')} behavior={cpx_debug.get('traffic_signal_behavior_state', cpx_debug.get('traffic_signal_state', ''))} from_cp={cpx_debug.get('traffic_control_from_cp', '')}", False),
+            (f"planner_input cp_ctrl={cpx_debug.get('planner_input_cp_traffic_control_count', '')} pred_risk={cpx_debug.get('planner_input_prediction_risky_lane_count', '')} objs={cpx_debug.get('planner_input_perception_planning_count', '')}", False),
+            (f"mpc_status={cpx_debug.get('mpc_status', '')}  solve_ms={cpx_debug.get('mpc_solve_time_ms', '')} profile={cpx_debug.get('mpc_cost_profile', '')}", mpc_status_alert),
+            (f"decision={cpx_debug.get('decision_final_action', '')} source={cpx_debug.get('decision_control_source', '')} veto={cpx_debug.get('decision_veto_count', '')}", False),
+            (f"cmd a={cpx_debug.get('accel_cmd_mps2', '')}  steer={cpx_debug.get('steer_cmd_rad', '')}", False),
+            (f"target=({cpx_debug.get('destination_x', '')}, {cpx_debug.get('destination_y', '')}) v_ref={cpx_debug.get('target_speed_mps', '')}", False),
+            (f"mpc_fallback={cpx_debug.get('mpc_fallback_reason', '')}", bool(str(cpx_debug.get('mpc_fallback_reason', '')))),
         ]
 
-    def _draw_hud_lines(self, lines: Sequence[str], rect: Any) -> None:
+    def _draw_hud_lines(self, lines: Sequence[tuple[str, bool]], rect: Any) -> None:
         if self.font is None:
             return
         columns = 2 if int(rect.width) >= 1000 else 1
         column_width = max(1, int((rect.width - 24) / columns))
         line_height = max(16, int(self.font.get_linesize()))
         max_lines_per_column = max(1, int((rect.height - 20) / line_height))
-        for index, line in enumerate(lines):
+        for index, (line, is_alert) in enumerate(lines):
             column = int(index / max_lines_per_column)
             if column >= columns:
                 break
             row = int(index % max_lines_per_column)
             x = int(rect.x) + 12 + column * column_width
             y = int(rect.y) + 10 + row * line_height
-            surface = self.font.render(str(line), True, (235, 235, 235))
+            color = _HUD_ALERT_COLOR if is_alert else _HUD_TEXT_COLOR
+            surface = self.font.render(str(line), True, color)
             self.display.blit(surface, (x, y))
 
     def destroy(self) -> None:

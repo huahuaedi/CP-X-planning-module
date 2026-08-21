@@ -127,6 +127,9 @@ class CPXRouteManager:
             start_point=self._start_point,
             goal_point=self._goal_point,
         )
+        imported_summary = self._register_carla_mission_route_with_global_planner()
+        if imported_summary is not None:
+            self._active_route_summary = imported_summary
         self._fallback_route_points = []
         if not bool(getattr(self._active_route_summary, "route_found", False)) or len(
             list(getattr(self._active_route_summary, "route_waypoints", []) or [])
@@ -168,10 +171,23 @@ class CPXRouteManager:
                 goal_location=self._goal_point,
                 replace_stored_route=True,
             )
-            self._build_carla_route(
-                start_point=normalized_start,
-                goal_point=self._goal_point,
-            )
+            if str(trigger_reason).strip().lower().startswith("static_obstacle"):
+                if (
+                    not bool(getattr(summary, "route_found", False))
+                    or len(list(getattr(summary, "route_waypoints", []) or [])) < 2
+                ):
+                    raise RuntimeError("blocked_summary_route_not_found")
+                self._build_carla_route_from_summary(summary)
+            else:
+                self._build_carla_route(
+                    start_point=normalized_start,
+                    goal_point=self._goal_point,
+                )
+                imported_summary = (
+                    self._register_carla_mission_route_with_global_planner()
+                )
+                if imported_summary is not None:
+                    summary = imported_summary
             route_point_count = len(self._carla_route_nodes())
             if route_point_count < 2:
                 raise RuntimeError(str(self._carla_route_debug_reason))
@@ -181,7 +197,9 @@ class CPXRouteManager:
             self._fallback_route_points = []
             self._last_status = self._status_from_summary(summary)
             self._carla_route_debug_reason = (
-                f"carla_grp_route_replanned:{str(trigger_reason)}"
+                f"blocked_summary_route_replanned:{str(trigger_reason)}"
+                if str(trigger_reason).strip().lower().startswith("static_obstacle")
+                else f"carla_grp_route_replanned:{str(trigger_reason)}"
             )
             return RouteReplanResult(
                 True,
@@ -276,6 +294,9 @@ class CPXRouteManager:
                 "z": nodes[-1][2],
             }
         )
+        imported_summary = self._register_carla_mission_route_with_global_planner()
+        if imported_summary is not None:
+            self._active_route_summary = imported_summary
         self._last_status = RouteManagerStatus(
             route_found=True,
             route_point_count=len(nodes),
@@ -283,6 +304,29 @@ class CPXRouteManager:
             reached_destination=False,
             debug_reason="external_leaderboard_route_ready",
         )
+
+    def _register_carla_mission_route_with_global_planner(self) -> Any:
+        """Map-match the supplied mission route into the semantic backend.
+
+        Start/goal-only Dijkstra is allowed to choose a different valid road
+        sequence from CARLA/OpenCDA's scenario route.  Importing the ordered
+        GRP geometry keeps one mission route while still letting AD-map own
+        stable lane identity, topology, maneuver labels, and progress.
+        """
+        register = getattr(self.global_planner, "register_imported_route", None)
+        nodes = self._carla_route_nodes()
+        if not callable(register) or len(nodes) < 2:
+            return None
+        route_points = [
+            [float(node[0]), float(node[1]), float(node[2])]
+            for node in nodes
+        ]
+        try:
+            return register(route_points)
+        except Exception:
+            # Geometry remains usable and the original planner route remains
+            # intact if an optional semantic backend cannot import a point.
+            return None
 
     def get_route_info(
         self,
@@ -1032,6 +1076,52 @@ class CPXRouteManager:
     def active_route_summary(self) -> Any:
         return self._active_route_summary
 
+    def accept_authoritative_route_summary(
+        self,
+        summary: Any,
+        *,
+        debug_reason: str = "authoritative_route_summary",
+    ) -> RouteManagerStatus:
+        """Publish one route backend's per-tick progress as manager state.
+
+        The custom AD-map path queries its route directly because AD lane
+        identities and maneuver semantics must not be inferred from the CARLA
+        geometry route.  Publishing that same query here keeps diagnostics,
+        destination completion, and behavior input on one progress source.
+        CARLA route progress remains available only for geometry sampling.
+        """
+
+        def value(name: str, default: Any = None) -> Any:
+            if isinstance(summary, Mapping):
+                return summary.get(name, default)
+            return getattr(summary, name, default)
+
+        route_found = bool(value("route_found", False))
+        remaining = max(
+            0.0,
+            float(
+                value(
+                    "distance_to_destination_m",
+                    value("remaining_distance_m", 0.0),
+                )
+                or 0.0
+            ),
+        )
+        route_waypoints = list(value("route_waypoints", []) or [])
+        route_point_count = max(
+            len(route_waypoints),
+            len(self._fallback_route_points),
+        )
+        reached = bool(route_found and remaining <= self.reached_distance_m)
+        self._last_status = RouteManagerStatus(
+            route_found=route_found,
+            route_point_count=int(route_point_count),
+            remaining_distance_m=float(remaining),
+            reached_destination=reached,
+            debug_reason=str(debug_reason),
+        )
+        return self._last_status
+
     def _build_carla_route(
         self,
         *,
@@ -1081,6 +1171,78 @@ class CPXRouteManager:
         except Exception as exc:
             self._carla_route_entries = []
             self._carla_route_debug_reason = f"carla_grp_route_failed:{exc}"
+
+    def _build_carla_route_from_summary(self, summary: Any) -> None:
+        """Install blocked-lane-aware planner geometry as the CARLA route.
+
+        Re-running CARLA GRP after the custom planner has avoided a blocked
+        lane silently recreates the original shortest route. Project the
+        successful summary onto CARLA waypoints instead so topology choice and
+        MPC geometry refer to the same replacement corridor.
+        """
+
+        self._carla_route_entries = []
+        self._carla_route_progress_index = 0
+        self._carla_route_progress_initialized = False
+        self._carla_route_projection = None
+        self._carla_route_sync_reason = "carla_route_progress_not_initialized"
+        if self.carla_map is None or self.carla_api is None:
+            self._carla_route_debug_reason = "summary_route_map_unavailable"
+            return
+        route_points = list(getattr(summary, "route_waypoints", []) or [])
+        route_options = list(getattr(summary, "road_options", []) or [])
+        entries: List[Any] = []
+        try:
+            for index, raw_point in enumerate(route_points):
+                if not isinstance(raw_point, Sequence) or len(raw_point) < 2:
+                    continue
+                location = self.carla_api.Location(
+                    x=float(raw_point[0]),
+                    y=float(raw_point[1]),
+                    z=float(raw_point[2]) if len(raw_point) >= 3 else 0.0,
+                )
+                waypoint = self.carla_map.get_waypoint(location)
+                if waypoint is None or not hasattr(waypoint, "transform"):
+                    continue
+                option = (
+                    route_options[index]
+                    if index < len(route_options)
+                    else "LANEFOLLOW"
+                )
+                if entries:
+                    previous_waypoint, _ = _carla_route_entry(entries[-1])
+                    previous_location = getattr(
+                        getattr(previous_waypoint, "transform", None),
+                        "location",
+                        None,
+                    )
+                    current_location = getattr(
+                        getattr(waypoint, "transform", None),
+                        "location",
+                        None,
+                    )
+                    if (
+                        previous_location is not None
+                        and current_location is not None
+                        and math.hypot(
+                            float(current_location.x) - float(previous_location.x),
+                            float(current_location.y) - float(previous_location.y),
+                        )
+                        < 1.0e-3
+                    ):
+                        continue
+                entries.append((waypoint, option))
+            self._carla_route_entries = entries
+            self._carla_route_debug_reason = (
+                "blocked_summary_route_ready"
+                if len(entries) >= 2
+                else "blocked_summary_route_empty"
+            )
+        except Exception as exc:
+            self._carla_route_entries = []
+            self._carla_route_debug_reason = (
+                f"blocked_summary_route_failed:{exc}"
+            )
 
     def _bridge_carla_route_gaps(self, entries: List[Any]) -> List[Any]:
         """Fill in large gaps between consecutive CARLA GRP route waypoints.

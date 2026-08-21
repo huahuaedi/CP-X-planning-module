@@ -541,6 +541,58 @@ class SafetySupervisorTest(unittest.TestCase):
         self.assertEqual(control.throttle, 0.0)
         self.assertAlmostEqual(control.brake, 0.2)
 
+    def test_rate_limit_matches_legacy_flat_delta_when_sim_time_s_omitted(self):
+        # No sim_time_s passed -- must reproduce the exact pre-dt-aware
+        # behavior (delta capped at the configured value, unscaled).
+        supervisor = SafetySupervisor(max_throttle_delta=0.10)
+        supervisor._last_control = _Control(throttle=0.0)
+
+        control, _ = supervisor.filter_control(
+            control=_Control(throttle=1.0),
+            carla_module=_Carla,
+        )
+
+        self.assertAlmostEqual(control.throttle, 0.10)
+
+    def test_rate_limit_scales_with_measured_dt(self):
+        # max_throttle_delta=0.10 is configured against the 0.05s reference
+        # tick (a rate of 2.0/s). Calling filter_control() with sim_time_s
+        # 0.20s apart (4x the reference tick) must allow 4x the delta.
+        supervisor = SafetySupervisor(max_throttle_delta=0.10)
+        supervisor._last_control = _Control(throttle=0.0)
+        # First call only seeds _last_filter_time_s -- dt is unknown before
+        # a previous timestamp exists, so it still uses the reference tick.
+        supervisor.filter_control(
+            control=_Control(throttle=0.0),
+            carla_module=_Carla,
+            sim_time_s=10.0,
+        )
+
+        control, _ = supervisor.filter_control(
+            control=_Control(throttle=1.0),
+            carla_module=_Carla,
+            sim_time_s=10.20,
+        )
+
+        self.assertAlmostEqual(control.throttle, 0.40)
+
+    def test_rate_limit_scales_down_for_a_faster_call_rate(self):
+        supervisor = SafetySupervisor(max_throttle_delta=0.10)
+        supervisor._last_control = _Control(throttle=0.0)
+        supervisor.filter_control(
+            control=_Control(throttle=0.0),
+            carla_module=_Carla,
+            sim_time_s=10.0,
+        )
+
+        control, _ = supervisor.filter_control(
+            control=_Control(throttle=1.0),
+            carla_module=_Carla,
+            sim_time_s=10.025,
+        )
+
+        self.assertAlmostEqual(control.throttle, 0.05)
+
 
 if __name__ == "__main__":
     unittest.main()

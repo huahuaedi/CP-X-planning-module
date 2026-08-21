@@ -38,6 +38,25 @@ def _reference(y_offset=0.0, speed=2.0):
 
 
 class ManeuverManagerTests(unittest.TestCase):
+    def test_plain_route_lane_change_is_not_classified_as_turn_chained(self):
+        manager = ManeuverManager()
+
+        result = manager.update(
+            reference_samples=_reference(0.0, 2.0),
+            destination_state=[20.0, 0.0, 2.0, 0.0, 2],
+            decision="lane_change_right",
+            behavior_fsm_state="EXECUTE_LANE_CHANGE_RIGHT",
+            current_lane_id=1,
+            target_lane_id=2,
+            ego_x_m=0.0,
+            ego_y_m=0.0,
+            reference_source="locked_quintic_lane_change_reference",
+            route_current_option="CHANGELANERIGHT",
+            route_next_maneuver="Lane Change Right",
+        )
+
+        self.assertEqual(result.debug["maneuver_geometry_type"], "lane_change")
+
     def test_extend_geometry_does_not_append_the_same_path_back_to_its_start(self):
         geometry = ManeuverManager._extend_geometry(_reference(), _reference())
 
@@ -326,6 +345,61 @@ class ManeuverManagerTests(unittest.TestCase):
             released.debug["maneuver_geometry_release_reason"],
             "lane_change_commitment_complete",
         )
+
+
+class ApplyVelocityProfileTests(unittest.TestCase):
+    """`geometry` (the persisted maneuver window) and `incoming` (this
+    tick's freshly planned speed profile) are very often different
+    lengths. Speed must follow each geometry sample's own
+    lane_change_progress, not the array offset it happens to sit at."""
+
+    @staticmethod
+    def _geometry(progress_values):
+        return [
+            {
+                "x_ref_m": float(index),
+                "y_ref_m": 0.0,
+                "lane_change_progress": float(progress),
+            }
+            for index, progress in enumerate(progress_values)
+        ]
+
+    @staticmethod
+    def _speed_source(progress_speed_pairs):
+        return [
+            {"lane_change_progress": float(progress), "speed_ref_mps": float(speed)}
+            for progress, speed in progress_speed_pairs
+        ]
+
+    def test_matches_by_progress_when_incoming_is_shorter_than_geometry(self):
+        geometry = self._geometry([0.0, 0.25, 0.5, 0.75, 1.0])
+        incoming = self._speed_source([(0.0, 1.0), (1.0, 9.0)])
+
+        result = ManeuverManager._apply_velocity_profile(geometry, incoming)
+
+        speeds = [float(sample["speed_ref_mps"]) for sample in result]
+        # Early-maneuver points (progress 0.25, 0.5) must stay near the
+        # early speed (1.0) -- plain index alignment would instead clamp
+        # to incoming[-1] (9.0, the terminal speed) starting at index 1.
+        self.assertEqual(speeds, [1.0, 1.0, 1.0, 9.0, 9.0])
+
+    def test_falls_back_to_index_alignment_without_progress_tags(self):
+        geometry = [
+            {"x_ref_m": float(index), "y_ref_m": 0.0} for index in range(4)
+        ]
+        incoming = [{"speed_ref_mps": 3.0}, {"speed_ref_mps": 6.0}]
+
+        result = ManeuverManager._apply_velocity_profile(geometry, incoming)
+
+        speeds = [float(sample["speed_ref_mps"]) for sample in result]
+        self.assertEqual(speeds, [3.0, 6.0, 6.0, 6.0])
+
+    def test_empty_incoming_zeros_speed(self):
+        geometry = self._geometry([0.0, 0.5, 1.0])
+
+        result = ManeuverManager._apply_velocity_profile(geometry, [])
+
+        self.assertTrue(all(float(s["speed_ref_mps"]) == 0.0 for s in result))
 
 
 if __name__ == "__main__":

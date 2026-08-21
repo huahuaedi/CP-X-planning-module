@@ -131,6 +131,49 @@ class _DummyCarla:
 
 
 class TempDestinationModeTests(unittest.TestCase):
+    def test_lane_follow_uses_route_only_to_choose_successor_geometry(self):
+        ego_wp = _DummyWaypoint(
+            road_id=300, is_junction=False, x_m=0.0, y_m=0.0,
+            yaw_deg=90.0, lane_id=1,
+        )
+        # The wrong branch is instantaneously straighter, so heading-only
+        # selection would choose it.  The mission route selects straight_wp.
+        wrong_wp = _DummyWaypoint(
+            road_id=301, is_junction=True, x_m=-0.2, y_m=2.0,
+            yaw_deg=90.0, lane_id=1,
+        )
+        straight_wp = _DummyWaypoint(
+            road_id=302, is_junction=True, x_m=0.0, y_m=2.0,
+            yaw_deg=91.0, lane_id=1,
+        )
+        ego_wp.set_next(wrong_wp, straight_wp)
+        wrong_wp.set_next()
+        straight_wp.set_next()
+        world_map = _NearestWaypointMap(ego_wp, wrong_wp, straight_wp)
+        ego_transform = types.SimpleNamespace(
+            location=ego_wp.transform.location,
+            rotation=ego_wp.transform.rotation,
+        )
+
+        samples = build_reference_samples(
+            world_map=world_map,
+            carla=_DummyCarla,
+            ego_transform=ego_transform,
+            target_lane_id=1,
+            decision="lane_follow",
+            horizon_steps=2,
+            step_distance_m=2.0,
+            # Deliberately offset route XY proves it is guidance, not emitted
+            # reference geometry.
+            global_route_points=[[0.3, 0.0], [0.3, 2.0], [0.3, 4.0]],
+            mode_override="NORMAL",
+            follow_global_route_lane=False,
+        )
+
+        self.assertEqual(len(samples), 2)
+        self.assertAlmostEqual(float(samples[1]["x_ref_m"]), 0.0, places=6)
+        self.assertAlmostEqual(float(samples[1]["y_ref_m"]), 2.0, places=6)
+
     def test_lane_change_blend_uses_smootherstep_alpha(self):
         self.assertAlmostEqual(_smooth_lane_change_alpha(0.0), 0.0)
         self.assertAlmostEqual(_smooth_lane_change_alpha(0.5), 0.5)

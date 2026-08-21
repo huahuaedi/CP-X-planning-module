@@ -187,9 +187,21 @@ class ManeuverManager:
         )
 
         if self.active_plan is None and should_start and incoming:
+            # "chained with a route turn" must come from the ROUTE's own
+            # upcoming-maneuver hints, not from `decision` -- a plain
+            # lane_change_left/right decision trivially contains "left"/
+            # "right" itself, so using `direction` (which folds `decision`
+            # into the same text match) here always finds a match and no
+            # lane change was ever classified as the plain "lane_change"
+            # type, even ones with no upcoming turn at all (e.g. a local
+            # static-obstacle avoidance lane change). That silently routed
+            # every lane change through the turn-chained geometry path.
+            route_turn_direction = self._route_direction(
+                route_current_option, route_next_maneuver
+            )
             maneuver_type = (
                 "lane_change_to_turn"
-                if normalized_decision in _LANE_CHANGE and direction
+                if normalized_decision in _LANE_CHANGE and route_turn_direction
                 else "lane_change"
                 if normalized_decision in _LANE_CHANGE
                 else "intersection_turn"
@@ -342,6 +354,34 @@ class ManeuverManager:
         return ""
 
     @staticmethod
+    def _route_direction(current: str, upcoming: str) -> str:
+        """Return a direction only for an explicit intersection turn hint.
+
+        ``CHANGELANERIGHT`` and ``Lane Change Right`` contain the word
+        ``right`` but are lateral maneuvers, not evidence of a following
+        right turn.  Treating them as turns changes a plain lane-change
+        reference into ``lane_change_to_turn`` and creates a short curved
+        trajectory even when the global route crosses the junction straight.
+        """
+        current_option = str(current or "").strip().upper().replace("_", "")
+        upcoming_option = (
+            str(upcoming or "")
+            .strip()
+            .lower()
+            .replace("-", " ")
+            .replace("_", " ")
+        )
+        if current_option == "RIGHT":
+            return "right"
+        if current_option == "LEFT":
+            return "left"
+        if upcoming_option in {"right", "turn right", "right turn"}:
+            return "right"
+        if upcoming_option in {"left", "turn left", "left turn"}:
+            return "left"
+        return ""
+
+    @staticmethod
     def _route_still_requires_direction(direction: str, current: str, upcoming: str) -> bool:
         if not direction:
             return False
@@ -464,15 +504,43 @@ class ManeuverManager:
     def _apply_velocity_profile(geometry, incoming):
         result = [dict(sample) for sample in list(geometry or [])]
         source = list(incoming or [])
+        # `result` is the persisted geometry window (may span many ticks
+        # unchanged); `source` is this tick's freshly planned speed
+        # profile, which is very often shorter (e.g. speed_planner only
+        # extends a few points ahead) or simply a different length than
+        # the geometry window. Plain index alignment (source[i]) then
+        # silently repeats source's LAST speed value for every geometry
+        # point beyond len(source), regardless of how far along the
+        # locked maneuver that point actually is -- decoupling commanded
+        # speed from lateral progress (e.g. a stale following-cap speed
+        # from early in a lane change getting stamped onto points already
+        # well into the target lane). Match by each sample's own
+        # `lane_change_progress` instead when both sides carry it: that
+        # tag is a physical/time position along the maneuver shared by
+        # both arrays, not an incidental array offset.
+        source_has_progress = any("lane_change_progress" in item for item in source)
         for index, sample in enumerate(result):
-            if source:
-                speed_sample = source[min(index, len(source) - 1)]
+            if not source:
+                speed = 0.0
+            elif source_has_progress and "lane_change_progress" in sample:
+                target_progress = float(sample.get("lane_change_progress", 0.0) or 0.0)
+                speed_sample = min(
+                    source,
+                    key=lambda item: abs(
+                        float(item.get("lane_change_progress", 0.0) or 0.0)
+                        - target_progress
+                    ),
+                )
                 speed = float(speed_sample.get(
                     "speed_ref_mps",
                     speed_sample.get("v_ref_mps", speed_sample.get("speed_mps", 0.0)),
                 ) or 0.0)
             else:
-                speed = 0.0
+                speed_sample = source[min(index, len(source) - 1)]
+                speed = float(speed_sample.get(
+                    "speed_ref_mps",
+                    speed_sample.get("v_ref_mps", speed_sample.get("speed_mps", 0.0)),
+                ) or 0.0)
             sample["speed_ref_mps"] = speed
             sample["v_ref_mps"] = speed
             sample["speed_mps"] = speed

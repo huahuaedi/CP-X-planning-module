@@ -81,6 +81,59 @@ class _ContractResult:
 
 
 class CandidatePipelineTest(unittest.TestCase):
+    def test_confirmed_local_avoidance_keeps_stop_as_deferred_fallback(self):
+        intents = candidate_pipeline.build_candidate_intents(
+            selected_decision="lane_change_left",
+            selected_target_lane_id=2,
+            current_lane_id=1,
+            target_speed_mps=8.0,
+            candidate_lane_ids=[1, 2],
+            lane_safety_scores={1: 0.1, 2: 0.95},
+            lane_prediction_risks={2: {"risk": False}},
+            stop_goal_active=True,
+            traffic_stop_active=False,
+            lane_change_authorized=True,
+            lane_change_authorized_target_lane_id=2,
+            allow_lane_change_candidates=True,
+            lane_change_authorization_source="opportunistic",
+            lane_change_authorization_direction="left",
+            local_obstacle_avoidance_active=True,
+            local_obstacle_stop_defer_cost=25.0,
+        )
+
+        stop_intent = next(
+            intent for intent in intents if intent.name == "obstacle_stop"
+        )
+        lane_change_intents = [
+            intent for intent in intents if intent.decision == "lane_change_left"
+        ]
+        self.assertEqual(stop_intent.base_cost, 25.0)
+        self.assertTrue(lane_change_intents)
+        self.assertLess(
+            min(intent.base_cost for intent in lane_change_intents), 25.0
+        )
+
+    def test_static_obstacle_stop_is_a_mandatory_zero_speed_candidate(self):
+        intents = candidate_pipeline.build_candidate_intents(
+            selected_decision="static_obstacle_stop",
+            selected_target_lane_id=1,
+            current_lane_id=1,
+            target_speed_mps=12.0,
+            candidate_lane_ids=[1, 2],
+            lane_safety_scores={1: 0.0, 2: 1.0},
+            lane_prediction_risks={1: {}, 2: {}},
+            stop_goal_active=False,
+            traffic_stop_active=False,
+            lane_change_authorized=True,
+            lane_change_authorized_target_lane_id=2,
+            allow_lane_change_candidates=True,
+        )
+
+        self.assertEqual(len(intents), 1)
+        self.assertEqual(intents[0].decision, "static_obstacle_stop")
+        self.assertEqual(float(intents[0].target_speed_mps), 0.0)
+        self.assertTrue(bool(intents[0].stop_goal_active))
+
     def test_physical_direction_overrides_opaque_topology_sign(self):
         physical_left = _Waypoint(1.0, 3.5)
         physical_right = _Waypoint(1.0, -3.5)
@@ -438,7 +491,14 @@ class CandidatePipelineTest(unittest.TestCase):
         self.assertEqual(len(shaped), 6)
         self.assertGreater(shaped[0]["y_ref_m"], 0.0)
         self.assertLess(shaped[0]["y_ref_m"], shaped[-1]["y_ref_m"])
-        self.assertLess(shaped[-1]["y_ref_m"], 3.5)
+        # duration_s=4.0 calls for more blend time than the 6 samples at
+        # dt_s=0.5 (3.0s) actually span. The blend must still finish by the
+        # last available sample -- if it didn't, the caller splices the
+        # unblended target tail directly onto an only-partially-blended
+        # last point, a lateral-offset jump that reads as a curvature spike
+        # independent of how generous duration_s is. So the last sample
+        # lands at the target lane, not short of it.
+        self.assertAlmostEqual(shaped[-1]["y_ref_m"], 3.5, places=6)
         self.assertTrue(all(
             row["lane_transition_kind"] == "lateral_lane_change"
             for row in shaped
@@ -671,6 +731,53 @@ class CandidatePipelineTest(unittest.TestCase):
 
         self.assertAlmostEqual(average_speed, 8.25)
         self.assertLess(average_speed, 12.0)
+
+    def test_stopped_lane_change_geometry_keeps_minimum_spatial_length(self):
+        geometry_speed, length_m, step_m = (
+            candidate_pipeline.lane_change_geometry_requirements(
+                ego_speed_mps=0.0,
+                target_speed_mps=0.8,
+                duration_s=4.38,
+                dt_s=0.05,
+                lane_width_m=3.5,
+                max_curvature_1pm=0.35,
+                minimum_geometry_speed_mps=2.0,
+                minimum_length_m=10.0,
+            )
+        )
+
+        self.assertEqual(geometry_speed, 2.0)
+        self.assertGreaterEqual(length_m, 10.0)
+        self.assertGreater(step_m, 0.11)
+        self.assertLess(step_m, 0.12)
+
+        sample_count = int(math.ceil(4.38 / 0.05)) + 20
+        source = [
+            {
+                "x_ref_m": float(index + 1) * step_m,
+                "y_ref_m": 0.0,
+                "heading_rad": 0.0,
+            }
+            for index in range(sample_count)
+        ]
+        target = [
+            {
+                "x_ref_m": float(index + 1) * step_m,
+                "y_ref_m": 3.5,
+                "heading_rad": 0.0,
+            }
+            for index in range(sample_count)
+        ]
+        shaped = candidate_pipeline.shape_lane_change_reference(
+            target_reference=target,
+            source_reference=source,
+            duration_s=4.38,
+            dt_s=0.05,
+            current_lane_id=1,
+            target_lane_id=2,
+            target_speed_mps=0.8,
+        )
+        self.assertLessEqual(self._discrete_curvature_1pm(shaped), 0.35)
 
     def test_envelope_blocks_anchor_at_lock_position_and_span_lane_width(self):
         source = [
@@ -1208,6 +1315,73 @@ class CandidatePipelineTest(unittest.TestCase):
         )
         self.assertFalse(candidate.feasible)
         self.assertIn("mpc_probe:primal infeasible", candidate.feasibility_reason)
+
+
+class LaneCostTopologyAliasTests(unittest.TestCase):
+    """`lane_safety_scores`/`lane_prediction_risks` are keyed by this tick's
+    canonical recount at ego's own cross-section, which only assigns unique
+    numbers to lanes visible from there. When AD-map topology proves a
+    route target is a real, different, farther lane that the recount
+    happens to number the same as current_lane_id (topology_alias_target),
+    looking it up by that shared key would silently read ego's own lane's
+    entry instead -- and zero out the lane-change cost for what is,
+    physically, a real lane change."""
+
+    def test_alias_target_does_not_borrow_egos_own_lane_safety_score(self):
+        # Lane 1 (ego's own key) reads as perfectly safe; if the alias
+        # target silently reused that key it would look equally safe.
+        cost_ordinary_same_key = candidate_pipeline._lane_cost(
+            lane_id=1,
+            current_lane_id=1,
+            lane_safety_scores={1: 1.0},
+            lane_prediction_risks={},
+        )
+        cost_alias_target = candidate_pipeline._lane_cost(
+            lane_id=1,
+            current_lane_id=1,
+            lane_safety_scores={1: 1.0},
+            lane_prediction_risks={},
+            is_topology_alias_target=True,
+        )
+
+        self.assertGreater(cost_alias_target, cost_ordinary_same_key)
+
+    def test_alias_target_still_charges_lane_change_cost(self):
+        # Same numeric id as current_lane_id, so the ordinary branch's
+        # "int(lane_id) != int(current_lane_id)" check would zero out the
+        # lane-change cost even though this is a real physical lane change.
+        cost_ordinary_same_key = candidate_pipeline._lane_cost(
+            lane_id=1,
+            current_lane_id=1,
+            lane_safety_scores={1: 0.0},
+            lane_prediction_risks={},
+        )
+        cost_alias_target = candidate_pipeline._lane_cost(
+            lane_id=1,
+            current_lane_id=1,
+            lane_safety_scores={1: 0.0},
+            lane_prediction_risks={},
+            is_topology_alias_target=True,
+        )
+
+        self.assertAlmostEqual(cost_alias_target - cost_ordinary_same_key, 5.0)
+
+    def test_non_alias_lookup_is_unaffected(self):
+        cost_default = candidate_pipeline._lane_cost(
+            lane_id=2,
+            current_lane_id=1,
+            lane_safety_scores={2: 0.75},
+            lane_prediction_risks={},
+        )
+        cost_explicit_false = candidate_pipeline._lane_cost(
+            lane_id=2,
+            current_lane_id=1,
+            lane_safety_scores={2: 0.75},
+            lane_prediction_risks={},
+            is_topology_alias_target=False,
+        )
+
+        self.assertAlmostEqual(cost_default, cost_explicit_false)
 
 
 if __name__ == "__main__":

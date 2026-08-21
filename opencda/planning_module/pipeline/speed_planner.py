@@ -156,6 +156,45 @@ def enforce_speed_ceiling(
     )
 
 
+def effective_emergency_gap_m(
+    *,
+    base_emergency_gap_m: float,
+    ego_speed_mps: float,
+    front_obstacle_speed_mps: Optional[float] = None,
+    standstill_buffer_m: float = 1.0,
+    time_headway_s: float = 1.5,
+) -> float:
+    """IDM/RSS-style emergency-stop floor: scales with closing speed.
+
+    A flat distance floor can't tell "closing fast" from "queued
+    nose-to-tail, neither vehicle moving" -- both read as "gap <= floor"
+    even though only one is actually dangerous. Once several vehicles
+    compress into a tight, genuinely stationary queue (a real
+    construction-zone bottleneck), a flat floor latches every one of them
+    at a hard stop forever, since the gap between two motionless vehicles
+    never grows on its own. This shrinks the floor toward a small,
+    still-safe standstill buffer as the closing speed (ego minus the
+    obstacle ahead) drops toward zero, capped at ``base_emergency_gap_m``
+    so a genuinely closing obstacle is never treated more permissively
+    than a flat floor would. If the obstacle's own speed is unknown,
+    assumes the least favorable case (stationary target, i.e. closing
+    speed = ego speed) -- identical to a flat floor's implicit assumption.
+    """
+    closing_speed_mps = max(
+        0.0,
+        float(ego_speed_mps)
+        - (
+            0.0
+            if front_obstacle_speed_mps is None
+            else max(0.0, float(front_obstacle_speed_mps))
+        ),
+    )
+    dynamic_distance_m = float(standstill_buffer_m) + float(time_headway_s) * float(
+        closing_speed_mps
+    )
+    return float(min(float(base_emergency_gap_m), dynamic_distance_m))
+
+
 def build_speed_plan(
     *,
     scenario_decision: object,
@@ -164,6 +203,7 @@ def build_speed_plan(
     ego_speed_mps: float,
     config: Mapping[str, object],
     front_gap_m: Optional[float] = None,
+    front_obstacle_speed_mps: Optional[float] = None,
     upcoming_turn_direction: str = "",
     upcoming_turn_distance_m: Optional[float] = None,
     lane_change_commitment_active: bool = False,
@@ -197,7 +237,12 @@ def build_speed_plan(
     stop_goal = bool(getattr(scenario_decision, "stop_goal_active", False))
     reason = str(getattr(scenario_decision, "reason", "") or "")
     decision = str(behavior_decision or "").strip().lower()
-    if decision in {"stop_at_intersection", "stop_sign", "emergency_brake"}:
+    if decision in {
+        "stop_at_intersection",
+        "stop_sign",
+        "emergency_brake",
+        "static_obstacle_stop",
+    }:
         stop_goal = True
     turn_cap_mps = None
     turn_approach_cap_mps = None
@@ -303,7 +348,18 @@ def build_speed_plan(
         )
         desired_gap_m = standstill_gap_m + time_headway_s * max(0.0, float(ego_speed_mps))
         free_gap_m = desired_gap_m + free_gap_margin_m
-        if gap_m <= emergency_gap_m:
+        emergency_standstill_buffer_m = max(
+            0.0,
+            float(config.get("following_emergency_standstill_buffer_m", 1.0)),
+        )
+        effective_gap_m = effective_emergency_gap_m(
+            base_emergency_gap_m=float(emergency_gap_m),
+            ego_speed_mps=float(ego_speed_mps),
+            front_obstacle_speed_mps=front_obstacle_speed_mps,
+            standstill_buffer_m=float(emergency_standstill_buffer_m),
+            time_headway_s=float(time_headway_s),
+        )
+        if gap_m <= effective_gap_m:
             cap = 0.0
             stop_goal = True
             reason = _join_reason(reason, "speed_plan_obstacle_emergency_stop")

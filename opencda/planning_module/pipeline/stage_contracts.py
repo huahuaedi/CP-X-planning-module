@@ -25,6 +25,11 @@ class ManeuverCommitment:
             str(self.state).upper() in {"COMMITTED", "STABILIZING"}
             and str(self.decision) in LANE_CHANGE_DECISIONS
             and int(self.target_lane_id) != 0
+            # A self-referencing commit (target == source) has no real lateral
+            # offset to execute and can only ever fail its own reference
+            # contract -- treat it as never having been active instead of
+            # locking in an unwinnable maneuver.
+            and int(self.target_lane_id) != int(self.source_lane_id)
             and bool(self.reference_locked)
         )
 
