@@ -467,10 +467,11 @@ mpc:
     # Increase -> sharper guessed steering. Decrease -> more timid rollout turn.
     heading_gain: 1.6
 
-    # Speed-controller gain used to turn speed error into guessed acceleration.
-    # Increase -> faster guessed accel/brake changes.
-    # Decrease -> smoother but slower rollout speed adaptation.
-    speed_gain: 1.2
+    # Warm-start gain used to turn speed error into guessed acceleration for
+    # nonlinear rollout/linearization only. It does not define the QP's
+    # tracked velocity profile; that profile is independently acceleration-
+    # and jerk-reachable from the SpeedPlanner target.
+    speed_gain: 1.6
 
     # If true, the rollout follows a per-stage lane-center path when waypoint
     # data is available. If false, it always points directly toward the active

@@ -6,6 +6,8 @@ from dataclasses import dataclass
 import math
 from typing import Mapping, Optional, Sequence
 
+from opencda.planning_module.behavior_planner.car_follow import idm_acceleration
+
 
 @dataclass(frozen=True)
 class SpeedPlan:
@@ -16,6 +18,7 @@ class SpeedPlan:
     front_gap_m: Optional[float] = None
     desired_follow_gap_m: Optional[float] = None
     continuous_following_active: bool = False
+    idm_acceleration_mps2: Optional[float] = None
     requested_speed_mps: float = 0.0
     scenario_cap_mps: Optional[float] = None
     turn_cap_mps: Optional[float] = None
@@ -42,6 +45,11 @@ class SpeedPlan:
             ),
             "speed_plan_continuous_following_active": bool(
                 self.continuous_following_active
+            ),
+            "speed_plan_idm_acceleration_mps2": (
+                ""
+                if self.idm_acceleration_mps2 is None
+                else float(self.idm_acceleration_mps2)
             ),
             "speed_owner_requested_mps": float(self.requested_speed_mps),
             "speed_owner_scenario_cap_mps": (
@@ -207,6 +215,7 @@ def build_speed_plan(
     upcoming_turn_direction: str = "",
     upcoming_turn_distance_m: Optional[float] = None,
     lane_change_commitment_active: bool = False,
+    previous_idm_acceleration_mps2: Optional[float] = None,
 ) -> SpeedPlan:
     """Return the speed target owned by the scenario/behavior layer."""
 
@@ -323,6 +332,7 @@ def build_speed_plan(
     following_cap_mps = None
     following_gap_m = None
     desired_gap_m = None
+    idm_acceleration_mps2 = None
     if front_gap_m is not None and math.isfinite(float(front_gap_m)) and not stop_goal:
         gap_m = max(0.0, float(front_gap_m))
         following_gap_m = float(gap_m)
@@ -382,7 +392,152 @@ def build_speed_plan(
             cap = 0.0
             stop_goal = True
             reason = _join_reason(reason, "speed_plan_obstacle_emergency_stop")
+        elif (
+            bool(config.get("following_idm_enabled", True))
+            and front_obstacle_speed_mps is not None
+            and math.isfinite(float(front_obstacle_speed_mps))
+        ):
+            # IDM owns normal car-following whenever the selected lead actor
+            # has a usable speed estimate. Convert its acceleration command
+            # into a short-horizon, kinematically reachable speed reference;
+            # all previously computed scenario/turn/lane-change limits remain
+            # hard ceilings. This lets a rear vehicle accelerate back toward
+            # cruise after a lane change, while a closing lead continuously
+            # lowers the same reference instead of engaging a second,
+            # competing distance-only controller.
+            idm_horizon_s = max(
+                0.05,
+                float(config.get("following_idm_target_horizon_s", 0.20)),
+            )
+            idm_max_acceleration_mps2 = max(
+                0.05,
+                float(config.get("following_idm_max_acceleration_mps2", 2.0)),
+            )
+            idm_comfort_deceleration_mps2 = max(
+                0.05,
+                float(
+                    config.get(
+                        "following_idm_comfort_deceleration_mps2", 3.0
+                    )
+                ),
+            )
+            relative_speed_mps = float(ego_speed_mps) - max(
+                0.0, float(front_obstacle_speed_mps)
+            )
+            desired_gap_m = float(standstill_gap_m) + max(
+                0.0,
+                float(ego_speed_mps) * float(time_headway_s)
+                + float(ego_speed_mps)
+                * float(relative_speed_mps)
+                / (
+                    2.0
+                    * math.sqrt(
+                        float(idm_max_acceleration_mps2)
+                        * float(idm_comfort_deceleration_mps2)
+                    )
+                ),
+            )
+            configured_catchup_delta_mps = max(
+                0.0,
+                float(config.get("following_max_catchup_delta_mps", 2.0)),
+            )
+            # requested is the normal cruise target, not a legal hard limit.
+            # IDM continuously owns the interaction; avoid switching its
+            # free-flow speed at a gap threshold because that discontinuity
+            # reintroduces oscillation near the desired spacing.
+            idm_desired_speed_mps = max(
+                0.1,
+                float(
+                    config.get(
+                        "following_idm_free_flow_speed_mps",
+                        float(requested)
+                        + max(
+                            0.0,
+                            float(
+                                config.get(
+                                    "following_idm_free_speed_headroom_mps", 10.0
+                                )
+                            ),
+                        ),
+                    )
+                ),
+            )
+            idm_acceleration_mps2 = idm_acceleration(
+                v=float(ego_speed_mps),
+                v_lead=max(0.0, float(front_obstacle_speed_mps)),
+                gap_m=float(gap_m),
+                v_desired=float(idm_desired_speed_mps),
+                a_max=float(idm_max_acceleration_mps2),
+                b_comfort=float(idm_comfort_deceleration_mps2),
+                time_headway_s=float(time_headway_s),
+                min_gap_m=float(standstill_gap_m),
+                delta=max(
+                    1.0,
+                    float(config.get("following_idm_acceleration_exponent", 4.0)),
+                ),
+            )
+            if (
+                previous_idm_acceleration_mps2 is not None
+                and math.isfinite(float(previous_idm_acceleration_mps2))
+            ):
+                idm_control_dt_s = max(
+                    0.01,
+                    float(config.get("following_idm_control_dt_s", 0.05)),
+                )
+                idm_max_jerk_mps3 = max(
+                    0.1,
+                    float(config.get("following_idm_max_jerk_mps3", 3.0)),
+                )
+                maximum_acceleration_step = (
+                    float(idm_max_jerk_mps3) * float(idm_control_dt_s)
+                )
+                idm_acceleration_mps2 = max(
+                    float(previous_idm_acceleration_mps2) - maximum_acceleration_step,
+                    min(
+                        float(previous_idm_acceleration_mps2) + maximum_acceleration_step,
+                        float(idm_acceleration_mps2),
+                    ),
+                )
+            # Single longitudinal controller: IDM alone determines the next
+            # reachable speed from ego speed, lead speed, and gap. Do not add
+            # a second lead-speed/gap controller here; their branch switching
+            # produced the high-frequency target-speed sawtooth diagnosed by
+            # tools/test_idm_following.py.
+            rate_limited_target_mps = max(
+                0.0,
+                float(ego_speed_mps)
+                + float(idm_acceleration_mps2) * float(idm_horizon_s),
+            )
+            # Only the ordinary behavior-request ceiling may be relaxed for
+            # catch-up. All explicit safety/context caps stay hard.
+            following_hard_ceiling_mps = float(requested) + (
+                float(configured_catchup_delta_mps)
+            )
+            for explicit_cap_mps in (
+                scenario_cap_value,
+                turn_approach_cap_mps,
+                turn_cap_mps,
+                lane_change_cap_mps,
+            ):
+                if explicit_cap_mps is not None:
+                    following_hard_ceiling_mps = min(
+                        float(following_hard_ceiling_mps),
+                        max(0.0, float(explicit_cap_mps)),
+                    )
+            following_cap_mps = min(
+                float(following_hard_ceiling_mps),
+                float(rate_limited_target_mps),
+            )
+            active_constraints.append("idm_following")
+            previous_cap = float(cap)
+            cap = float(following_cap_mps)
+            if abs(float(cap) - previous_cap) > 1.0e-6:
+                limiting_owner = "idm_following"
+            following_active = True
         elif gap_m < free_gap_m:
+            # Conservative fallback for a detected lead whose velocity is
+            # unavailable. Do not pretend that a stationary velocity sample
+            # exists; retain the earlier distance-only behavior instead.
             ratio = (gap_m - emergency_gap_m) / max(
                 1.0e-6,
                 free_gap_m - emergency_gap_m,
@@ -432,6 +587,7 @@ def build_speed_plan(
         front_gap_m=following_gap_m,
         desired_follow_gap_m=desired_gap_m,
         continuous_following_active=bool(following_active),
+        idm_acceleration_mps2=idm_acceleration_mps2,
         requested_speed_mps=float(requested),
         scenario_cap_mps=scenario_cap_value,
         turn_cap_mps=turn_cap_mps,

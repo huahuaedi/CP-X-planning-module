@@ -120,13 +120,32 @@ def test_compensated_command_round_trips_to_requested_acceleration():
     assert abs(recovered - 0.5) < 1.0e-9
 
 
-def test_positive_acceleration_coasts_after_overspeed():
+def test_positive_acceleration_tapers_throttle_just_past_overspeed():
+    # 0.3 m/s over target: past the 0.15 deadband, but well inside the
+    # default 1.0 m/s taper band, so throttle rolls off smoothly instead
+    # of stepping straight to zero (a hard cutoff here was a real
+    # disturbance at higher cruise speeds -- see actuator_mapper.py's
+    # overspeed_taper_mps docstring).
     mapper = CarlaActuatorMapper({})
     command = mapper.map_acceleration(
         acceleration_mps2=1.5,
         max_acceleration_mps2=3.0,
         min_acceleration_mps2=-3.0,
         ego_speed_mps=3.3,
+        target_speed_mps=3.0,
+        stop_goal_active=False,
+    )
+    assert 0.0 < command.throttle < 0.5
+    assert command.brake == 0.0
+
+
+def test_positive_acceleration_coasts_well_past_overspeed_taper():
+    mapper = CarlaActuatorMapper({})
+    command = mapper.map_acceleration(
+        acceleration_mps2=1.5,
+        max_acceleration_mps2=3.0,
+        min_acceleration_mps2=-3.0,
+        ego_speed_mps=4.5,
         target_speed_mps=3.0,
         stop_goal_active=False,
     )

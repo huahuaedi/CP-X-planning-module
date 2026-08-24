@@ -170,28 +170,12 @@ class OpenCDAPlanningAdapter:
             ego_heading_rad=float(ego_yaw_rad),
         )
 
-        lane_assignments = bridge.assign_obstacles_to_lanes(object_snapshots)
         ego_snapshot = {
             "x": float(ego_location.x),
             "y": float(ego_location.y),
             "v": float(ego_speed_mps),
             "psi": float(ego_yaw_rad),
         }
-        lane_safety_scores = bridge.lane_safety_scorer.compute_lane_scores(
-            ego_snapshot=ego_snapshot,
-            obstacle_snapshots=object_snapshots,
-            lane_assignments=lane_assignments,
-            ego_lane_id=int(current_lane_id),
-            available_lane_ids=lane_ids,
-            timestamp_s=float(sim_time_s),
-        )
-        bridge.lane_safety_scorer.cleanup_stale_obstacles(set(lane_assignments.keys()))
-        front_dist_by_lane = bridge.nearest_front_distance_by_lane(
-            ego_snapshot=ego_snapshot,
-            obstacle_snapshots=object_snapshots,
-            lane_assignments=lane_assignments,
-            available_lane_ids=lane_ids,
-        )
 
         route_points = bridge.active_global_route_points()
         route_summary = bridge.planning_global_route_summary(
@@ -261,6 +245,11 @@ class OpenCDAPlanningAdapter:
             signal_context=signal_context,
             stop_target=stop_target,
         )
+        # Lane assignment, safety scoring, and front-gap extraction used to
+        # run once on raw detections and then immediately run again on the
+        # tracker output below.  Nothing consumed the first result.  Keep the
+        # tracked snapshot as the single per-tick map-query owner so each
+        # obstacle is projected onto the CARLA reference map only once.
         lane_assignments = bridge.assign_obstacles_to_lanes(
             tracked_obstacles,
             ego_waypoint=ego_waypoint,
@@ -281,14 +270,30 @@ class OpenCDAPlanningAdapter:
             lane_assignments=lane_assignments,
             available_lane_ids=lane_ids,
         )
+        # A flat min_front_gap_m doesn't scale with cruise speed -- give
+        # it the same reaction-time margin regardless of how fast the
+        # scenario is configured to cruise, floored at the configured
+        # distance so low-speed/queued situations keep a sane minimum.
+        # Scaled off the *configured* cruise target rather than ego's
+        # live instantaneous speed: the conflict that matters here (a
+        # queued lane change denied by this exact check) happens while
+        # ego is still mid-acceleration toward that target, so scaling
+        # off the live speed barely moved the effective floor at the
+        # moment it mattered (confirmed via telemetry -- same denial,
+        # same distances, down to the decimal, before and after that
+        # version of the fix).
+        speed_scaled_min_gap_m = max(
+            float(bridge.min_front_gap_m),
+            float(bridge.target_speed_mps) * float(bridge.min_front_gap_time_s),
+        )
         prediction_frame = bridge.tracker.predict(
             ego_snapshot=ego_snapshot,
             lane_assignments=lane_assignments,
             available_lane_ids=lane_ids,
             horizon_s=float(bridge.mpc.horizon_s),
             dt_s=float(bridge.mpc.dt_s),
-            min_front_gap_m=float(bridge.min_front_gap_m),
-            min_rear_gap_m=float(bridge.min_front_gap_m),
+            min_front_gap_m=float(speed_scaled_min_gap_m),
+            min_rear_gap_m=float(speed_scaled_min_gap_m),
             min_ttc_s=float(bridge.config.get("prediction_min_ttc_s", 2.0)),
             lane_step_fn=bridge.lane_step_fn(),
         )

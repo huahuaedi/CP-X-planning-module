@@ -101,6 +101,10 @@ class CPXRouteManager:
         self._fallback_route_points: List[List[float]] = []
         self._carla_route_planner = None
         self._carla_route_entries: List[Any] = []
+        self._carla_route_nodes_cache_key: Optional[Tuple[int, int, int, int]] = None
+        self._carla_route_nodes_cache: Tuple[Tuple[float, float, float, Any, str], ...] = ()
+        self._geometry_route_points_cache_key: Optional[Tuple[int, int, int, int]] = None
+        self._geometry_route_points_cache: Tuple[Tuple[float, float, float, float], ...] = ()
         self._carla_route_progress_index = 0
         self._carla_route_progress_initialized = False
         self._carla_route_projection: Optional[Tuple[int, float, float, float, float]] = None
@@ -605,6 +609,9 @@ class CPXRouteManager:
 
         nodes = self._carla_route_nodes()
         if len(nodes) >= 2:
+            cache_key = self._carla_route_entries_cache_key()
+            if self._geometry_route_points_cache_key == cache_key:
+                return [list(point) for point in self._geometry_route_points_cache]
             points: List[List[float]] = []
             for index, node in enumerate(nodes):
                 if index + 1 < len(nodes):
@@ -623,6 +630,10 @@ class CPXRouteManager:
                     float(node[2]),
                     float(heading_rad),
                 ])
+            self._geometry_route_points_cache_key = cache_key
+            self._geometry_route_points_cache = tuple(
+                tuple(float(value) for value in point) for point in points
+            )
             return points
         return self.route_points(x_m=x_m, y_m=y_m, query_key=query_key)
 
@@ -1042,6 +1053,9 @@ class CPXRouteManager:
         return str(self._carla_route_sync_reason)
 
     def _carla_route_nodes(self) -> List[Tuple[float, float, float, Any, str]]:
+        cache_key = self._carla_route_entries_cache_key()
+        if self._carla_route_nodes_cache_key == cache_key:
+            return list(self._carla_route_nodes_cache)
         nodes: List[Tuple[float, float, float, Any, str]] = []
         for entry in list(self._carla_route_entries or []):
             waypoint, option = _carla_route_entry(entry)
@@ -1054,7 +1068,25 @@ class CPXRouteManager:
             if nodes and math.hypot(x_m - nodes[-1][0], y_m - nodes[-1][1]) < 1.0e-3:
                 continue
             nodes.append((x_m, y_m, z_m, waypoint, _road_option_name(option)))
+        self._carla_route_nodes_cache_key = cache_key
+        self._carla_route_nodes_cache = tuple(nodes)
         return nodes
+
+    def _carla_route_entries_cache_key(self) -> Tuple[int, int, int, int]:
+        """Identify the immutable route-entry snapshot used by geometry caches.
+
+        Route installation replaces ``_carla_route_entries`` with a new list.
+        Including the list plus its endpoint identities also keeps direct test
+        fixtures and compatibility callers safe without changing that legacy
+        attribute into a property.
+        """
+        entries = self._carla_route_entries
+        return (
+            id(entries),
+            len(entries),
+            id(entries[0]) if entries else 0,
+            id(entries[-1]) if entries else 0,
+        )
 
     @property
     def carla_route_debug_reason(self) -> str:

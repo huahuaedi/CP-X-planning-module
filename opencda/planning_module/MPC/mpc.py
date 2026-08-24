@@ -2485,6 +2485,97 @@ class MPC:
 
         return x_ref_traj, u_ref_traj
 
+    def _speed_tracking_reference(
+        self,
+        *,
+        x0: np.ndarray,
+        x_ref_target: np.ndarray,
+        linearization_rollout: np.ndarray,
+        object_snapshots: Sequence[Mapping[str, object]],
+        current_acceleration_mps2: float,
+        speed_upper_bound_mps: float | None = None,
+        reachable_speed_floor_profile_mps: Sequence[float] | None = None,
+    ) -> np.ndarray:
+        """Build the QP velocity reference independently of ``speed_gain``.
+
+        ``_reference_rollout`` remains a nonlinear warm start and
+        linearization trajectory.  This profile is the longitudinal contract
+        the QP actually tracks: it approaches the SpeedPlanner target through
+        the same acceleration and jerk limits enforced by the optimization.
+        """
+
+        rollout = np.asarray(linearization_rollout, dtype=float)
+        if rollout.shape != (self.horizon_steps + 1, self.nx):
+            raise ValueError("linearization rollout must be shaped (N+1,nx)")
+        effective_upper_mps = float(self.constraints.max_velocity_mps)
+        if speed_upper_bound_mps is not None:
+            effective_upper_mps = min(
+                float(effective_upper_mps),
+                max(
+                    float(self.constraints.min_velocity_mps),
+                    float(speed_upper_bound_mps),
+                ),
+            )
+        base_target_mps = self._clamp(
+            float(x_ref_target[2]),
+            float(self.constraints.min_velocity_mps),
+            float(effective_upper_mps),
+        )
+        profile = np.zeros(self.horizon_steps + 1, dtype=float)
+        profile[0] = self._clamp(
+            float(x0[2]),
+            float(self.constraints.min_velocity_mps),
+            float(self.constraints.max_velocity_mps),
+        )
+        previous_accel_mps2 = self._clamp(
+            float(current_acceleration_mps2),
+            float(self.constraints.min_acceleration_mps2),
+            float(self.constraints.max_acceleration_mps2),
+        )
+        jerk_step_mps2 = (
+            float(self.constraints.max_jerk_mps3) * float(self.dt_s)
+        )
+        for k in range(self.horizon_steps):
+            stage_target_mps = self._compute_reference_rollout_speed_limit(
+                stage_x_m=float(rollout[k, 0]),
+                stage_y_m=float(rollout[k, 1]),
+                stage_heading_rad=float(rollout[k, 3]),
+                stage_index=int(k),
+                base_speed_mps=float(base_target_mps),
+                object_snapshots=object_snapshots,
+            )
+            stage_upper_mps = self._future_speed_upper_bound_mps(
+                active_speed_upper_bound_mps=float(effective_upper_mps),
+                future_state_index=int(k + 1),
+                reachable_speed_floor_profile_mps=reachable_speed_floor_profile_mps,
+            )
+            if bool(getattr(self, "speed_soft_constraint_enabled", False)):
+                stage_upper_mps += float(self.speed_soft_max_slack_mps)
+            stage_target_mps = min(float(stage_target_mps), float(stage_upper_mps))
+            desired_accel_mps2 = self._clamp(
+                (float(stage_target_mps) - float(profile[k]))
+                / max(1.0e-9, float(self.dt_s)),
+                float(self.constraints.min_acceleration_mps2),
+                float(self.constraints.max_acceleration_mps2),
+            )
+            accel_mps2 = self._clamp(
+                float(desired_accel_mps2),
+                float(previous_accel_mps2) - float(jerk_step_mps2),
+                float(previous_accel_mps2) + float(jerk_step_mps2),
+            )
+            accel_mps2 = self._clamp(
+                float(accel_mps2),
+                float(self.constraints.min_acceleration_mps2),
+                float(self.constraints.max_acceleration_mps2),
+            )
+            profile[k + 1] = self._clamp(
+                float(profile[k]) + float(self.dt_s) * float(accel_mps2),
+                float(self.constraints.min_velocity_mps),
+                float(stage_upper_mps),
+            )
+            previous_accel_mps2 = float(accel_mps2)
+        return profile
+
     def _linearize_dynamics(self, x_bar: np.ndarray, u_bar: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Intent:
@@ -2552,6 +2643,7 @@ class MPC:
         speed_upper_bound_mps: float | None,
         reachable_speed_floor_profile_mps: Sequence[float] | None,
         road_envelope_blocks: Mapping[str, object] | None = None,
+        speed_tracking_reference_mps: Sequence[float] | None = None,
     ) -> Tuple[sp.csc_matrix, np.ndarray, sp.csc_matrix, np.ndarray, np.ndarray, QPIndex]:
         """
         Intent:
@@ -2710,6 +2802,11 @@ class MPC:
             x_ref_value = float(stage_reference[0])
             y_ref_value = float(stage_reference[1])
             v_ref_value = float(stage_reference[2])
+            if (
+                speed_tracking_reference_mps is not None
+                and len(speed_tracking_reference_mps) > int(k)
+            ):
+                v_ref_value = float(speed_tracking_reference_mps[int(k)])
             psi_ref_value = self._wrap_angle(float(stage_reference[3]))
             x_k_idx = index.state_index(k, 0)
             y_k_idx = index.state_index(k, 1)
@@ -3610,10 +3707,20 @@ class MPC:
             seed_state_traj=shifted_seed[0] if shifted_seed is not None else None,
             seed_control_traj=shifted_seed[1] if shifted_seed is not None else None,
         )
+        speed_tracking_reference_mps = self._speed_tracking_reference(
+            x0=x0,
+            x_ref_target=destination,
+            linearization_rollout=x_ref_rollout,
+            object_snapshots=object_snapshots,
+            current_acceleration_mps2=float(planning_current_acceleration_mps2),
+            speed_upper_bound_mps=float(active_speed_upper_bound_mps),
+            reachable_speed_floor_profile_mps=reachable_speed_floor_profile_mps,
+        )
 
         def _run_sequential_qp(
             initial_x_ref_rollout: np.ndarray,
             initial_u_ref_rollout: np.ndarray,
+            fixed_speed_tracking_reference_mps: Sequence[float],
         ) -> tuple[np.ndarray | None, np.ndarray | None, str, float, np.ndarray, np.ndarray]:
             solve_time_total_ms = 0.0
             current_x_rollout = np.asarray(initial_x_ref_rollout, dtype=float)
@@ -3635,6 +3742,9 @@ class MPC:
                     speed_upper_bound_mps=float(active_speed_upper_bound_mps),
                     reachable_speed_floor_profile_mps=reachable_speed_floor_profile_mps,
                     road_envelope_blocks=road_envelope_blocks,
+                    speed_tracking_reference_mps=(
+                        fixed_speed_tracking_reference_mps
+                    ),
                 )
                 solution, status, solve_time_ms = self._solve_qp(P=P, q=q, A=A, l=l, u=u)
                 solve_time_total_ms += float(solve_time_ms)
@@ -3657,6 +3767,10 @@ class MPC:
         best_x_solution, best_u_solution, best_status, total_solve_time_ms, current_x_ref_rollout, current_u_ref_rollout = _run_sequential_qp(
             initial_x_ref_rollout=np.asarray(x_ref_rollout, dtype=float),
             initial_u_ref_rollout=np.asarray(u_ref_rollout, dtype=float),
+            fixed_speed_tracking_reference_mps=np.asarray(
+                speed_tracking_reference_mps,
+                dtype=float,
+            ),
         )
 
         solved_initially = best_x_solution is not None and best_u_solution is not None
@@ -3678,6 +3792,21 @@ class MPC:
                 seed_state_traj=None,
                 seed_control_traj=None,
             )
+            clean_speed_tracking_reference_mps = (
+                self._speed_tracking_reference(
+                    x0=x0,
+                    x_ref_target=destination,
+                    linearization_rollout=clean_x_ref_rollout,
+                    object_snapshots=object_snapshots,
+                    current_acceleration_mps2=float(
+                        planning_current_acceleration_mps2
+                    ),
+                    speed_upper_bound_mps=float(active_speed_upper_bound_mps),
+                    reachable_speed_floor_profile_mps=(
+                        reachable_speed_floor_profile_mps
+                    ),
+                )
+            )
             (
                 best_x_solution,
                 best_u_solution,
@@ -3688,6 +3817,10 @@ class MPC:
             ) = _run_sequential_qp(
                 initial_x_ref_rollout=np.asarray(clean_x_ref_rollout, dtype=float),
                 initial_u_ref_rollout=np.asarray(clean_u_ref_rollout, dtype=float),
+                fixed_speed_tracking_reference_mps=np.asarray(
+                    clean_speed_tracking_reference_mps,
+                    dtype=float,
+                ),
             )
             total_solve_time_ms += float(clean_solve_time_ms)
             self._record_clean_restart_result(

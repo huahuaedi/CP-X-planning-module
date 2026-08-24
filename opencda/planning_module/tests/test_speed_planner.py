@@ -99,6 +99,134 @@ class SpeedPlannerTest(unittest.TestCase):
         self.assertEqual(plan.limiting_owner, "following_cap")
         self.assertIn("following_cap", plan.active_constraints)
 
+    def test_idm_accelerates_rear_vehicle_toward_cruise_after_lane_change(self):
+        plan = build_speed_plan(
+            scenario_decision=SimpleNamespace(
+                speed_cap_mps=None,
+                stop_goal_active=False,
+                reason="",
+            ),
+            behavior_decision="lane_follow",
+            requested_speed_mps=12.0,
+            ego_speed_mps=8.0,
+            config={},
+            front_gap_m=60.0,
+            front_obstacle_speed_mps=11.0,
+        )
+        self.assertGreater(plan.target_speed_mps, 8.0)
+        self.assertLessEqual(plan.target_speed_mps, 12.0)
+        self.assertGreater(plan.idm_acceleration_mps2, 0.0)
+        self.assertTrue(plan.continuous_following_active)
+        self.assertIn("idm_following", plan.active_constraints)
+
+    def test_idm_matches_a_slower_lead_without_emergency_stop(self):
+        plan = build_speed_plan(
+            scenario_decision=SimpleNamespace(
+                speed_cap_mps=None,
+                stop_goal_active=False,
+                reason="",
+            ),
+            behavior_decision="lane_follow",
+            requested_speed_mps=12.0,
+            ego_speed_mps=12.0,
+            config={},
+            front_gap_m=18.0,
+            front_obstacle_speed_mps=7.0,
+        )
+        self.assertLess(plan.target_speed_mps, 12.0)
+        self.assertLess(plan.idm_acceleration_mps2, 0.0)
+        self.assertFalse(plan.stop_goal_active)
+        self.assertEqual(plan.limiting_owner, "idm_following")
+
+    def test_pure_idm_applies_its_equilibrium_correction_at_dynamic_gap(self):
+        ego_speed = 8.0
+        lead_speed = 8.0
+        desired_gap = 5.0 + 1.5 * ego_speed
+        plan = build_speed_plan(
+            scenario_decision=SimpleNamespace(
+                speed_cap_mps=None,
+                stop_goal_active=False,
+                reason="",
+            ),
+            behavior_decision="lane_follow",
+            requested_speed_mps=12.0,
+            ego_speed_mps=ego_speed,
+            config={},
+            front_gap_m=desired_gap,
+            front_obstacle_speed_mps=lead_speed,
+        )
+        self.assertLess(plan.target_speed_mps, lead_speed)
+        self.assertGreater(plan.target_speed_mps, lead_speed - 0.5)
+        self.assertAlmostEqual(plan.desired_follow_gap_m, desired_gap)
+
+    def test_idm_uses_small_lead_relative_catchup_when_gap_is_large(self):
+        plan = build_speed_plan(
+            scenario_decision=SimpleNamespace(
+                speed_cap_mps=None,
+                stop_goal_active=False,
+                reason="",
+            ),
+            behavior_decision="lane_follow",
+            requested_speed_mps=15.0,
+            ego_speed_mps=10.0,
+            config={},
+            front_gap_m=50.0,
+            front_obstacle_speed_mps=10.0,
+        )
+        self.assertGreater(plan.target_speed_mps, 10.0)
+        self.assertLessEqual(plan.target_speed_mps, 12.0)
+
+    def test_idm_may_temporarily_exceed_cruise_target_to_close_large_gap(self):
+        plan = build_speed_plan(
+            scenario_decision=SimpleNamespace(
+                speed_cap_mps=None,
+                stop_goal_active=False,
+                reason="",
+            ),
+            behavior_decision="lane_follow",
+            requested_speed_mps=12.0,
+            ego_speed_mps=12.0,
+            config={"following_max_catchup_delta_mps": 2.0},
+            front_gap_m=60.0,
+            front_obstacle_speed_mps=12.0,
+        )
+        self.assertGreater(plan.target_speed_mps, 12.0)
+        self.assertLessEqual(plan.target_speed_mps, 14.0)
+        self.assertEqual(plan.limiting_owner, "idm_following")
+
+    def test_idm_catchup_never_exceeds_explicit_scenario_cap(self):
+        plan = build_speed_plan(
+            scenario_decision=SimpleNamespace(
+                speed_cap_mps=12.5,
+                stop_goal_active=False,
+                reason="road_speed_limit",
+            ),
+            behavior_decision="lane_follow",
+            requested_speed_mps=12.0,
+            ego_speed_mps=12.0,
+            config={"following_max_catchup_delta_mps": 2.0},
+            front_gap_m=60.0,
+            front_obstacle_speed_mps=12.0,
+        )
+        self.assertLessEqual(plan.target_speed_mps, 12.5)
+
+    def test_idm_never_raises_scenario_speed_ceiling(self):
+        plan = build_speed_plan(
+            scenario_decision=SimpleNamespace(
+                speed_cap_mps=9.0,
+                stop_goal_active=False,
+                reason="",
+            ),
+            behavior_decision="lane_follow",
+            requested_speed_mps=12.0,
+            ego_speed_mps=8.5,
+            config={},
+            front_gap_m=80.0,
+            front_obstacle_speed_mps=12.0,
+        )
+        self.assertLessEqual(plan.target_speed_mps, 9.0)
+        self.assertGreater(plan.idm_acceleration_mps2, 0.0)
+
     def test_emergency_gap_requests_stop(self):
         plan = self._plan(2.5)
         self.assertEqual(plan.target_speed_mps, 0.0)

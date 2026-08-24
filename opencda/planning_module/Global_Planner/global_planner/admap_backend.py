@@ -7,6 +7,7 @@ from pathlib import Path
 from .runtime import import_ad_map_access
 
 ad = None
+_map_matcher = None
 
 
 def _get_compatible_attribute(value, *attribute_names):
@@ -39,6 +40,29 @@ def ensure_runtime_ready(ad_map_install_root: str | Path | None = None):
     if ad is None:
         ad = import_ad_map_access(ad_map_install_root)
     return ad
+
+
+def _get_map_matcher():
+    """Return the map-lifetime AD-map matcher.
+
+    ``AdMapMatching`` does not carry an ego pose; the loaded map is owned by
+    AD-map's process-wide access singleton.  Reusing the matcher therefore
+    avoids reconstructing the same native helper on every planning tick
+    without changing the search radius, probability threshold, or results.
+    Map load/cleanup functions invalidate this cache.
+    """
+    global _map_matcher
+
+    if _map_matcher is None:
+        _map_matcher = ad.map.match.AdMapMatching()
+    return _map_matcher
+
+
+def _reset_map_matcher() -> None:
+    """Invalidate the cached matcher after the active map changes."""
+    global _map_matcher
+
+    _map_matcher = None
 
 
 def to_base_value(value):
@@ -148,6 +172,7 @@ def load_open_drive_map(xodr_path: str | Path, overlap_margin: float = 0.05) -> 
         )
     if not initialized:
         raise RuntimeError(f"Failed to load map: {path}")
+    _reset_map_matcher()
     return get_all_lane_ids()
 
 
@@ -162,6 +187,7 @@ def load_adm_map(adm_config_path: str | Path) -> bool:
         raise FileNotFoundError(path)
     if not ad.map.access.init(str(path)):
         raise RuntimeError(f"Failed to load cached AD map: {path}")
+    _reset_map_matcher()
     return True
 
 
@@ -193,6 +219,7 @@ def close_map() -> None:
     output: none (`None`)
     """
     ad.map.access.cleanup()
+    _reset_map_matcher()
 
 
 def get_lane(lane_id: int):
@@ -246,7 +273,7 @@ def get_map_matches(enu_point, search_radius: float = 8.0) -> list:
     input: `enu_point` (`ad.map.point.ENUPoint`), `search_radius` (`float`)
     output: routable map matches (`list`)
     """
-    matcher = ad.map.match.AdMapMatching()
+    matcher = _get_map_matcher()
     matches = matcher.getMapMatchedPositions(
         enu_point,
         ad.physics.Distance(search_radius),

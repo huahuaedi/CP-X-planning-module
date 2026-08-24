@@ -13,6 +13,7 @@ import dataclasses
 import json
 import math
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
@@ -175,6 +176,19 @@ class CPXMPCPlannerBridge:
         self.target_speed_mps = float(self.config.get("target_speed_mps", 8.0))
         self.lookahead_m = float(self.config.get("lookahead_m", 18.0))
         self.min_front_gap_m = float(self.config.get("min_front_gap_m", 8.0))
+        # min_front_gap_m alone is a flat distance that doesn't scale with
+        # cruise speed: at 11.18 m/s the default 8.0m gave several
+        # seconds of reaction margin before target_lane_prediction_risk
+        # would trip, but at 20 m/s the same 8.0m is covered in half the
+        # time -- confirmed via telemetry (Interactive_Lane_Change's
+        # queued lane change missed again at 20 m/s cruise, tripping this
+        # exact check, after being fixed at 11.18 m/s). min_front_gap_time_s
+        # defaults to 8.0/11.18 so today's calibrated distance is
+        # reproduced exactly at 11.18 m/s, while the effective floor grows
+        # proportionally with whatever cruise speed is configured.
+        self.min_front_gap_time_s = float(
+            self.config.get("min_front_gap_time_s", 8.0 / 11.18)
+        )
         self.max_mpc_obstacles = max(0, int(self.config.get("max_mpc_obstacles", 4)))
         self.debug = bool(self.config.get("debug", True))
         self.last_debug: dict[str, Any] = {}
@@ -448,6 +462,7 @@ class CPXMPCPlannerBridge:
             "speed_plan_front_gap_m",
             "speed_plan_desired_follow_gap_m",
             "speed_plan_continuous_following_active",
+            "speed_plan_idm_acceleration_mps2",
             "speed_plan_reason",
             "speed_owner_requested_mps",
             "speed_owner_scenario_cap_mps",
@@ -2691,6 +2706,14 @@ class CPXMPCPlannerBridge:
             "speed_plan_continuous_following_active": reference_debug.get(
                 "speed_plan_continuous_following_active", ""
             ),
+            "speed_plan_idm_acceleration_mps2": reference_debug.get(
+                "speed_plan_idm_acceleration_mps2", ""
+            ),
+            "front_gap_actor_id": reference_debug.get("front_gap_actor_id", ""),
+            "front_gap_obstacle_speed_mps": reference_debug.get(
+                "front_gap_obstacle_speed_mps", ""
+            ),
+            "snapshot_repr_diag": reference_debug.get("snapshot_repr_diag", ""),
             "speed_owner_requested_mps": reference_debug.get(
                 "speed_owner_requested_mps", ""
             ),
@@ -4041,6 +4064,17 @@ class CPXMPCPlannerBridge:
                 allowed=False,
                 reason=cooperative_lane_change_yield_reason,
             )
+            cooperative_wait_speed_cap_mps = self._cooperative_wait_speed_cap_mps(
+                ego_location=ego_location,
+                ego_speed_mps=float(ego_speed_mps),
+                cooperative_lane_change_yield_reason=(
+                    cooperative_lane_change_yield_reason
+                ),
+            )
+            if cooperative_wait_speed_cap_mps is not None:
+                speed_ref_mps = min(
+                    float(speed_ref_mps), float(cooperative_wait_speed_cap_mps)
+                )
         route_lane_change_required = bool(lane_change_authorization.required_by_route)
         # If the route ever genuinely required a specific lane, remember it.
         # The route's own next-macro-maneuver progression advances on
@@ -4981,6 +5015,8 @@ class CPXMPCPlannerBridge:
             ego_location=ego_location,
             ego_yaw_rad=float(ego_yaw_rad),
             object_snapshots=object_snapshots,
+            current_lane_id=int(current_lane_id),
+            lane_assignments=dict(adapter_output.lane_assignments),
             lane_change_direction=(
                 "left" if str(decision) == "lane_change_left"
                 else "right" if str(decision) == "lane_change_right"
@@ -5022,6 +5058,14 @@ class CPXMPCPlannerBridge:
             lane_change_commitment_active=bool(
                 lane_change_commitment_pending_stabilization
             ),
+            previous_idm_acceleration_mps2=getattr(
+                self, "_previous_following_idm_acceleration_mps2", None
+            ),
+        )
+        self._previous_following_idm_acceleration_mps2 = (
+            None
+            if speed_plan.idm_acceleration_mps2 is None
+            else float(speed_plan.idm_acceleration_mps2)
         )
         speed_ref_mps = float(speed_plan.target_speed_mps)
         stop_goal_active = bool(stop_goal_active or speed_plan.stop_goal_active)
@@ -5150,6 +5194,24 @@ class CPXMPCPlannerBridge:
             "fallback_reason": str(ref_output.last_reference_fallback_reason),
             "reference_source": "behavior_reference_pipeline",
             "front_gap_actor_id": str(front_gap_actor_id or ""),
+            "front_gap_obstacle_speed_mps": (
+                ""
+                if front_gap_obstacle_speed_mps is None
+                else float(front_gap_obstacle_speed_mps)
+            ),
+            "snapshot_repr_diag": str(
+                [
+                    {
+                        k: v
+                        for k, v in dict(snap).items()
+                        if k in (
+                            "track_id", "object_id", "vehicle_id",
+                            "actor_id", "id", "v", "speed_mps", "x", "y",
+                        )
+                    }
+                    for snap in list(object_snapshots or [])
+                ]
+            ),
             "route_reference_allowed": bool(route_reference_allowed),
             "route_reference_gate_reason": str(route_reference_gate_reason),
             "route_lane_change_allowed": bool(route_lane_change_allowed),
@@ -6543,6 +6605,140 @@ class CPXMPCPlannerBridge:
             ),
         )
         return str(reason) if reason else ""
+
+    def _cooperative_wait_speed_cap_mps(
+        self,
+        *,
+        ego_location: carla.Location,
+        ego_speed_mps: float,
+        cooperative_lane_change_yield_reason: str,
+    ) -> Optional[float]:
+        """Cap speed while queued behind a peer's lane change.
+
+        ``_cooperative_lane_change_yield_reason`` already holds ego's own
+        lane change back until the peer clears -- necessary but not
+        sufficient. That peer is normally in an ADJACENT lane, outside
+        ego's own-lane ``_front_gap_m`` search cone, so the ordinary
+        following-cap in speed_planner.py never sees it and has no reason
+        to slow down for it. Left unconstrained, ego keeps accelerating
+        toward its full cruise target while waiting, closes the real gap
+        to the peer it intends to merge behind, and by the time its own
+        turn opens up the gap has fallen under trajectory_risk.py's
+        min_front_gap_m -- so the now-authorized lane change gets denied
+        by target_lane_prediction_risk and is missed once the route's own
+        lane-change requirement lapses (diagnosed via Interactive_Lane_
+        Change telemetry: gap fell from ~8.3m to ~6.5m across the wait
+        window). This does not touch that prediction-risk check at all;
+        it just stops ego from closing the gap in the first place while
+        it has nowhere to go yet.
+
+        The trigger distance is deliberately larger than trajectory_risk.
+        py's own min_front_gap_m (8.0m default): reusing that exact value
+        here gave this cap zero lead time -- telemetry showed the yield
+        reason (and therefore this function) only ever starts firing once
+        the gap has *already* dropped to ~7.9m, one tick past the hard
+        floor, so there was never a tick left where capping ego's speed
+        could still have prevented the gap sliding on down to ~6.5-6.9m
+        and tripping target_lane_prediction_risk. A separate, wider
+        trigger (cooperative_wait_trigger_gap_m, default 15.0m) gives the
+        cap several seconds of runway to hold ego at the peer's speed
+        before the hard threshold is anywhere close.
+        """
+        if not cooperative_lane_change_yield_reason:
+            return None
+        match = re.search(r"peer=(-?\d+)", cooperative_lane_change_yield_reason)
+        if match is None:
+            return None
+        peer_id = match.group(1)
+        v2x_manager = getattr(self.vehicle_manager, "v2x_manager", None)
+        cav_nearby = dict(getattr(v2x_manager, "cav_nearby", {}) or {})
+        peer_manager = cav_nearby.get(str(peer_id))
+        peer_vehicle = getattr(peer_manager, "vehicle", None)
+        if peer_vehicle is None:
+            return None
+        try:
+            peer_location = peer_vehicle.get_location()
+            peer_velocity = peer_vehicle.get_velocity()
+        except Exception:
+            return None
+        peer_speed_mps = math.sqrt(
+            float(peer_velocity.x) ** 2
+            + float(peer_velocity.y) ** 2
+            + float(peer_velocity.z) ** 2
+        )
+        distance_m = math.hypot(
+            float(peer_location.x) - float(ego_location.x),
+            float(peer_location.y) - float(ego_location.y),
+        )
+        # Both floors below are flat distances that don't scale with
+        # cruise speed -- also give them the same reaction-time margin
+        # regardless of configured cruise speed, matching min_front_gap_m's
+        # own speed scaling in planner_input_adapter.py. Scaled off the
+        # *configured* cruise target (self.target_speed_mps), not ego's
+        # live instantaneous speed -- this wait window happens while ego
+        # is still mid-acceleration toward that target, so scaling off
+        # the live speed barely moved either floor at the moment it
+        # mattered (confirmed via telemetry: identical denial, identical
+        # distances down to the decimal, before and after that version).
+        min_gap_m = max(
+            0.5,
+            float(self.target_speed_mps) * float(self.min_front_gap_time_s),
+            float(self.config.get("cooperative_wait_min_gap_m", 8.0)),
+        )
+        trigger_gap_m = max(
+            float(min_gap_m),
+            float(self.target_speed_mps)
+            * float(self.config.get("cooperative_wait_trigger_time_s", 15.0 / 11.18)),
+            float(self.config.get("cooperative_wait_trigger_gap_m", 15.0)),
+        )
+        if float(distance_m) >= float(trigger_gap_m):
+            return None
+        # min(ego_speed, peer_speed) was the original cap here, but it does
+        # nothing when both CAVs are ramping up toward the same cruise
+        # target in near lockstep from a similar start (confirmed via
+        # telemetry at 20 m/s cruise: peer's speed tracked ego's own climb
+        # tick-for-tick, ~7->11 m/s over the same 2s window, so "cap at
+        # peer's speed" never actually differed from where ego was already
+        # headed -- three separate threshold-tuning attempts on the
+        # trigger/min-gap distances above produced bit-identical
+        # trajectories because the actual constraining value never
+        # changed). Reuse the same IDM model used for ordinary front-
+        # vehicle following instead: it reacts to the actual gap being
+        # smaller than the desired safe spacing even when closing speed is
+        # ~0, which a plain speed-match can't express.
+        from opencda.planning_module.behavior_planner.car_follow import (
+            idm_acceleration as _cooperative_wait_idm_acceleration,
+        )
+
+        idm_accel = _cooperative_wait_idm_acceleration(
+            v=float(ego_speed_mps),
+            v_lead=max(0.0, float(peer_speed_mps)),
+            gap_m=max(0.1, float(distance_m)),
+            v_desired=max(0.1, float(self.target_speed_mps)),
+            a_max=max(
+                0.05,
+                float(self.config.get("following_idm_max_acceleration_mps2", 2.0)),
+            ),
+            b_comfort=max(
+                0.05,
+                float(
+                    self.config.get(
+                        "following_idm_comfort_deceleration_mps2", 3.0
+                    )
+                ),
+            ),
+            time_headway_s=max(
+                0.05, float(self.config.get("following_time_headway_s", 1.5))
+            ),
+            min_gap_m=float(min_gap_m),
+            delta=max(
+                1.0, float(self.config.get("following_idm_acceleration_exponent", 4.0))
+            ),
+        )
+        cap_horizon_s = max(
+            0.05, float(self.config.get("cooperative_wait_cap_horizon_s", 1.0))
+        )
+        return max(0.0, float(ego_speed_mps) + float(idm_accel) * float(cap_horizon_s))
 
     def _cooperative_avoidance_lane_yield_reason(
         self,
@@ -11662,6 +11858,8 @@ class CPXMPCPlannerBridge:
         *,
         lane_change_direction: str = "",
         lane_change_progress: float = 0.0,
+        current_lane_id: Optional[int] = None,
+        lane_assignments: Optional[Mapping[str, int]] = None,
         return_actor_id: bool = False,
     ):
         """Nearest-ahead gap in ego's body frame.
@@ -11718,6 +11916,13 @@ class CPXMPCPlannerBridge:
             best_gap = None
             best_actor_id = None
             for snapshot in object_snapshots:
+                if current_lane_id is not None and lane_assignments is not None:
+                    obstacle_id = self._object_track_id(snapshot)
+                    assigned_lane_id = int(
+                        lane_assignments.get(str(obstacle_id), 0) or 0
+                    )
+                    if assigned_lane_id != int(current_lane_id):
+                        continue
                 dx = float(snapshot.get("x", 0.0)) - float(ego_location.x)
                 dy = float(snapshot.get("y", 0.0)) - float(ego_location.y)
                 longitudinal = dx * cos_h + dy * sin_h
@@ -11743,7 +11948,19 @@ class CPXMPCPlannerBridge:
                     best_actor_id = self._object_track_id(snapshot)
             return best_gap, best_actor_id
 
-        direction = str(lane_change_direction or "").strip().lower()
+        # When stable map assignments are available, "own lane" is the
+        # currently map-matched ego lane. Adjacent-lane actors never enter
+        # longitudinal following, including during a lane change; once ego's
+        # map match moves to the target lane, that lane naturally becomes its
+        # own lane on the next tick.
+        strict_current_lane = bool(
+            current_lane_id is not None and lane_assignments is not None
+        )
+        direction = (
+            ""
+            if strict_current_lane
+            else str(lane_change_direction or "").strip().lower()
+        )
         if direction not in {"left", "right"}:
             best_gap, best_actor_id = _nearest_gap(
                 min_lateral_m=-2.5, max_lateral_m=2.5
@@ -11853,6 +12070,7 @@ class CPXMPCPlannerBridge:
             ego_speed_mps=float(self._actuator_ego_speed_mps),
             target_speed_mps=float(self._actuator_target_speed_mps),
             stop_goal_active=bool(self._actuator_stop_goal_active),
+            timestamp_s=float(self._sim_time_s()),
         )
         steer = min(1.0, max(-1.0, float(steering_angle_rad) / max_steer))
         return carla.VehicleControl(

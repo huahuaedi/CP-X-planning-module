@@ -300,6 +300,52 @@ class RoadEnvelopeBlockMathTests(unittest.TestCase):
 
 
 class MPCLaneKeepingIntegrationTests(unittest.TestCase):
+
+    def test_speed_tracking_reference_is_independent_of_warm_start_gain(self):
+        mpc = MPC(*self._minimal_mpc_config(speed_soft_enabled=False))
+        x0 = np.array([0.0, 0.0, 2.0, 0.0], dtype=float)
+        target = np.array([20.0, 0.0, 8.0, 0.0], dtype=float)
+
+        mpc.reference_speed_gain = 0.2
+        slow_rollout, _ = mpc._reference_rollout(
+            x0=x0,
+            x_ref_target=target,
+            lane_center_reference=None,
+            object_snapshots=[],
+            speed_upper_bound_mps=8.0,
+        )
+        slow_speed_reference = mpc._speed_tracking_reference(
+            x0=x0,
+            x_ref_target=target,
+            linearization_rollout=slow_rollout,
+            object_snapshots=[],
+            current_acceleration_mps2=0.0,
+            speed_upper_bound_mps=8.0,
+        )
+
+        mpc.reference_speed_gain = 3.0
+        fast_rollout, _ = mpc._reference_rollout(
+            x0=x0,
+            x_ref_target=target,
+            lane_center_reference=None,
+            object_snapshots=[],
+            speed_upper_bound_mps=8.0,
+        )
+        fast_speed_reference = mpc._speed_tracking_reference(
+            x0=x0,
+            x_ref_target=target,
+            linearization_rollout=fast_rollout,
+            object_snapshots=[],
+            current_acceleration_mps2=0.0,
+            speed_upper_bound_mps=8.0,
+        )
+
+        self.assertFalse(np.allclose(slow_rollout[:, 2], fast_rollout[:, 2]))
+        np.testing.assert_allclose(
+            slow_speed_reference,
+            fast_speed_reference,
+            atol=1.0e-9,
+        )
     def test_stage_sample_preserves_lane_width(self):
         mpc = object.__new__(MPC)
         mpc.lane_center_reference_local_window = 0
