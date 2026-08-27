@@ -173,3 +173,4 @@ opencda/planning_module/opencda_bridge/debug*/
 .agents/
 .claude/
 .codex/
+CARLA_DEPENDENCY_AND_GLOBAL_PLANNER_REPLACEMENT_REPORT.md
