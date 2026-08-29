@@ -2428,7 +2428,7 @@ def run_loaded_world(client, world, scenario_cfg: Mapping[str, object], carla) -
         visualization_cfg.get("show_global_route", True)
     )
 
-    sample_distance_m = float(planning_cfg.get("waypoint_sample_distance_m", 2.0))
+    sample_distance_m = float(planning_cfg.get("waypoint_sample_distance_m", 1.0))
     xodr_path = resolve_xodr_path(scenario_cfg=scenario_cfg, sumo_cfg=sumo_cfg)
     global_planner = CustomGlobalPlannerAdapter(
         xodr_path=xodr_path,

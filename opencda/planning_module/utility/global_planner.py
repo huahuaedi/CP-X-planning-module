@@ -333,7 +333,7 @@ class CustomGlobalPlannerAdapter:
         *,
         xodr_path: str,
         cache_root: str,
-        route_sample_distance_m: float = 3.0,
+        route_sample_distance_m: float = 1.0,
         ad_map_install_root: str | None = None,
     ) -> None:
         self.core = GlobalPlanner(
@@ -386,6 +386,19 @@ class CustomGlobalPlannerAdapter:
             _point_dict(position),
             search_radius_m=search_radius_m,
         ))
+
+    def get_drivable_waypoint(
+        self,
+        position: Mapping[str, object] | Sequence[object],
+        search_radius_m: float | None = None,
+    ) -> Waypoint | None:
+        """Return a waypoint only when the requested point is inside a driving lane."""
+        candidates = self.get_waypoint_candidates(position, search_radius_m=search_radius_m)
+        for candidate in candidates:
+            if bool(candidate.get("is_in_lane", False)):
+                waypoint = candidate.get("waypoint")
+                return waypoint if waypoint is not None else None
+        return None
 
     @staticmethod
     def world_heading_rad(waypoint: Waypoint | None) -> float | None:
@@ -479,6 +492,21 @@ class CustomGlobalPlannerAdapter:
             options=per_waypoint_options,
             lane_ids=per_waypoint_lane_ids,
         )
+
+    def get_dense_route_entries(self) -> List[Dict[str, object]]:
+        """Return the stored route's ordered custom waypoints and road options."""
+        entries: List[Dict[str, object]] = []
+        for index, waypoint in enumerate(self._stored_route_waypoints):
+            road_option = (
+                self._stored_route_options[index]
+                if index < len(self._stored_route_options)
+                else "LANEFOLLOW"
+            )
+            entries.append({
+                "waypoint": waypoint,
+                "road_option": str(road_option),
+            })
+        return entries
 
     def nearest_waypoint_query(self, x_m: float, y_m: float) -> WaypointQueryResult | None:
         waypoint = self.get_waypoint({"x": x_m, "y": y_m, "z": 0.0})

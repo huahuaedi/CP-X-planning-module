@@ -174,3 +174,7 @@ opencda/planning_module/opencda_bridge/debug*/
 .claude/
 .codex/
 CARLA_DEPENDENCY_AND_GLOBAL_PLANNER_REPLACEMENT_REPORT.md
+
+# Standalone CARLA/custom-global-planner comparison artifacts
+compare_carla_custom_global_planner.py
+global_planner_comparison_output/

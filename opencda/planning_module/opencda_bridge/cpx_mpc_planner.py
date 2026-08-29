@@ -938,7 +938,7 @@ class CPXMPCPlannerBridge:
             self.config.get("velocity_steering_interface_enabled", False)
         )
         self.velocity_steering_adapter = CarlaVelocitySteeringAdapter(self.config)
-        route_sample_distance_m = float(self.config.get("route_sample_distance_m", 2.0))
+        route_sample_distance_m = float(self.config.get("route_sample_distance_m", 1.0))
         self.global_planner_backend = "legacy_astar"
         self.global_planner_backend_warning = ""
         road_cfg_from_map = {}

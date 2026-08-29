@@ -538,6 +538,8 @@ def get_opendrive_lane_info(ad_lane_id: int) -> dict[str, int | None]:
         "ad_lane_id": ad_lane_id,
         "road_id": road_id,
         "lane_section_index": lane_section_index,
-        "section_id": lane_section_index,
+        # The AD-map lane-id encoding starts lane sections at 1, while CARLA
+        # exposes the OpenDRIVE lane-section index starting at 0.
+        "section_id": lane_section_index - 1,
         "lane_id": lane_id,
     }

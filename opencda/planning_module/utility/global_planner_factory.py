@@ -66,8 +66,9 @@ def create_global_planner_backend(
     output: backend selection with planner and road configuration
     """
 
-    sample_distance_m = float(planning_cfg.get("waypoint_sample_distance_m", 2.0))
     mode = normalize_global_planner_mode(planning_cfg.get("global_planner_mode", "astar"))
+    default_sample_distance_m = 1.0 if mode in CUSTOM_GLOBAL_PLANNER_MODES else 2.0
+    sample_distance_m = float(planning_cfg.get("waypoint_sample_distance_m", default_sample_distance_m))
 
     if mode in CUSTOM_GLOBAL_PLANNER_MODES:
         xodr_path = resolve_xodr_path_fn(scenario_cfg=scenario_cfg, sumo_cfg=sumo_cfg)

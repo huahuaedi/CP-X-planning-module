@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -34,6 +35,18 @@ class Waypoint:
         output: lane width in meters (`float | None`)
         """
         return self.lane_width_m
+
+    @property
+    def world_heading_rad(self) -> float | None:
+        """Return the lane heading in the planner/world coordinate frame.
+
+        input: none (`None`)
+        output: wrapped world heading in radians (`float | None`)
+        """
+        if self.heading is None:
+            return None
+        world_heading = -float(self.heading)
+        return math.atan2(math.sin(world_heading), math.cos(world_heading))
 
     def left(self) -> "Waypoint" | None:
         """Return the adjacent same-direction left-lane waypoint if it exists.
@@ -82,6 +95,7 @@ class Waypoint:
             "lane_id": self.lane_id,
             "parametric_offset": self.parametric_offset,
             "heading": self.heading,
+            "world_heading_rad": self.world_heading_rad,
             "lane_length_m": self.lane_length_m,
             "lane_width_m": self.lane_width_m,
             "lane_width": self.lane_width,
