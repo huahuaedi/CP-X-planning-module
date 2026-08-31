@@ -48,6 +48,39 @@ class Waypoint:
         world_heading = -float(self.heading)
         return math.atan2(math.sin(world_heading), math.cos(world_heading))
 
+    @property
+    def is_junction(self) -> bool:
+        """Alias for `is_intersection` using the CARLA attribute name.
+
+        input: none (`None`)
+        output: whether the waypoint lies in a junction (`bool`)
+        """
+        return bool(self.is_intersection)
+
+    @property
+    def transform(self) -> Any:
+        """Return a CARLA-`Waypoint.transform`-shaped read-only view.
+
+        Lets helpers written against `carla.Waypoint` read this waypoint
+        without a per-shape branch: `.transform.location.{x,y,z}` and
+        `.transform.rotation.yaw` (world-frame lane heading, degrees).
+
+        input: none (`None`)
+        output: object with `location` and `rotation` namespaces (`SimpleNamespace`)
+        """
+        from types import SimpleNamespace
+
+        heading_rad = self.world_heading_rad
+        yaw_deg = 0.0 if heading_rad is None else math.degrees(float(heading_rad))
+        return SimpleNamespace(
+            location=SimpleNamespace(
+                x=float(self.position["x"]),
+                y=float(self.position["y"]),
+                z=float(self.position.get("z", 0.0)),
+            ),
+            rotation=SimpleNamespace(yaw=yaw_deg, pitch=0.0, roll=0.0),
+        )
+
     def left(self) -> "Waypoint" | None:
         """Return the adjacent same-direction left-lane waypoint if it exists.
 

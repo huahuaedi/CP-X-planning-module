@@ -185,6 +185,21 @@ def import_ad_map_access(ad_map_install_root: str | Path | None = None):
     if _AD_MAP_MODULE is not None:
         return _AD_MAP_MODULE
 
-    prepare_ad_map_runtime(ad_map_install_root)
+    try:
+        prepare_ad_map_runtime(ad_map_install_root)
+    except FileNotFoundError as folder_layout_error:
+        # No folder-layout AD-map install was found (explicit root, the
+        # GLOBAL_PLANNER_AD_MAP_INSTALL / AD_MAP_INSTALL_ROOT env vars, or
+        # <project>/map_repo/install). Fall back to a self-contained,
+        # already-importable ``ad_map_access`` -- e.g. the ``ad-map-access``
+        # PyPI wheel, which bundles its own native libraries and is the
+        # supported runtime for the Python 3.10-3.13 environments. ``build_ad_map.sh``
+        # remains the path only where that wheel is unavailable.
+        try:
+            _AD_MAP_MODULE = importlib.import_module("ad_map_access")
+        except ImportError:
+            raise folder_layout_error from None
+        return _AD_MAP_MODULE
+
     _AD_MAP_MODULE = importlib.import_module("ad_map_access")
     return _AD_MAP_MODULE

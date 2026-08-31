@@ -6,7 +6,11 @@ from dataclasses import dataclass
 import math
 from typing import Any, Callable, Mapping, Sequence
 
-import carla
+# CARLA is absent in the ROS / Python 3.13 environment; carla_compat returns
+# the real package when available and an API-compatible stand-in otherwise.
+from opencda.planning_module.utility.carla_compat import carla  # noqa: E402
+
+_Location = carla.Location
 
 
 @dataclass(frozen=True)
@@ -576,7 +580,7 @@ class ReferenceGenerator:
             )
             try:
                 waypoint = callback(
-                    carla.Location(
+                    _Location(
                         x=float(point_x_m),
                         y=float(point_y_m),
                         z=float(z_m),
@@ -1256,7 +1260,7 @@ class ReferenceGenerator:
     ) -> tuple[float, float, float, float] | None:
         try:
             waypoint = self._map_waypoint_from_location(
-                carla.Location(x=float(x_m), y=float(y_m), z=0.0)
+                _Location(x=float(x_m), y=float(y_m), z=0.0)
             )
             transform = waypoint.transform
             center = transform.location

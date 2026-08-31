@@ -1,0 +1,8 @@
+adapter_cache/
+carla_free_route_smoke.json
+carla_free_runstep_smoke.json
+_dij_cache/
+M0_REPORT.md
+out_*.json
+_t6_cache/
+.venv/

@@ -18,8 +18,9 @@ import sys
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
-import carla
 import yaml
+
+from opencda.planning_module.utility.carla_compat import carla
 
 from opencda.planning_module.pipeline.traffic_light_memory import (
     TrafficLightMemory,
@@ -158,6 +159,13 @@ class CPXMPCPlannerBridge:
         self.config, self.architecture_profile = normalize_architecture_config(config)
         self.carla = carla
         self.map_planner = map_planner or getattr(vehicle_manager, "carla_map", None)
+        # A real `carla.Map` exposes `get_topology`; the CARLA-free path passes a
+        # CustomGlobalPlannerAdapter here instead, which the CARLA-GRP route
+        # builder must not be handed.
+        self._map_planner_is_carla_map = (
+            self.map_planner is not None
+            and callable(getattr(self.map_planner, "get_topology", None))
+        )
         self.enabled = bool(self.config.get("enabled", True))
         self.mode = str(self.config.get("mode", "full_cpx_mpc")).strip().lower()
         self.fallback_policy = str(
@@ -959,6 +967,11 @@ class CPXMPCPlannerBridge:
                         )
                     ),
                     route_sample_distance_m=float(route_sample_distance_m),
+                    lane_change_penalty_m=(
+                        float(self.config["global_planner_lane_change_penalty_m"])
+                        if self.config.get("global_planner_lane_change_penalty_m") is not None
+                        else None
+                    ),
                     ad_map_install_root=self.config.get("ad_map_install_root"),
                 )
                 self.global_planner.load(
@@ -1012,8 +1025,8 @@ class CPXMPCPlannerBridge:
         )
         self.route_manager = CPXRouteManager(
             global_planner=self.global_planner,
-            carla_map=self.map_planner,
-            carla_api=carla,
+            carla_map=self.map_planner if self._map_planner_is_carla_map else None,
+            carla_api=carla if self._map_planner_is_carla_map else None,
             carla_route_sampling_resolution_m=float(
                 self.config.get("carla_route_sampling_resolution_m", 1.0)
             ),

@@ -134,6 +134,10 @@ class CPXRouteManager:
         imported_summary = self._register_carla_mission_route_with_global_planner()
         if imported_summary is not None:
             self._active_route_summary = imported_summary
+        if len(self._carla_route_nodes()) < 2:
+            # No CARLA GRP geometry (no CARLA map, e.g. the ROS path). Drive the
+            # reference/progress helpers from the in-house planner's route.
+            self._build_inhouse_route_entries()
         self._fallback_route_points = []
         if not bool(getattr(self._active_route_summary, "route_found", False)) or len(
             list(getattr(self._active_route_summary, "route_waypoints", []) or [])
@@ -175,12 +179,15 @@ class CPXRouteManager:
                 goal_location=self._goal_point,
                 replace_stored_route=True,
             )
-            if str(trigger_reason).strip().lower().startswith("static_obstacle"):
-                if (
-                    not bool(getattr(summary, "route_found", False))
-                    or len(list(getattr(summary, "route_waypoints", []) or [])) < 2
-                ):
-                    raise RuntimeError("blocked_summary_route_not_found")
+            is_static_obstacle = str(trigger_reason).strip().lower().startswith(
+                "static_obstacle"
+            )
+            if is_static_obstacle and (
+                not bool(getattr(summary, "route_found", False))
+                or len(list(getattr(summary, "route_waypoints", []) or [])) < 2
+            ):
+                raise RuntimeError("blocked_summary_route_not_found")
+            if is_static_obstacle:
                 self._build_carla_route_from_summary(summary)
             else:
                 self._build_carla_route(
@@ -192,6 +199,9 @@ class CPXRouteManager:
                 )
                 if imported_summary is not None:
                     summary = imported_summary
+            if len(self._carla_route_nodes()) < 2:
+                # No CARLA GRP geometry (no CARLA map, e.g. the ROS path).
+                self._build_inhouse_route_entries()
             route_point_count = len(self._carla_route_nodes())
             if route_point_count < 2:
                 raise RuntimeError(str(self._carla_route_debug_reason))
@@ -1275,6 +1285,58 @@ class CPXRouteManager:
             self._carla_route_debug_reason = (
                 f"blocked_summary_route_failed:{exc}"
             )
+
+    def _build_inhouse_route_entries(self) -> None:
+        """Populate the route-node cache from the in-house global planner.
+
+        Used when no CARLA map is available (`carla_map is None`), i.e. the
+        CARLA-free / ROS path. Every reference and progress helper here
+        consumes ``_carla_route_nodes()``; the in-house planner's stored dense
+        route exposes the same ``(waypoint, road_option)`` shape and its
+        ``Waypoint`` now provides a CARLA-compatible ``.transform``, so the
+        rest of this class works unchanged.
+        """
+        self._carla_route_entries = []
+        self._carla_route_progress_index = 0
+        self._carla_route_progress_initialized = False
+        self._carla_route_projection = None
+        self._carla_route_sync_reason = "inhouse_route_progress_not_initialized"
+
+        get_entries = getattr(self.global_planner, "get_dense_route_entries", None)
+        if not callable(get_entries):
+            self._carla_route_debug_reason = "inhouse_route_entries_unavailable"
+            return
+        try:
+            raw_entries = list(get_entries() or [])
+        except Exception as exc:  # noqa: BLE001
+            self._carla_route_debug_reason = f"inhouse_route_entries_failed:{exc}"
+            return
+
+        entries: List[Any] = []
+        for item in raw_entries:
+            waypoint = item.get("waypoint") if isinstance(item, Mapping) else None
+            location = getattr(getattr(waypoint, "transform", None), "location", None)
+            if waypoint is None or location is None:
+                continue
+            option = str(
+                (item.get("road_option") if isinstance(item, Mapping) else None)
+                or "LANEFOLLOW"
+            )
+            if entries:
+                previous_location = getattr(
+                    getattr(entries[-1][0], "transform", None), "location", None
+                )
+                if previous_location is not None and math.hypot(
+                    float(location.x) - float(previous_location.x),
+                    float(location.y) - float(previous_location.y),
+                ) < 1.0e-3:
+                    continue
+            entries.append((waypoint, option))
+
+        self._carla_route_entries = entries
+        self._carla_route_debug_reason = (
+            "inhouse_route_ready" if len(entries) >= 2 else "inhouse_route_empty"
+        )
 
     def _bridge_carla_route_gaps(self, entries: List[Any]) -> List[Any]:
         """Fill in large gaps between consecutive CARLA GRP route waypoints.

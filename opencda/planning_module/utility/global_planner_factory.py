@@ -81,6 +81,11 @@ def create_global_planner_backend(
                 xodr_path=xodr_path,
                 cache_root=os.path.join(project_root, "Global_Planner", "cache"),
                 route_sample_distance_m=float(sample_distance_m),
+                lane_change_penalty_m=(
+                    float(planning_cfg["global_planner_lane_change_penalty_m"])
+                    if planning_cfg.get("global_planner_lane_change_penalty_m") is not None
+                    else None
+                ),
                 ad_map_install_root=planning_cfg.get("ad_map_install_root"),
             )
             planner.load()

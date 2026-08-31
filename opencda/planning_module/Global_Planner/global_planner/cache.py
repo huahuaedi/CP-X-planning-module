@@ -9,7 +9,10 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
 
-CACHE_VERSION = 2
+# 3: pickle protocol capped at 4 for Python 3.7 <-> 3.13 cache sharing. Bumping
+#    invalidates any protocol-5 cache written by a 3.8+ run so it is rebuilt
+#    rather than hit with "unsupported pickle protocol: 5" on load.
+CACHE_VERSION = 3
 
 
 def compute_xodr_signature(xodr_path: Path) -> Dict[str, Any]:
@@ -94,9 +97,15 @@ def save_metadata(path: Path, metadata: Mapping[str, Any]) -> None:
         stream.write("\n")
 
 
+# Protocol 4 is the newest common to Python 3.7 (max 4) and 3.10-3.13 (default
+# 5). Capping here lets the legacy CARLA (3.7) env and the ROS (3.13) env share
+# one map cache instead of failing with "unsupported pickle protocol: 5".
+_CACHE_PICKLE_PROTOCOL = min(4, pickle.HIGHEST_PROTOCOL)
+
+
 def save_pickle(path: Path, payload: Any) -> None:
-    """Save a Python planner-cache payload using the current pickle protocol."""
+    """Save a planner-cache payload with a cross-Python-version pickle protocol."""
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("wb") as stream:
-        pickle.dump(payload, stream, protocol=pickle.HIGHEST_PROTOCOL)
+        pickle.dump(payload, stream, protocol=_CACHE_PICKLE_PROTOCOL)

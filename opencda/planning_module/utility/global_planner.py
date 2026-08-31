@@ -334,13 +334,23 @@ class CustomGlobalPlannerAdapter:
         xodr_path: str,
         cache_root: str,
         route_sample_distance_m: float = 1.0,
+        lane_change_penalty_m: float | None = None,
         ad_map_install_root: str | None = None,
     ) -> None:
+        # `lane_change_penalty_m=None` keeps the core GlobalPlanner default
+        # (2.0 m). M0 (2026-08) showed 10.0 removes two spurious lane changes on
+        # Town10 scenario_6 / red_light_violator, but that value regressed the
+        # Town06 cpx_single_right_lane_turn scenario (ego stuck mid-route), so
+        # it is opt-in via `planning.global_planner_lane_change_penalty_m`.
+        core_kwargs = {}
+        if lane_change_penalty_m is not None:
+            core_kwargs["default_lane_change_penalty_m"] = float(lane_change_penalty_m)
         self.core = GlobalPlanner(
             xodr_path=xodr_path,
             cache_root=cache_root,
             centerline_spacing_m=float(route_sample_distance_m),
             ad_map_install_root=ad_map_install_root,
+            **core_kwargs,
         )
         self.route_sample_distance_m = max(0.5, float(route_sample_distance_m))
         self._stored_route_summary: RoutePlanSummary | None = None
