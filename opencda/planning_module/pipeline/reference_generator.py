@@ -1649,10 +1649,26 @@ class ReferenceGenerator:
     def waypoint_lane_width(self, waypoint: Any) -> float:
         return self._waypoint_lane_width(waypoint)
 
+    # Curvature is measured over at least this arc length so the estimate is
+    # invariant to reference-sample spacing. With the previous adjacent-sample
+    # `d(theta)/ds`, a fixed heading kink at a junction connector read ~3x
+    # higher after route sampling went 3 m -> 1 m, and exploded further as the
+    # ego slowed (step_distance_m -> ~0.1 m at crawl), so an over-curvy
+    # reference could never let the vehicle accelerate back out. See
+    # opencda/planning_module/pipeline/reference_contract.py for the matching
+    # change in the independent validator.
+    CURVATURE_EVAL_ARC_M = 1.5
+
     @staticmethod
     def _max_discrete_curvature_1pm(
         samples: Sequence[Mapping[str, object]],
+        eval_arc_m: float | None = None,
     ) -> float:
+        window_m = float(
+            ReferenceGenerator.CURVATURE_EVAL_ARC_M
+            if eval_arc_m is None
+            else eval_arc_m
+        )
         points = []
         for sample in list(samples or []):
             try:
@@ -1662,27 +1678,36 @@ class ReferenceGenerator:
                 ))
             except Exception:
                 continue
-        headings = []
-        distances = []
+        seg_headings: list[float] = []
+        seg_lengths: list[float] = []
         for first, second in zip(points[:-1], points[1:]):
             dx_m = float(second[0]) - float(first[0])
             dy_m = float(second[1]) - float(first[1])
             distance_m = math.hypot(dx_m, dy_m)
             if distance_m <= 1.0e-6:
                 continue
-            headings.append(math.atan2(dy_m, dx_m))
-            distances.append(float(distance_m))
+            seg_headings.append(math.atan2(dy_m, dx_m))
+            seg_lengths.append(float(distance_m))
+        if len(seg_headings) < 2:
+            return 0.0
         maximum = 0.0
-        for index, (previous, current) in enumerate(
-            zip(headings[:-1], headings[1:])
-        ):
-            ds_m = max(1.0e-6, float(distances[min(index + 1, len(distances) - 1)]))
-            maximum = max(
-                float(maximum),
-                abs(ReferenceGenerator._wrap_angle_static(
-                    float(current) - float(previous)
-                )) / float(ds_m),
+        for end_index in range(1, len(seg_headings)):
+            # Widen the window backward until it spans at least `window_m` of
+            # real arc (or the polyline runs out), then measure the heading
+            # change across that span.
+            arc_m = float(seg_lengths[end_index])
+            start_index = end_index - 1
+            while start_index > 0 and arc_m < window_m:
+                arc_m += float(seg_lengths[start_index])
+                start_index -= 1
+            span_m = max(0.5 * window_m, arc_m)
+            delta_rad = abs(
+                ReferenceGenerator._wrap_angle_static(
+                    float(seg_headings[end_index])
+                    - float(seg_headings[start_index])
+                )
             )
+            maximum = max(float(maximum), float(delta_rad) / float(span_m))
         return float(maximum)
 
     def _build_route_reference(

@@ -6,6 +6,11 @@ from dataclasses import dataclass, field
 import math
 from typing import Mapping, Optional, Sequence
 
+# Discrete curvature is measured over at least this arc length so the estimate
+# is independent of reference-sample spacing. Kept in sync with
+# ReferenceGenerator.CURVATURE_EVAL_ARC_M.
+CURVATURE_EVAL_ARC_M = 1.5
+
 
 @dataclass(frozen=True)
 class ReferenceContract:
@@ -181,12 +186,50 @@ def validate_reference_contract(
             violations.append("lane_id_transition_not_allowed")
 
     if bool(contract.require_monotonic_progress):
-        for previous, current in zip(progress_values[:-1], progress_values[1:]):
-            if float(current) + 1.0e-3 < float(previous):
-                violations.append("non_monotonic_progress")
+        # Ego-body forward projection is not a route-progress coordinate. It
+        # legitimately decreases as an ordered reference bends through a
+        # junction. Prefer explicit arc length when available; otherwise
+        # reject only a genuine local reversal between successive segments.
+        tagged_progress: list[float] = []
+        tagged_progress_valid = True
+        for sample in point_samples:
+            try:
+                progress_m = float(sample.get("progress_m", float("nan")))
+            except (TypeError, ValueError):
+                progress_m = float("nan")
+            if not math.isfinite(progress_m):
+                tagged_progress_valid = False
                 break
+            tagged_progress.append(float(progress_m))
+        if tagged_progress_valid and len(tagged_progress) >= 2:
+            for previous, current in zip(tagged_progress[:-1], tagged_progress[1:]):
+                if float(current) + 1.0e-3 < float(previous):
+                    violations.append("non_monotonic_progress")
+                    break
+        else:
+            path_points = [(float(ego_state[0]), float(ego_state[1]))] + points
+            previous_segment = None
+            for first, second in zip(path_points[:-1], path_points[1:]):
+                segment = (
+                    float(second[0]) - float(first[0]),
+                    float(second[1]) - float(first[1]),
+                )
+                segment_norm = math.hypot(segment[0], segment[1])
+                if segment_norm <= 1.0e-6:
+                    continue
+                if previous_segment is not None:
+                    previous_norm = math.hypot(previous_segment[0], previous_segment[1])
+                    dot = (
+                        previous_segment[0] * segment[0]
+                        + previous_segment[1] * segment[1]
+                    )
+                    if dot < -1.0e-3 * previous_norm * segment_norm:
+                        violations.append("non_monotonic_progress")
+                        break
+                previous_segment = segment
 
     headings: list[float] = []
+    heading_seg_lengths: list[float] = []
     for first, second in zip(points[:-1], points[1:]):
         distance_m = math.hypot(second[0] - first[0], second[1] - first[1])
         if distance_m <= 1.0e-6:
@@ -196,14 +239,32 @@ def validate_reference_contract(
         if distance_m > float(contract.max_point_jump_m):
             violations.append("point_jump_out_of_contract")
         headings.append(math.atan2(second[1] - first[1], second[0] - first[0]))
+        heading_seg_lengths.append(float(distance_m))
 
-    for index, (prev_heading, cur_heading) in enumerate(zip(headings[:-1], headings[1:])):
-        delta = abs(_wrap_angle(cur_heading - prev_heading))
-        result.max_heading_jump_rad = max(result.max_heading_jump_rad, float(delta))
-        if delta > float(contract.max_heading_jump_rad):
+    # Curvature over a >= CURVATURE_EVAL_ARC_M arc window, so the estimate does
+    # not depend on reference-sample spacing (adjacent-sample d(theta)/ds
+    # inflated ~3x when route sampling went 3 m -> 1 m and blew up further as
+    # the ego slowed). The per-step heading jump above stays adjacent-sample.
+    for end_index in range(1, len(headings)):
+        delta_adjacent = abs(
+            _wrap_angle(headings[end_index] - headings[end_index - 1])
+        )
+        result.max_heading_jump_rad = max(
+            result.max_heading_jump_rad, float(delta_adjacent)
+        )
+        if delta_adjacent > float(contract.max_heading_jump_rad):
             violations.append("heading_jump_out_of_contract")
-        ds = max(1.0e-6, math.hypot(points[index + 2][0] - points[index + 1][0], points[index + 2][1] - points[index + 1][1]))
-        curvature = float(delta) / float(ds)
+
+        arc_m = float(heading_seg_lengths[end_index])
+        start_index = end_index - 1
+        while start_index > 0 and arc_m < CURVATURE_EVAL_ARC_M:
+            arc_m += float(heading_seg_lengths[start_index])
+            start_index -= 1
+        span_m = max(0.5 * CURVATURE_EVAL_ARC_M, arc_m)
+        delta_windowed = abs(
+            _wrap_angle(headings[end_index] - headings[start_index])
+        )
+        curvature = float(delta_windowed) / float(span_m)
         result.max_curvature_1pm = max(result.max_curvature_1pm, float(curvature))
         if curvature > float(contract.max_curvature_1pm):
             violations.append("curvature_out_of_contract")

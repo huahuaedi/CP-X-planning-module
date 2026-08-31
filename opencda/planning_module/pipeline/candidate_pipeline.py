@@ -365,42 +365,11 @@ def build_candidate_intents(
             else "default_keep_lane"
         ),
     ))
-    add(CandidateBehaviorIntent(
-        name="yield_slow_down",
-        decision="lane_follow",
-        target_lane_id=int(current_lane_id),
-        # The 0.6 m/s floor keeps this candidate from proposing an
-        # unreasonably slow creep when the baseline speed is comfortably
-        # above it. But once the baseline itself has already decayed below
-        # 0.6 (e.g. braking for a close lead vehicle/red light), the floor
-        # would make "yield" target a HIGHER speed than "keep_lane" itself --
-        # backwards for a candidate meant to be the more conservative option.
-        # That paces this candidate's own reference faster than the vehicle
-        # can actually be going, producing a reference whose points sit
-        # further ahead than ego's real trajectory reaches -- a large,
-        # sustained lane-center tracking-cost mismatch for as long as this
-        # candidate keeps winning. Capping at the baseline speed preserves
-        # the floor's purpose everywhere it doesn't invert the ordering.
-        target_speed_mps=min(
-            float(target_speed_mps),
-            max(0.6, 0.55 * float(target_speed_mps)),
-        ),
-        base_cost=4.0 + (
-            max(0.0, float(lane_change_defer_cost))
-            if bool(lane_change_committed)
-            else 0.0
-        ) + _lane_cost(
-            lane_id=int(current_lane_id),
-            current_lane_id=int(current_lane_id),
-            lane_safety_scores=lane_safety_scores,
-            lane_prediction_risks=lane_prediction_risks,
-        ),
-        reason=(
-            "conservative_yield_defer_route_lane_change"
-            if bool(lane_change_committed)
-            else "conservative_yield_candidate"
-        ),
-    ))
+    # Do not add a generic reduced-speed candidate here. Longitudinal speed
+    # has one owner: SpeedPlanner. Lead-vehicle following, curvature, turn
+    # approach and stop profiles are represented as explicit SpeedPlanner
+    # constraints. A future prediction-based yield must likewise submit a
+    # typed conflict constraint instead of directly changing target speed.
     if str(selected_decision) == "lane_follow":
         add(CandidateBehaviorIntent(
             name="selected_behavior",
@@ -1494,11 +1463,23 @@ def _trajectory_comfort_cost(
             continue
         headings.append(math.atan2(dy, dx))
         segment_lengths.append(ds)
+    # Curvature over a >= 1.5 m arc window so this candidate score does not
+    # depend on reference-sample spacing (matches the reference contract /
+    # generator estimators).
+    curvature_eval_arc_m = 1.5
     curvatures = []
-    for index, (first, second) in enumerate(zip(headings[:-1], headings[1:])):
-        delta = math.atan2(math.sin(second - first), math.cos(second - first))
-        ds = max(1.0e-3, segment_lengths[min(index + 1, len(segment_lengths) - 1)])
-        curvatures.append(abs(float(delta)) / float(ds))
+    for end_index in range(1, len(headings)):
+        arc_m = float(segment_lengths[end_index])
+        start_index = end_index - 1
+        while start_index > 0 and arc_m < curvature_eval_arc_m:
+            arc_m += float(segment_lengths[start_index])
+            start_index -= 1
+        span_m = max(0.5 * curvature_eval_arc_m, arc_m)
+        delta = math.atan2(
+            math.sin(headings[end_index] - headings[start_index]),
+            math.cos(headings[end_index] - headings[start_index]),
+        )
+        curvatures.append(abs(float(delta)) / float(span_m))
     if not curvatures:
         return 0.0
     max_curvature = max(curvatures)
