@@ -212,25 +212,18 @@ differ from its parent.
 
 | Group | Scenario | Purpose | Configuration base |
 |---|---|---|---|
-| Baseline | `single_intersection_town06_carla` | Straight driving through three signalized Town06 intersections with background traffic. | Standalone configuration |
 | Route turn | `cpx_single_left_lane_turn` | Route-required left lane change followed by a continuous left-turn connector. | `single_intersection_town06_carla.yaml` |
 | Route turn | `cpx_single_right_lane_turn` | Route-required right lane change followed by a continuous right-turn connector. | `single_intersection_town06_carla.yaml` |
 | Static obstacle | `cpx_single_left_lane_turn_blocked` | Local avoidance, lane borrowing, stopping fallback, and recovery around a deterministic blocker. | `cpx_single_left_lane_turn.yaml` |
-| Route progression | `cpx_single_straight_three_lights` | Lane following and traffic-light behavior over several intersections. | `single_intersection_town06_carla.yaml` |
-| Route progression | `cpx_single_first_light_turn` | A turn requested at the first signalized intersection. | `single_intersection_town06_carla.yaml` |
-| Route progression | `cpx_single_second_light_reroute_left` | Route progression and a later left-turn/reroute request. | `single_intersection_town06_carla.yaml` |
 | Cooperative driving | `cpx_multi_cav_three_lights` | Multi-CAV state sharing and arbitration along the Town06 corridor. | `single_intersection_town06_carla.yaml` |
-| Lane change | `cpx_lane_change_2lanefree` | Base two-lane lane-change geometry and maneuver execution. | `cpx_profile_full_default.yaml` |
-| Speed sweep | `cpx_lane_change_speed_03` | Lane change at 3 m/s. | `cpx_lane_change_2lanefree.yaml` |
 | Speed sweep | `cpx_lane_change_speed_08` | Lane change at 8 m/s. | `cpx_lane_change_2lanefree.yaml` |
 | Speed sweep | `cpx_lane_change_speed_12` | Lane change at 12 m/s. | `cpx_lane_change_2lanefree.yaml` |
 | Speed sweep | `cpx_lane_change_speed_15` | Lane change at 15 m/s. | `cpx_lane_change_2lanefree.yaml` |
 
-A compact regression pass should cover one baseline, both turn directions,
-static-obstacle recovery, multiple lane-change speeds, and the cooperative case:
+The retained regression pass covers both turn directions, static-obstacle
+recovery, multiple lane-change speeds, and the cooperative case:
 
 ```bash
-python opencda.py -t single_intersection_town06_carla -v 0.9.12
 python opencda.py -t cpx_single_left_lane_turn -v 0.9.12
 python opencda.py -t cpx_single_right_lane_turn -v 0.9.12
 python opencda.py -t cpx_single_left_lane_turn_blocked -v 0.9.12
@@ -240,12 +233,10 @@ python opencda.py -t cpx_lane_change_speed_15 -v 0.9.12
 python opencda.py -t cpx_multi_cav_three_lights -v 0.9.12
 ```
 
-The `cpx_smoke_*` scenarios remain available for fast deterministic checks.
-Feature-specific `cpx_town10_*`, MDrive, roadway-hazard, work-zone, emergency,
-and SUMO scenarios are retained as extended regression coverage. The shared
-`cpx_mature_runner.py`, `cpx_smoke_runner.py`, `default.yaml`, and
-`cpx_profile_full_default.yaml` files are infrastructure, not standalone
-scenarios, and must not be removed.
+The shared `single_intersection_town06_carla.py`, `cpx_mature_runner.py`,
+`default.yaml`, `single_intersection_town06_carla.yaml`,
+`cpx_lane_change_2lanefree.yaml`, and `cpx_profile_full_default.yaml` files are
+supporting infrastructure for these scenarios and must not be removed.
 
 Each run writes per-tick planner debug CSV/JSONL to the scenario's
 `planner.debug_output_dir` (see its config under

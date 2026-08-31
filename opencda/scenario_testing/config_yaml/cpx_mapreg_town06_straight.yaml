@@ -1,8 +1,0 @@
-base_config: cpx_smoke_town06_straight.yaml
-
-description: Map-layer regression for longitudinal Town06 lane continuity.
-
-vehicle_base:
-  planner:
-    global_planner_strict: true
-    debug_output_dir: opencda/planning_module/opencda_bridge/mapreg_town06_straight

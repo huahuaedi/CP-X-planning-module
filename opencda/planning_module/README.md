@@ -37,16 +37,20 @@ python main.py
 
 ## CP-X Validation Scenarios
 
-Three Town06 CARLA scenarios validate the CP-X planning stack through the
-OpenCDA integration entrypoint (`opencda.py`, not `main.py`). Each spawns a
-single CAV; unless noted, background traffic and vehicle config are
-inherited from `single_intersection_town06_carla.yaml`.
+The retained scenarios validate the CP-X planning stack through the OpenCDA
+integration entrypoint (`opencda.py`, not `main.py`). Shared Town06 settings
+are inherited from `single_intersection_town06_carla.yaml`; lane-change speed
+tests inherit from `cpx_lane_change_2lanefree.yaml`.
 
 | Scenario | What it validates |
 |---|---|
 | `cpx_single_right_lane_turn` | Route-required `CHANGELANERIGHT` before an intersection, followed by the continuous right-turn connector onto the outgoing road. |
 | `cpx_single_left_lane_turn` | Route-required `CHANGELANELEFT` right at spawn, followed by the continuous left-turn connector. The destination sits ~40m past the turn's outgoing lane instead of ending right at the turn, and this scenario overrides `carla_traffic_manager`'s spawn range so background traffic actually spawns near this ego (the base range doesn't cover this route's x/y footprint). |
-| `single_intersection_town06_carla` | Straight-line urban traffic-light behavior: the ego follows the southbound arterial through three signalized intersections with CARLA Traffic Manager background traffic. |
+| `cpx_single_left_lane_turn_blocked` | Required left turn with deterministic target-lane blockers and reroute/recovery behavior. |
+| `cpx_lane_change_speed_08` | Isolated lane-change validation at 8 m/s. |
+| `cpx_lane_change_speed_12` | Isolated lane-change validation at 12 m/s. |
+| `cpx_lane_change_speed_15` | Isolated lane-change validation at 15 m/s. |
+| `cpx_multi_cav_three_lights` | Multi-CAV cooperative perception and planning along the Town06 corridor. |
 
 Run any of them from the repository root:
 
@@ -57,7 +61,11 @@ export OPENCDA_SPECTATOR_VIEW=planner  # or "topdown"
 
 python opencda.py -t cpx_single_right_lane_turn -v 0.9.12
 python opencda.py -t cpx_single_left_lane_turn -v 0.9.12
-python opencda.py -t single_intersection_town06_carla -v 0.9.12
+python opencda.py -t cpx_single_left_lane_turn_blocked -v 0.9.12
+python opencda.py -t cpx_lane_change_speed_08 -v 0.9.12
+python opencda.py -t cpx_lane_change_speed_12 -v 0.9.12
+python opencda.py -t cpx_lane_change_speed_15 -v 0.9.12
+python opencda.py -t cpx_multi_cav_three_lights -v 0.9.12
 ```
 
 Each run writes per-tick planner debug CSV/JSONL to the scenario's
