@@ -40,6 +40,52 @@ class ReferenceContractTest(unittest.TestCase):
         )
         self.assertTrue(result.valid, result.reason())
 
+    def test_lane_follow_curve_does_not_use_ego_body_projection_as_progress(self):
+        contract = contract_from_config(
+            mode="lane_follow",
+            expected_lane_id=1,
+            horizon_steps=5,
+            config={
+                "reference_contract_lane_follow_max_heading_jump_rad": 1.0,
+                "reference_contract_lane_follow_max_curvature_1pm": 2.0,
+                "reference_contract_lane_follow_max_destination_body_lateral_abs_m": 5.0,
+            },
+            default_speed_mps=3.0,
+        )
+        reference = [
+            {"x_ref_m": 1.0, "y_ref_m": 0.0, "lane_id": 1, "speed_ref_mps": 2.0},
+            {"x_ref_m": 2.0, "y_ref_m": 0.2, "lane_id": 1, "speed_ref_mps": 2.0},
+            {"x_ref_m": 2.6, "y_ref_m": 1.0, "lane_id": 1, "speed_ref_mps": 2.0},
+            {"x_ref_m": 2.5, "y_ref_m": 2.0, "lane_id": 1, "speed_ref_mps": 2.0},
+            {"x_ref_m": 2.1, "y_ref_m": 3.0, "lane_id": 1, "speed_ref_mps": 2.0},
+        ]
+        result = validate_reference_contract(
+            reference_samples=reference,
+            destination_state=[2.1, 3.0, 2.0, 1.9, 1],
+            ego_state=[0.0, 0.0, 2.0, 0.0],
+            contract=contract,
+            check_destination_body_lateral=True,
+        )
+        self.assertTrue(result.valid, result.reason())
+
+    def test_lane_follow_still_rejects_a_genuine_local_reversal(self):
+        contract = self._lane_follow_contract()
+        reference = [
+            {"x_ref_m": 1.0, "y_ref_m": 0.0, "lane_id": 1, "speed_ref_mps": 2.0},
+            {"x_ref_m": 2.0, "y_ref_m": 0.0, "lane_id": 1, "speed_ref_mps": 2.0},
+            {"x_ref_m": 1.5, "y_ref_m": 0.0, "lane_id": 1, "speed_ref_mps": 2.0},
+        ]
+        result = validate_reference_contract(
+            reference_samples=reference,
+            destination_state=[1.5, 0.0, 2.0, 0.0, 1],
+            ego_state=[0.0, 0.0, 2.0, 0.0],
+            contract=contract,
+            check_destination_body_lateral=True,
+        )
+        self.assertFalse(result.valid)
+        self.assertIn("non_monotonic_progress", result.violations)
+
+
     def test_destination_lane_error_blocks_lane_follow(self):
         contract = self._lane_follow_contract()
         reference = [

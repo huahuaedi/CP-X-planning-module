@@ -15,9 +15,70 @@ suppress_lane_change_for_lateral_owner = route_authorization.suppress_lane_chang
 lane_change_target_reached = route_authorization.lane_change_target_reached
 normalize_route_maneuver = route_authorization.normalize_route_maneuver
 RouteManeuver = route_authorization.RouteManeuver
+LaneChangeAuthorization = route_authorization.LaneChangeAuthorization
+RouteLaneChangeAuthorizationLatch = (
+    route_authorization.RouteLaneChangeAuthorizationLatch
+)
 
 
 class RouteAuthorizationTest(unittest.TestCase):
+    def test_route_authorization_stays_latched_after_dynamic_gate_lapses(self):
+        latch = RouteLaneChangeAuthorizationLatch()
+        ready = LaneChangeAuthorization(
+            allowed=True,
+            direction="right",
+            reason="route_lane_change_authorized_by_geometry",
+            required_by_route=True,
+            distance_to_maneuver_m=46.0,
+            target_lane_id=500144,
+            maneuver="lane_change_right",
+        )
+        waiting_again = LaneChangeAuthorization(
+            allowed=False,
+            direction=None,
+            reason="explicit_lane_change_trigger_too_far",
+            required_by_route=False,
+            distance_to_maneuver_m=43.0,
+            target_lane_id=500145,
+            maneuver="lane_change_right",
+        )
+
+        self.assertTrue(
+            latch.update(ready, target_reached=False, in_turn_connector=False).allowed
+        )
+        stabilized = latch.update(
+            waiting_again,
+            target_reached=False,
+            in_turn_connector=False,
+        )
+
+        self.assertTrue(stabilized.allowed)
+        self.assertTrue(stabilized.required_by_route)
+        self.assertEqual(stabilized.target_lane_id, 500144)
+        self.assertEqual(stabilized.reason, "route_lane_change_authorization_latched")
+        self.assertEqual(stabilized.distance_to_maneuver_m, 43.0)
+
+    def test_route_authorization_latch_releases_at_target(self):
+        latch = RouteLaneChangeAuthorizationLatch()
+        ready = LaneChangeAuthorization(
+            allowed=True,
+            direction="right",
+            reason="route_lane_change_authorized_by_geometry",
+            required_by_route=True,
+            distance_to_maneuver_m=20.0,
+            target_lane_id=500144,
+            maneuver="lane_change_right",
+        )
+        latch.update(ready, target_reached=False, in_turn_connector=False)
+        released = latch.update(
+            ready,
+            target_reached=True,
+            in_turn_connector=False,
+        )
+
+        self.assertIsNone(latch.active)
+        self.assertIs(released, ready)
+
     def test_completion_uses_zero_offset_across_ad_road_segments(self):
         self.assertTrue(lane_change_target_reached(
             current_lane_id=1,
@@ -203,6 +264,7 @@ class RouteAuthorizationTest(unittest.TestCase):
             preparation_start_distance_m=45.0,
             latest_start_distance_m=12.0,
             target_safety_threshold=0.65,
+            adjacent_lane_directions={2: "left"},
         )
         self.assertTrue(auth.allowed)
         self.assertTrue(auth.required_by_route)
@@ -223,6 +285,7 @@ class RouteAuthorizationTest(unittest.TestCase):
             preparation_start_distance_m=45.0,
             latest_start_distance_m=12.0,
             target_safety_threshold=0.65,
+            adjacent_lane_directions={2: "left"},
         )
         self.assertFalse(auth.allowed)
         self.assertEqual(auth.reason, "maneuver_too_far_for_lane_change")
@@ -241,6 +304,7 @@ class RouteAuthorizationTest(unittest.TestCase):
             preparation_start_distance_m=45.0,
             latest_start_distance_m=12.0,
             target_safety_threshold=0.65,
+            adjacent_lane_directions={2: "left"},
         )
         self.assertFalse(auth.allowed)
         self.assertEqual(auth.reason, "target_lane_prediction_risk")
@@ -259,6 +323,7 @@ class RouteAuthorizationTest(unittest.TestCase):
             preparation_start_distance_m=45.0,
             latest_start_distance_m=12.0,
             target_safety_threshold=0.65,
+            adjacent_lane_directions={1: "right"},
         )
 
         self.assertTrue(auth.allowed)
@@ -279,6 +344,7 @@ class RouteAuthorizationTest(unittest.TestCase):
             preparation_start_distance_m=45.0,
             latest_start_distance_m=12.0,
             target_safety_threshold=0.65,
+            adjacent_lane_directions={1: "right"},
             explicit_lane_change_start_distance_m=15.0,
         )
 

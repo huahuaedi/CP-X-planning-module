@@ -379,7 +379,7 @@ def _mode_defaults(mode: str) -> Mapping[str, object]:
             "max_destination_body_lateral_abs_m": None,
             "max_heading_jump_rad": 0.95,
             "max_curvature_1pm": 0.55,
-            # Route progress is enforced by the monotonic CARLA route index.
+            # Route progress is enforced by the monotonic AD-map route index.
             # Ego-body forward distance is not monotonic around a real turn.
             "require_monotonic_progress": False,
         },

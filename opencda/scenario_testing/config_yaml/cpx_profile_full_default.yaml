@@ -60,8 +60,8 @@ vehicle_base:
     reference_vehicle_half_width_m: 1.07
     reference_vehicle_half_length_m: 2.45
     turn_swept_footprint_correction_padding_m: 0.05
-    carla_reference_boundary_aware: true
-    carla_reference_tracking_reserve_m: 0.20
+    route_reference_boundary_aware: true
+    route_reference_tracking_reserve_m: 0.20
     control_buffer_max_reference_anchor_jump_m: 0.75
     lane_change_completion_footprint_margin_m: 0.05
     use_opencda_global_route: true

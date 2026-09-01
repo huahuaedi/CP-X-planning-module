@@ -19,10 +19,8 @@ except ModuleNotFoundError:
     )
 
 try:
-    from .legacy_global_planner import AStarGlobalPlanner, WaypointNode
     from . import carla_lane_graph as _carla_lane_graph
 except ImportError:
-    from utility.legacy_global_planner import AStarGlobalPlanner, WaypointNode
     from utility import carla_lane_graph as _carla_lane_graph
 
 
@@ -502,6 +500,39 @@ class CustomGlobalPlannerAdapter:
             options=per_waypoint_options,
             lane_ids=per_waypoint_lane_ids,
         )
+
+    def snapshot_stored_route(self) -> Dict[str, object]:
+        """Return a restorable copy of the active route and query progress."""
+
+        return {
+            "summary": self._stored_route_summary,
+            "xy": None if self._stored_route_xy is None else self._stored_route_xy.copy(),
+            "cum_dists": (
+                None
+                if self._stored_route_cum_dists is None
+                else self._stored_route_cum_dists.copy()
+            ),
+            "options": list(self._stored_route_options),
+            "lane_ids": list(self._stored_route_lane_ids),
+            "waypoints": list(self._stored_route_waypoints),
+            "query_indices": dict(self._query_indices),
+        }
+
+    def restore_stored_route(self, snapshot: Mapping[str, object]) -> None:
+        """Restore a snapshot after a proposed route fails acceptance gates."""
+
+        self._stored_route_summary = snapshot.get("summary")
+        xy = snapshot.get("xy")
+        cum_dists = snapshot.get("cum_dists")
+        self._stored_route_xy = None if xy is None else np.asarray(xy).copy()
+        self._stored_route_cum_dists = (
+            None if cum_dists is None else np.asarray(cum_dists).copy()
+        )
+        self._stored_route_options = list(snapshot.get("options", []) or [])
+        self._stored_route_lane_ids = list(snapshot.get("lane_ids", []) or [])
+        self._stored_route_waypoints = list(snapshot.get("waypoints", []) or [])
+        self._query_indices = dict(snapshot.get("query_indices", {}) or {})
+        self._local_lane_graph_cache = None
 
     def get_dense_route_entries(self) -> List[Dict[str, object]]:
         """Return the stored route's ordered custom waypoints and road options."""
@@ -1066,7 +1097,14 @@ class CustomGlobalPlannerAdapter:
             )
             delta = _wrap_angle(after - before)
             if abs(delta) >= math.radians(28.0):
-                option = "LEFT" if delta > 0.0 else "RIGHT"
+                # CARLA world coords are left-handed (+Y points to the driver's
+                # right), so a physical RIGHT turn produces a POSITIVE atan2
+                # heading change -- the opposite of a textbook right-handed
+                # frame. This matches CARLA's own GlobalRoutePlanner
+                # (opencda/core/plan/global_route_planner.py::_turn_decision,
+                # `next_cross > 0 -> RIGHT`). Before this fix every AD-map /
+                # dij junction turn was labelled backwards.
+                option = "RIGHT" if delta > 0.0 else "LEFT"
             elif abs(delta) >= math.radians(10.0):
                 option = "STRAIGHT"
             else:

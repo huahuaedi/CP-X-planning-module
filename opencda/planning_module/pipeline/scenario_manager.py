@@ -485,9 +485,13 @@ class CPXScenarioManager:
             and bool(self._turn_connector_seen)
             and not self._turn_direction_from_route_option(current_road_option)
         ):
+            # AD-map connector lanes may retain the junction flag well into
+            # the physically straight outgoing corridor. Route topology has
+            # already stopped requesting a turn in this branch, so release
+            # on sustained physical alignment rather than waiting for a map
+            # polygon label to change.
             exit_aligned = bool(
-                not bool(ego_in_junction)
-                and bool(turn_exit_alignment_valid)
+                bool(turn_exit_alignment_valid)
                 and bool(turn_exit_aligned)
             )
             self._turn_exit_stable_frames = (

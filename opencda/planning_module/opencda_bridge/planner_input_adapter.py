@@ -87,6 +87,9 @@ class OpenCDARuntimePort:
     def planning_global_route_summary(self, **kwargs):
         return self._bridge._planning_module_global_route_summary(**kwargs)
 
+    def local_map_snapshot(self):
+        return getattr(self._bridge, "_local_map_snapshot", None)
+
     def load_cp_message_payload(self):
         return self._bridge._load_cp_message_payload()
 
@@ -130,41 +133,15 @@ class OpenCDAPlanningAdapter:
             float(ego_yaw_rad),
         ]
         ego_waypoint = bridge.reference_map.get_waypoint(ego_pose)
-        # canonical_lane_id_for_waypoint() numbers lanes by counting how many
-        # driving lanes exist AT THIS POINT (rightmost = 1, increasing
-        # leftward). That count is only meaningful locally: wherever the
-        # total lane count changes along the road (a lane merges away, a
-        # turn-only lane appears/disappears), the same physical lane this
-        # vehicle never left gets renumbered out from under it, which can
-        # make the route think a required lane change already happened (the
-        # new number coincidentally matches the target) when the vehicle
-        # never actually moved laterally. _lane_id_tracker instead only
-        # changes id when real get_left_lane()/get_right_lane() adjacency
-        # proves the vehicle's raw lane changed, so it stays a stable
-        # identity across the whole route -- see StableLaneIdTracker.
-        # ``reference_map`` is deliberately CARLA-only. AD-map identities
-        # live in route_summary/topology_map and must never leak into the
-        # geometry-facing local lane-id namespace.
-        current_lane_id = int(
-            bridge._lane_id_tracker.update(
-                ego_waypoint,
-                on_discontinuity=bridge.record_lane_id_discontinuity,
-            )
-        )
-        if current_lane_id == 0:
-            current_lane_id = 1
-        lane_ids = [
-            int(canonical_lane_id_for_waypoint(wp))
-            for wp in list(canonical_lane_waypoints(ego_waypoint) or [])
-            if int(canonical_lane_id_for_waypoint(wp)) != 0
-        ]
-        if not lane_ids:
-            lane_ids = [int(current_lane_id)]
+        # One lane namespace is used end-to-end: the opaque AD-map lane id.
+        # Direction is carried separately by topology offsets; numeric lane-id
+        # ordering has no lateral meaning.
+        current_lane_id = int(canonical_lane_id_for_waypoint(ego_waypoint) or 0)
 
-        # Keep the CARLA GRP route index synchronized throughout lane follow,
-        # so intersection reference generation never performs a late first
+        # Keep active-route progress synchronized throughout lane follow, so
+        # intersection reference generation never performs a late first
         # lookup hundreds of metres into the route.
-        bridge.route_manager.sync_carla_route_progress(
+        bridge.route_manager.sync_route_progress(
             ego_x_m=float(ego_location.x),
             ego_y_m=float(ego_location.y),
             ego_heading_rad=float(ego_yaw_rad),
@@ -184,8 +161,58 @@ class OpenCDAPlanningAdapter:
             fallback_lane_id=int(current_lane_id),
             ego_waypoint=ego_waypoint,
         )
+        local_map = bridge.local_map_snapshot()
+        authoritative_lane_id = int(
+            getattr(local_map, "ego_lane_id", 0)
+            or route_summary.get("authoritative_current_lane_id", 0)
+            or 0
+        )
+        authoritative_waypoint = getattr(
+            bridge,
+            "_authoritative_ego_waypoint",
+            None,
+        )
+        if authoritative_lane_id != 0:
+            current_lane_id = int(authoritative_lane_id)
+        if authoritative_waypoint is not None:
+            ego_waypoint = authoritative_waypoint
+        lane_ids = [
+            int(canonical_lane_id_for_waypoint(wp))
+            for wp in list(canonical_lane_waypoints(ego_waypoint) or [])
+            if int(canonical_lane_id_for_waypoint(wp)) != 0
+        ]
+        if local_map is not None and getattr(local_map, "frame_id", 0):
+            local_corridors = {
+                int(corridor.offset): list(corridor.lane_ids)
+                for corridor in tuple(getattr(local_map, "corridors", ()) or ())
+            }
+        else:
+            local_corridors = dict(
+                route_summary.get("diagnostic_local_lane_frame", {}).get(
+                    "corridors", {}
+                )
+                if isinstance(
+                    route_summary.get("diagnostic_local_lane_frame", {}), Mapping
+                )
+                else {}
+            )
+        for corridor_lane_ids in local_corridors.values():
+            for lane_id in list(corridor_lane_ids or []):
+                if int(lane_id or 0) != 0:
+                    lane_ids.append(int(lane_id))
+        lane_ids = list(dict.fromkeys(lane_ids))
+        if not lane_ids:
+            lane_ids = [int(current_lane_id)] if current_lane_id != 0 else []
+        snapshot_target_lane_id = int(
+            getattr(local_map, "route_target_lane_id", 0) or 0
+        )
+        snapshot_target_in_frame = bool(
+            getattr(local_map, "route_target_in_frame", False)
+        )
         route_optimal_lane_id = int(
-            route_summary.get("optimal_lane_id", current_lane_id) or current_lane_id
+            snapshot_target_lane_id
+            if snapshot_target_in_frame and snapshot_target_lane_id != 0
+            else route_summary.get("optimal_lane_id", current_lane_id) or current_lane_id
         )
         route_reference_allowed = (
             bool(bridge.use_opencda_global_route)

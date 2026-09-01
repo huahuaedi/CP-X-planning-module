@@ -93,7 +93,7 @@ def normalize_architecture_config(
         speed_owner="SpeedPlanner",
         reference_owner="ReferenceGenerator+ReferencePipeline",
         control_memory_owner=(
-            "CarlaVelocitySteeringAdapter"
+            "OpenCDAVelocitySteeringAdapter"
             if bool(velocity_steering_interface)
             else "MPCControlBuffer"
         ),

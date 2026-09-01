@@ -214,6 +214,21 @@ class FailSafeFallbackTrajectoryTests(unittest.TestCase):
 
         self.assertEqual(print_mock.call_count, 2)
 
+    def test_probe_fallback_does_not_emit_control_level_warning(self):
+        mpc = _bare_mpc(consecutive_failures=1)
+        mpc._probe_mode_active = True
+        rollout_x, rollout_u = self._rollout(mpc.horizon_steps)
+
+        with mock.patch("builtins.print") as print_mock:
+            mpc._fail_safe_fallback_trajectory(
+                x0=np.array([0.0, 2.5, 10.0, 0.3]),
+                rollout_x=rollout_x,
+                rollout_u=rollout_u,
+                current_acceleration_mps2=0.0,
+            )
+
+        print_mock.assert_not_called()
+
 
 class ModeCostProfileTests(unittest.TestCase):
     def test_apply_mode_cost_profile_updates_objective_weights(self):

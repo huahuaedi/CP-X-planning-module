@@ -153,7 +153,7 @@ class CPXScenarioManagerTests(unittest.TestCase):
         self.assertEqual(decision.state, TRAFFIC_LIGHT_STOP)
         self.assertTrue(decision.stop_goal_active)
 
-    def test_carla_turn_lookahead_enters_prepare_turn(self):
+    def test_route_turn_lookahead_enters_prepare_turn(self):
         manager = CPXScenarioManager({
             "full_intersection_turn_speed_cap_mps": 2.2,
             "scenario_turn_prepare_speed_cap_mps": 2.8,
@@ -443,6 +443,42 @@ class CPXScenarioManagerTests(unittest.TestCase):
         self.assertIn("turn_exit_stabilization", held.reason)
         self.assertEqual(released.state, LANE_FOLLOW)
 
+    def test_aligned_turn_exit_releases_inside_long_junction_lane(self):
+        manager = CPXScenarioManager({
+            "scenario_turn_exit_stable_frames": 1,
+        })
+        manager.update(
+            traffic_state="unknown",
+            stop_target=None,
+            stop_forward_m=0.0,
+            stop_target_reliable=False,
+            ego_speed_mps=2.0,
+            ego_in_junction=True,
+            current_road_option="RIGHT",
+            next_macro_maneuver="right",
+            sim_time_s=1.0,
+        )
+
+        released = manager.update(
+            traffic_state="unknown",
+            stop_target=None,
+            stop_forward_m=0.0,
+            stop_target_reliable=False,
+            ego_speed_mps=1.0,
+            # Town06 connector 5960149 remains marked as a junction after
+            # the vehicle is already aligned to the outgoing straight.
+            ego_in_junction=True,
+            current_road_option="LaneFollow",
+            next_macro_maneuver="straight",
+            sim_time_s=2.0,
+            turn_exit_alignment_valid=True,
+            turn_exit_aligned=True,
+            turn_exit_heading_error_rad=0.04,
+            turn_exit_lateral_m=0.05,
+        )
+
+        self.assertEqual(released.state, LANE_FOLLOW)
+
     def test_post_turn_lane_change_macro_waits_for_stable_exit_alignment(self):
         manager = CPXScenarioManager({
             "scenario_turn_exit_hold_s": 3.0,
@@ -467,7 +503,7 @@ class CPXScenarioManagerTests(unittest.TestCase):
             stop_target_reliable=False,
             ego_speed_mps=3.0,
             ego_in_junction=True,
-            # Both the CARLA route option and junction flag can lag behind
+            # Both the AD-map route option and junction flag can lag behind
             # the AD-map macro at a segment boundary.
             current_road_option="LEFT",
             next_macro_maneuver="Lane Change Right",

@@ -1944,6 +1944,7 @@ def _build_reference_samples_impl(
     follow_target_state: Sequence[float] | Mapping[str, object] | None = None,
     follow_global_route_lane: bool | None = None,
     force_stop_reference: bool = False,
+    authoritative_ego_waypoint: Any = None,
 ) -> List[Dict[str, float]]:
     """
     Build a reference trajectory for MPC's lane-centre cost.
@@ -1959,7 +1960,16 @@ def _build_reference_samples_impl(
     n = max(1, int(horizon_steps))
     sd = max(0.25, float(step_distance_m))
 
-    ego_wp = map_planner.get_waypoint(ego_position)
+    # Current-lane identity and its longitudinal projection are owned by the
+    # continuity-aware AD-map matcher.  Re-running a stateless nearest-lane
+    # query here is ambiguous at connector exits: it can return the same lane
+    # id at a different lateral projection and make lane-follow preserve the
+    # vehicle's existing offset instead of returning to the lane centre.
+    ego_wp = (
+        authoritative_ego_waypoint
+        if authoritative_ego_waypoint is not None
+        else map_planner.get_waypoint(ego_position)
+    )
     if ego_wp is None:
         return [
             {

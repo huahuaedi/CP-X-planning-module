@@ -952,6 +952,8 @@ class GlobalPlanner:
             lane_change_distance_m,
         )
         if use_lateral:
+            # This is a topology transition marker, not an executable path.
+            # Display smoothing and local Frenet geometry are separate owners.
             return (from_offset, from_offset)
 
         landing_distance_m = lane_change_distance_m * 0.45

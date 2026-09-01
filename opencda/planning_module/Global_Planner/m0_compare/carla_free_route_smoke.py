@@ -106,7 +106,7 @@ def _sane_reference(samples, ego_xy):
 
 def run_case(adapter, name, start, goal):
     out = {"name": name}
-    rm = CPXRouteManager(global_planner=adapter, carla_map=None, carla_api=None)
+    rm = CPXRouteManager(global_planner=adapter)
     summary = rm.set_destination(
         start_point={"x": start[0], "y": start[1], "z": start[2]},
         goal_point={"x": goal[0], "y": goal[1], "z": goal[2]},
@@ -117,7 +117,7 @@ def run_case(adapter, name, start, goal):
     out["length_m"] = round(float(getattr(summary, "distance_to_destination_m", 0.0) or 0.0), 1)
     if len(rw) < 2:
         out["ok"] = False
-        out["fail"] = f"route has {len(rw)} points; debug={rm.carla_route_debug_reason}"
+        out["fail"] = f"route has {len(rw)} points; debug={rm.route_debug_reason}"
         return out
 
     # walk synthetic ego poses along the planned polyline
@@ -142,7 +142,7 @@ def run_case(adapter, name, start, goal):
             problems.append(f"i={i}: geometry_route_points returned {len(gpts)}")
 
         try:
-            ref, reason = rm.carla_waypoint_reference(
+            ref, reason = rm.route_reference(
                 ego_x_m=ex, ego_y_m=ey, ego_heading_rad=heading,
                 horizon_steps=15, step_distance_m=2.0, target_speed_mps=8.0,
                 fallback_lane_id=1)
@@ -152,7 +152,7 @@ def run_case(adapter, name, start, goal):
             if not ok and i < idx_samples[-1]:
                 problems.append(f"i={i}: reference not sane ({why}; reason={reason})")
         except Exception as exc:  # noqa: BLE001
-            problems.append(f"i={i}: carla_waypoint_reference raised {type(exc).__name__}: {exc}")
+            problems.append(f"i={i}: route_reference raised {type(exc).__name__}: {exc}")
 
         try:
             rm.upcoming_turn(ego_x_m=ex, ego_y_m=ey, ego_heading_rad=heading,

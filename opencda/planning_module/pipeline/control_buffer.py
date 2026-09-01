@@ -37,7 +37,10 @@ class MPCControlBuffer:
         self._predicted_speed_sequence_mps: List[float] = []
         self._plan_target_speed_mps: Optional[float] = None
         self._context_key = ""
-        self._reference_anchor_xy: Optional[Tuple[float, float]] = None
+        # Reference anchor expressed in the ego frame as (forward, lateral).
+        # A world-frame anchor advances with the vehicle and therefore cannot
+        # distinguish normal rolling-window progress from a geometry jump.
+        self._reference_anchor_relative_m: Optional[Tuple[float, float]] = None
         self._last_reason = "control_buffer_empty"
         self._previous_speed_error_mps: Optional[float] = None
 
@@ -47,7 +50,7 @@ class MPCControlBuffer:
         sim_time_s: float,
         force_replan: bool = False,
         context_key: str = "",
-        reference_anchor_xy: Optional[Tuple[float, float]] = None,
+        reference_anchor_relative_m: Optional[Tuple[float, float]] = None,
         ego_speed_mps: Optional[float] = None,
         target_speed_mps: Optional[float] = None,
         speed_error_crossing_deadband_mps: float = 0.15,
@@ -72,7 +75,7 @@ class MPCControlBuffer:
         if str(context_key or "") != str(self._context_key or ""):
             self._last_reason = "control_buffer_context_changed"
             return True
-        if self._reference_anchor_jump_exceeded(reference_anchor_xy):
+        if self._reference_anchor_jump_exceeded(reference_anchor_relative_m):
             self._last_reason = "control_buffer_reference_anchor_jump"
             return True
         if self._target_speed_jump_exceeded(target_speed_mps):
@@ -179,7 +182,7 @@ class MPCControlBuffer:
         plan_time_s: float,
         dt_s: float,
         context_key: str = "",
-        reference_anchor_xy: Optional[Tuple[float, float]] = None,
+        reference_anchor_relative_m: Optional[Tuple[float, float]] = None,
         predicted_speed_sequence_mps: Optional[Any] = None,
         target_speed_mps: Optional[float] = None,
     ) -> None:
@@ -229,7 +232,9 @@ class MPCControlBuffer:
         except (TypeError, ValueError):
             self._plan_target_speed_mps = None
         self._context_key = str(context_key or "")
-        self._reference_anchor_xy = self._finite_anchor(reference_anchor_xy)
+        self._reference_anchor_relative_m = self._finite_anchor(
+            reference_anchor_relative_m
+        )
         self._last_reason = "control_buffer_updated"
 
     def sample(
@@ -237,7 +242,7 @@ class MPCControlBuffer:
         *,
         sim_time_s: float,
         context_key: str = "",
-        reference_anchor_xy: Optional[Tuple[float, float]] = None,
+        reference_anchor_relative_m: Optional[Tuple[float, float]] = None,
     ) -> Optional[Tuple[float, float, str]]:
         if self._plan_time_s is None or not self._sequence:
             self._last_reason = "control_buffer_empty"
@@ -249,7 +254,7 @@ class MPCControlBuffer:
         if str(context_key or "") != str(self._context_key or ""):
             self._last_reason = "control_buffer_context_changed"
             return None
-        if self._reference_anchor_jump_exceeded(reference_anchor_xy):
+        if self._reference_anchor_jump_exceeded(reference_anchor_relative_m):
             self._last_reason = "control_buffer_reference_anchor_jump"
             return None
         index = min(self._index_for_age(float(age_s)), len(self._sequence) - 1)
@@ -263,7 +268,7 @@ class MPCControlBuffer:
         self._predicted_speed_sequence_mps = []
         self._plan_target_speed_mps = None
         self._context_key = ""
-        self._reference_anchor_xy = None
+        self._reference_anchor_relative_m = None
         self._previous_speed_error_mps = None
         self._last_reason = str(reason)
 
@@ -301,10 +306,10 @@ class MPCControlBuffer:
 
     def _reference_anchor_jump_exceeded(
         self,
-        reference_anchor_xy: Optional[Tuple[float, float]],
+        reference_anchor_relative_m: Optional[Tuple[float, float]],
     ) -> bool:
-        current = self._finite_anchor(reference_anchor_xy)
-        previous = self._reference_anchor_xy
+        current = self._finite_anchor(reference_anchor_relative_m)
+        previous = self._reference_anchor_relative_m
         if current is None or previous is None:
             return bool(current is not None or previous is not None)
         return bool(

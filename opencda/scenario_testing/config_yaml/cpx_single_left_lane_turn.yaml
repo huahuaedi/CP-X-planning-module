@@ -31,7 +31,7 @@ scenario:
   single_cav_list:
     - name: cav1
       spawn_position: [-10.75, 162.52, 0.3, 0, 89.47, 0]
-      # CARLA GRP route from this spawn (original ~108.7m):
+      # AD-map route from this spawn (original ~108.7m):
       # CHANGELANELEFT -> LANEFOLLOW -> LEFT -> LANEFOLLOW, then extended
       # ~40m further down the same outgoing LANEFOLLOW lane (~148.7m total).
       destination: [64.38, 248.05, 0.3]
@@ -43,3 +43,6 @@ scenario:
           debug: true
       planner:
         debug_output_dir: opencda/planning_module/opencda_bridge/debug_single_left_lane_turn
+        global_planner_mode: dij
+        global_planner_xodr_path: Global_Planner/maps/Town06.xodr
+        global_planner_strict: true

@@ -231,8 +231,16 @@ class VehicleManager(object):
         planner_config = dict(config_yaml.get('planner', {}) or {})
         self.store_input_frame = bool(store_input_frame)
         self.debug_time = bool(debug_time)
-        planner_config["record_debug"] = bool(self.store_input_frame)
-        planner_config["record_evaluation_metrics"] = bool(self.store_input_frame)
+        # `store_input_frame` force-enables the heavy records; it must not
+        # silently disable `record_debug` / `record_evaluation_metrics` when the
+        # scenario YAML asked for them (the per-tick planner debug CSV/JSONL is
+        # the primary diagnostic surface).
+        planner_config["record_debug"] = bool(
+            planner_config.get("record_debug", False)
+        ) or bool(self.store_input_frame)
+        planner_config["record_evaluation_metrics"] = bool(
+            planner_config.get("record_evaluation_metrics", False)
+        ) or bool(self.store_input_frame)
         planner_config["draw_world_debug"] = False
         debug_output_dir = Path(str(planner_config.get("debug_output_dir", "opencda/planning_module/opencda_bridge/debug")))
         self.shadow_comparison_timeout_s = max(0.0, float(planner_config.get("shadow_comparison_timeout_s", 5.0)))
@@ -293,6 +301,11 @@ class VehicleManager(object):
         self.cpx_planner = None
         self.controller = None
         if bool(cpx_single_cav_supported) and not bool(self.ros_planner_enabled):
+            # CP-X owns planning and lateral steering, while OpenCDA remains
+            # the platform-level longitudinal controller.  Construct the
+            # normal ControlManager before the bridge so the planner can hand
+            # it target velocity commands without owning throttle/brake.
+            self.controller = ControlManager(control_config)
             self.cpx_planner = CPXMPCPlannerBridge(
                 vehicle_manager=self,
                 config=planner_config,
@@ -461,6 +474,9 @@ class VehicleManager(object):
             self.ros_actuator_mapper.update_measurement(speed_mps=float(ego_spd) / 3.6, timestamp_s=float(self.vehicle.get_world().get_snapshot().timestamp.elapsed_seconds))
 
         if self.cpx_planner is not None:
+            # Keep OpenCDA's longitudinal PID measurement current even though
+            # its BehaviorAgent and lateral waypoint PID are bypassed.
+            self.controller.update_info(ego_pos, ego_spd)
             self.cpx_planner.update_information(
                 ego_transform=ego_pos,
                 ego_speed_kmh=ego_spd,
@@ -661,7 +677,15 @@ class VehicleManager(object):
             return list(ros_output.get("planned_trajectory", []) or []), list(adapter_output.get("route_points", []) or []), "ROS"
         local_output = getattr(self.cpx_planner, "last_output", None)
         local_adapter_output = getattr(self.cpx_planner, "last_adapter_output", None)
-        return list(getattr(local_output, "planned_trajectory", []) or []), list(getattr(local_adapter_output, "route_points", []) or []), "OpenCDA"
+        diagnostics = (
+            dict(local_output.diagnostics_dict())
+            if local_output is not None and callable(getattr(local_output, "diagnostics_dict", None))
+            else {}
+        )
+        display_route = list(diagnostics.get("global_route_points", []) or [])
+        if not display_route:
+            display_route = list(getattr(local_adapter_output, "route_points", []) or [])
+        return list(getattr(local_output, "planned_trajectory", []) or []), display_route, "OpenCDA"
 
     def _draw_selected_planner_visualization(self, ros_output):
         """Draw the selected trajectory in green and selected global route in yellow."""

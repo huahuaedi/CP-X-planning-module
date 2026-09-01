@@ -119,6 +119,16 @@ class _BadJunctionProjectionMap:
         return self._route_wp
 
 
+class _AlwaysWrongNearestMap:
+    """Simulate an ambiguous stateless lookup at a connector exit."""
+
+    def __init__(self, wrong_waypoint):
+        self.wrong_waypoint = wrong_waypoint
+
+    def get_waypoint(self, _point):
+        return self.wrong_waypoint
+
+
 class _DummyCarla:
     class Location:
         def __init__(self, x, y, z):
@@ -131,6 +141,43 @@ class _DummyCarla:
 
 
 class TempDestinationModeTests(unittest.TestCase):
+    def test_lane_follow_uses_authoritative_continuous_match_as_anchor(self):
+        authoritative = _DummyWaypoint(
+            road_id=90, is_junction=False, x_m=10.0, y_m=0.0,
+            yaw_deg=0.0, lane_id=1,
+        )
+        authoritative_next = _DummyWaypoint(
+            road_id=90, is_junction=False, x_m=11.0, y_m=0.0,
+            yaw_deg=0.0, lane_id=1,
+        )
+        wrong_nearest = _DummyWaypoint(
+            road_id=90, is_junction=False, x_m=10.0, y_m=1.6,
+            yaw_deg=0.0, lane_id=1,
+        )
+        wrong_next = _DummyWaypoint(
+            road_id=90, is_junction=False, x_m=11.0, y_m=1.6,
+            yaw_deg=0.0, lane_id=1,
+        )
+        for waypoint in (authoritative, authoritative_next, wrong_nearest, wrong_next):
+            waypoint.ad_lane_id = 900001
+        authoritative.set_next(authoritative_next)
+        wrong_nearest.set_next(wrong_next)
+
+        samples = build_reference_samples(
+            map_planner=_AlwaysWrongNearestMap(wrong_nearest),
+            ego_pose={"x": 10.0, "y": 1.6, "z": 0.0, "heading_rad": 0.0},
+            target_lane_id=900001,
+            decision="lane_follow",
+            horizon_steps=2,
+            step_distance_m=1.0,
+            global_route_points=[],
+            mode_override="NORMAL",
+            authoritative_ego_waypoint=authoritative,
+        )
+
+        self.assertEqual(len(samples), 2)
+        self.assertTrue(all(abs(float(sample["y_ref_m"])) < 1.0e-9 for sample in samples))
+
     def test_lane_follow_uses_route_only_to_choose_successor_geometry(self):
         ego_wp = _DummyWaypoint(
             road_id=300, is_junction=False, x_m=0.0, y_m=0.0,

@@ -55,6 +55,45 @@ class ReferenceGeneratorTests(unittest.TestCase):
         self.assertAlmostEqual(reference[-1]["x_ref_m"], 5.0)
         self.assertTrue(all(abs(row["y_ref_m"] + 1.0) < 1.0e-9 for row in reference))
 
+    def test_lane_center_reference_does_not_cross_restricted_ad_lane(self):
+        generator = self._generator(horizon_steps=5)
+
+        class Waypoint:
+            def __init__(self, x_m, lane_id):
+                self.ad_lane_id = int(lane_id)
+                self.road_id = 1
+                self.lane_id = -1
+                self.lane_width = 3.5
+                self.world_heading_rad = 0.0
+                self.transform = types.SimpleNamespace(
+                    location=types.SimpleNamespace(x=float(x_m), y=0.0),
+                    rotation=types.SimpleNamespace(yaw=0.0),
+                )
+                self._next = []
+
+            def next(self, _distance_m):
+                return list(self._next)
+
+        incoming = Waypoint(0.0, 500144)
+        incoming_next = Waypoint(1.0, 500144)
+        connector = Waypoint(2.0, 5960149)
+        incoming._next = [incoming_next]
+        incoming_next._next = [connector]
+
+        reference = generator.lane_center_samples(
+            start_waypoint=incoming,
+            current_lane_id=500144,
+            horizon_steps=5,
+            step_distance_m=1.0,
+            route_points=[],
+            first_point_distance_m=1.0,
+            restrict_to_ad_lane_id=500144,
+        )
+
+        self.assertTrue(reference)
+        self.assertTrue(all(row["lane_id"] == 500144 for row in reference))
+        self.assertTrue(all(float(row["x_ref_m"]) <= 1.0 for row in reference))
+
     def test_corridor_projection_interpolates_segment_heading(self):
         generator = self._generator()
         samples = [
@@ -475,6 +514,49 @@ class ReferenceGeneratorTests(unittest.TestCase):
         self.assertTrue(
             all(bool(sample["reference_curvature_limited"]) for sample in shaped)
         )
+
+    def test_curvature_conditioner_preserves_reference_anchor_not_ego_offset(self):
+        generator = self._generator(horizon_steps=6)
+        ego = types.SimpleNamespace(x=0.0, y=1.6, z=0.0)
+        raw = [
+            {"x_ref_m": 0.8, "y_ref_m": 0.0, "heading_rad": 0.0, "lane_id": 1},
+            {"x_ref_m": 1.6, "y_ref_m": 0.0, "heading_rad": 0.0, "lane_id": 1},
+            {"x_ref_m": 1.9, "y_ref_m": 0.7, "heading_rad": 0.0, "lane_id": 1},
+            {"x_ref_m": 1.9, "y_ref_m": 1.5, "heading_rad": 0.0, "lane_id": 1},
+        ]
+
+        shaped, reason = generator.curvature_feasible_samples(
+            reference_samples=raw,
+            ego_location=ego,
+            ego_heading_rad=0.0,
+            max_curvature_1pm=0.20,
+            mode="lane_follow",
+        )
+
+        self.assertIn("curvature_feasible_lane_follow", reason)
+        self.assertAlmostEqual(float(shaped[0]["x_ref_m"]), 0.8)
+        self.assertAlmostEqual(float(shaped[0]["y_ref_m"]), 0.0)
+
+    def test_valid_reference_is_not_shaped_by_internal_margin(self):
+        generator = self._generator(horizon_steps=4)
+        raw = [
+            {"x_ref_m": 0.0, "y_ref_m": 0.0, "heading_rad": 0.0},
+            {"x_ref_m": 1.0, "y_ref_m": 0.0, "heading_rad": 0.0},
+            {"x_ref_m": 2.0, "y_ref_m": 0.225, "heading_rad": 0.0},
+        ]
+        raw_curvature = generator._max_discrete_curvature_1pm(raw)
+        contract_limit = float(raw_curvature) + 1.0e-4
+
+        shaped, reason = generator.curvature_feasible_samples(
+            reference_samples=raw,
+            ego_location=types.SimpleNamespace(x=0.0, y=1.0, z=0.0),
+            ego_heading_rad=0.0,
+            max_curvature_1pm=contract_limit,
+            mode="lane_follow",
+        )
+
+        self.assertEqual(reason, "")
+        self.assertEqual(shaped, raw)
 
     def test_discrete_curvature_1pm_matches_internal_computation(self):
         generator = self._generator(horizon_steps=8)

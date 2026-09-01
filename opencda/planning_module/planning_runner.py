@@ -1825,7 +1825,9 @@ def _spawn_collision_sensor(
             vel = ego_vehicle.get_velocity()
             ego_x = float(loc.x)
             ego_y = float(loc.y)
-            ego_speed_mps = float((vel.x**2 + vel.y**2 + vel.z**2) ** 0.5)
+            # Keep the standalone runner consistent with OpenCDA localization:
+            # vertical spawn-settling velocity is not ground-vehicle speed.
+            ego_speed_mps = float(math.hypot(vel.x, vel.y))
         except Exception:
             ego_x = ego_y = ego_speed_mps = None
 

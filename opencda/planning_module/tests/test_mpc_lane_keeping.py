@@ -1250,5 +1250,48 @@ class CrossTrackSuppressionIntegrationTests(unittest.TestCase):
         self.assertAlmostEqual(x_q_off, x_q_on, places=9)
 
 
+class MinimumProgressContractTests(unittest.TestCase):
+    @staticmethod
+    def _mpc(profile="intersection_turn"):
+        mpc = object.__new__(MPC)
+        mpc.constraints = types.SimpleNamespace(
+            min_velocity_mps=0.0,
+            max_velocity_mps=15.0,
+        )
+        mpc.minimum_progress_enabled = True
+        mpc.active_cost_profile_name = str(profile)
+        mpc.turn_minimum_progress_speed_mps = 1.5
+        mpc.turn_minimum_progress_ramp_accel_mps2 = 0.6
+        mpc.dt_s = 0.1
+        return mpc
+
+    def test_turn_floor_holds_progress_when_already_moving(self):
+        floor = self._mpc()._minimum_progress_lower_bound_mps(
+            current_speed_mps=5.0,
+            future_state_index=4,
+        )
+        self.assertAlmostEqual(floor, 1.5)
+
+    def test_turn_floor_ramps_reachably_from_rest(self):
+        mpc = self._mpc()
+        first = mpc._minimum_progress_lower_bound_mps(
+            current_speed_mps=0.0,
+            future_state_index=1,
+        )
+        tenth = mpc._minimum_progress_lower_bound_mps(
+            current_speed_mps=0.0,
+            future_state_index=10,
+        )
+        self.assertAlmostEqual(first, 0.06)
+        self.assertAlmostEqual(tenth, 0.6)
+
+    def test_floor_is_inactive_outside_turn(self):
+        floor = self._mpc(profile="lane_follow")._minimum_progress_lower_bound_mps(
+            current_speed_mps=5.0,
+            future_state_index=4,
+        )
+        self.assertAlmostEqual(floor, 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

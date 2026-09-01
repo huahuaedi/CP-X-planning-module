@@ -96,7 +96,12 @@ def get_speed(vehicle, meters=False):
         The vehicle speed.
     """
     vel = vehicle.get_velocity()
-    vel_meter_per_second = math.sqrt(vel.x ** 2 + vel.y ** 2 + vel.z ** 2)
+    # Ground-vehicle speed is planar. CARLA actors can have a transient
+    # vertical velocity while settling onto the road after spawn; including
+    # ``vel.z`` makes localization, planning and longitudinal control believe
+    # the stationary vehicle is already moving. That false speed is especially
+    # harmful when an MPC velocity command feeds a downstream PID controller.
+    vel_meter_per_second = math.hypot(vel.x, vel.y)
     return vel_meter_per_second if meters else 3.6 * vel_meter_per_second
 
 

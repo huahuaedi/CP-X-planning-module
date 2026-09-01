@@ -1,5 +1,13 @@
 base_config: single_intersection_town06_carla.yaml
 
+# Isolate the route-required right lane change + right turn: no background
+# traffic. The base config's `carla_traffic_manager.range` grid scatters cars
+# by raw x/y over Town06 and some land on the median/grass; it also does not
+# populate the ego's westbound arterial. A dedicated "vehicle blocking the
+# turn lane" scenario comes later with a placed obstacle.
+carla_traffic_manager:
+  vehicle_list: []
+
 vehicle_base:
   behavior:
     max_speed: 50
@@ -14,7 +22,10 @@ scenario:
       spawn_position: [225.10, -20.1, 0.3, 0, 179.8, 0]
       # Keep the validated route anchor, then follow that exact lane's CARLA
       # successors so higher-speed lane changes have room to stabilize.
-      destination: [6.3, -46.9, 0.3]
+      # The right-turn connector exits on AD lane 540156 (centre x~=9.8).
+      # x=6.3 is adjacent lane 540155 and forced an unintended second
+      # route-required lane change immediately after the turn.
+      destination: [9.8, -46.9, 0.3]
       destination_lane_extension_m: 50.0
       v2x:
         communication_range: 60
@@ -26,5 +37,18 @@ scenario:
         debug_output_dir: opencda/planning_module/opencda_bridge/debug_right_turn_highspeed
         target_speed_mps: 12.0
         ignore_traffic_control: true
+        # Functional-isolation run: keep AD-map topology/reference geometry,
+        # road boundaries and MPC, but remove dynamic actors from behavior,
+        # prediction and MPC until the route/lane-change/turn chain is stable.
+        functional_test_ignore_dynamic_objects: true
+        # Layered-rebuild isolation: no route replan, so a downstream failure
+        # cannot feed back and reset route progress while the route /
+        # authorization / reference layers are being validated. Re-enable in
+        # Layer 6.
+        route_replan_enabled: false
+        publish_cp_message: false
+        require_native_opencda_cp: false
+        prediction_lane_following_enabled: false
+        max_mpc_obstacles: 0
         global_planner_mode: dij
         global_planner_strict: true

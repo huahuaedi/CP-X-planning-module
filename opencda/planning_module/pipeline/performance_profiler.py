@@ -110,9 +110,9 @@ class PlannerStageProfiler:
             ("geometry_route_points", "profile.route_manager.geometry_extraction"),
             ("route_points", "profile.route_manager.route_points_extraction"),
             ("get_route_info", "profile.route_manager.route_info"),
-            ("sync_carla_route_progress", "profile.route_manager.route_progress_sync"),
+            ("sync_route_progress", "profile.route_manager.route_progress_sync"),
             ("upcoming_turn", "profile.route_manager.upcoming_turn_search"),
-            ("carla_route_alignment", "profile.route_manager.route_alignment"),
+            ("route_alignment", "profile.route_manager.route_alignment"),
         ):
             self.wrap_method(route_manager, method_name, label)
 
@@ -213,4 +213,3 @@ class PlannerStageProfiler:
                     "maximum_ms": float(self._maximum_ms[label]),
                 }
             return result
-

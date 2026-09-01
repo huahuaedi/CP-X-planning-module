@@ -110,10 +110,10 @@ def run_case(name, mp, start, goal):
     )
     rm = bridge.route_manager
     route_found = bool(getattr(rm._active_route_summary, "route_found", False))
-    route_dbg = rm.carla_route_debug_reason
+    route_dbg = rm.route_debug_reason
     if not route_found:
         raise AssertionError(f"{name}: route not found (debug={route_dbg})")
-    if route_dbg != "inhouse_route_ready":
+    if route_dbg != "admap_route_ready":
         raise AssertionError(
             f"{name}: expected in-house route entries, got debug={route_dbg}"
         )

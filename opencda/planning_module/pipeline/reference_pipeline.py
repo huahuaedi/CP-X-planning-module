@@ -706,7 +706,7 @@ class ReferencePipeline:
                 destination_state=destination,
                 lane_center_reference=reference,
                 target_arc_length_m=float(
-                    self.config.get("carla_waypoint_turn_destination_arc_m", 4.5)
+                    self.config.get("waypoint_turn_destination_arc_m", 4.5)
                 ),
             )
         else:

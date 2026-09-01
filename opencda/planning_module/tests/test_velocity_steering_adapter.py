@@ -1,8 +1,7 @@
-import math
 import unittest
 
 from opencda.planning_module.pipeline.velocity_steering_adapter import (
-    CarlaVelocitySteeringAdapter,
+    OpenCDAVelocitySteeringAdapter,
     VelocitySteeringCommand,
 )
 
@@ -18,140 +17,88 @@ class _Carla:
     VehicleControl = _Control
 
 
+class _OpenCDAPID:
+    def __init__(self):
+        self.current_speed = 0.0
+        self.max_throttle = 0.8
+        self.max_brake = 0.6
+        self.max_steering = 0.7
+        self.past_steering = 0.0
+        self.longitudinal_targets = []
+        self.lateral_call_count = 0
+
+    def lon_run_step(self, target_speed_kmh):
+        self.longitudinal_targets.append(float(target_speed_kmh))
+        return max(-1.0, min(1.0, 0.1 * (target_speed_kmh - self.current_speed)))
+
+    def lat_run_step(self, _waypoint):
+        self.lateral_call_count += 1
+        raise AssertionError("OpenCDA lateral PID must not own MPC steering")
+
+
+class _ControlManager:
+    def __init__(self):
+        self.controller = _OpenCDAPID()
+
+
 class VelocitySteeringAdapterTest(unittest.TestCase):
-    def test_below_target_never_brakes(self):
-        adapter = CarlaVelocitySteeringAdapter({})
-        control, _ = adapter.run_step(
-            command=VelocitySteeringCommand(3.0, 0.1),
-            actual_speed_mps=1.0,
+    def setUp(self):
+        self.manager = _ControlManager()
+        self.adapter = OpenCDAVelocitySteeringAdapter(self.manager)
+
+    def _run(self, command, actual_speed_mps=1.0):
+        return self.adapter.run_step(
+            command=command,
+            actual_speed_mps=actual_speed_mps,
             sim_time_s=1.0,
             max_steering_rad=0.6,
             carla_module=_Carla,
         )
+
+    def test_target_velocity_is_sent_to_opencda_pid_in_kmh(self):
+        control, reason = self._run(VelocitySteeringCommand(3.0, 0.0))
+        self.assertEqual(self.manager.controller.longitudinal_targets, [10.8])
+        self.assertEqual(reason, "opencda_pid_accelerate")
         self.assertGreater(control.throttle, 0.0)
         self.assertEqual(control.brake, 0.0)
 
-    def test_small_overspeed_coasts_without_brake(self):
-        adapter = CarlaVelocitySteeringAdapter({})
-        control, _ = adapter.run_step(
-            command=VelocitySteeringCommand(3.0, 0.0),
-            actual_speed_mps=3.2,
-            sim_time_s=1.0,
-            max_steering_rad=0.6,
-            carla_module=_Carla,
+    def test_mpc_steering_bypasses_opencda_lateral_pid(self):
+        control, _ = self._run(VelocitySteeringCommand(3.0, 0.12))
+        self.assertAlmostEqual(control.steer, 0.2)
+        self.assertEqual(self.manager.controller.lateral_call_count, 0)
+
+    def test_opencda_lateral_max_does_not_clip_mpc_physical_steering(self):
+        self.manager.controller.max_steering = 0.3
+        control, _ = self._run(VelocitySteeringCommand(3.0, 0.32))
+        self.assertAlmostEqual(control.steer, 0.32 / 0.6)
+        self.assertGreater(control.steer, self.manager.controller.max_steering)
+
+    def test_tracking_overspeed_uses_opencda_pid_brake(self):
+        control, reason = self._run(
+            VelocitySteeringCommand(2.0, 0.0), actual_speed_mps=4.0
         )
+        self.assertEqual(reason, "opencda_pid_tracking_brake")
         self.assertEqual(control.throttle, 0.0)
-        self.assertEqual(control.brake, 0.0)
+        self.assertGreater(control.brake, 0.0)
 
-    def test_stop_and_emergency_are_separate(self):
-        adapter = CarlaVelocitySteeringAdapter({})
-        stop, _ = adapter.run_step(
-            command=VelocitySteeringCommand(0.0, 0.0, stop_goal_active=True),
-            actual_speed_mps=2.0,
-            sim_time_s=1.0,
-            max_steering_rad=0.6,
-            carla_module=_Carla,
+    def test_stop_hold_uses_opencda_brake_limit(self):
+        control, reason = self._run(
+            VelocitySteeringCommand(0.0, 0.0, stop_goal_active=True),
+            actual_speed_mps=0.0,
         )
-        emergency, _ = adapter.run_step(
-            command=VelocitySteeringCommand(0.0, 0.0, emergency_stop=True),
-            actual_speed_mps=2.0,
-            sim_time_s=1.05,
-            max_steering_rad=0.6,
-            carla_module=_Carla,
-        )
-        self.assertGreater(stop.brake, 0.0)
-        self.assertLessEqual(stop.brake, 0.35)
-        self.assertEqual(emergency.brake, 1.0)
+        self.assertEqual(reason, "opencda_pid_stop_hold")
+        self.assertEqual(control.throttle, 0.0)
+        self.assertAlmostEqual(control.brake, 0.3)
 
-    def test_stop_hold_smoothly_returns_steering_to_zero(self):
-        adapter = CarlaVelocitySteeringAdapter({
-            "velocity_adapter_stop_steering_decay_rate_deg_s": 12.0,
-        })
-        moving, _ = adapter.run_step(
-            command=VelocitySteeringCommand(3.0, 0.20),
+    def test_emergency_stop_bypasses_pid(self):
+        control, reason = self._run(
+            VelocitySteeringCommand(0.0, 0.2, emergency_stop=True),
             actual_speed_mps=3.0,
-            sim_time_s=1.0,
-            max_steering_rad=0.6,
-            carla_module=_Carla,
         )
-        stopped, _ = adapter.run_step(
-            command=VelocitySteeringCommand(0.0, 0.0, stop_goal_active=True),
-            actual_speed_mps=0.0,
-            sim_time_s=1.05,
-            max_steering_rad=0.6,
-            carla_module=_Carla,
-        )
-
-        maximum_normalized_delta = math.radians(12.0) * 0.05 / 0.6
-        self.assertGreater(stopped.steer, 0.0)
-        self.assertLess(stopped.steer, moving.steer)
-        self.assertLessEqual(
-            abs(stopped.steer - moving.steer),
-            maximum_normalized_delta + 1.0e-9,
-        )
-
-    def test_emergency_brake_is_immediate_but_steering_is_rate_limited(self):
-        adapter = CarlaVelocitySteeringAdapter({
-            "velocity_adapter_emergency_steering_decay_rate_deg_s": 25.0,
-        })
-        moving, _ = adapter.run_step(
-            command=VelocitySteeringCommand(3.0, -0.20),
-            actual_speed_mps=3.0,
-            sim_time_s=1.0,
-            max_steering_rad=0.6,
-            carla_module=_Carla,
-        )
-        emergency, reason = adapter.run_step(
-            command=VelocitySteeringCommand(0.0, 0.0, emergency_stop=True),
-            actual_speed_mps=2.0,
-            sim_time_s=1.05,
-            max_steering_rad=0.6,
-            carla_module=_Carla,
-        )
-
-        self.assertEqual(reason, "velocity_adapter_emergency_stop")
-        self.assertEqual(emergency.throttle, 0.0)
-        self.assertEqual(emergency.brake, 1.0)
-        self.assertLess(emergency.steer, 0.0)
-        self.assertGreater(emergency.steer, moving.steer)
-
-    def test_throttle_delta_matches_legacy_value_at_the_reference_tick(self):
-        # velocity_adapter_max_throttle_delta=0.08 is expressed against the
-        # 0.05s reference tick -- calling at exactly that dt must reproduce
-        # the pre-dt-aware flat delta unchanged.
-        adapter = CarlaVelocitySteeringAdapter({
-            "velocity_adapter_max_throttle_delta": 0.08,
-        })
-        adapter._last_control = _Control(throttle=0.0)
-        adapter._previous_time_s = 10.0
-
-        control, _ = adapter.run_step(
-            command=VelocitySteeringCommand(10.0, 0.0),
-            actual_speed_mps=0.0,
-            sim_time_s=10.05,
-            max_steering_rad=0.6,
-            carla_module=_Carla,
-        )
-
-        self.assertAlmostEqual(control.throttle, 0.08)
-
-    def test_throttle_delta_scales_with_measured_dt(self):
-        adapter = CarlaVelocitySteeringAdapter({
-            "velocity_adapter_max_throttle_delta": 0.08,
-        })
-        adapter._last_control = _Control(throttle=0.0)
-        adapter._previous_time_s = 10.0
-
-        control, _ = adapter.run_step(
-            command=VelocitySteeringCommand(10.0, 0.0),
-            actual_speed_mps=0.0,
-            sim_time_s=10.20,
-            max_steering_rad=0.6,
-            carla_module=_Carla,
-        )
-
-        # 4x the reference 0.05s tick -> 4x the allowed delta.
-        self.assertAlmostEqual(control.throttle, 0.32)
+        self.assertEqual(reason, "opencda_pid_emergency_stop")
+        self.assertEqual(control.throttle, 0.0)
+        self.assertEqual(control.brake, 1.0)
+        self.assertEqual(self.manager.controller.longitudinal_targets, [])
 
 
 if __name__ == "__main__":

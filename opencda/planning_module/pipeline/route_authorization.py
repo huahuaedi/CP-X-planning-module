@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 import math
 from typing import Mapping, Optional, Sequence
@@ -40,6 +40,56 @@ class LaneChangeAuthorization:
             "lane_change_authorized_target_lane_id": int(self.target_lane_id),
             "route_maneuver_normalized": str(self.maneuver),
         }
+
+
+class RouteLaneChangeAuthorizationLatch:
+    """Keep a route-required maneuver stable after its entry gate is crossed."""
+
+    _TRANSIENT_LAPSE_REASONS = {
+        "explicit_lane_change_trigger_too_far",
+        "maneuver_too_far_for_lane_change",
+        "route_maneuver_does_not_require_lane_change",
+        "already_in_required_lane",
+    }
+
+    def __init__(self) -> None:
+        self._active: Optional[LaneChangeAuthorization] = None
+
+    @property
+    def active(self) -> Optional[LaneChangeAuthorization]:
+        return self._active
+
+    def reset(self) -> None:
+        self._active = None
+
+    def update(
+        self,
+        authorization: LaneChangeAuthorization,
+        *,
+        target_reached: bool,
+        in_turn_connector: bool,
+    ) -> LaneChangeAuthorization:
+        if bool(target_reached) or bool(in_turn_connector):
+            self.reset()
+            return authorization
+        if bool(authorization.allowed) and bool(authorization.required_by_route):
+            self._active = authorization
+            return authorization
+        if (
+            self._active is not None
+            and str(authorization.reason) in self._TRANSIENT_LAPSE_REASONS
+        ):
+            active = self._active
+            return replace(
+                active,
+                reason="route_lane_change_authorization_latched",
+                distance_to_maneuver_m=(
+                    authorization.distance_to_maneuver_m
+                    if authorization.distance_to_maneuver_m is not None
+                    else active.distance_to_maneuver_m
+                ),
+            )
+        return authorization
 
 
 def normalize_route_maneuver(value: object) -> RouteManeuver:
@@ -128,6 +178,8 @@ def authorize_route_lane_change(
     topology_target_lane_id: int = 0,
     topology_lane_offset: int = 0,
     topology_target_in_local_frame: bool = True,
+    route_geometry_direction: str = "",
+    route_geometry_distance_m: Optional[float] = None,
 ) -> LaneChangeAuthorization:
     if not bool(route_lane_change_allowed):
         return _denied("route_lane_change_not_allowed", next_macro_maneuver, remaining_distance_m, current_lane_id)
@@ -136,6 +188,102 @@ def authorize_route_lane_change(
     current_option = normalize_route_maneuver(current_road_option)
     target_lane_id = int(route_required_lane_id or 0)
     current_lane_id = int(current_lane_id or 0)
+
+    # W5: the arc-length route model (RouteGeometry) can see a route-required
+    # lane change a full preparation window ahead and reports its physical
+    # direction directly, without the canonical/AD lane-id bookkeeping that
+    # the checks below depend on. That bookkeeping is unreliable here: the
+    # stable-tracker `current_lane_id` is a small 1..N index while
+    # `available_lane_ids` are AD lane ids, and `route_required_lane_id`
+    # only diverges from `current_lane_id` once ego is already at/past the
+    # connector -- so the id-space path silently answers
+    # "already_in_required_lane" for the whole approach and the maneuver is
+    # never prepared. When geometry supplies a direction, trust it for
+    # existence/adjacency/direction and keep only the physically meaningful
+    # gates: an active turn connector, the trigger-distance window, target
+    # lane safety, and predicted risk.
+    geometry_direction = str(route_geometry_direction or "").strip().lower()
+    if geometry_direction in {"left", "right"}:
+        if current_option in {RouteManeuver.TURN_LEFT, RouteManeuver.TURN_RIGHT}:
+            return _denied("already_in_turn_connector", maneuver, remaining_distance_m, current_lane_id)
+        geometry_maneuver = (
+            RouteManeuver.LANE_CHANGE_LEFT
+            if geometry_direction == "left"
+            else RouteManeuver.LANE_CHANGE_RIGHT
+        )
+        if (
+            int(topology_target_lane_id or 0) != 0
+            and int(topology_target_lane_id) != int(topology_current_lane_id or 0)
+            and not bool(topology_target_in_local_frame)
+        ):
+            return _denied(
+                "route_target_outside_local_frame",
+                geometry_maneuver,
+                route_geometry_distance_m,
+                int(topology_target_lane_id),
+            )
+        geometry_distance = _finite_or_none(route_geometry_distance_m)
+        if geometry_distance is None:
+            geometry_distance = _finite_or_none(remaining_distance_m)
+        if (
+            geometry_distance is not None
+            and explicit_lane_change_start_distance_m is not None
+            and float(geometry_distance) > float(explicit_lane_change_start_distance_m)
+        ):
+            return _denied(
+                "explicit_lane_change_trigger_too_far",
+                geometry_maneuver,
+                geometry_distance,
+                target_lane_id,
+            )
+        # Pick a target lane id that is genuinely distinct from the current
+        # one. The AD local-frame target (`topology_target_lane_id`, e.g.
+        # 500144 at offset -1) is authoritative; `route_required_lane_id`
+        # is the canonical fallback. Reporting `current_lane_id` here is the
+        # degenerate case that makes the downstream commitment tracker treat
+        # the maneuver as finished before ego has moved (id-equality
+        # completion), so only use it when nothing distinct is available --
+        # and then the caller must judge completion by local-frame offset,
+        # not id equality (it already passes `topology_lane_offset`).
+        geometry_target_lane_id = int(current_lane_id or 0)
+        for candidate_id in (int(topology_target_lane_id or 0), int(route_required_lane_id or 0)):
+            if candidate_id != 0 and candidate_id != int(current_lane_id or 0):
+                geometry_target_lane_id = candidate_id
+                break
+        geometry_safety = float(
+            lane_safety_scores.get(
+                int(geometry_target_lane_id),
+                lane_safety_scores.get(int(topology_target_lane_id or 0), float("nan")),
+            )
+        )
+        if geometry_safety == geometry_safety and geometry_safety < float(
+            target_safety_threshold
+        ):
+            return _denied(
+                "target_lane_safety_below_threshold",
+                geometry_maneuver,
+                geometry_distance,
+                geometry_target_lane_id,
+            )
+        geometry_risk = dict(
+            lane_prediction_risks.get(int(geometry_target_lane_id), {}) or {}
+        )
+        if bool(geometry_risk.get("risk", False)):
+            return _denied(
+                "target_lane_prediction_risk",
+                geometry_maneuver,
+                geometry_distance,
+                geometry_target_lane_id,
+            )
+        return LaneChangeAuthorization(
+            allowed=True,
+            direction=str(geometry_direction),
+            reason="route_lane_change_authorized_by_geometry",
+            required_by_route=True,
+            distance_to_maneuver_m=geometry_distance,
+            target_lane_id=int(geometry_target_lane_id),
+            maneuver=str(geometry_maneuver.value),
+        )
 
     if maneuver in {RouteManeuver.GO_STRAIGHT, RouteManeuver.LANE_FOLLOW, RouteManeuver.UNKNOWN}:
         return _denied(
@@ -202,8 +350,7 @@ def authorize_route_lane_change(
     elif topology_directions:
         expected_direction = topology_directions.get(int(target_lane_id))
     else:
-        lane_delta = int(target_lane_id) - int(current_lane_id)
-        expected_direction = _direction_for_delta(lane_delta)
+        expected_direction = None
     if bool(require_adjacent) and expected_direction not in {"left", "right"}:
         return _denied("required_lane_not_adjacent", maneuver, remaining_distance_m, target_lane_id)
     if maneuver == RouteManeuver.TURN_LEFT and expected_direction != "left":

@@ -57,6 +57,46 @@ class ManeuverManagerTests(unittest.TestCase):
 
         self.assertEqual(result.debug["maneuver_geometry_type"], "lane_change")
 
+    def test_lane_change_geometry_is_committed_once_across_source_and_lane_switch(self):
+        manager = ManeuverManager()
+        initial = manager.update(
+            reference_samples=_reference(0.0, 2.0),
+            destination_state=[20.0, 0.0, 2.0, 0.0, 2],
+            decision="lane_change_right",
+            behavior_fsm_state="EXECUTE_LANE_CHANGE_RIGHT",
+            current_lane_id=1,
+            target_lane_id=2,
+            ego_x_m=0.0,
+            ego_y_m=0.0,
+            reference_source="lane_change_intent",
+            route_next_maneuver="Lane Change Right",
+        )
+        # The matcher has crossed onto the target lane and the upstream
+        # source label/geometry has changed.  Neither event may recommit XY.
+        shifted = manager.update(
+            reference_samples=_reference(3.0, 7.0),
+            destination_state=[20.0, 3.0, 7.0, 0.0, 2],
+            decision="lane_change",
+            behavior_fsm_state="TARGET_LANE_STABILIZATION",
+            current_lane_id=2,
+            target_lane_id=2,
+            ego_x_m=1.0,
+            ego_y_m=0.0,
+            reference_source="locked_target_lane_reference",
+            route_next_maneuver="Lane Change Right",
+            lane_change_commitment_active=True,
+        )
+
+        self.assertEqual(
+            shifted.debug["maneuver_geometry_id"],
+            initial.debug["maneuver_geometry_id"],
+        )
+        self.assertEqual(shifted.debug["maneuver_geometry_revision"], 1)
+        self.assertFalse(shifted.debug["maneuver_geometry_source_changed"])
+        self.assertLess(abs(float(shifted.reference_samples[0]["y_ref_m"])), 0.1)
+        self.assertEqual(manager.active_plan.source_lane_id, 1)
+        self.assertEqual(manager.active_plan.target_lane_id, 2)
+
     def test_extend_geometry_does_not_append_the_same_path_back_to_its_start(self):
         geometry = ManeuverManager._extend_geometry(_reference(), _reference())
 

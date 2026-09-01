@@ -81,6 +81,28 @@ class _ContractResult:
 
 
 class CandidatePipelineTest(unittest.TestCase):
+    def test_lane_follow_has_no_generic_fixed_ratio_yield_candidate(self):
+        intents = candidate_pipeline.build_candidate_intents(
+            selected_decision="lane_follow",
+            selected_target_lane_id=1,
+            current_lane_id=1,
+            target_speed_mps=15.0,
+            candidate_lane_ids=[1, 2],
+            lane_safety_scores={1: 1.0, 2: 1.0},
+            lane_prediction_risks={},
+            stop_goal_active=False,
+            traffic_stop_active=False,
+            lane_change_authorized=False,
+            lane_change_authorized_target_lane_id=1,
+            allow_lane_change_candidates=False,
+        )
+
+        self.assertNotIn("yield_slow_down", {intent.name for intent in intents})
+        self.assertEqual(
+            {float(intent.target_speed_mps) for intent in intents},
+            {15.0},
+        )
+
     def test_confirmed_local_avoidance_keeps_stop_as_deferred_fallback(self):
         intents = candidate_pipeline.build_candidate_intents(
             selected_decision="lane_change_left",
@@ -260,6 +282,7 @@ class CandidatePipelineTest(unittest.TestCase):
             traffic_stop_active=False,
             lane_change_authorized=True,
             lane_change_authorized_target_lane_id=1,
+            lane_change_authorization_direction="right",
             allow_lane_change_candidates=True,
             lane_change_authorization_source="route",
         )
@@ -351,6 +374,7 @@ class CandidatePipelineTest(unittest.TestCase):
             traffic_stop_active=False,
             lane_change_authorized=True,
             lane_change_authorized_target_lane_id=2,
+            lane_change_authorization_direction="left",
             allow_lane_change_candidates=True,
         )
         self.assertTrue(any(intent.decision == "lane_change_left" for intent in allowed))
@@ -454,20 +478,13 @@ class CandidatePipelineTest(unittest.TestCase):
         )
 
         keep = next(intent for intent in intents if intent.name == "keep_lane")
-        yield_intent = next(
-            intent for intent in intents if intent.name == "yield_slow_down"
-        )
         normal = next(
             intent for intent in intents
             if intent.trajectory_variant == "normal"
         )
         self.assertEqual(keep.reason, "defer_route_lane_change")
         self.assertGreater(keep.base_cost, normal.base_cost)
-        self.assertEqual(
-            yield_intent.reason,
-            "conservative_yield_defer_route_lane_change",
-        )
-        self.assertGreater(yield_intent.base_cost, normal.base_cost)
+        self.assertNotIn("yield_slow_down", {intent.name for intent in intents})
 
     def test_lane_change_reference_uses_quintic_time_blend(self):
         source = [
@@ -731,6 +748,24 @@ class CandidatePipelineTest(unittest.TestCase):
 
         self.assertAlmostEqual(average_speed, 8.25)
         self.assertLess(average_speed, 12.0)
+
+    def test_lane_change_operational_curvature_uses_lateral_acceleration(self):
+        limit = candidate_pipeline.lane_change_operational_curvature_limit_1pm(
+            planning_speed_mps=12.0,
+            lateral_accel_limit_mps2=1.3,
+            vehicle_max_curvature_1pm=0.35,
+        )
+
+        self.assertAlmostEqual(limit, 1.3 / (12.0 * 12.0))
+        _, length_m, _ = candidate_pipeline.lane_change_geometry_requirements(
+            ego_speed_mps=5.0,
+            target_speed_mps=12.0,
+            duration_s=4.38,
+            dt_s=0.1,
+            lane_width_m=3.5,
+            max_curvature_1pm=limit,
+        )
+        self.assertGreater(length_m, 45.0)
 
     def test_stopped_lane_change_geometry_keeps_minimum_spatial_length(self):
         geometry_speed, length_m, step_m = (
@@ -1163,6 +1198,38 @@ class CandidatePipelineTest(unittest.TestCase):
         self.assertEqual(outcome.reason, "feasible_route_required_candidate")
         self.assertIs(outcome.selected, change)
 
+    def test_route_required_prefers_feasible_normal_over_cheaper_assertive(self):
+        def lane_change(variant, cost):
+            return candidate_pipeline.CandidateReferenceResult(
+                intent=candidate_pipeline.CandidateBehaviorIntent(
+                    name=f"route_lane_change_right_{variant}",
+                    decision="lane_change_right",
+                    target_lane_id=1,
+                    target_speed_mps=3.0,
+                    trajectory_variant=variant,
+                ),
+                destination_state=[],
+                lane_center_reference=[],
+                feasibility_status="mpc_probe_solved",
+                total_cost=cost,
+            )
+
+        assertive = lane_change("assertive", 1.0)
+        normal = lane_change("normal", 10.0)
+        conservative = lane_change("conservative", 5.0)
+        outcome = candidate_pipeline.select_candidate_with_commitment(
+            [assertive, normal, conservative],
+            commitment=candidate_pipeline.ManeuverCommitment(),
+            required_decision="lane_change_right",
+            required_target_lane_id=1,
+        )
+
+        self.assertIs(outcome.selected, normal)
+        self.assertEqual(
+            outcome.reason,
+            "feasible_route_required_normal_candidate",
+        )
+
     def test_route_required_lane_change_defers_when_candidate_is_infeasible(self):
         keep = candidate_pipeline.CandidateReferenceResult(
             intent=candidate_pipeline.CandidateBehaviorIntent(
@@ -1441,6 +1508,27 @@ class LaneCostTopologyAliasTests(unittest.TestCase):
         )
 
         self.assertAlmostEqual(cost_default, cost_explicit_false)
+
+    def test_opaque_ad_lane_ids_do_not_determine_direction(self):
+        intents = candidate_pipeline.build_candidate_intents(
+            selected_decision="lane_follow",
+            selected_target_lane_id=500200,
+            current_lane_id=490100,
+            target_speed_mps=8.0,
+            candidate_lane_ids=[490100, 500200],
+            lane_safety_scores={490100: 1.0, 500200: 1.0},
+            lane_prediction_risks={},
+            stop_goal_active=False,
+            traffic_stop_active=False,
+            lane_change_authorized=True,
+            lane_change_authorized_target_lane_id=500200,
+            lane_change_authorization_direction="right",
+            allow_lane_change_candidates=True,
+        )
+
+        lane_changes = [intent for intent in intents if "lane_change" in intent.decision]
+        self.assertTrue(lane_changes)
+        self.assertTrue(all(intent.decision == "lane_change_right" for intent in lane_changes))
 
 
 if __name__ == "__main__":

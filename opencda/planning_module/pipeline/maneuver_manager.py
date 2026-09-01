@@ -7,7 +7,7 @@ import math
 from typing import Mapping, Sequence
 
 
-_LANE_CHANGE = {"lane_change_left", "lane_change_right"}
+_LANE_CHANGE = {"lane_change", "lane_change_left", "lane_change_right"}
 _TURN = {"intersection_turn_left", "intersection_turn_right"}
 
 
@@ -246,7 +246,14 @@ class ManeuverManager:
 
         plan = self.active_plan
         plan.phase = phase
-        if int(target_lane_id):
+        # Source/target lane identity belongs to the committed maneuver.  A
+        # continuous matcher is expected to move current_lane_id onto the
+        # target lane during execution; that is progress, not a reason to
+        # retarget or rebuild the maneuver.
+        if int(target_lane_id) and not (
+            plan.maneuver_type in {"lane_change", "lane_change_to_turn"}
+            and int(plan.target_lane_id)
+        ):
             plan.target_lane_id = int(target_lane_id)
         retained, retained_index = self._forward_window(
             plan.geometry,
@@ -255,12 +262,25 @@ class ManeuverManager:
             count=max(len(incoming), 2),
             start_index=plan.progress_index,
         )
-        source_changed = bool(
+        incoming_source_changed = bool(
             str(reference_source) and str(reference_source) != plan.reference_source
         )
+        owns_lane_change_geometry = bool(
+            plan.maneuver_type in {"lane_change", "lane_change_to_turn"}
+            and plan.phase in {"LANE_CHANGE", "STABILIZATION"}
+        )
+        # A lane-change is committed once.  Candidate/source labels can
+        # legitimately change on the next tick (intent -> locked reference,
+        # source-lane match -> target-lane match), but they must not transfer
+        # XY ownership.  Keep the accepted prefix and only append genuinely
+        # new points beyond its tail; per-frame speed is applied separately.
+        source_changed = bool(incoming_source_changed and not owns_lane_change_geometry)
         window_start_index = retained_index
         if incoming:
-            if retained and bool(stop_goal_active):
+            if owns_lane_change_geometry:
+                plan.geometry = self._extend_geometry(plan.geometry, incoming)
+                geometry = retained
+            elif retained and bool(stop_goal_active):
                 geometry = retained[:len(incoming)]
             elif retained and source_changed:
                 geometry = self._continuous_handoff(
@@ -270,16 +290,14 @@ class ManeuverManager:
                 )
             else:
                 geometry = self._geometry_only(incoming)
-            plan.geometry = self._extend_geometry(geometry, incoming)
-            plan.geometry_revision += int(source_changed)
-            plan.reference_source = str(reference_source or plan.reference_source)
-            # The rebuilt geometry's index 0 is re-anchored near ego (it is
-            # built from retained[0]/incoming[0], the point nearest ego
-            # found above), so the window search below must restart at 0
-            # instead of inheriting retained_index, which is an index into
-            # the old (pre-rebuild) array and can point past the end of a
-            # shorter rebuilt one.
-            window_start_index = 0
+            if not owns_lane_change_geometry:
+                plan.geometry = self._extend_geometry(geometry, incoming)
+                plan.geometry_revision += int(source_changed)
+                plan.reference_source = str(reference_source or plan.reference_source)
+                # The rebuilt geometry's index 0 is re-anchored near ego (it
+                # is built from retained[0]/incoming[0], the point nearest
+                # ego found above), so the next search must restart at 0.
+                window_start_index = 0
 
         window, window_index = self._forward_window(
             plan.geometry,

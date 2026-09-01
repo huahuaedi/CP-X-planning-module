@@ -608,6 +608,7 @@ class MpcReferenceGenerationContext:
     lane_reference_freeze_count: int
     sim_time_s: float
     stop_release_temp_smooth_until_sim_time_s: float
+    authoritative_ego_waypoint: Any
 
     def __init__(self, **kwargs: object) -> None:
         legacy_keys = {"world_map", "carla", "ego_transform"}
@@ -624,6 +625,9 @@ class MpcReferenceGenerationContext:
                 "heading_rad": math.radians(float(getattr(rotation, "yaw", 0.0))),
             }
 
+        # Optional during migration of non-AD-map/legacy callers.  The ROS
+        # bridge supplies this from its continuous matcher.
+        kwargs.setdefault("authoritative_ego_waypoint", None)
         field_names = set(self.__dataclass_fields__.keys())
         unknown_keys = set(kwargs.keys()) - field_names - legacy_keys
         if unknown_keys:
@@ -863,6 +867,7 @@ def generate_mpc_reference(
         follow_target_state=follow_target_state,
         follow_global_route_lane=bool(reference_intent.follow_global_route_lane),
         force_stop_reference=False,
+        authoritative_ego_waypoint=context.authoritative_ego_waypoint,
     )
     reference_samples, fallback_reason = reference_with_route_fallback(
         ego_state=ego_state,
@@ -1016,6 +1021,7 @@ def generate_mpc_reference(
             follow_target_state=None,
             follow_global_route_lane=False,
             force_stop_reference=False,
+            authoritative_ego_waypoint=context.authoritative_ego_waypoint,
         )
         reanchor_reason = "lane_center_reanchor"
         reanchor_invalid_reason = reference_first_sample_invalid_reason(
@@ -1088,6 +1094,7 @@ def generate_mpc_reference(
                 follow_target_state=follow_target_state,
                 follow_global_route_lane=bool(reference_intent.follow_global_route_lane),
                 force_stop_reference=True,
+                authoritative_ego_waypoint=context.authoritative_ego_waypoint,
             )
         elif bool(allow_heading_reanchor):
             reanchored_reference = heading_reference_fallback_samples(

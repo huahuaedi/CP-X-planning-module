@@ -41,7 +41,7 @@ vehicle_base:
     safety_stuck_release_min_accel_mps2: 0.01
     use_opencda_global_route: true
     opencda_global_route_reference_allowed: true
-    # CARLA-native GlobalRoutePlanner (route_manager.py's _build_carla_route)
+    # CARLA-native GlobalRoutePlanner (route_manager.py's _build_route)
     # is already the primary source for road-option/macro-maneuver lookups
     # and reference geometry whenever it has a route (geometry_route_points()
     # prefers it explicitly) -- self.global_planner (this setting) only
@@ -64,38 +64,16 @@ vehicle_base:
     # cruise value and are non-binding (higher than cruise) at 3.0.
     target_speed_mps: 3.0
     velocity_steering_interface_enabled: true
-    velocity_adapter_kp: 0.18
-    velocity_adapter_ki: 0.025
-    velocity_adapter_cruise_feedforward: 0.28
-    velocity_adapter_speed_deadband_mps: 0.12
-    velocity_adapter_brake_activation_error_mps: 0.35
-    # Raised from 0.48: this ceiling was tuned for the original 3-5 m/s
-    # cruise baseline and was never raised alongside target_speed_mps to
-    # 35mph (15.6464). The velocity_steering_interface (kp/ki closed-loop
-    # controller, active since velocity_steering_interface_enabled=true)
-    # was correctly commanding more throttle to chase the speed error, but
-    # it saturated at this hard ceiling, so actual speed plateaued around
-    # ~4.2-4.3 m/s no matter how high the target was.
-    velocity_adapter_max_throttle: 0.85
-    velocity_adapter_max_tracking_brake: 0.10
-    velocity_adapter_max_stop_brake: 0.35
-    velocity_adapter_max_steering_rate_deg_s: 25.0
-    # Lowered from 12.0: a small residual steering angle right before a stop
-    # (e.g. <1 deg) fully decays to 0 within a single ~50ms tick at 12 deg/s,
-    # reading as an instantaneous snap in the steering-rate signal even
-    # though it's rate-limited by design. 4.0 spreads that same small
-    # residual over 2-3 ticks instead.
-    velocity_adapter_stop_steering_decay_rate_deg_s: 4.0
-    velocity_adapter_emergency_steering_decay_rate_deg_s: 25.0
+    # OpenCDA PID tracks the optimized MPC velocity at this future time,
+    # rather than the nearly-identical one-step-ahead velocity.
+    mpc_velocity_command_preview_time_s: 0.6
     # MPC outputs physical acceleration, while CARLA accepts normalized pedal
     # positions. This inverse-actuator model compensates steady-state drag and
     # uses measured acceleration as the MPC feedback state.
     actuator_compensation_enabled: true
     actuator_cruise_throttle_feedforward: 0.28
-    # Raised from 0.55 for the same reason as velocity_adapter_max_throttle
-    # above; speed_error_throttle_gain/boost re-enabled so throttle keeps
-    # closing the gap instead of settling at a fixed feedforward once far
-    # below target.
+    # Retained for the legacy acceleration-to-pedal fallback path; normal
+    # velocity tracking is now owned by OpenCDA's longitudinal PID.
     actuator_cruise_max_throttle: 0.85
     actuator_speed_error_throttle_gain: 0.05
     actuator_max_speed_error_throttle_boost: 0.20
@@ -215,7 +193,7 @@ vehicle_base:
     # drop -- re-validate after any further change.
     full_lane_change_speed_cap_mps: 6.0
     # This governs the turn connector's own waypoint spacing (step_distance_m
-    # = max(carla_waypoint_turn_min_step_m, dt_s * this)), not a comfort
+    # = max(waypoint_turn_min_step_m, dt_s * this)), not a comfort
     # speed -- raising it alongside cruise speed widened the connector's
     # sampled path to ~0.5m/step, which cuts the inside of a tight turn
     # enough to push the swept vehicle envelope outside the drivable
@@ -224,12 +202,12 @@ vehicle_base:
     # permanently stuck mid-turn at 5.0). Keep this low so the connector
     # stays finely sampled regardless of how fast a turn is actually taken;
     # full_intersection_turn_speed_cap_mps governs the real comfort speed.
-    carla_waypoint_turn_speed_cap_mps: 2.2
-    carla_waypoint_turn_min_step_m: 0.35
-    carla_waypoint_turn_connector_distance_m: 7.0
-    carla_waypoint_turn_anchor_to_ego_heading: false
-    carla_waypoint_turn_destination_arc_m: 4.5
-    carla_turn_connector_smoothing_passes: 16
+    waypoint_turn_speed_cap_mps: 2.2
+    waypoint_turn_min_step_m: 0.35
+    waypoint_turn_connector_distance_m: 7.0
+    waypoint_turn_anchor_to_ego_heading: false
+    waypoint_turn_destination_arc_m: 4.5
+    route_turn_connector_smoothing_passes: 16
     reference_contract_intersection_turn_max_curvature_1pm: 0.55
     reference_contract_turn_vehicle_footprint_enabled: true
     reference_contract_turn_boundary_margin_m: 0.15
@@ -244,8 +222,8 @@ vehicle_base:
     reference_vehicle_half_width_m: 1.07
     reference_vehicle_half_length_m: 2.45
     turn_swept_footprint_correction_padding_m: 0.05
-    carla_reference_boundary_aware: true
-    carla_reference_tracking_reserve_m: 0.20
+    route_reference_boundary_aware: true
+    route_reference_tracking_reserve_m: 0.20
     control_buffer_max_reference_anchor_jump_m: 0.75
     lane_change_completion_footprint_margin_m: 0.05
     # Defaults (0.35m / 8deg) let a lane change hand off to lane_follow with
@@ -303,7 +281,7 @@ scenario:
   single_cav_list: # this is for merging vehicle or single cav without v2x
     - name: cav1
       spawn_position: [6.31, 125.03, 0.3, 0, -92, 0]
-      # Keep the CARLA GRP route on the southbound arterial. This endpoint is
+      # Keep the AD-map route on the southbound arterial. This endpoint is
       # beyond the third signalized intersection but before the later turn.
       destination: [6.31, -60.0, 0.3]
       v2x:
@@ -331,17 +309,7 @@ scenario:
         require_native_opencda_cp: true
         target_speed_mps: 3.0
         velocity_steering_interface_enabled: true
-        velocity_adapter_kp: 0.18
-        velocity_adapter_ki: 0.025
-        velocity_adapter_cruise_feedforward: 0.28
-        velocity_adapter_speed_deadband_mps: 0.12
-        velocity_adapter_brake_activation_error_mps: 0.35
-        velocity_adapter_max_throttle: 0.85
-        velocity_adapter_max_tracking_brake: 0.10
-        velocity_adapter_max_stop_brake: 0.35
-        velocity_adapter_max_steering_rate_deg_s: 25.0
-        velocity_adapter_stop_steering_decay_rate_deg_s: 4.0
-        velocity_adapter_emergency_steering_decay_rate_deg_s: 25.0
+        mpc_velocity_command_preview_time_s: 0.6
         actuator_compensation_enabled: true
         actuator_cruise_throttle_feedforward: 0.28
         actuator_cruise_max_throttle: 0.85
@@ -445,12 +413,12 @@ scenario:
         turn_approach_entry_buffer_m: 5.0
         turn_approach_preview_margin_m: 10.0
         full_lane_change_speed_cap_mps: 6.0
-        carla_waypoint_turn_speed_cap_mps: 2.2
-        carla_waypoint_turn_min_step_m: 0.35
-        carla_waypoint_turn_connector_distance_m: 7.0
-        carla_waypoint_turn_anchor_to_ego_heading: false
-        carla_waypoint_turn_destination_arc_m: 4.5
-        carla_turn_connector_smoothing_passes: 16
+        waypoint_turn_speed_cap_mps: 2.2
+        waypoint_turn_min_step_m: 0.35
+        waypoint_turn_connector_distance_m: 7.0
+        waypoint_turn_anchor_to_ego_heading: false
+        waypoint_turn_destination_arc_m: 4.5
+        route_turn_connector_smoothing_passes: 16
         reference_contract_intersection_turn_max_curvature_1pm: 0.55
         scenario_turn_exit_hold_s: 3.0
         scenario_turn_exit_max_heading_error_rad: 0.15

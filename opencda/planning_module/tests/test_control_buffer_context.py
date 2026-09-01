@@ -16,7 +16,7 @@ class MPCControlBufferContextTests(unittest.TestCase):
             plan_time_s=1.0,
             dt_s=0.1,
             context_key="lane_follow|LANE_KEEP|1",
-            reference_anchor_xy=(5.0, 2.0),
+            reference_anchor_relative_m=(5.0, 2.0),
         )
         return buffer
 
@@ -26,12 +26,12 @@ class MPCControlBufferContextTests(unittest.TestCase):
         self.assertFalse(buffer.should_replan(
             sim_time_s=1.1,
             context_key="lane_follow|LANE_KEEP|1",
-            reference_anchor_xy=(5.2, 2.0),
+            reference_anchor_relative_m=(5.2, 2.0),
         ))
         self.assertIsNotNone(buffer.sample(
             sim_time_s=1.1,
             context_key="lane_follow|LANE_KEEP|1",
-            reference_anchor_xy=(5.2, 2.0),
+            reference_anchor_relative_m=(5.2, 2.0),
         ))
 
     def test_phase_change_invalidates_buffer(self):
@@ -40,20 +40,20 @@ class MPCControlBufferContextTests(unittest.TestCase):
         self.assertTrue(buffer.should_replan(
             sim_time_s=1.1,
             context_key="lane_change_right|TARGET_LANE_STABILIZATION|1",
-            reference_anchor_xy=(5.2, 2.0),
+            reference_anchor_relative_m=(5.2, 2.0),
         ))
         self.assertEqual(
             buffer.last_reason,
             "control_buffer_context_changed",
         )
 
-    def test_reference_anchor_jump_invalidates_buffer(self):
+    def test_relative_reference_lateral_jump_invalidates_buffer(self):
         buffer = self._buffer()
 
         self.assertTrue(buffer.should_replan(
             sim_time_s=1.1,
             context_key="lane_follow|LANE_KEEP|1",
-            reference_anchor_xy=(6.0, 2.0),
+            reference_anchor_relative_m=(5.0, 3.0),
         ))
         self.assertEqual(
             buffer.last_reason,
@@ -66,7 +66,7 @@ class MPCControlBufferContextTests(unittest.TestCase):
         self.assertIsNone(buffer.sample(
             sim_time_s=1.1,
             context_key="intersection_turn_right|TURN|1",
-            reference_anchor_xy=(5.0, 2.0),
+            reference_anchor_relative_m=(5.0, 2.0),
         ))
         self.assertEqual(buffer.last_reason, "control_buffer_context_changed")
 
@@ -75,14 +75,14 @@ class MPCControlBufferContextTests(unittest.TestCase):
         self.assertFalse(buffer.should_replan(
             sim_time_s=1.05,
             context_key="lane_follow|LANE_KEEP|1",
-            reference_anchor_xy=(5.0, 2.0),
+            reference_anchor_relative_m=(5.0, 2.0),
             ego_speed_mps=2.0,
             target_speed_mps=3.0,
         ))
         self.assertTrue(buffer.should_replan(
             sim_time_s=1.10,
             context_key="lane_follow|LANE_KEEP|1",
-            reference_anchor_xy=(5.0, 2.0),
+            reference_anchor_relative_m=(5.0, 2.0),
             ego_speed_mps=2.9,
             target_speed_mps=3.0,
         ))
@@ -96,14 +96,14 @@ class MPCControlBufferContextTests(unittest.TestCase):
         buffer.should_replan(
             sim_time_s=1.05,
             context_key="lane_follow|LANE_KEEP|1",
-            reference_anchor_xy=(5.0, 2.0),
+            reference_anchor_relative_m=(5.0, 2.0),
             ego_speed_mps=2.5,
             target_speed_mps=3.0,
         )
         self.assertTrue(buffer.should_replan(
             sim_time_s=1.10,
             context_key="lane_follow|LANE_KEEP|1",
-            reference_anchor_xy=(5.0, 2.0),
+            reference_anchor_relative_m=(5.0, 2.0),
             ego_speed_mps=3.1,
             target_speed_mps=3.0,
         ))
@@ -129,14 +129,14 @@ class MPCControlBufferContextTests(unittest.TestCase):
             plan_time_s=1.0,
             dt_s=0.1,
             context_key="lane_change_left|EXECUTE_LANE_CHANGE_LEFT|2",
-            reference_anchor_xy=(5.0, 2.0),
+            reference_anchor_relative_m=(5.0, 2.0),
             predicted_speed_sequence_mps=[3.0, 2.9, 2.8, 2.7],
         )
 
         self.assertTrue(buffer.should_replan(
             sim_time_s=1.1,
             context_key="lane_change_left|EXECUTE_LANE_CHANGE_LEFT|2",
-            reference_anchor_xy=(5.0, 2.0),
+            reference_anchor_relative_m=(5.0, 2.0),
             ego_speed_mps=1.5,
         ))
         self.assertEqual(
@@ -156,14 +156,14 @@ class MPCControlBufferContextTests(unittest.TestCase):
             plan_time_s=1.0,
             dt_s=0.1,
             context_key="lane_change_left|EXECUTE_LANE_CHANGE_LEFT|2",
-            reference_anchor_xy=(5.0, 2.0),
+            reference_anchor_relative_m=(5.0, 2.0),
             predicted_speed_sequence_mps=[3.0, 2.9, 2.8, 2.7],
         )
 
         self.assertFalse(buffer.should_replan(
             sim_time_s=1.1,
             context_key="lane_change_left|EXECUTE_LANE_CHANGE_LEFT|2",
-            reference_anchor_xy=(5.0, 2.0),
+            reference_anchor_relative_m=(5.0, 2.0),
             ego_speed_mps=2.5,
         ))
         self.assertEqual(buffer.last_reason, "control_buffer_reuse")
@@ -177,7 +177,7 @@ class MPCControlBufferContextTests(unittest.TestCase):
         self.assertFalse(buffer.should_replan(
             sim_time_s=1.1,
             context_key="lane_follow|LANE_KEEP|1",
-            reference_anchor_xy=(5.2, 2.0),
+            reference_anchor_relative_m=(5.2, 2.0),
             ego_speed_mps=0.0,
         ))
 

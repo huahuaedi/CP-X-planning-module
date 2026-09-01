@@ -24,6 +24,7 @@ from .candidate_pipeline import (
 from .control_buffer import MPCControlBuffer
 from .decision_record import DecisionRecord, DecisionVeto, build_decision_record
 from .mpc_feedback import BehaviorMPCFeedback
+from .mpc_command_extractor import MPCCommandExtractor, MPCTrackingCommand
 from .maneuver_manager import ManeuverManager, ManeuverPlan, ManeuverReferenceResult
 from .prediction import PredictionFrame, build_prediction_frame
 from .planner_pipeline import CPXPlanningPipeline
@@ -67,6 +68,7 @@ from .scenario_manager import (
 from .speed_planner import SpeedPlan, build_speed_plan
 from .velocity_steering_adapter import (
     CarlaVelocitySteeringAdapter,
+    OpenCDAVelocitySteeringAdapter,
     VelocitySteeringCommand,
 )
 from .tracker import CPXObstacleTracker
@@ -74,6 +76,8 @@ from .tracker import CPXObstacleTracker
 __all__ = [
     "ActuatorCommand",
     "BehaviorMPCFeedback",
+    "MPCCommandExtractor",
+    "MPCTrackingCommand",
     "CarlaActuatorMapper",
     "BoundaryRecoveryRequest",
     "BoundaryRecoveryValidation",
@@ -119,6 +123,7 @@ __all__ = [
     "SafetySupervisor",
     "SpeedPlan",
     "CarlaVelocitySteeringAdapter",
+    "OpenCDAVelocitySteeringAdapter",
     "VelocitySteeringCommand",
     "authorize_route_lane_change",
     "build_prediction_frame",

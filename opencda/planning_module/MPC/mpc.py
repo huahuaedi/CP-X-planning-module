@@ -620,6 +620,7 @@ class MPC:
         )
         self._solver_failure_log_event_count = 0
         self._solver_failure_emergency_logged = False
+        self._probe_mode_active = False
         self.reference_previous_solution_search_steps = max(
             0,
             int(self.reference_cfg.get("previous_solution_search_steps", 15)),
@@ -677,6 +678,18 @@ class MPC:
         )
         self._base_mode_cost_state = self._capture_mode_cost_state()
         self.active_cost_profile_name = "base"
+        minimum_progress_cfg = dict(mpc_cfg.get("minimum_progress", {}))
+        self.minimum_progress_enabled = bool(
+            minimum_progress_cfg.get("enabled", True)
+        )
+        self.turn_minimum_progress_speed_mps = max(
+            0.0,
+            float(minimum_progress_cfg.get("intersection_turn_min_speed_mps", 1.5)),
+        )
+        self.turn_minimum_progress_ramp_accel_mps2 = max(
+            0.0,
+            float(minimum_progress_cfg.get("recovery_acceleration_mps2", 0.6)),
+        )
 
         self.solver_cfg = dict(mpc_cfg.get("solver", {}))
         self.qp_max_iter = int(self.solver_cfg.get("max_iter", 4000))
@@ -838,6 +851,39 @@ class MPC:
         self.speed_soft_max_slack_mps = float(blended["speed_soft_max_slack_mps"])
         self.active_cost_profile_name = str(normalized_profile)
         return str(normalized_profile)
+
+    def _minimum_progress_lower_bound_mps(
+        self, *, current_speed_mps: float, future_state_index: int
+    ) -> float:
+        """Return a dynamically reachable turn-progress speed floor."""
+
+        if (
+            not bool(getattr(self, "minimum_progress_enabled", False))
+            or str(getattr(self, "active_cost_profile_name", ""))
+            != "intersection_turn"
+        ):
+            return float(self.constraints.min_velocity_mps)
+        target_mps = min(
+            float(self.constraints.max_velocity_mps),
+            max(
+                float(self.constraints.min_velocity_mps),
+                float(getattr(self, "turn_minimum_progress_speed_mps", 0.0)),
+            ),
+        )
+        if float(current_speed_mps) >= float(target_mps):
+            return float(target_mps)
+        reachable_mps = (
+            max(float(self.constraints.min_velocity_mps), float(current_speed_mps))
+            + max(
+                0.0,
+                float(getattr(
+                    self, "turn_minimum_progress_ramp_accel_mps2", 0.0
+                )),
+            )
+            * max(0, int(future_state_index))
+            * max(1.0e-6, float(self.dt_s))
+        )
+        return float(min(float(target_mps), float(reachable_mps)))
 
     def blend_toward_horizon_s(
         self, target_horizon_s: float, *, blend_alpha: float | None = None
@@ -1977,6 +2023,11 @@ class MPC:
         self._previous_x_solution = None
         self._previous_u_solution = None
 
+    def clear_solution_memory(self) -> None:
+        """Reset rollout and control seeds at an explicit maneuver-mode boundary."""
+
+        self._clear_all_solution_memory()
+
     def _clear_all_solution_memory(self) -> None:
         self._last_x_solution = None
         self._last_u_solution = None
@@ -2226,7 +2277,14 @@ class MPC:
             1,
             int(getattr(self, "solver_failure_log_every_n", 50)),
         )
-        if event_count == 1 or emergency_first_report or event_count % log_every_n == 0:
+        if (
+            not bool(getattr(self, "_probe_mode_active", False))
+            and (
+                event_count == 1
+                or emergency_first_report
+                or event_count % log_every_n == 0
+            )
+        ):
             print(
                 "[MPC] "
                 + ("EMERGENCY STOP" if emergency else "brake-gently")
@@ -3126,8 +3184,21 @@ class MPC:
                 reachable_speed_floor_profile_mps=reachable_speed_floor_profile_mps,
             )
             v_idx = index.state_index(k, 2)
+            stage_speed_lower_bound_mps = self._minimum_progress_lower_bound_mps(
+                current_speed_mps=float(x0[2]),
+                future_state_index=int(k),
+            )
+            stage_speed_lower_bound_mps = min(
+                float(stage_speed_upper_bound_mps),
+                max(
+                    float(self.constraints.min_velocity_mps),
+                    float(stage_speed_lower_bound_mps),
+                ),
+            )
             if speed_soft_term_active:
-                add_constraint({v_idx: 1.0}, self.constraints.min_velocity_mps, np.inf)
+                add_constraint(
+                    {v_idx: 1.0}, float(stage_speed_lower_bound_mps), np.inf
+                )
                 slack_idx = index.speed_slack_index(k)
                 add_quadratic(slack_idx, float(self.speed_soft_constraint_weight))
                 add_constraint(
@@ -3143,7 +3214,7 @@ class MPC:
             else:
                 add_constraint(
                     {v_idx: 1.0},
-                    self.constraints.min_velocity_mps,
+                    float(stage_speed_lower_bound_mps),
                     float(stage_speed_upper_bound_mps),
                 )
         # Optional hard terminal-speed constraint. Apply it only for stop-like
@@ -3930,6 +4001,7 @@ class MPC:
             "_last_was_stop_goal",
             "_solver_failure_log_event_count",
             "_solver_failure_emergency_logged",
+            "_probe_mode_active",
         )
         snapshot = {
             name: copy.deepcopy(getattr(self, name))
@@ -3944,6 +4016,7 @@ class MPC:
             "dynamic_cost": 0.0,
         }
         try:
+            self._probe_mode_active = True
             self.plan_trajectory(
                 current_state=current_state,
                 destination_state=destination_state,

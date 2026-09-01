@@ -1,14 +1,4 @@
-"""Factory for selecting global-planner backends.
-
-The planning stack supports two route-planning systems:
-
-* ``astar`` / ``legacy`` / ``carla_grp``: CARLA waypoint graph plus legacy A*.
-  This is the baseline used for comparisons and does not require AD-map.
-* ``custom`` / ``admap`` / ``opendrive``: custom OpenDRIVE planner backed by
-  the compiled AD-map runtime.
-
-Both backends expose the same runner-facing methods after construction.
-"""
+"""Factory for the single AD-map global-planner backend."""
 
 from __future__ import annotations
 
@@ -16,21 +6,8 @@ from dataclasses import dataclass
 import os
 from typing import Any, Callable, Dict, Mapping, Tuple
 
-from .carla_lane_graph import build_lane_center_waypoints
 from .global_planner import CustomGlobalPlannerAdapter
-from .legacy_global_planner import AStarGlobalPlanner
 
-
-ASTAR_GLOBAL_PLANNER_MODES = {"", "astar", "legacy", "carla_grp"}
-# "dijkstra"/"dij" are recognized here too so that
-# ``cpx_scenario_bridge.py``'s legacy-scenario bootstrap (which calls this
-# factory to align spawn/destination anchors) makes the same backend choice
-# as ``opencda_bridge/cpx_mpc_planner.py``'s own inline selection (which has
-# always accepted these as custom-planner aliases). Before this fix, a
-# scenario configured with ``global_planner_mode: dij`` would bootstrap its
-# anchors against the legacy A*/CARLA waypoint graph (this factory's default)
-# while the CAV actually drove against the custom AD-map Dijkstra planner --
-# two different route graphs used within the same scenario run.
 CUSTOM_GLOBAL_PLANNER_MODES = {"custom", "custom_admap", "admap", "opendrive", "dijkstra", "dij"}
 
 
@@ -47,7 +24,7 @@ class GlobalPlannerBackendSelection:
 def normalize_global_planner_mode(raw_mode: object) -> str:
     """Normalize scenario YAML planner mode."""
 
-    return str(raw_mode if raw_mode is not None else "astar").strip().lower()
+    return str(raw_mode if raw_mode is not None else "dij").strip().lower()
 
 
 def create_global_planner_backend(
@@ -66,68 +43,35 @@ def create_global_planner_backend(
     output: backend selection with planner and road configuration
     """
 
-    mode = normalize_global_planner_mode(planning_cfg.get("global_planner_mode", "astar"))
-    default_sample_distance_m = 1.0 if mode in CUSTOM_GLOBAL_PLANNER_MODES else 2.0
-    sample_distance_m = float(planning_cfg.get("waypoint_sample_distance_m", default_sample_distance_m))
+    mode = normalize_global_planner_mode(planning_cfg.get("global_planner_mode", "dij"))
+    if mode not in CUSTOM_GLOBAL_PLANNER_MODES:
+        raise ValueError(
+            f"Unsupported planning.global_planner_mode {mode!r}; AD-map is required."
+        )
+    sample_distance_m = float(planning_cfg.get("waypoint_sample_distance_m", 1.0))
 
-    if mode in CUSTOM_GLOBAL_PLANNER_MODES:
-        xodr_path = resolve_xodr_path_fn(scenario_cfg=scenario_cfg, sumo_cfg=sumo_cfg)
-        print(
-            "[CARLA GLOBAL ROUTE OUTPUT] Using custom OpenDRIVE/AD-map "
-            f"global planner (mode={mode})."
-        )
-        try:
-            planner = CustomGlobalPlannerAdapter(
-                xodr_path=xodr_path,
-                cache_root=os.path.join(project_root, "Global_Planner", "cache"),
-                route_sample_distance_m=float(sample_distance_m),
-                lane_change_penalty_m=(
-                    float(planning_cfg["global_planner_lane_change_penalty_m"])
-                    if planning_cfg.get("global_planner_lane_change_penalty_m") is not None
-                    else None
-                ),
-                ad_map_install_root=planning_cfg.get("ad_map_install_root"),
-            )
-            planner.load()
-        except FileNotFoundError as exc:
-            raise RuntimeError(
-                "Custom global planner was requested, but the AD-map runtime "
-                "is not installed for this Python environment. Build it with "
-                "`PYTHON_BIN=\"$(command -v python)\" "
-                "opencda/planning_module/Global_Planner/build_ad_map.sh --clean`, "
-                "set `GLOBAL_PLANNER_AD_MAP_INSTALL`, or set "
-                "`planning.global_planner_mode: astar` in the scenario YAML."
-            ) from exc
-        return GlobalPlannerBackendSelection(
-            planner=planner,
-            road_cfg={"lane_count": 1, "lane_width_m": 3.5},
-            mode=mode,
-            backend_name="custom_admap",
-        )
-
-    if mode in ASTAR_GLOBAL_PLANNER_MODES:
-        print(
-            "[CARLA GLOBAL ROUTE OUTPUT] Using legacy CARLA/A* global planner "
-            f"(mode={mode or 'astar'})."
-        )
-        lane_center_waypoints, road_cfg = build_lane_center_waypoints(
-            map_obj=world_map,
-            carla=carla,
-            sample_distance_m=float(sample_distance_m),
-        )
-        planner = AStarGlobalPlanner(
-            lane_center_waypoints=lane_center_waypoints,
-            world_map=world_map,
+    xodr_path = resolve_xodr_path_fn(scenario_cfg=scenario_cfg, sumo_cfg=sumo_cfg)
+    print(f"[AD-MAP ROUTE] Using AD-map global planner (mode={mode}).")
+    try:
+        planner = CustomGlobalPlannerAdapter(
+            xodr_path=xodr_path,
+            cache_root=os.path.join(project_root, "Global_Planner", "cache"),
             route_sample_distance_m=float(sample_distance_m),
+            lane_change_penalty_m=(
+                float(planning_cfg["global_planner_lane_change_penalty_m"])
+                if planning_cfg.get("global_planner_lane_change_penalty_m") is not None
+                else None
+            ),
+            ad_map_install_root=planning_cfg.get("ad_map_install_root"),
         )
-        return GlobalPlannerBackendSelection(
-            planner=planner,
-            road_cfg=dict(road_cfg),
-            mode=mode or "astar",
-            backend_name="legacy_astar",
-        )
-
-    raise ValueError(
-        "Unsupported planning.global_planner_mode "
-        f"{mode!r}; expected astar/carla_grp/legacy or custom/admap/opendrive."
+        planner.load()
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "The AD-map runtime is not installed for this Python environment."
+        ) from exc
+    return GlobalPlannerBackendSelection(
+        planner=planner,
+        road_cfg={"lane_count": 1, "lane_width_m": 3.5},
+        mode=mode,
+        backend_name="custom_admap",
     )

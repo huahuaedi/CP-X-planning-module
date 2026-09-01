@@ -409,18 +409,17 @@ def build_candidate_intents(
                 authorization_source = "route"
             decision = (
                 str(selected_decision)
-                if authorization_source == "opportunistic"
-                and str(selected_decision) in {"lane_change_left", "lane_change_right"}
+                if str(selected_decision) in {"lane_change_left", "lane_change_right"}
                 else (
                     "lane_change_left"
                     if authorized_direction == "left"
                     else "lane_change_right"
                     if authorized_direction == "right"
-                    else "lane_change_left"
-                    if target_lane_id > int(current_lane_id)
-                    else "lane_change_right"
+                    else ""
                 )
             )
+            if decision not in {"lane_change_left", "lane_change_right"}:
+                return intents
             lane_cost = _lane_cost(
                 lane_id=int(target_lane_id),
                 current_lane_id=int(current_lane_id),
@@ -481,11 +480,9 @@ def build_candidate_intents(
         if not bool(lane_change_authorized) or candidate_lane_id != int(lane_change_authorized_target_lane_id or 0):
             continue
         authorized_direction = str(lane_change_authorization_direction or "").strip().lower()
-        decision = (
-            f"lane_change_{authorized_direction}"
-            if authorized_direction in {"left", "right"}
-            else "lane_change_left" if candidate_lane_id > int(current_lane_id) else "lane_change_right"
-        )
+        if authorized_direction not in {"left", "right"}:
+            continue
+        decision = f"lane_change_{authorized_direction}"
         # The authorized target already owns assertive/normal/conservative
         # variants above. Other lanes remain forbidden by the authorization
         # boundary and must not leak into reference generation.
@@ -807,6 +804,23 @@ def lane_change_geometry_requirements(
     )
 
 
+def lane_change_operational_curvature_limit_1pm(
+    *,
+    planning_speed_mps: float,
+    lateral_accel_limit_mps2: float,
+    vehicle_max_curvature_1pm: float,
+    minimum_speed_mps: float = 2.0,
+) -> float:
+    """Curvature bound shared by Frenet geometry and lateral comfort."""
+
+    speed = max(float(minimum_speed_mps), abs(float(planning_speed_mps)))
+    comfort_limit = max(1.0e-3, float(lateral_accel_limit_mps2)) / (speed * speed)
+    return max(
+        1.0e-3,
+        min(max(1.0e-3, float(vehicle_max_curvature_1pm)), comfort_limit),
+    )
+
+
 def _align_target_reference_to_source(
     *,
     source_reference: Sequence[Mapping[str, object]],
@@ -902,7 +916,7 @@ def route_lane_change_target_anchor(
 ) -> tuple[object | None, str]:
     """Find the continuous target-lane anchor after a route lateral edge.
 
-    CARLA GRP encodes a lane change as one long lateral segment between two
+    AD-map encodes a lane change as one long lateral segment between two
     otherwise approximately unit-spaced lane-center polylines.  The point
     after that segment identifies the physical target lane even when both
     lanes share the same canonical lane id.  Walking that waypoint backward
@@ -1383,10 +1397,27 @@ def select_candidate_with_commitment(
             == int(required_target_lane_id)
         ]
         if required_rows:
+            # Route ownership makes the lane change mandatory, but it does
+            # not make the most aggressive timing the default.  Prefer the
+            # comfort-balanced normal Frenet profile whenever it passed all
+            # contract/prediction/MPC gates. Assertive and conservative
+            # remain available as feasibility fallbacks.
+            normal_required_rows = [
+                candidate
+                for candidate in required_rows
+                if str(candidate.intent.trajectory_variant).strip().lower()
+                == "normal"
+            ]
             return CandidateSelectionOutcome(
-                selected=select_best_candidate(required_rows),
+                selected=select_best_candidate(
+                    normal_required_rows or required_rows
+                ),
                 status="selected_route_required",
-                reason="feasible_route_required_candidate",
+                reason=(
+                    "feasible_route_required_normal_candidate"
+                    if normal_required_rows
+                    else "feasible_route_required_candidate"
+                ),
             )
     if not commitment.active:
         return CandidateSelectionOutcome(

@@ -75,7 +75,7 @@ class DrivableFootprintOccupancy:
 
 
 class ReferenceGenerator:
-    """Generate MPC reference geometry from route and CARLA waypoint context."""
+    """Generate MPC reference geometry from route and AD-map waypoint context."""
 
     def __init__(
         self,
@@ -1448,16 +1448,41 @@ class ReferenceGenerator:
         # in the independent validator.
         limit = 0.98 * float(contract_limit)
         raw_curvature = self._max_discrete_curvature_1pm(raw)
-        if len(raw) < 2 or float(raw_curvature) <= float(limit):
+        # The contract limit is the acceptance boundary.  The smaller shaping
+        # target is only the target *after* a real violation; using it as the
+        # trigger rewrote otherwise valid AD-map centre lines (for example
+        # 0.224 1/m against a 0.228 1/m contract).
+        if len(raw) < 2 or float(raw_curvature) <= float(contract_limit):
             return raw, ""
 
-        result: list[dict[str, object]] = []
-        current_x = float(ego_location.x)
-        current_y = float(ego_location.y)
-        current_heading = float(ego_heading_rad)
-        previous_raw_x = float(ego_location.x)
-        previous_raw_y = float(ego_location.y)
-        for sample in raw:
+        # Geometry ownership stays with the accepted reference provider.  A
+        # feasibility conditioner may smooth its tangent progression, but it
+        # must not re-anchor XY at the ego pose: doing so copies the current
+        # tracking error into the new reference and makes MPC see zero lateral
+        # error while the vehicle is actually near a lane boundary.
+        first = dict(raw[0])
+        current_x = float(first.get("x_ref_m", first.get("x", ego_location.x)))
+        current_y = float(first.get("y_ref_m", first.get("y", ego_location.y)))
+        if "heading_rad" in first:
+            current_heading = float(first["heading_rad"])
+        elif len(raw) >= 2:
+            next_x = float(raw[1].get("x_ref_m", raw[1].get("x", current_x)))
+            next_y = float(raw[1].get("y_ref_m", raw[1].get("y", current_y)))
+            current_heading = math.atan2(next_y - current_y, next_x - current_x)
+        else:
+            current_heading = float(ego_heading_rad)
+        first.update({
+            "x_ref_m": float(current_x),
+            "y_ref_m": float(current_y),
+            "x": float(current_x),
+            "y": float(current_y),
+            "heading_rad": float(current_heading),
+            "reference_curvature_limited": True,
+        })
+        result: list[dict[str, object]] = [first]
+        previous_raw_x = float(current_x)
+        previous_raw_y = float(current_y)
+        for sample in raw[1:]:
             raw_x = float(sample.get("x_ref_m", sample.get("x", current_x)))
             raw_y = float(sample.get("y_ref_m", sample.get("y", current_y)))
             step_m = max(
@@ -1836,6 +1861,7 @@ class ReferenceGenerator:
         route_points: Sequence[Sequence[float]] | None = None,
         minimum_step_m: float = 0.5,
         first_point_distance_m: Optional[float] = None,
+        restrict_to_ad_lane_id: Optional[int] = None,
     ) -> list[dict[str, float]]:
         """Build a strict lane-follow reference from the current CARLA lane center."""
 
@@ -1862,6 +1888,13 @@ class ReferenceGenerator:
             )
         )
         first_candidates = list(current.next(first_step_m) or [])
+        if restrict_to_ad_lane_id is not None:
+            first_candidates = [
+                candidate
+                for candidate in first_candidates
+                if int(canonical_lane_id_for_waypoint(candidate) or 0)
+                == int(restrict_to_ad_lane_id)
+            ]
         if first_candidates:
             first_current = self._select_smooth_next_waypoint(
                 current_waypoint=current,
@@ -1894,6 +1927,13 @@ class ReferenceGenerator:
             })
 
             candidates = list(current.next(step_m) or [])
+            if restrict_to_ad_lane_id is not None:
+                candidates = [
+                    candidate
+                    for candidate in candidates
+                    if int(canonical_lane_id_for_waypoint(candidate) or 0)
+                    == int(restrict_to_ad_lane_id)
+                ]
             if not candidates:
                 break
             current = self._select_smooth_next_waypoint(
