@@ -30,18 +30,17 @@ DIJ_CACHE = (
 # cpx_single_right_lane_turn.yaml: spawn_position / destination.
 SCENARIO_MAP = "Town06"
 START_XYZ = {"x": 225.10, "y": -20.1, "z": 0.3}
-GOAL_XYZ = {"x": 6.3, "y": -46.9, "z": 0.3}
+GOAL_XYZ = {"x": 10.113184332893075, "y": -96.89902155894256, "z": 0.3}
 
 # --- GOLDEN (dij route, route_sample_distance_m = 1.0) --------------------- #
-GOLDEN_ENTRY_COUNT = 248
-GOLDEN_TOTAL_M = 243.0
+GOLDEN_ENTRY_COUNT = 294
+GOLDEN_TOTAL_M = 289.36
 GOLDEN_SIGNATURE = (
     "lane_follow",
     "lane_change:right",
     "lane_follow",
     "junction_turn:right",
     "lane_follow",
-    "lane_change:right",
 )
 # (kind, direction, s_start_m, s_end_m) -- arc positions checked with a
 # tolerance; the point is drift detection, not sub-metre exactness.
@@ -50,8 +49,7 @@ GOLDEN_SEGMENTS = [
     ("lane_change", "right", 129.0, 140.0),
     ("lane_follow", "", 141.0, 213.0),
     ("junction_turn", "right", 214.0, 218.0),
-    ("lane_follow", "", 219.0, 231.0),
-    ("lane_change", "right", 232.0, 243.0),
+    ("lane_follow", "", 219.0, 289.36),
 ]
 ARC_TOL_M = 6.0
 
@@ -74,13 +72,11 @@ def _load_route_geometry():
 def _deps_available() -> bool:
     if not (MAPS_DIR / f"{SCENARIO_MAP}.xodr").is_file():
         return False
-    try:  # noqa: SIM105
-        import ad_map_access  # noqa: F401
+    try:
+        from Global_Planner.global_planner.runtime import import_ad_map_access
+        import_ad_map_access()
     except Exception:  # pragma: no cover - environment dependent
-        try:
-            from utility.global_planner import CustomGlobalPlannerAdapter  # noqa: F401
-        except Exception:
-            return False
+        return False
     return True
 
 

@@ -93,6 +93,44 @@ class LocalMapSnapshot:
         }
 
 
+def audit_local_map_rows(rows: Sequence[Mapping[str, object]]) -> tuple[str, ...]:
+    """Return M2 acceptance violations from a recorded planning run."""
+
+    samples = [dict(row) for row in rows]
+    violations: list[str] = []
+    frame_ids = [int(row.get("local_map_frame_id", 0) or 0) for row in samples]
+    if not frame_ids or any(
+        second <= first for first, second in zip(frame_ids, frame_ids[1:])
+    ):
+        violations.append("local_map_frame_not_strictly_monotonic")
+    if any(not bool(row.get("local_map_valid", False)) for row in samples):
+        violations.append("local_map_invalid_frame")
+    if any(not bool(row.get("map_match_valid", False)) for row in samples):
+        violations.append("map_match_invalid_frame")
+    if any(
+        str(row.get("local_map_invariant_violations", "")).strip()
+        or str(row.get("local_lane_frame_invariant_violations", "")).strip()
+        for row in samples
+    ):
+        violations.append("local_map_contract_violation")
+
+    # Reject short A->B->A identity oscillations. Longitudinal AD-map segment
+    # transitions are expected, but a continuously matched lane must not
+    # switch back within a few planning cycles at overlapping geometry.
+    runs: list[tuple[int, int]] = []
+    for row in samples:
+        lane_id = int(row.get("local_map_ego_lane_id", 0) or 0)
+        if runs and runs[-1][0] == lane_id:
+            runs[-1] = (lane_id, runs[-1][1] + 1)
+        else:
+            runs.append((lane_id, 1))
+    for first, middle, third in zip(runs, runs[1:], runs[2:]):
+        if first[0] != 0 and first[0] == third[0] and middle[1] < 8:
+            violations.append("map_match_lane_identity_flip_flop")
+            break
+    return tuple(violations)
+
+
 def build_local_map_snapshot(
     *,
     frame_id: int,

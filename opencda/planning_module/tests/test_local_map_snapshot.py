@@ -2,7 +2,7 @@ import dataclasses
 
 import pytest
 
-from pipeline.local_map_snapshot import build_local_map_snapshot
+from pipeline.local_map_snapshot import audit_local_map_rows, build_local_map_snapshot
 
 
 def _snapshot(**overrides):
@@ -60,3 +60,34 @@ def test_legacy_export_returns_detached_mutable_copy():
     legacy = snapshot.as_legacy_dict()
     legacy["corridors"][0].append(999)
     assert 999 not in snapshot.corridor_lane_ids(0)
+
+
+def test_local_map_audit_accepts_monotonic_continuous_match():
+    rows = [
+        {
+            "local_map_frame_id": index + 1,
+            "local_map_valid": True,
+            "map_match_valid": True,
+            "local_map_ego_lane_id": lane_id,
+            "local_map_invariant_violations": "",
+            "local_lane_frame_invariant_violations": "",
+        }
+        for index, lane_id in enumerate([10] * 10 + [11] * 10 + [12] * 10)
+    ]
+    assert audit_local_map_rows(rows) == ()
+
+
+def test_local_map_audit_rejects_short_lane_identity_flip_flop():
+    lanes = [10] * 10 + [20] * 3 + [10] * 10
+    rows = [
+        {
+            "local_map_frame_id": index + 1,
+            "local_map_valid": True,
+            "map_match_valid": True,
+            "local_map_ego_lane_id": lane_id,
+            "local_map_invariant_violations": "",
+            "local_lane_frame_invariant_violations": "",
+        }
+        for index, lane_id in enumerate(lanes)
+    ]
+    assert "map_match_lane_identity_flip_flop" in audit_local_map_rows(rows)
