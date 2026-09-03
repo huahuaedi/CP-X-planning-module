@@ -127,6 +127,24 @@ def _one_cav(rows: List[dict], status: dict) -> Dict[str, object]:
     ttc = [v for v in (_f(r, "nearest_ttc_s") for r in rows) if v and v > 0.0]
     bump = [v for v in (_f(r, "nearest_ttc_bumper_gap_m") for r in rows)
             if v is not None and v >= 0.0]
+    # --- MPC-internal signals: what the peer trajectory does to the solve ---
+    # raw MPC output before the safety supervisor clamp = true solution chatter
+    racc = [(t[i], _f(r, "pre_supervisor_accel_cmd_mps2"))
+            for i, r in enumerate(rows)]
+    racc = [(tt, a) for tt, a in racc if a is not None]
+    raw_jerk = max(
+        (abs(racc[i + 1][1] - racc[i][1]) / max(1e-3, racc[i + 1][0] - racc[i][0])
+         for i in range(len(racc) - 1)), default=0.0)
+    raw_flips = sum(
+        1 for i in range(len(racc) - 1)
+        if racc[i][1] * racc[i + 1][1] < 0.0
+        and abs(racc[i + 1][1] - racc[i][1]) > 0.5)
+    solve_ms = sorted(v for v in (_f(r, "mpc_solve_time_ms") for r in rows)
+                      if v is not None and v >= 0.0)
+    n_stat = sum(1 for r in rows if r.get("mpc_feasibility_status", ""))
+    n_solved = sum(1 for r in rows
+                   if r.get("mpc_feasibility_status", "") == "solved")
+    repcost = [v for v in (_f(r, "Cost_Repulsive") for r in rows) if v is not None]
     coll = max((int(cs.get("collision_count", 0) or 0)
                 for cs in status.get("cav_states", []) or []), default=0)
     coll = max(coll, max((int(_f(r, "collision_count") or 0) for r in rows), default=0))
@@ -155,6 +173,15 @@ def _one_cav(rows: List[dict], status: dict) -> Dict[str, object]:
             None,
         ),
         "stalled_s": round(_stalled_seconds(rows), 1),
+        "mpc_solved_frac": round(n_solved / n_stat, 3) if n_stat else None,
+        "mpc_replan_ticks": sum(_truthy(r, "mpc_replan_executed") for r in rows),
+        "mpc_mean_solve_ms": round(sum(solve_ms) / len(solve_ms), 2) if solve_ms else None,
+        "mpc_p95_solve_ms": round(solve_ms[int(0.95 * (len(solve_ms) - 1))], 2)
+        if solve_ms else None,
+        "raw_accel_sign_flips": raw_flips,
+        "raw_peak_jerk_mps3": round(raw_jerk, 1),
+        "repulsive_cost_mean": round(sum(repcost) / len(repcost), 3) if repcost else None,
+        "repulsive_cost_max": round(max(repcost), 2) if repcost else None,
         "cav_roles_seen": ";".join(sorted({
             r.get("cav_conflict_summary", "") for r in rows
             if r.get("cav_conflict_summary", "") not in ("", "no_conflict")
@@ -203,6 +230,20 @@ _ROWS = [
     ("cav_roles_seen", "cav_conflict_summary seen", None),
 ]
 
+# What adding the peer's predicted trajectory does to the MPC solve itself.
+_MPC_ROWS = [
+    ("mpc_solved_frac", "MPC solved fraction", "higher (->1)"),
+    ("infeasible_ticks", "MPC primal-infeasible ticks", "lower"),
+    ("fallback_ticks", "MPC fallback ticks", "lower"),
+    ("mpc_replan_ticks", "MPC replan ticks", "lower"),
+    ("mpc_mean_solve_ms", "mean QP solve (ms)", "lower/stable"),
+    ("mpc_p95_solve_ms", "p95 QP solve (ms)", "lower/stable"),
+    ("raw_accel_sign_flips", "raw accel-cmd sign flips", "lower"),
+    ("raw_peak_jerk_mps3", "raw |jerk| pre-supervisor", "lower"),
+    ("repulsive_cost_mean", "Cost_Repulsive mean", "lower (->0)"),
+    ("repulsive_cost_max", "Cost_Repulsive max", "lower"),
+]
+
 
 def main() -> int:
     ap = argparse.ArgumentParser()
@@ -234,6 +275,20 @@ def main() -> int:
           + "   better")
     print("-" * (w0 + wc * len(cols)))
     for key, label, better in _ROWS:
+        line = label.ljust(w0) + "".join(
+            _fmt(data[c].get(key))[: wc - 1].rjust(wc) for c in cols)
+        print(line + (f"   {better}" if better else ""))
+    print("-" * (w0 + wc * len(cols)))
+
+    # MPC solve quality -- the direct "what the peer trajectory buys the MPC"
+    print()
+    print("effect of the peer trajectory on the MPC solve".center(
+        w0 + wc * len(cols)))
+    print("-" * (w0 + wc * len(cols)))
+    print("metric".ljust(w0) + "".join(f"{arm}/{cav}".rjust(wc) for arm, cav in cols)
+          + "   better")
+    print("-" * (w0 + wc * len(cols)))
+    for key, label, better in _MPC_ROWS:
         line = label.ljust(w0) + "".join(
             _fmt(data[c].get(key))[: wc - 1].rjust(wc) for c in cols)
         print(line + (f"   {better}" if better else ""))
