@@ -959,6 +959,7 @@ class CPXMPCPlannerBridge:
         )
         from opencda.planning_module.pipeline.safety_supervisor import SafetySupervisor
         from opencda.planning_module.pipeline.runtime_input_stage import RuntimeInputStage
+        from opencda.planning_module.pipeline.perception_stage import PerceptionStage
         from opencda.planning_module.pipeline.velocity_steering_adapter import (
             OpenCDAVelocitySteeringAdapter,
         )
@@ -1018,6 +1019,13 @@ class CPXMPCPlannerBridge:
                 self.config.get("tracker_max_acceleration_mps2", 12.0)
             ),
             max_position_jump_m=float(self.config.get("tracker_max_position_jump_m", 12.0)),
+        )
+        self.perception_stage = PerceptionStage(
+            collect_local=self._collect_object_snapshots,
+            fuse=self._fused_planning_object_snapshots,
+            limit_for_mpc=self._limit_obstacles_for_mpc,
+            front_gap=self._front_gap_m,
+            object_track_id=self._object_track_id,
         )
         self.final_reference_gate = FinalReferenceGate(self.config)
         self.reference_pipeline = ReferencePipeline(
@@ -1515,9 +1523,6 @@ class CPXMPCPlannerBridge:
 
         self._clean_functional_test_dynamic_actors_once()
 
-        local_object_snapshots = self._collect_object_snapshots(
-            detected_objects=latest_update.get("detected_objects")
-        )
         if self.cp_provider is not None:
             try:
                 self.cp_provider.publish(
@@ -1530,37 +1535,21 @@ class CPXMPCPlannerBridge:
             except Exception as exc:
                 if self.debug:
                     print(f"[CP-X OpenCDA Bridge] native CP publish failed: {exc}")
-        cp_payload = self._load_cp_message_payload()
-        object_snapshots = self._fused_planning_object_snapshots(
-            local_object_snapshots=local_object_snapshots,
-            cp_obstacles=list(cp_payload.get("obstacles", []) or []),
+        perception = self.perception_stage.build(
+            detected_objects=latest_update.get("detected_objects"),
+            cp_payload=self._load_cp_message_payload(),
             ego_location=ego_location,
-            sim_time_s=float(self._sim_time_s()),
+            ego_yaw_rad=float(ego_yaw_rad),
+            timestamp_s=float(sim_time_s),
+            ignore_dynamic_objects=bool(
+                self.functional_test_ignore_dynamic_objects
+            ),
         )
-        if bool(self.functional_test_ignore_dynamic_objects):
-            object_snapshots = []
-        mpc_object_snapshots = self._limit_obstacles_for_mpc(
-            object_snapshots=object_snapshots,
-            ego_location=ego_location,
-        )
-        front_gap_m, front_gap_actor_id_early = self._front_gap_m(
-            ego_location=ego_location,
-            ego_yaw_rad=ego_yaw_rad,
-            object_snapshots=object_snapshots,
-            return_actor_id=True,
-        )
-        front_gap_obstacle_speed_mps_early = None
-        if front_gap_actor_id_early:
-            for _snapshot in object_snapshots:
-                if str(self._object_track_id(_snapshot)) == str(front_gap_actor_id_early):
-                    front_gap_obstacle_speed_mps_early = max(
-                        0.0,
-                        float(
-                            _snapshot.get("v", _snapshot.get("speed_mps", 0.0))
-                            or 0.0
-                        ),
-                    )
-                    break
+        cp_payload = dict(perception.cp_payload)
+        object_snapshots = [dict(item) for item in perception.fused_objects]
+        mpc_object_snapshots = [dict(item) for item in perception.mpc_objects]
+        front_gap_m = perception.front_gap_m
+        front_gap_obstacle_speed_mps_early = perception.front_actor_speed_mps
         from opencda.planning_module.pipeline.speed_planner import (
             effective_emergency_gap_m as _effective_emergency_gap_m,
         )

@@ -46,6 +46,7 @@ from .nominal_trajectory import (
 )
 from .prediction import PredictionFrame, build_prediction_frame
 from .output import BehaviorCommand, PlannerDiagnostics, PlannerOutput
+from .perception_stage import PerceptionStage, PerceptionStageResult
 from .reference_contract import (
     ReferenceContract,
     ReferenceValidationResult,
@@ -150,6 +151,8 @@ __all__ = [
     "TrajectoryFallbackManager",
     "PlannerDiagnostics",
     "PlannerOutput",
+    "PerceptionStage",
+    "PerceptionStageResult",
     "PredictionFrame",
     "ReferenceContract",
     "FinalReferenceGate",
