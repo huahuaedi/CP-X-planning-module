@@ -1025,7 +1025,6 @@ class CPXMPCPlannerBridge:
             "extent", None,
         )
         self.perception_stage = PerceptionStage(
-            object_track_id=self._object_track_id,
             max_mpc_obstacles=int(self.max_mpc_obstacles),
             ego_length_m=2.0 * float(getattr(ego_extent, "x", 2.25)),
             ego_width_m=2.0 * float(getattr(ego_extent, "y", 1.0)),

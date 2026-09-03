@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Any, Callable, Mapping, Optional, Sequence, Tuple
+from typing import Any, Mapping, Optional, Sequence, Tuple
+
+from .prediction import obstacle_track_id
 
 
 @dataclass(frozen=True)
@@ -28,14 +30,12 @@ class PerceptionStage:
     def __init__(
         self,
         *,
-        object_track_id: Callable[[Mapping[str, Any]], str],
         max_mpc_obstacles: int = 0,
         ego_length_m: float = 4.5,
         ego_width_m: float = 2.0,
         lane_width_m: float = 3.5,
         lane_change_boundary_overlap_m: float = 0.75,
     ) -> None:
-        self._object_track_id = object_track_id
         self._max_mpc_obstacles = max(0, int(max_mpc_obstacles))
         self._ego_half_length_m = 0.5 * max(0.0, float(ego_length_m))
         self._ego_width_m = max(0.5, float(ego_width_m))
@@ -75,7 +75,7 @@ class PerceptionStage:
             front = next(
                 (
                     obstacle for obstacle in fused
-                    if str(self._object_track_id(obstacle)) == actor_id
+                    if str(obstacle_track_id(obstacle)) == actor_id
                 ),
                 None,
             )
@@ -185,7 +185,7 @@ class PerceptionStage:
         def nearest(min_lateral_m, max_lateral_m):
             best_gap, best_actor = None, None
             for obstacle in object_snapshots:
-                actor_id = str(self._object_track_id(obstacle))
+                actor_id = str(obstacle_track_id(obstacle))
                 if current_lane_id is not None and lane_assignments is not None:
                     assigned = int(lane_assignments.get(actor_id, 0) or 0)
                     if assigned != int(current_lane_id):

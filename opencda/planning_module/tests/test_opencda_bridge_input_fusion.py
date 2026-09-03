@@ -1164,7 +1164,6 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         bridge.max_mpc_obstacles = 10
 
         stage = PerceptionStage(
-            object_track_id=lambda item: str(item.get("vehicle_id", "")),
             max_mpc_obstacles=10,
         )
         fused = stage.fuse(
@@ -1221,7 +1220,6 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
 
         bridge.max_mpc_obstacles = 1
         bridge.perception_stage = PerceptionStage(
-            object_track_id=lambda item: str(item.get("vehicle_id", "")),
             max_mpc_obstacles=1,
         )
         limited = bridge.perception_stage.limit_for_mpc(
@@ -1273,7 +1271,6 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         bridge.max_mpc_obstacles = 10
 
         stage = PerceptionStage(
-            object_track_id=lambda item: str(item.get("vehicle_id", "")),
             max_mpc_obstacles=10,
         )
         fused = stage.fuse(

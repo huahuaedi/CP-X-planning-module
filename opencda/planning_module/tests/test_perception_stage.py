@@ -8,7 +8,6 @@ from pipeline.perception_stage import PerceptionStage
 
 def test_perception_stage_builds_one_fused_obstacle_view():
     stage = PerceptionStage(
-        object_track_id=lambda item: str(item["vehicle_id"]),
         max_mpc_obstacles=1,
         ego_length_m=4.5,
         ego_width_m=2.0,
@@ -45,7 +44,6 @@ def test_ignore_dynamic_objects_is_applied_before_mpc_and_gap():
     observed = {}
 
     stage = PerceptionStage(
-        object_track_id=lambda item: str(item["vehicle_id"]),
         max_mpc_obstacles=8,
         ego_length_m=4.5,
         ego_width_m=2.0,
