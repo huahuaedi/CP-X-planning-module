@@ -1,0 +1,37 @@
+base_config: cpx_single_left_lane_turn.yaml
+
+description: |-
+  Deterministic development checkpoint for the single-CAV AD-map route,
+  required lane change, junction connector, reference line, and MPC chain.
+  Dynamic traffic, traffic controls, perception and CP messages are disabled;
+  the route/replan/reference safety contracts remain enabled.
+
+# An explicit empty list overrides the parent scenario's random traffic range.
+carla_traffic_manager:
+  random: false
+  vehicle_list: []
+
+vehicle_base:
+  sensing:
+    perception:
+      activate: false
+      camera:
+        visualize: 0
+        num: 0
+        positions: []
+      lidar:
+        visualize: false
+  behavior:
+    ignore_traffic_light: true
+  planner:
+    functional_test_ignore_dynamic_objects: true
+    ignore_traffic_control: true
+    route_replan_enabled: true
+    publish_cp_message: false
+    require_native_opencda_cp: false
+    prediction_lane_following_enabled: false
+    max_mpc_obstacles: 0
+    debug_output_dir: opencda/planning_module/opencda_bridge/debug_single_left_lane_turn_isolated
+
+scenario:
+  max_ticks: 2400
