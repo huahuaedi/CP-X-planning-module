@@ -4065,120 +4065,29 @@ class CPXMPCPlannerBridge:
             ),
             ego_speed_mps=float(ego_speed_mps),
         )
-        # A completed turn must not hand geometry directly to the generic
-        # behavior reference.  On Town06 that reference selected alternating
-        # points on opposite sides of the outgoing lane (destination lateral
-        # +/-1.95 m), which made MPC steer from one line to the other.  Consume
-        # the still-locked turn as the activation token for one immutable
-        # AD-map exit-centerline handoff.
-        scenario_state = str(getattr(scenario_decision, "state", "")).strip().upper()
-        post_turn_snapshot = self._stable_reference_line_provider.snapshot(POST_TURN)
-        hold_arc_m = max(
-            0.0,
-            float(self.config.get("post_turn_exit_reference_arc_m", 12.0)),
-        )
-        exit_aligned = bool(
-            behavior_lane_alignment_valid
-            and abs(float(behavior_lane_lateral_error_m))
-            <= float(self.config.get("post_turn_exit_max_lateral_m", 0.35))
-            and abs(float(behavior_lane_heading_error_rad))
-            <= math.radians(
-                float(self.config.get("post_turn_exit_max_heading_error_deg", 5.0))
-            )
-        )
-        post_turn_action = self.maneuver_manager.resolve_post_turn_phase(
+        post_turn = self._stable_reference_line_provider.resolve_post_turn_reference(
+            maneuver_manager=self.maneuver_manager,
             decision=str(decision),
-            scenario_state=str(scenario_state),
-            turn_reference_active=bool(
-                self._stable_reference_line_provider.snapshot(TURN).active
-            ),
-            post_turn_reference_active=bool(post_turn_snapshot.active),
-            travelled_s_m=float(post_turn_snapshot.travelled_s_m),
-            required_s_m=float(hold_arc_m),
-            exit_aligned=bool(exit_aligned),
+            scenario_state=str(getattr(scenario_decision, "state", "")),
+            exit_alignment_valid=bool(behavior_lane_alignment_valid),
+            exit_lateral_error_m=float(behavior_lane_lateral_error_m),
+            exit_heading_error_rad=float(behavior_lane_heading_error_rad),
+            local_map=self._local_map_snapshot,
+            ego_x_m=float(ego_location.x), ego_y_m=float(ego_location.y),
+            current_state=current_state, current_lane_id=int(current_lane_id),
+            target_speed_mps=float(planned_speed_mps),
+            horizon_steps=int(self.mpc.horizon_steps), dt_s=float(self.mpc.dt_s),
+            route_revision=str(self.route_manager.route_revision),
+            map_epoch=str(self.waypoint_backend or "admap"), config=self.config,
+            destination_state=nominal_destination_state,
+            reference_samples=local_lane_center_reference,
+            debug_fields=reference_debug,
         )
-        if str(post_turn_action) == "activate":
-            activated = self._stable_reference_line_provider.start_post_turn_exit(
-                local_map=self._local_map_snapshot,
-                ego_x_m=float(ego_location.x),
-                ego_y_m=float(ego_location.y),
-                current_lane_id=int(current_lane_id),
-                target_speed_mps=float(planned_speed_mps),
-                horizon_steps=int(self.mpc.horizon_steps),
-                dt_s=float(self.mpc.dt_s),
-                hold_arc_m=float(hold_arc_m),
-                route_revision=str(self.route_manager.route_revision),
-                map_epoch=str(self.waypoint_backend or "admap"),
-            )
-            if bool(activated):
-                self._clear_turn_master_reference()
-
-        post_turn_snapshot = self._stable_reference_line_provider.snapshot(
-            POST_TURN
-        )
-        post_turn_exit_active = bool(post_turn_snapshot.active)
-        if bool(post_turn_exit_active):
-            if str(post_turn_action) == "complete":
-                self._stable_reference_line_provider.release(
-                    POST_TURN, event="phase_transition"
-                )
-                post_turn_exit_active = False
-            else:
-                exit_reference, exit_reason = (
-                    self._stable_reference_line_provider.post_turn_exit_window(
-                    ego_x_m=float(ego_location.x),
-                    ego_y_m=float(ego_location.y),
-                    target_speed_mps=float(planned_speed_mps),
-                    horizon_steps=int(self.mpc.horizon_steps),
-                    dt_s=float(self.mpc.dt_s),
-                    first_forward_m=float(self.config.get(
-                        "reference_contract_lane_follow_min_first_forward_m", 0.0
-                    )),
-                    )
-                )
-                if exit_reference:
-                    from opencda.planning_module.behavior_planner.reference_pipeline import (
-                        lane_center_destination_from_reference_arc_length,
-                    )
-
-                    local_lane_center_reference = [
-                        dict(sample) for sample in exit_reference
-                    ]
-                    seed_destination = list(nominal_destination_state or [])
-                    if len(seed_destination) < 5:
-                        seed_destination = [
-                            float(current_state[0]),
-                            float(current_state[1]),
-                            float(planned_speed_mps),
-                            float(current_state[3]),
-                            int(current_lane_id),
-                        ]
-                    seed_destination[2] = float(planned_speed_mps)
-                    seed_destination[4] = int(
-                        post_turn_snapshot.target_lane_id or current_lane_id
-                    )
-                    nominal_destination_state = (
-                        lane_center_destination_from_reference_arc_length(
-                            destination_state=seed_destination,
-                            lane_center_reference=local_lane_center_reference,
-                            target_arc_length_m=float(
-                                self.config.get(
-                                    "post_turn_exit_destination_arc_m", 6.0
-                                )
-                            ),
-                        )
-                        or seed_destination
-                    )
-                    reference_debug["reference_source"] = (
-                        "admap_post_turn_exit_centerline"
-                    )
-                    reference_debug["final_reference_geometry_source"] = (
-                        "admap_post_turn_exit_centerline"
-                    )
-                    reference_debug["post_turn_exit_reason"] = str(exit_reason)
-                    reference_debug["post_turn_exit_reference_source"] = str(
-                        post_turn_snapshot.build_reason
-                    )
+        if bool(post_turn.clear_turn_reference):
+            self._clear_turn_master_reference()
+        nominal_destination_state = post_turn.mutable_destination_state()
+        local_lane_center_reference = post_turn.mutable_samples()
+        reference_debug = dict(post_turn.debug_fields)
 
         reference_debug["opencda_style_reference_conditioning_reason"] = ""
         # ReferenceLineProvider is the sole geometry owner. ManeuverManager

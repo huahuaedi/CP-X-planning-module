@@ -84,6 +84,22 @@ class ReferenceLineSnapshot:
 
 
 @dataclass(frozen=True)
+class PostTurnReferenceResult:
+    """Frozen output of the turn-to-lane-follow geometry handoff."""
+
+    active: bool
+    destination_state: tuple
+    samples: tuple
+    debug_fields: Mapping[str, object]
+    clear_turn_reference: bool = False
+
+    def mutable_destination_state(self):
+        return list(self.destination_state)
+
+    def mutable_samples(self):
+        return [dict(sample) for sample in self.samples]
+
+@dataclass(frozen=True)
 class ReferenceLineRequest:
     """Complete typed input contract for one reference publication."""
 
@@ -1257,6 +1273,106 @@ class ReferenceLineProvider(StableReferenceLineProvider):
         return window, (
             f"post_turn_exit_locked_window:s={snapshot.progress_s_m:.2f}:"
             f"travel={snapshot.travelled_s_m:.2f}:provider={stable_window.reason}"
+        )
+
+    def resolve_post_turn_reference(
+        self, *, maneuver_manager: Any, decision: str, scenario_state: str,
+        exit_alignment_valid: bool, exit_lateral_error_m: float,
+        exit_heading_error_rad: float, local_map: Any, ego_x_m: float,
+        ego_y_m: float, current_state: Sequence[float], current_lane_id: int,
+        target_speed_mps: float, horizon_steps: int, dt_s: float,
+        route_revision: str, map_epoch: str, config: Mapping[str, object],
+        destination_state: Sequence[float], reference_samples: Sequence[Mapping[str, object]],
+        debug_fields: Mapping[str, object],
+    ) -> PostTurnReferenceResult:
+        """Own the complete turn-to-outgoing-centerline handoff."""
+
+        hold_arc_m = max(0.0, float(config.get("post_turn_exit_reference_arc_m", 12.0)))
+        lateral_limit_m = float(config.get("post_turn_exit_max_lateral_m", 0.35))
+        heading_limit_rad = math.radians(
+            float(config.get("post_turn_exit_max_heading_error_deg", 5.0))
+        )
+        aligned = bool(
+            exit_alignment_valid
+            and abs(float(exit_lateral_error_m)) <= lateral_limit_m
+            and abs(float(exit_heading_error_rad)) <= heading_limit_rad
+        )
+        snapshot = self.snapshot(POST_TURN)
+        action = maneuver_manager.resolve_post_turn_phase(
+            decision=str(decision), scenario_state=str(scenario_state).strip().upper(),
+            turn_reference_active=bool(self.snapshot(TURN).active),
+            post_turn_reference_active=bool(snapshot.active),
+            travelled_s_m=float(snapshot.travelled_s_m), required_s_m=float(hold_arc_m),
+            exit_aligned=aligned,
+        )
+        clear_turn = False
+        if str(action) == "activate":
+            clear_turn = self.start_post_turn_exit(
+                local_map=local_map, ego_x_m=float(ego_x_m), ego_y_m=float(ego_y_m),
+                current_lane_id=int(current_lane_id), target_speed_mps=float(target_speed_mps),
+                horizon_steps=int(horizon_steps), dt_s=float(dt_s), hold_arc_m=float(hold_arc_m),
+                route_revision=str(route_revision), map_epoch=str(map_epoch),
+            )
+
+        snapshot = self.snapshot(POST_TURN)
+        if not snapshot.active:
+            return PostTurnReferenceResult(
+                active=False, destination_state=tuple(destination_state or ()),
+                samples=tuple(dict(row) for row in reference_samples or ()),
+                debug_fields=MappingProxyType(dict(debug_fields or {})),
+                clear_turn_reference=bool(clear_turn),
+            )
+        if str(action) == "complete":
+            self.release(POST_TURN, event="phase_transition")
+            return PostTurnReferenceResult(
+                active=False, destination_state=tuple(destination_state or ()),
+                samples=tuple(dict(row) for row in reference_samples or ()),
+                debug_fields=MappingProxyType(dict(debug_fields or {})),
+                clear_turn_reference=bool(clear_turn),
+            )
+
+        window, reason = self.post_turn_exit_window(
+            ego_x_m=float(ego_x_m), ego_y_m=float(ego_y_m),
+            target_speed_mps=float(target_speed_mps), horizon_steps=int(horizon_steps),
+            dt_s=float(dt_s), first_forward_m=float(
+                config.get("reference_contract_lane_follow_min_first_forward_m", 0.0)
+            ),
+        )
+        if not window:
+            return PostTurnReferenceResult(
+                active=False, destination_state=tuple(destination_state or ()),
+                samples=tuple(dict(row) for row in reference_samples or ()),
+                debug_fields=MappingProxyType(dict(debug_fields or {})),
+                clear_turn_reference=bool(clear_turn),
+            )
+
+        from opencda.planning_module.behavior_planner.reference_pipeline import (
+            lane_center_destination_from_reference_arc_length,
+        )
+        destination = list(destination_state or ())
+        if len(destination) < 5:
+            destination = [
+                float(current_state[0]), float(current_state[1]),
+                float(target_speed_mps), float(current_state[3]), int(current_lane_id),
+            ]
+        destination[2] = float(target_speed_mps)
+        destination[4] = int(snapshot.target_lane_id or current_lane_id)
+        destination = lane_center_destination_from_reference_arc_length(
+            destination_state=destination, lane_center_reference=window,
+            target_arc_length_m=float(config.get("post_turn_exit_destination_arc_m", 6.0)),
+        ) or destination
+        debug = dict(debug_fields or {})
+        debug.update({
+            "reference_source": "admap_post_turn_exit_centerline",
+            "final_reference_geometry_source": "admap_post_turn_exit_centerline",
+            "post_turn_exit_reason": str(reason),
+            "post_turn_exit_reference_source": str(snapshot.build_reason),
+        })
+        return PostTurnReferenceResult(
+            active=True, destination_state=tuple(destination),
+            samples=tuple(dict(row) for row in window),
+            debug_fields=MappingProxyType(debug),
+            clear_turn_reference=bool(clear_turn),
         )
 
     @staticmethod
