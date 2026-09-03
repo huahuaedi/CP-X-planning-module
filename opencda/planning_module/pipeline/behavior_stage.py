@@ -243,6 +243,43 @@ class BehaviorCommandResult:
     preferred_target_lane_id: int
 
 
+@dataclass(frozen=True)
+class BehaviorCommandFrameRequest:
+    adapter_output: Any
+    ego_pose: Any
+    ego_location: Any
+    ego_yaw_rad: float
+    ego_speed_mps: float
+    current_lane_id: int
+    target_speed_mps: float
+    sim_time_s: float
+    route_optimal_lane_id: int
+    route_next_macro_maneuver: str
+    route_points: Sequence
+    front_distance_by_lane: Mapping[int, float]
+    lane_safety_scores: Mapping[int, float]
+    object_snapshots: Sequence[Mapping[str, object]]
+    lane_change_authorization: Any
+    opportunistic_lane_change_allowed: bool
+    behavior_traffic_state: str
+    behavior_stop_target: Optional[Mapping[str, object]]
+    signal_context: Mapping[str, object]
+    scenario_stop_required: bool
+    lane_change_reference_active: bool
+    mpc_feedback: Mapping[str, object]
+    max_deceleration_mps2: float
+    config: Mapping[str, object]
+    runtime_config: Mapping[str, object]
+
+
+@dataclass(frozen=True)
+class BehaviorCommandFrameResult:
+    command: BehaviorCommandResult
+    candidate_frame: Any
+    nearest_front_obstacles_by_lane: Mapping[int, Mapping[str, object]]
+    candidate_lane_ids: tuple
+
+
 class BehaviorStage:
     """Sole constructor and transition owner for BehaviorDecision."""
 
@@ -251,6 +288,103 @@ class BehaviorStage:
 
     def reset_route_lane_change_authorization(self) -> None:
         self._route_lane_change_latch.reset()
+
+    def produce_command_from_frame(
+        self, request: BehaviorCommandFrameRequest, *, behavior_planner: Any,
+        static_obstacle_stage: Any, reference_map: Any,
+        nearest_front_obstacles: Any, cooperative_yield: Any,
+        attempt_replan: Any, object_track_id: Any,
+    ) -> BehaviorCommandFrameResult:
+        """Evaluate lane candidates and produce one command from a frozen frame."""
+
+        frame = request.adapter_output.frame
+        available = tuple(frame.map_lane.allowed_lane_ids)
+        nearest = nearest_front_obstacles(
+            ego_snapshot={
+                "x": float(request.ego_location.x),
+                "y": float(request.ego_location.y),
+                "psi": float(request.ego_yaw_rad),
+            },
+            obstacle_snapshots=request.object_snapshots,
+            lane_assignments=dict(frame.prediction.lane_assignments or {}),
+            available_lane_ids=available,
+        )
+        authorization = request.lane_change_authorization
+        if bool(authorization.allowed):
+            candidate_lane_ids = (
+                int(request.current_lane_id), int(authorization.target_lane_id)
+            )
+        elif bool(request.opportunistic_lane_change_allowed):
+            candidate_lane_ids = available
+        else:
+            candidate_lane_ids = (int(request.current_lane_id),)
+        candidate_frame = self.evaluate_lane_candidates(BehaviorCandidateRequest(
+            lane_safety_scores=dict(request.lane_safety_scores),
+            lane_prediction_risks=dict(frame.prediction.lane_prediction_risks),
+            ego_lane_id=int(request.current_lane_id),
+            available_lane_ids=candidate_lane_ids,
+            route_optimal_lane_id=int(request.route_optimal_lane_id),
+            in_junction=bool(frame.map_lane.in_junction),
+            mpc_feedback_blocked_lane_ids=tuple(
+                request.mpc_feedback.get("blocked_lane_ids", []) or []
+            ),
+            mpc_feedback_weight=float(
+                request.config.get("mpc_feedback_candidate_weight", 80.0)
+            ),
+            nearest_front_obstacles_by_lane=dict(nearest),
+            desired_speed_mps=float(request.target_speed_mps),
+            progress_cost_weight=float(
+                request.config.get("candidate_progress_cost_weight", 4.0)
+            ),
+        ))
+        preferred = (
+            int(authorization.target_lane_id)
+            if bool(authorization.allowed)
+            else int(candidate_frame.selected.target_lane_id)
+            if bool(request.opportunistic_lane_change_allowed)
+            else int(request.current_lane_id)
+        )
+        command = self.produce_command(
+            behavior_planner=behavior_planner,
+            static_obstacle_stage=static_obstacle_stage,
+            reference_map=reference_map, ego_pose=request.ego_pose,
+            ego_x_m=float(request.ego_location.x),
+            ego_y_m=float(request.ego_location.y),
+            ego_yaw_rad=float(request.ego_yaw_rad),
+            ego_speed_mps=float(request.ego_speed_mps),
+            max_deceleration_mps2=float(request.max_deceleration_mps2),
+            current_lane_id=int(request.current_lane_id),
+            route_optimal_lane_id=int(request.route_optimal_lane_id),
+            next_macro_maneuver=str(request.route_next_macro_maneuver),
+            in_junction=bool(frame.map_lane.in_junction),
+            sim_time_s=float(request.sim_time_s),
+            target_speed_mps=float(request.target_speed_mps),
+            lane_safety_scores=request.lane_safety_scores,
+            lane_prediction_risks=dict(frame.prediction.lane_prediction_risks),
+            front_distance_by_lane=request.front_distance_by_lane,
+            route_points=request.route_points,
+            nearest_front_obstacles_by_lane=nearest,
+            available_lane_ids=available,
+            behavior_traffic_state=str(request.behavior_traffic_state),
+            behavior_stop_target=request.behavior_stop_target,
+            signal_context=request.signal_context,
+            scenario_stop_required=bool(request.scenario_stop_required),
+            preferred_target_lane_id=int(preferred),
+            opportunistic_lane_change_allowed=bool(
+                request.opportunistic_lane_change_allowed
+            ),
+            lane_change_reference_active=bool(
+                request.lane_change_reference_active
+            ),
+            config=request.config, runtime_config=request.runtime_config,
+            cooperative_yield=cooperative_yield, attempt_replan=attempt_replan,
+            object_track_id=object_track_id,
+        )
+        return BehaviorCommandFrameResult(
+            command=command, candidate_frame=candidate_frame,
+            nearest_front_obstacles_by_lane=dict(nearest),
+            candidate_lane_ids=tuple(candidate_lane_ids),
+        )
 
     @staticmethod
     def produce_command(

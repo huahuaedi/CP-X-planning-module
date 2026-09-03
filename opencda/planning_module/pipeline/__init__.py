@@ -31,6 +31,8 @@ from .behavior_decision import BehaviorConstraint, BehaviorDecision
 from .behavior_stage import (
     BehaviorStage,
     BehaviorStageResult,
+    BehaviorCommandFrameRequest,
+    BehaviorCommandFrameResult,
     ConflictResolutionRequest,
     ConflictResolutionResult,
     RouteBehaviorContextResult,
@@ -130,6 +132,8 @@ __all__ = [
     "CandidateArbitrationResult",
     "CandidateSelectionStage",
     "BehaviorMPCFeedback",
+    "BehaviorCommandFrameRequest",
+    "BehaviorCommandFrameResult",
     "ConflictResolutionRequest",
     "ConflictResolutionResult",
     "RouteBehaviorContextResult",

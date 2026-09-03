@@ -262,8 +262,8 @@ class PlanningPipeline:
     def reset_route_lane_change_authorization(self):
         self.behavior.reset_route_lane_change_authorization()
 
-    def evaluate_behavior_candidates(self, request):
-        return self.behavior.evaluate_lane_candidates(request)
+    def produce_behavior_command(self, request, **kwargs):
+        return self.behavior.produce_command_from_frame(request, **kwargs)
 
     def apply_behavior_overrides(self, request):
         return self.behavior.apply_overrides(request)

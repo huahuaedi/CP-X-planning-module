@@ -84,7 +84,7 @@ from opencda.planning_module.pipeline.candidate_selection_stage import (
     CandidateSelectionStage,
 )
 from opencda.planning_module.pipeline.behavior_stage import (
-    BehaviorCandidateRequest,
+    BehaviorCommandFrameRequest,
     BehaviorOverrideRequest,
     BehaviorStage,
     ConflictResolutionRequest,
@@ -2962,89 +2962,44 @@ class CPXMPCPlannerBridge:
         mpc_feedback = self.mpc_feedback.candidate_feedback(
             current_time_s=float(sim_time_s)
         )
-        nearest_front_obstacles_by_lane = self._nearest_front_obstacle_by_lane(
-            ego_snapshot={
-                "x": float(ego_location.x),
-                "y": float(ego_location.y),
-                "psi": float(ego_yaw_rad),
-            },
-            obstacle_snapshots=object_snapshots,
-            lane_assignments=dict(
-                planner_input_frame.prediction.lane_assignments or {}
-            ),
-            available_lane_ids=list(
-                planner_input_frame.map_lane.allowed_lane_ids
-            ),
-        )
-        if bool(lane_change_authorized):
-            candidate_lane_ids = [
-                int(current_lane_id),
-                int(lane_change_authorization.target_lane_id),
-            ]
-        elif bool(opportunistic_lane_change_allowed):
-            candidate_lane_ids = list(planner_input_frame.map_lane.allowed_lane_ids)
-        else:
-            candidate_lane_ids = [int(current_lane_id)]
-        candidate_frame = self.pipeline.evaluate_behavior_candidates(
-            BehaviorCandidateRequest(
-                lane_safety_scores=dict(lane_safety_scores),
-                lane_prediction_risks=dict(
-                    planner_input_frame.prediction.lane_prediction_risks
-                ),
-                ego_lane_id=int(current_lane_id),
-                available_lane_ids=tuple(candidate_lane_ids),
+        command_frame = self.pipeline.produce_behavior_command(
+            BehaviorCommandFrameRequest(
+                adapter_output=adapter_output, ego_pose=ego_pose,
+                ego_location=ego_location, ego_yaw_rad=float(ego_yaw_rad),
+                ego_speed_mps=float(ego_speed_mps),
+                current_lane_id=int(current_lane_id),
+                target_speed_mps=float(self.target_speed_mps),
+                sim_time_s=float(sim_time_s),
                 route_optimal_lane_id=int(route_optimal_lane_id),
-                in_junction=bool(planner_input_frame.map_lane.in_junction),
-                mpc_feedback_blocked_lane_ids=tuple(
-                    mpc_feedback.get("blocked_lane_ids", []) or []
+                route_next_macro_maneuver=str(route_context.next_macro_maneuver),
+                route_points=route_points,
+                front_distance_by_lane=front_dist_by_lane,
+                lane_safety_scores=lane_safety_scores,
+                object_snapshots=object_snapshots,
+                lane_change_authorization=lane_change_authorization,
+                opportunistic_lane_change_allowed=bool(
+                    opportunistic_lane_change_allowed
                 ),
-                mpc_feedback_weight=float(
-                    self.config.get("mpc_feedback_candidate_weight", 80.0)
+                behavior_traffic_state=str(behavior_traffic_state),
+                behavior_stop_target=behavior_stop_target,
+                signal_context=filtered_signal_context,
+                scenario_stop_required=bool(scenario_decision.stop_goal_active),
+                lane_change_reference_active=bool(
+                    self._stable_reference_line_provider.snapshot(
+                        LANE_CHANGE
+                    ).active
                 ),
-                nearest_front_obstacles_by_lane=dict(
-                    nearest_front_obstacles_by_lane
+                mpc_feedback=mpc_feedback,
+                max_deceleration_mps2=float(
+                    self.mpc.constraints.min_acceleration_mps2
                 ),
-                desired_speed_mps=float(self.target_speed_mps),
-                progress_cost_weight=float(
-                    self.config.get("candidate_progress_cost_weight", 4.0)
-                ),
-            )
-        )
-        preferred_target_lane_id = (
-            int(lane_change_authorization.target_lane_id)
-            if bool(lane_change_authorized)
-            else int(candidate_frame.selected.target_lane_id)
-            if bool(opportunistic_lane_change_allowed)
-            else int(current_lane_id)
-        )
-
-        command_result = self.pipeline.behavior.produce_command(
+                config=self.config,
+                runtime_config=self.behavior_runtime_cfg,
+            ),
             behavior_planner=self.behavior_planner,
             static_obstacle_stage=self.pipeline.static_obstacle,
-            reference_map=self.reference_map, ego_pose=ego_pose,
-            ego_x_m=float(ego_location.x), ego_y_m=float(ego_location.y),
-            ego_yaw_rad=float(ego_yaw_rad), ego_speed_mps=float(ego_speed_mps),
-            max_deceleration_mps2=float(self.mpc.constraints.min_acceleration_mps2),
-            current_lane_id=int(current_lane_id),
-            route_optimal_lane_id=int(route_optimal_lane_id),
-            next_macro_maneuver=str(route_context.next_macro_maneuver),
-            in_junction=bool(planner_input_frame.map_lane.in_junction),
-            sim_time_s=float(sim_time_s), target_speed_mps=float(self.target_speed_mps),
-            lane_safety_scores=lane_safety_scores,
-            lane_prediction_risks=dict(planner_input_frame.prediction.lane_prediction_risks),
-            front_distance_by_lane=front_dist_by_lane, route_points=route_points,
-            nearest_front_obstacles_by_lane=nearest_front_obstacles_by_lane,
-            available_lane_ids=tuple(planner_input_frame.map_lane.allowed_lane_ids),
-            behavior_traffic_state=str(behavior_traffic_state),
-            behavior_stop_target=behavior_stop_target,
-            signal_context=filtered_signal_context,
-            scenario_stop_required=bool(scenario_decision.stop_goal_active),
-            preferred_target_lane_id=int(preferred_target_lane_id),
-            opportunistic_lane_change_allowed=bool(opportunistic_lane_change_allowed),
-            lane_change_reference_active=bool(
-                self._stable_reference_line_provider.snapshot(LANE_CHANGE).active
-            ),
-            config=self.config, runtime_config=self.behavior_runtime_cfg,
+            reference_map=self.reference_map,
+            nearest_front_obstacles=self._nearest_front_obstacle_by_lane,
             cooperative_yield=lambda target: self._cooperative_avoidance_lane_yield_reason(
                 target_lane_id=int(target), ego_location=ego_location,
                 ego_yaw_rad=float(ego_yaw_rad),
@@ -3054,6 +3009,12 @@ class CPXMPCPlannerBridge:
             ),
             object_track_id=self._object_track_id,
         )
+        command_result = command_frame.command
+        candidate_frame = command_frame.candidate_frame
+        nearest_front_obstacles_by_lane = dict(
+            command_frame.nearest_front_obstacles_by_lane
+        )
+        candidate_lane_ids = list(command_frame.candidate_lane_ids)
         behavior_lane_alignment_valid = bool(command_result.lane_alignment_valid)
         behavior_lane_lateral_error_m = float(command_result.lane_lateral_error_m)
         behavior_lane_heading_error_rad = float(command_result.lane_heading_error_rad)
