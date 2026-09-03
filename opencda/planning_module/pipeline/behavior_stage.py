@@ -125,6 +125,19 @@ class ConflictResolutionRequest:
     ego_location: Any
     ego_yaw_rad: float
 
+    # --- multi-CAV interaction inputs (default: inactive, single-vehicle) ---
+    # When ``cav_enabled`` and there is at least one peer/obstacle, the
+    # interaction-aware pipeline (classify -> assign -> corridor) runs and
+    # its output rides along on the result. Everything above is untouched.
+    cav_enabled: bool = False
+    reference_samples: Sequence[Mapping[str, object]] = ()
+    peer_intents: Sequence[Any] = ()
+    obstacle_snapshots: Sequence[Mapping[str, object]] = ()
+    cav_latch_state: Optional[Mapping[str, Any]] = None
+    my_actor_id: int = -1
+    my_claim: Optional[Any] = None
+    cav_horizon_steps: int = 20
+
 
 @dataclass(frozen=True)
 class ConflictResolutionResult:
@@ -136,6 +149,13 @@ class ConflictResolutionResult:
     lane_change_gate_reason: str
     cooperative_yield_reason: str
     cooperative_wait_speed_cap_mps: Optional[float]
+
+    # --- multi-CAV interaction outputs (empty when the pipeline did not run) ---
+    conflict_tags: Sequence[Any] = ()
+    conflict_assignments: Sequence[Any] = ()
+    corridor: Optional[Any] = None
+    cav_latch_state: Mapping[str, Any] = MappingProxyType({})
+    cav_diagnostics: Mapping[str, Any] = MappingProxyType({})
 
 
 @dataclass(frozen=True)
@@ -1016,6 +1036,10 @@ class BehaviorStage:
                 "opportunistic_lane_change_suppressed:"
                 + str(authorization.reason)
             )
+
+        # --- multi-CAV interaction pipeline (classify -> assign -> corridor) --
+        cav = self._resolve_cav_conflicts(request)
+
         return ConflictResolutionResult(
             authorization=authorization,
             lateral_ownership=ownership,
@@ -1023,7 +1047,66 @@ class BehaviorStage:
             lane_change_gate_reason=str(gate_reason),
             cooperative_yield_reason=str(yield_reason),
             cooperative_wait_speed_cap_mps=wait_cap,
+            conflict_tags=cav["tags"],
+            conflict_assignments=cav["assignments"],
+            corridor=cav["corridor"],
+            cav_latch_state=cav["latch_state"],
+            cav_diagnostics=cav["diagnostics"],
         )
+
+    @staticmethod
+    def _resolve_cav_conflicts(request: ConflictResolutionRequest) -> dict:
+        """Run the interaction-aware pipeline when enabled and there is at
+        least one other vehicle. Pure with respect to this stage's state --
+        the hysteresis latch is carried on ``request`` and returned."""
+
+        empty = {
+            "tags": (), "assignments": (), "corridor": None,
+            "latch_state": dict(request.cav_latch_state or {}),
+            "diagnostics": {},
+        }
+        if not bool(request.cav_enabled):
+            return empty
+        if not request.peer_intents and not request.obstacle_snapshots:
+            return empty
+
+        from opencda.planning_module.pipeline.cav_conflict_pipeline import (
+            resolve_conflicts as cav_resolve_conflicts,
+        )
+        from opencda.planning_module.pipeline.conflict_classifier import (
+            ClassifierParams,
+        )
+        from opencda.planning_module.pipeline.spatiotemporal_corridor import (
+            CorridorParams,
+        )
+
+        loc = request.ego_location
+        ego_snapshot = {
+            "x": float(getattr(loc, "x", getattr(loc, "x_m", 0.0))),
+            "y": float(getattr(loc, "y", getattr(loc, "y_m", 0.0))),
+            "v": float(request.ego_speed_mps),
+            "psi": float(request.ego_yaw_rad),
+        }
+        n = max(1, int(request.cav_horizon_steps))
+        dt = max(1.0e-3, float(request.dt_s))
+        res = cav_resolve_conflicts(
+            reference_samples=request.reference_samples,
+            ego_snapshot=ego_snapshot,
+            my_actor_id=int(request.my_actor_id),
+            my_claim=request.my_claim,
+            obstacle_snapshots=request.obstacle_snapshots,
+            peer_intents=request.peer_intents,
+            latch_state=request.cav_latch_state,
+            classifier_params=ClassifierParams(horizon_steps=n, dt_s=dt),
+            corridor_params=CorridorParams(horizon_steps=n, dt_s=dt),
+        )
+        return {
+            "tags": tuple(res.tags),
+            "assignments": tuple(res.assignments),
+            "corridor": res.corridor,
+            "latch_state": res.latch_state,
+            "diagnostics": dict(res.diagnostics),
+        }
 
     @staticmethod
     def finalize(
