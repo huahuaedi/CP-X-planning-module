@@ -513,29 +513,33 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
     def test_low_speed_lane_follow_forces_closed_loop_replan(self):
         bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
         bridge.full_control_buffer_min_speed_mps = 1.5
+        check = MPCEntryStage.low_speed_replan_required
 
         self.assertTrue(
-            bridge._low_speed_control_buffer_force_replan(
+            check(
                 ego_speed_mps=0.2,
                 behavior_decision="lane_follow",
                 behavior_fsm_state="IDLE",
                 stop_goal_active=False,
+                minimum_speed_mps=1.5,
             )
         )
         self.assertFalse(
-            bridge._low_speed_control_buffer_force_replan(
+            check(
                 ego_speed_mps=2.0,
                 behavior_decision="lane_follow",
                 behavior_fsm_state="IDLE",
                 stop_goal_active=False,
+                minimum_speed_mps=1.5,
             )
         )
         self.assertFalse(
-            bridge._low_speed_control_buffer_force_replan(
+            check(
                 ego_speed_mps=0.2,
                 behavior_decision="intersection_turn_left",
                 behavior_fsm_state="IDLE",
                 stop_goal_active=False,
+                minimum_speed_mps=1.5,
             )
         )
 

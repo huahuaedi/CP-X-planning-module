@@ -138,6 +138,12 @@ class PlanningPipeline:
     def evaluate_mpc_entry(self, **kwargs):
         return self.mpc_entry.evaluate(**kwargs)
 
+    def prepare_mpc_control_context(self, **kwargs):
+        return self.mpc_entry.prepare_control_context(**kwargs)
+
+    def low_speed_mpc_replan_required(self, **kwargs):
+        return self.mpc_entry.low_speed_replan_required(**kwargs)
+
     def record_valid_trajectory(self, trajectory, **kwargs):
         if self.fallback is None:
             return False

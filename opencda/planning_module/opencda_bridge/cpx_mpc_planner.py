@@ -1911,45 +1911,21 @@ class CPXMPCPlannerBridge:
         reference_debug.update(mpc_entry.trace_fields())
         candidate_hard_gate_reason = str(mpc_entry.hard_gate_reason)
         stationary_traffic_stop_hold = bool(mpc_entry.stationary_stop_hold)
-        control_context_key = "|".join((
-            str(behavior_decision.maneuver),
-            str(behavior_decision.phase),
-            str(behavior_decision.target_lane_id),
-            str(reference_debug.get("reference_source", "")),
-            str(bool(mpc_stop_goal_active)),
-            str(behavior_decision.traffic_signal_state),
-            # A buffered control sequence was optimized against whichever
-            # vehicle _front_gap_m() picked as "ahead of me" -- if that
-            # identity changes (e.g. the source-lane vehicle a lane change
-            # was following drops out of the gate and a different, target-
-            # lane vehicle takes over), the old sequence's braking/following
-            # intent no longer means what it did when it was solved, even
-            # though decision/lc_state/target_lane haven't changed yet.
-            str(reference_debug.get("front_gap_actor_id", "")),
-        ))
-        reference_anchor_relative_m = None
-        if lane_center_reference:
-            anchor_x_m = float(
-                lane_center_reference[0].get(
-                    "x_ref_m",
-                    lane_center_reference[0].get("x", ego_location.x),
-                )
-            )
-            anchor_y_m = float(
-                lane_center_reference[0].get(
-                    "y_ref_m",
-                    lane_center_reference[0].get("y", ego_location.y),
-                )
-            )
-            anchor_dx_m = float(anchor_x_m) - float(ego_location.x)
-            anchor_dy_m = float(anchor_y_m) - float(ego_location.y)
-            ego_yaw_rad = math.radians(float(ego_transform.rotation.yaw))
-            reference_anchor_relative_m = (
-                math.cos(ego_yaw_rad) * anchor_dx_m
-                + math.sin(ego_yaw_rad) * anchor_dy_m,
-                -math.sin(ego_yaw_rad) * anchor_dx_m
-                + math.cos(ego_yaw_rad) * anchor_dy_m,
-            )
+        mpc_control_context = self.pipeline.prepare_mpc_control_context(
+            behavior=behavior_decision,
+            reference_source=str(reference_debug.get("reference_source", "")),
+            stop_goal_active=bool(mpc_stop_goal_active),
+            front_gap_actor_id=str(reference_debug.get("front_gap_actor_id", "")),
+            reference_samples=lane_center_reference,
+            ego_x_m=float(ego_location.x),
+            ego_y_m=float(ego_location.y),
+            ego_yaw_rad=float(ego_yaw_rad),
+            mode_transition_reason=str(mode_transition_guard_reason),
+        )
+        control_context_key = str(mpc_control_context.key)
+        reference_anchor_relative_m = (
+            mpc_control_context.reference_anchor_relative_m
+        )
         # MPC constrains jerk between the previous control input and the new
         # acceleration sequence. Seed that constraint with the acceleration
         # command actually sent last tick, not the measured vehicle response.
@@ -1972,26 +1948,16 @@ class CPXMPCPlannerBridge:
         try:
             if str(candidate_hard_gate_reason):
                 raise RuntimeError(str(candidate_hard_gate_reason))
-            force_replan = (
-                not bool(stationary_traffic_stop_hold)
-                and (
-                    bool(mpc_stop_goal_active)
-                    or str(behavior_decision.maneuver)
-                    in {
-                        "stop_at_intersection",
-                        "stop_sign",
-                        "emergency_brake",
-                        "intersection_turn_left",
-                        "intersection_turn_right",
-                    }
-                    or bool(mode_transition_guard_reason)
-                )
+            force_replan = bool(
+                not stationary_traffic_stop_hold
+                and mpc_control_context.force_replan
             )
-            low_speed_buffer_replan = self._low_speed_control_buffer_force_replan(
+            low_speed_buffer_replan = self.pipeline.low_speed_mpc_replan_required(
                 ego_speed_mps=float(ego_speed_mps),
                 behavior_decision=str(behavior_decision.maneuver),
                 behavior_fsm_state=str(behavior_decision.phase),
                 stop_goal_active=bool(mpc_stop_goal_active),
+                minimum_speed_mps=float(self.full_control_buffer_min_speed_mps),
             )
             force_replan = bool(force_replan) or bool(low_speed_buffer_replan)
             mpc_replan_executed = bool(
@@ -8459,26 +8425,6 @@ class CPXMPCPlannerBridge:
         mode = "stop" if bool(stop_like) else "lane_follow"
         return f"{mode}_lateral_guard:" + ":".join(reasons)
 
-
-    def _low_speed_control_buffer_force_replan(
-        self,
-        *,
-        ego_speed_mps: float,
-        behavior_decision: str,
-        behavior_fsm_state: str,
-        stop_goal_active: bool,
-    ) -> bool:
-        """Keep low-speed control closed-loop until the vehicle is moving."""
-
-        normalized_behavior = str(behavior_decision or "").strip().lower()
-        normalized_fsm = str(behavior_fsm_state or "").strip().upper()
-        return bool(
-            not bool(stop_goal_active)
-            and normalized_behavior == "lane_follow"
-            and normalized_fsm in {"", "IDLE", "LANE_KEEP"}
-            and float(ego_speed_mps)
-            < float(self.full_control_buffer_min_speed_mps)
-        )
 
     def _fallback_control(
         self,
