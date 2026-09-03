@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any, Callable, Mapping, Optional, Sequence, Tuple
 
 
@@ -28,13 +29,11 @@ class PerceptionStage:
         self,
         *,
         collect_local: Callable[..., Sequence[Mapping[str, Any]]],
-        fuse: Callable[..., Sequence[Mapping[str, Any]]],
         front_gap: Callable[..., Any],
         object_track_id: Callable[[Mapping[str, Any]], str],
         max_mpc_obstacles: int,
     ) -> None:
         self._collect_local = collect_local
-        self._fuse = fuse
         self._front_gap = front_gap
         self._object_track_id = object_track_id
         self._max_mpc_obstacles = max(0, int(max_mpc_obstacles))
@@ -50,12 +49,11 @@ class PerceptionStage:
         ignore_dynamic_objects: bool,
     ) -> PerceptionStageResult:
         local = list(self._collect_local(detected_objects=detected_objects))
-        fused = list(self._fuse(
-            local_object_snapshots=local,
+        fused = self.fuse(
+            local_objects=local,
             cp_obstacles=list(cp_payload.get("obstacles", ()) or ()),
-            ego_location=ego_location,
-            sim_time_s=float(timestamp_s),
-        ))
+            timestamp_s=float(timestamp_s),
+        )
         if bool(ignore_dynamic_objects):
             fused = []
         mpc_objects = self.limit_for_mpc(fused, ego_location=ego_location)
@@ -89,6 +87,106 @@ class PerceptionStage:
             front_actor_id=actor_id,
             front_actor_speed_mps=actor_speed_mps,
         )
+
+    def fuse(self, *, local_objects, cp_obstacles, timestamp_s):
+        fused = {}
+        priorities = {}
+        for raw in list(local_objects or ()):
+            normalized = self.normalize_local(raw)
+            if normalized is not None:
+                self._upsert(fused, priorities, normalized)
+        for raw in list(cp_obstacles or ()):
+            if not isinstance(raw, Mapping) or not self.message_is_fresh(
+                raw, timestamp_s=float(timestamp_s)
+            ):
+                continue
+            normalized = self.normalize_cp(raw)
+            if normalized is None or self._duplicates_native_perception(
+                normalized, fused.values()
+            ):
+                continue
+            self._upsert(fused, priorities, normalized)
+        return list(fused.values())
+
+    @staticmethod
+    def message_is_fresh(message, *, timestamp_s):
+        try:
+            valid_until_s = float(message.get("valid_until_s", "nan"))
+            if math.isfinite(valid_until_s):
+                return float(timestamp_s) <= valid_until_s
+        except Exception:
+            pass
+        try:
+            source_time_s = float(message.get("timestamp_s", timestamp_s))
+            ttl_s = float(message.get("ttl_s", 0.0))
+        except Exception:
+            return True
+        return bool(
+            ttl_s <= 0.0 or float(timestamp_s) <= source_time_s + ttl_s
+        )
+
+    @staticmethod
+    def _duplicates_native_perception(candidate, existing, max_delta_m=1.0):
+        provider = str(candidate.get("provider_source", "")).lower()
+        source = str(candidate.get("source", "")).lower()
+        if "perception" not in provider and "perception" not in source:
+            return False
+        try:
+            candidate_x = float(candidate.get("x", 0.0))
+            candidate_y = float(candidate.get("y", 0.0))
+        except Exception:
+            return False
+        for item in existing:
+            item_provider = str(item.get("provider_source", "")).lower()
+            item_source = str(item.get("source", "")).lower()
+            if "perception" not in item_provider and "perception" not in item_source:
+                continue
+            try:
+                distance_m = math.hypot(
+                    candidate_x - float(item.get("x", 0.0)),
+                    candidate_y - float(item.get("y", 0.0)),
+                )
+            except Exception:
+                continue
+            if distance_m <= float(max_delta_m):
+                return True
+        return False
+
+    @staticmethod
+    def _source_priority(snapshot):
+        source = (
+            str(snapshot.get("provider_source", ""))
+            + " " + str(snapshot.get("source", ""))
+        ).lower()
+        if "perception" in source:
+            return 100
+        if "v2x" in source:
+            return 80
+        if "fallback" in source or "carla" in source:
+            return 40
+        return 60
+
+    @classmethod
+    def _upsert(cls, fused, priorities, snapshot):
+        raw_id = str(
+            snapshot.get("vehicle_id", snapshot.get("id", ""))
+        ).strip()
+        key = raw_id.rsplit(":", 1)[-1]
+        if not key:
+            return
+        priority = cls._source_priority(snapshot)
+        previous_priority = int(priorities.get(key, -1))
+        previous = fused.get(key)
+        previous_confidence = (
+            float(previous.get("confidence", 0.0))
+            if isinstance(previous, Mapping) else -1.0
+        )
+        confidence = float(snapshot.get("confidence", 0.0))
+        if priority > previous_priority or (
+            priority == previous_priority and confidence >= previous_confidence
+        ):
+            fused[key] = dict(snapshot)
+            priorities[key] = int(priority)
 
     def limit_for_mpc(self, objects, *, ego_location):
         result = [

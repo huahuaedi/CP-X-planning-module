@@ -1022,7 +1022,6 @@ class CPXMPCPlannerBridge:
         )
         self.perception_stage = PerceptionStage(
             collect_local=self._collect_object_snapshots,
-            fuse=self._fused_planning_object_snapshots,
             front_gap=self._front_gap_m,
             object_track_id=self._object_track_id,
             max_mpc_obstacles=int(self.max_mpc_obstacles),
@@ -10163,78 +10162,6 @@ class CPXMPCPlannerBridge:
             ),
         }
 
-    def _fused_planning_object_snapshots(
-        self,
-        *,
-        local_object_snapshots: Sequence[Mapping[str, Any]],
-        cp_obstacles: Sequence[Mapping[str, Any]],
-        ego_location: carla.Location,
-        sim_time_s: float,
-    ) -> list[dict[str, Any]]:
-        fused_by_key: dict[str, dict[str, Any]] = {}
-        priorities_by_key: dict[str, int] = {}
-
-        for snapshot in list(local_object_snapshots or []):
-            normalized = PerceptionStage.normalize_local(snapshot)
-            if normalized is not None:
-                self._upsert_fused_obstacle(
-                    fused_by_key=fused_by_key,
-                    priorities_by_key=priorities_by_key,
-                    snapshot=normalized,
-                    priority=self._obstacle_source_priority(normalized),
-                )
-
-        for obstacle in list(cp_obstacles or []):
-            if not isinstance(obstacle, Mapping):
-                continue
-            if not self._cp_message_is_fresh(obstacle, sim_time_s=float(sim_time_s)):
-                continue
-            normalized = PerceptionStage.normalize_cp(obstacle)
-            if normalized is not None:
-                if self._is_duplicate_native_perception_cp_obstacle(
-                    cp_snapshot=normalized,
-                    fused_snapshots=fused_by_key.values(),
-                ):
-                    continue
-                self._upsert_fused_obstacle(
-                    fused_by_key=fused_by_key,
-                    priorities_by_key=priorities_by_key,
-                    snapshot=normalized,
-                    priority=self._obstacle_source_priority(normalized),
-                )
-
-        return list(fused_by_key.values())
-
-    @staticmethod
-    def _is_duplicate_native_perception_cp_obstacle(
-        *,
-        cp_snapshot: Mapping[str, Any],
-        fused_snapshots: Sequence[Mapping[str, Any]],
-        max_position_delta_m: float = 1.0,
-    ) -> bool:
-        provider_source = str(cp_snapshot.get("provider_source", "")).strip().lower()
-        source = str(cp_snapshot.get("source", "")).strip().lower()
-        if "perception" not in provider_source and "perception" not in source:
-            return False
-        try:
-            cp_x = float(cp_snapshot.get("x", 0.0))
-            cp_y = float(cp_snapshot.get("y", 0.0))
-        except Exception:
-            return False
-        for existing in list(fused_snapshots or []):
-            existing_provider = str(existing.get("provider_source", "")).strip().lower()
-            existing_source = str(existing.get("source", "")).strip().lower()
-            if "perception" not in existing_provider and "perception" not in existing_source:
-                continue
-            try:
-                dx = cp_x - float(existing.get("x", 0.0))
-                dy = cp_y - float(existing.get("y", 0.0))
-            except Exception:
-                continue
-            if math.hypot(dx, dy) <= float(max_position_delta_m):
-                return True
-        return False
-
     def _mpc_object_snapshots_with_prediction(
         self,
         object_snapshots: Sequence[Mapping[str, Any]],
@@ -10388,45 +10315,6 @@ class CPXMPCPlannerBridge:
             ),
             "cp_actor_evidence": json.dumps(evidence, default=str),
         }
-
-    @staticmethod
-    def _obstacle_source_priority(snapshot: Mapping[str, Any]) -> int:
-        provider_source = str(snapshot.get("provider_source", "")).lower()
-        source = str(snapshot.get("source", "")).lower()
-        if "perception" in provider_source or "perception" in source:
-            return 100
-        if "v2x" in provider_source or "v2x" in source:
-            return 80
-        if "fallback" in provider_source or "fallback" in source or "carla" in source:
-            return 40
-        return 60
-
-    @staticmethod
-    def _fused_obstacle_key(snapshot: Mapping[str, Any]) -> str:
-        obstacle_id = str(snapshot.get("vehicle_id", snapshot.get("id", ""))).strip()
-        return obstacle_id.rsplit(":", 1)[-1] if ":" in obstacle_id else obstacle_id
-
-    @classmethod
-    def _upsert_fused_obstacle(
-        cls,
-        *,
-        fused_by_key: dict[str, dict[str, Any]],
-        priorities_by_key: dict[str, int],
-        snapshot: Mapping[str, Any],
-        priority: int,
-    ) -> None:
-        key = cls._fused_obstacle_key(snapshot)
-        if not key:
-            return
-        previous_priority = int(priorities_by_key.get(key, -1))
-        previous = fused_by_key.get(key)
-        previous_confidence = float(previous.get("confidence", 0.0)) if isinstance(previous, Mapping) else -1.0
-        confidence = float(snapshot.get("confidence", 0.0))
-        if int(priority) > previous_priority or (
-            int(priority) == previous_priority and float(confidence) >= previous_confidence
-        ):
-            fused_by_key[key] = dict(snapshot)
-            priorities_by_key[key] = int(priority)
 
     def _draw_world_debug_primitives(
         self,

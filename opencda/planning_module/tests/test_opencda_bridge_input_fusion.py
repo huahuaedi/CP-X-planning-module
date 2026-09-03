@@ -1163,8 +1163,14 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
         bridge.max_mpc_obstacles = 10
 
-        fused = bridge._fused_planning_object_snapshots(
-            local_object_snapshots=[
+        stage = PerceptionStage(
+            collect_local=lambda **_kwargs: (),
+            front_gap=lambda **_kwargs: (None, None),
+            object_track_id=lambda item: str(item.get("vehicle_id", "")),
+            max_mpc_obstacles=10,
+        )
+        fused = stage.fuse(
+            local_objects=[
                 {
                     "vehicle_id": "42",
                     "x": 10.0,
@@ -1205,8 +1211,7 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
                     "ttl_s": 1.0,
                 },
             ],
-            ego_location=sys.modules["carla"].Location(0.0, 0.0, 0.0),
-            sim_time_s=10.5,
+            timestamp_s=10.5,
         )
 
         by_id = {item["vehicle_id"]: item for item in fused}
@@ -1219,7 +1224,6 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         bridge.max_mpc_obstacles = 1
         bridge.perception_stage = PerceptionStage(
             collect_local=lambda **_kwargs: (),
-            fuse=lambda **_kwargs: (),
             front_gap=lambda **_kwargs: (None, None),
             object_track_id=lambda item: str(item.get("vehicle_id", "")),
             max_mpc_obstacles=1,
@@ -1272,8 +1276,14 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
         bridge.max_mpc_obstacles = 10
 
-        fused = bridge._fused_planning_object_snapshots(
-            local_object_snapshots=[
+        stage = PerceptionStage(
+            collect_local=lambda **_kwargs: (),
+            front_gap=lambda **_kwargs: (None, None),
+            object_track_id=lambda item: str(item.get("vehicle_id", "")),
+            max_mpc_obstacles=10,
+        )
+        fused = stage.fuse(
+            local_objects=[
                 {
                     "vehicle_id": "101",
                     "x": 15.0,
@@ -1302,8 +1312,7 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
                     "ttl_s": 1.0,
                 },
             ],
-            ego_location=sys.modules["carla"].Location(0.0, 0.0, 0.0),
-            sim_time_s=3.5,
+            timestamp_s=3.5,
         )
 
         by_source = [(item["vehicle_id"], item["provider_source"]) for item in fused]
