@@ -6250,131 +6250,37 @@ class CPXMPCPlannerBridge:
             "cp_actor_evidence": json.dumps(evidence, default=str),
         }
 
+    def _world_debug(self):
+        port = getattr(self, "world_debug_port", None)
+        if port is not None:
+            return port
+        from opencda.planning_module.opencda_bridge.platform_ports import WorldDebugPort
+        port = WorldDebugPort(
+            vehicle_manager=getattr(self, "vehicle_manager", None),
+            carla_module=getattr(self, "carla", None),
+            mpc=getattr(self, "mpc", None),
+            route_points=self._active_global_route_points,
+            enabled=bool(getattr(self, "draw_world_debug", False)),
+            draw_destination=bool(getattr(self, "draw_world_debug_destination", False)),
+            life_time_s=float(getattr(self, "world_debug_life_time_s", 0.15)),
+            report_error=lambda reason: print(
+                "[CP-X OpenCDA Bridge] world debug draw failed: " + reason
+            ) if bool(getattr(self, "debug", False)) else None,
+        )
+        self.world_debug_port = port
+        return port
+
     def _draw_world_debug_primitives(
-        self,
-        *,
-        destination_state: Sequence[float],
+        self, *, destination_state: Sequence[float],
         lane_center_reference: Sequence[Mapping[str, Any]],
     ) -> None:
-        """Draw planner primitives into CARLA's debug layer for OpenCDA runs."""
-
-        if not bool(self.draw_world_debug):
-            return
-        try:
-            world = self.vehicle_manager.vehicle.get_world()
-            debug = getattr(world, "debug", None)
-            if debug is None:
-                return
-            z_m = float(getattr(self.vehicle_manager.vehicle.get_location(), "z", 0.0)) + 0.35
-            life_time = max(0.05, float(self.world_debug_life_time_s))
-
-            route_points = self._display_global_route_points()
-            self._draw_debug_polyline(
-                debug=debug,
-                points_xy=[(float(p[0]), float(p[1])) for p in route_points],
-                z_m=z_m + 0.05,
-                color=self.carla.Color(255, 210, 20),
-                thickness=0.08,
-                life_time_s=life_time,
-                max_segments=120,
-            )
-
-            reference_points = [
-                (
-                    float(sample.get("x_ref_m", sample.get("x", 0.0))),
-                    float(sample.get("y_ref_m", sample.get("y", 0.0))),
-                )
-                for sample in list(lane_center_reference or [])
-            ]
-            self._draw_debug_polyline(
-                debug=debug,
-                points_xy=reference_points,
-                z_m=z_m + 0.15,
-                color=self.carla.Color(245, 245, 245),
-                thickness=0.06,
-                life_time_s=life_time,
-                max_segments=80,
-            )
-
-            mpc_points = self._last_mpc_trajectory_points()
-            self._draw_debug_polyline(
-                debug=debug,
-                points_xy=mpc_points,
-                z_m=z_m + 0.25,
-                color=self.carla.Color(30, 230, 70),
-                thickness=0.10,
-                life_time_s=life_time,
-                max_segments=80,
-            )
-
-            if (
-                bool(self.draw_world_debug_destination)
-                and destination_state is not None
-                and len(destination_state) >= 2
-            ):
-                debug.draw_point(
-                    self.carla.Location(
-                        x=float(destination_state[0]),
-                        y=float(destination_state[1]),
-                        z=z_m + 0.55,
-                    ),
-                    size=0.18,
-                    color=self.carla.Color(30, 145, 255),
-                    life_time=life_time,
-                    persistent_lines=False,
-                )
-        except Exception as exc:
-            if self.debug:
-                print(f"[CP-X OpenCDA Bridge] world debug draw failed: {exc}")
+        self._world_debug().draw(
+            destination_state=destination_state,
+            reference_samples=lane_center_reference,
+        )
 
     def _last_mpc_trajectory_points(self) -> list[tuple[float, float]]:
-        x_solution = getattr(self.mpc, "_last_x_solution", None)
-        if x_solution is None:
-            return []
-        points: list[tuple[float, float]] = []
-        try:
-            for state in list(x_solution):
-                if len(state) < 2:
-                    continue
-                points.append((float(state[0]), float(state[1])))
-        except Exception:
-            return []
-        return points
-
-    def _draw_debug_polyline(
-        self,
-        *,
-        debug: Any,
-        points_xy: Sequence[Sequence[float]],
-        z_m: float,
-        color: Any,
-        thickness: float,
-        life_time_s: float,
-        max_segments: int,
-    ) -> None:
-        points = [
-            (float(point[0]), float(point[1]))
-            for point in list(points_xy or [])
-            if len(point) >= 2
-        ]
-        if len(points) < 2:
-            return
-        stride = max(1, int(len(points) / max(1, int(max_segments))))
-        sampled = points[::stride]
-        if sampled[-1] != points[-1]:
-            sampled.append(points[-1])
-        for first, second in zip(sampled[:-1], sampled[1:]):
-            if math.hypot(float(second[0]) - float(first[0]), float(second[1]) - float(first[1])) < 1.0e-3:
-                continue
-            debug.draw_line(
-                self.carla.Location(x=float(first[0]), y=float(first[1]), z=float(z_m)),
-                self.carla.Location(x=float(second[0]), y=float(second[1]), z=float(z_m)),
-                thickness=float(thickness),
-                color=color,
-                life_time=float(life_time_s),
-                persistent_lines=False,
-            )
-
+        return self._world_debug().mpc_trajectory_points()
     def _active_global_route_points(self) -> list[list[float]]:
         """Return planner-owned route topology geometry; never display-filter it."""
 
@@ -6391,58 +6297,9 @@ class CPXMPCPlannerBridge:
         return [list(point) for point in route_points]
 
     def _display_global_route_points(self) -> list[list[float]]:
-        """Return a display-only smoothing of the active topology polyline.
+        """Return the diagnostics-only smoothed route polyline."""
 
-        AD-map lane-change edges are topological cross-lane markers and may be
-        nearly lateral in XY.  The minimap must not render that marker as a
-        physical 90-degree road corner.  This filtered copy is diagnostics
-        only: route progress, authorization, references and MPC continue to
-        consume ``_active_global_route_points`` unchanged.
-        """
-        raw = [list(point) for point in self._active_global_route_points()]
-        if len(raw) < 5:
-            return raw
-        signature_indices = sorted({0, len(raw) // 4, len(raw) // 2, 3 * len(raw) // 4, len(raw) - 1})
-        signature = tuple(
-            (len(raw), index, round(float(raw[index][0]), 3), round(float(raw[index][1]), 3))
-            for index in signature_indices
-        )
-        if signature == getattr(self, "_display_route_cache_signature", None):
-            return [list(point) for point in getattr(self, "_display_route_cache", ())]
-
-        xy = [(float(point[0]), float(point[1])) for point in raw]
-        # A symmetric triangular metric-like filter spreads a short lateral
-        # topology marker over neighboring longitudinal samples. Straight
-        # sections remain exactly straight and endpoints remain unchanged.
-        radius = 6
-        smoothed: list[tuple[float, float]] = []
-        for index in range(len(xy)):
-            if index == 0 or index == len(xy) - 1:
-                smoothed.append(xy[index])
-                continue
-            first = max(0, index - radius)
-            last = min(len(xy) - 1, index + radius)
-            weighted_x = 0.0
-            weighted_y = 0.0
-            total_weight = 0.0
-            for neighbor in range(first, last + 1):
-                weight = float(radius + 1 - abs(neighbor - index))
-                weighted_x += weight * xy[neighbor][0]
-                weighted_y += weight * xy[neighbor][1]
-                total_weight += weight
-            smoothed.append((weighted_x / total_weight, weighted_y / total_weight))
-
-        display: list[list[float]] = []
-        for index, (x_m, y_m) in enumerate(smoothed):
-            other = smoothed[index + 1] if index + 1 < len(smoothed) else smoothed[index - 1]
-            base = smoothed[index] if index + 1 < len(smoothed) else smoothed[index - 1]
-            heading = math.atan2(other[1] - base[1], other[0] - base[0])
-            z_m = float(raw[index][2]) if len(raw[index]) >= 3 else 0.0
-            display.append([float(x_m), float(y_m), float(z_m), float(heading)])
-        self._display_route_cache_signature = signature
-        self._display_route_cache = tuple(tuple(point) for point in display)
-        return display
-
+        return self._world_debug().display_route_points()
     def _map_waypoint_from_location(self, location: carla.Location):
         from opencda.planning_module.opencda_bridge.platform_ports import MapLookupPort
         port = getattr(self, "map_lookup_port", None) or MapLookupPort.from_owner(self)
