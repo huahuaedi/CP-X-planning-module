@@ -911,10 +911,6 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
         bridge.config = {}
         bridge.mpc = types.SimpleNamespace(dt_s=0.1, horizon_steps=3)
-        bridge._scenario_manager = types.SimpleNamespace(
-            state="TURN_EXIT_STABILIZATION",
-            turn_speed_cap_mps=5.0,
-        )
         bridge.maneuver_manager = ManeuverManager()
         retained_reference = [
                 {"x_ref_m": 1.0, "y_ref_m": 0.0, "heading_rad": 0.0, "speed_ref_mps": 5.0},

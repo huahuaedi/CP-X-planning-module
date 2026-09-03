@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import yaml
 
@@ -17,6 +18,38 @@ from opencda.planning_module.pipeline.scenario_manager import (
 
 
 class CPXScenarioManagerTests(unittest.TestCase):
+    def test_planning_context_returns_decision_and_signal_diagnostics(self):
+        manager = CPXScenarioManager()
+        result = manager.update_planning_context(
+            raw_traffic_state="unknown",
+            resolved_traffic_state="red",
+            filtered_traffic_state="red",
+            filtered_stop_target={"x_m": 8.0, "y_m": 0.0},
+            traffic_memory_reason="traffic_memory_hold_red",
+            signal_context={"control_id": "17"},
+            stop_forward_m=8.0,
+            stop_target_reliable=True,
+            ego_speed_mps=4.0,
+            ego_in_junction=False,
+            current_road_option="LANEFOLLOW",
+            next_macro_maneuver="lane_follow",
+            sim_time_s=1.0,
+            turn_context=SimpleNamespace(
+                direction="", distance_m=float("inf"), reason="no_turn",
+                exit_alignment_valid=False, exit_aligned=False,
+                exit_heading_error_rad=float("nan"),
+                exit_lateral_m=float("nan"),
+                exit_alignment_reason="unavailable",
+            ),
+        )
+
+        self.assertEqual(result.behavior_traffic_state, "red")
+        self.assertEqual(result.signal_context["resolved_signal_state"], "red")
+        self.assertEqual(
+            result.signal_context["traffic_memory_reason"],
+            "traffic_memory_hold_red",
+        )
+
     def test_town06_turn_speed_contract_uses_consumed_prepare_key(self):
         config_path = (
             Path(__file__).resolve().parents[2]

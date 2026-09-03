@@ -17,6 +17,7 @@ class PlanningPipeline:
         runtime_input: RuntimeInputStage,
         perception: PerceptionStage,
         behavior: Any,
+        scenario: Any,
         speed: Any,
         destination_speed: Any,
         reference_publication: Any,
@@ -26,6 +27,7 @@ class PlanningPipeline:
         self._runtime_input = runtime_input
         self._perception = perception
         self.behavior = behavior
+        self.scenario = scenario
         self.speed = speed
         self.destination_speed = destination_speed
         self.reference_publication = reference_publication
@@ -86,6 +88,9 @@ class PlanningPipeline:
 
     def prepare_turn_scenario_context(self, **kwargs):
         return self.behavior.prepare_turn_scenario_context(**kwargs)
+
+    def resolve_scenario(self, **kwargs):
+        return self.scenario.update_planning_context(**kwargs)
 
     def reset_route_lane_change_authorization(self):
         self.behavior.reset_route_lane_change_authorization()

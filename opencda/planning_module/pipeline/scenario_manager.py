@@ -10,7 +10,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Mapping, Optional
+from types import MappingProxyType
+from typing import Any, Mapping, Optional
 
 from .speed_planner import turn_approach_lookahead_m
 
@@ -84,6 +85,22 @@ class CPXScenarioDecision:
                 self.boundary_heading_error_rad
             ),
         }
+
+
+@dataclass(frozen=True)
+class ScenarioStageResult:
+    decision: CPXScenarioDecision
+    signal_context: Mapping[str, object]
+    traffic_memory_reason: str
+
+    @property
+    def behavior_traffic_state(self) -> str:
+        return str(self.decision.behavior_signal_state)
+
+    @property
+    def behavior_stop_target(self) -> Optional[Mapping[str, object]]:
+        target = self.decision.behavior_stop_target
+        return dict(target) if isinstance(target, Mapping) else None
 
 
 class CPXScenarioManager:
@@ -174,6 +191,92 @@ class CPXScenarioManager:
         self._turn_connector_seen = False
         self._boundary_recovery_stable_frames = 0
         self._turn_exit_stable_frames = 0
+
+    def update_planning_context(
+        self,
+        *,
+        raw_traffic_state: str,
+        resolved_traffic_state: str,
+        filtered_traffic_state: str,
+        filtered_stop_target: Optional[Mapping[str, object]],
+        traffic_memory_reason: str,
+        signal_context: Mapping[str, object],
+        stop_forward_m: float,
+        stop_target_reliable: bool,
+        ego_speed_mps: float,
+        ego_in_junction: bool,
+        current_road_option: str,
+        next_macro_maneuver: str,
+        sim_time_s: float,
+        turn_context: Any,
+        boundary_recovery_request: Any = None,
+    ) -> ScenarioStageResult:
+        """Evaluate the scenario and publish its complete typed context."""
+
+        decision = self.update(
+            traffic_state=str(filtered_traffic_state),
+            stop_target=(
+                dict(filtered_stop_target)
+                if isinstance(filtered_stop_target, Mapping)
+                else None
+            ),
+            stop_forward_m=float(stop_forward_m),
+            stop_target_reliable=bool(stop_target_reliable),
+            ego_speed_mps=float(ego_speed_mps),
+            ego_in_junction=bool(ego_in_junction),
+            current_road_option=str(current_road_option),
+            next_macro_maneuver=str(next_macro_maneuver),
+            sim_time_s=float(sim_time_s),
+            upcoming_turn_direction=str(turn_context.direction),
+            upcoming_turn_distance_m=float(turn_context.distance_m),
+            turn_exit_alignment_valid=bool(turn_context.exit_alignment_valid),
+            turn_exit_aligned=bool(turn_context.exit_aligned),
+            turn_exit_heading_error_rad=float(
+                turn_context.exit_heading_error_rad
+            ),
+            turn_exit_lateral_m=float(turn_context.exit_lateral_m),
+            boundary_recovery_request=boundary_recovery_request,
+        )
+        context = dict(signal_context or {})
+        context.update({
+            "raw_signal_state": str(raw_traffic_state),
+            "resolved_signal_state": str(resolved_traffic_state),
+            "signal_state": str(filtered_traffic_state),
+            "behavior_signal_state": str(decision.behavior_signal_state),
+            "scenario_owns_traffic_control": True,
+            "scenario_fsm_state": str(decision.state),
+            "traffic_stop_forward_m": float(stop_forward_m),
+            "traffic_stop_commit_distance_m": float(
+                decision.traffic_stop_commit_distance_m
+            ),
+            "route_upcoming_turn_direction": str(turn_context.direction),
+            "route_upcoming_turn_distance_m": (
+                "" if not math.isfinite(float(turn_context.distance_m))
+                else float(turn_context.distance_m)
+            ),
+            "route_upcoming_turn_reason": str(turn_context.reason),
+            "turn_exit_heading_error_rad": (
+                "" if not turn_context.exit_alignment_valid
+                else float(turn_context.exit_heading_error_rad)
+            ),
+            "turn_exit_lateral_m": (
+                "" if not turn_context.exit_alignment_valid
+                else float(turn_context.exit_lateral_m)
+            ),
+            "turn_exit_aligned": bool(turn_context.exit_aligned),
+            "turn_exit_alignment_reason": str(
+                turn_context.exit_alignment_reason
+            ),
+        })
+        if str(decision.reason):
+            context["traffic_stop_approach_reason"] = str(decision.reason)
+        if str(traffic_memory_reason):
+            context["traffic_memory_reason"] = str(traffic_memory_reason)
+        return ScenarioStageResult(
+            decision=decision,
+            signal_context=MappingProxyType(context),
+            traffic_memory_reason=str(traffic_memory_reason),
+        )
 
     def update(
         self,

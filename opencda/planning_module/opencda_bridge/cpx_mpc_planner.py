@@ -317,7 +317,7 @@ class CPXMPCPlannerBridge:
             CPXScenarioManager,
         )
 
-        self._scenario_manager = CPXScenarioManager(self.config)
+        scenario_manager = CPXScenarioManager(self.config)
         self._boundary_recovery_request = BoundaryRecoveryRequest()
         self._boundary_recovery_trigger_frames = 0
         self._boundary_recovery_infeasible_frames = 0
@@ -1089,6 +1089,7 @@ class CPXMPCPlannerBridge:
             runtime_input=runtime_input_stage,
             perception=perception_stage,
             behavior=behavior_stage,
+            scenario=scenario_manager,
             speed=speed_target_planner,
             destination_speed=destination_speed_stage,
             reference_publication=reference_publication_stage,
@@ -4306,13 +4307,13 @@ class CPXMPCPlannerBridge:
         )
         turn_exit_alignment_valid = bool(turn_context.exit_alignment_valid)
         turn_exit_aligned = bool(turn_context.exit_aligned)
-        scenario_decision = self._scenario_manager.update(
-            traffic_state=str(filtered_traffic_state),
-            stop_target=(
-                dict(filtered_stop_target)
-                if isinstance(filtered_stop_target, Mapping)
-                else None
-            ),
+        scenario_result = self.pipeline.resolve_scenario(
+            raw_traffic_state=str(raw_traffic_state),
+            resolved_traffic_state=str(resolved_traffic_state),
+            filtered_traffic_state=str(filtered_traffic_state),
+            filtered_stop_target=filtered_stop_target,
+            traffic_memory_reason=str(full_traffic_memory_reason),
+            signal_context=signal_context,
             stop_forward_m=float(traffic_stop_forward_m),
             stop_target_reliable=bool(traffic_stop_target_reliable),
             ego_speed_mps=float(ego_speed_mps),
@@ -4320,12 +4321,7 @@ class CPXMPCPlannerBridge:
             current_road_option=str(route_context.current_road_option),
             next_macro_maneuver=str(route_context.next_macro_maneuver),
             sim_time_s=float(sim_time_s),
-            upcoming_turn_direction=str(upcoming_turn_direction),
-            upcoming_turn_distance_m=float(upcoming_turn_distance_m),
-            turn_exit_alignment_valid=bool(turn_exit_alignment_valid),
-            turn_exit_aligned=bool(turn_exit_aligned),
-            turn_exit_heading_error_rad=float(turn_exit_heading_error_rad),
-            turn_exit_lateral_m=float(turn_exit_lateral_m),
+            turn_context=turn_context,
             boundary_recovery_request=(
                 getattr(self, "_boundary_recovery_request", None)
                 if bool(
@@ -4337,6 +4333,7 @@ class CPXMPCPlannerBridge:
                 else None
             ),
         )
+        scenario_decision = scenario_result.decision
         lateral_ownership = self.pipeline.resolve_lateral_ownership(
             authorization=lane_change_authorization,
             maneuver_manager=self.maneuver_manager,
@@ -4372,12 +4369,8 @@ class CPXMPCPlannerBridge:
                 "opportunistic_lane_change_suppressed:"
                 + str(lane_change_authorization.reason)
             )
-        behavior_traffic_state = str(scenario_decision.behavior_signal_state)
-        behavior_stop_target = (
-            dict(scenario_decision.behavior_stop_target)
-            if isinstance(scenario_decision.behavior_stop_target, Mapping)
-            else None
-        )
+        behavior_traffic_state = str(scenario_result.behavior_traffic_state)
+        behavior_stop_target = scenario_result.behavior_stop_target
         traffic_stop_commit_distance_m = float(
             scenario_decision.traffic_stop_commit_distance_m
         )
@@ -4387,48 +4380,7 @@ class CPXMPCPlannerBridge:
             else self.target_speed_mps
         )
         traffic_stop_approach_reason = str(scenario_decision.reason)
-        filtered_signal_context = dict(signal_context or {})
-        filtered_signal_context["raw_signal_state"] = str(raw_traffic_state)
-        filtered_signal_context["resolved_signal_state"] = str(
-            resolved_traffic_state
-        )
-        filtered_signal_context["signal_state"] = str(filtered_traffic_state)
-        filtered_signal_context["behavior_signal_state"] = str(behavior_traffic_state)
-        filtered_signal_context["scenario_owns_traffic_control"] = True
-        filtered_signal_context["scenario_fsm_state"] = str(
-            scenario_decision.state
-        )
-        filtered_signal_context["traffic_stop_forward_m"] = float(traffic_stop_forward_m)
-        filtered_signal_context["traffic_stop_commit_distance_m"] = float(traffic_stop_commit_distance_m)
-        filtered_signal_context["route_upcoming_turn_direction"] = str(
-            upcoming_turn_direction
-        )
-        filtered_signal_context["route_upcoming_turn_distance_m"] = (
-            ""
-            if not math.isfinite(float(upcoming_turn_distance_m))
-            else float(upcoming_turn_distance_m)
-        )
-        filtered_signal_context["route_upcoming_turn_reason"] = str(
-            upcoming_turn_reason
-        )
-        filtered_signal_context["turn_exit_heading_error_rad"] = (
-            ""
-            if not bool(turn_exit_alignment_valid)
-            else float(turn_exit_heading_error_rad)
-        )
-        filtered_signal_context["turn_exit_lateral_m"] = (
-            ""
-            if not bool(turn_exit_alignment_valid)
-            else float(turn_exit_lateral_m)
-        )
-        filtered_signal_context["turn_exit_aligned"] = bool(turn_exit_aligned)
-        filtered_signal_context["turn_exit_alignment_reason"] = str(
-            turn_exit_alignment_reason
-        )
-        if str(traffic_stop_approach_reason):
-            filtered_signal_context["traffic_stop_approach_reason"] = str(traffic_stop_approach_reason)
-        if str(full_traffic_memory_reason):
-            filtered_signal_context["traffic_memory_reason"] = str(full_traffic_memory_reason)
+        filtered_signal_context = dict(scenario_result.signal_context)
         mpc_feedback = self.mpc_feedback.candidate_feedback(
             current_time_s=float(sim_time_s)
         )
