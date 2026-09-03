@@ -48,6 +48,39 @@ def test_pipeline_sequences_runtime_and_perception_without_bridge():
     assert not hasattr(pipeline, "bridge")
 
 
+def test_pipeline_cycle_owns_initial_emergency_speed_intent():
+    pipeline = PlanningPipeline(
+        runtime_input=RuntimeInputStage(_Mapper()),
+        perception=PerceptionStage(max_mpc_obstacles=4),
+        behavior=object(), scenario=object(), static_obstacle=object(),
+        control_safety=object(), speed=object(), destination_speed=object(),
+        reference_publication=object(), mpc_entry=object(),
+    )
+    transform = SimpleNamespace(
+        location=SimpleNamespace(x=0.0, y=0.0, z=0.0),
+        rotation=SimpleNamespace(yaw=0.0),
+    )
+    cycle = pipeline.begin_cycle(
+        timestamp_s=4.0,
+        ego_transform=transform,
+        ego_speed_kmh=18.0,
+        detected_objects={"vehicles": [{
+            "vehicle_id": "front", "x": 2.0, "y": 0.0, "v": 0.0,
+        }]},
+        cp_payload={},
+        ignore_dynamic_objects=False,
+        cruise_speed_mps=8.0,
+        base_emergency_gap_m=3.0,
+        emergency_standstill_buffer_m=1.0,
+        following_time_headway_s=1.5,
+    )
+
+    assert cycle.tick.ego_speed_mps == pytest.approx(5.0)
+    assert cycle.emergency_stop_required
+    assert cycle.requested_speed_mps == 0.0
+    assert cycle.perception.front_actor_id == "front"
+
+
 def test_pipeline_owns_speed_resolution_sequence():
     calls = []
 

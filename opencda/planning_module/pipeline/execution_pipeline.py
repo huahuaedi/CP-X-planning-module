@@ -2,10 +2,35 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from dataclasses import dataclass
+from typing import Any, Mapping, Optional
 
 from .perception_stage import PerceptionStage, PerceptionStageResult
 from .runtime_input_stage import RuntimeInputStage, RuntimeTickSnapshot
+from .speed_planner import effective_emergency_gap_m
+
+
+@dataclass(frozen=True)
+class PlanningCycle:
+    """Immutable normalized inputs and the initial longitudinal safety intent."""
+
+    tick: RuntimeTickSnapshot
+    perception: PerceptionStageResult
+    emergency_gap_m: float
+    emergency_stop_required: bool
+    requested_speed_mps: float
+
+    @property
+    def object_snapshots(self):
+        return self.perception.fused_objects
+
+    @property
+    def mpc_object_snapshots(self):
+        return self.perception.mpc_objects
+
+    @property
+    def local_object_snapshots(self):
+        return self.perception.local_objects
 
 
 class PlanningPipeline:
@@ -64,6 +89,54 @@ class PlanningPipeline:
             ego_yaw_rad=float(tick.ego_yaw_rad),
             timestamp_s=float(tick.timestamp_s),
             ignore_dynamic_objects=bool(ignore_dynamic_objects),
+        )
+
+    def begin_cycle(
+        self,
+        *,
+        timestamp_s: float,
+        ego_transform: Any,
+        ego_speed_kmh: float,
+        detected_objects: Any,
+        cp_payload: Mapping[str, Any],
+        ignore_dynamic_objects: bool,
+        cruise_speed_mps: float,
+        base_emergency_gap_m: float,
+        emergency_standstill_buffer_m: float,
+        following_time_headway_s: float,
+    ) -> PlanningCycle:
+        """Create the single authoritative input snapshot for one planner tick."""
+
+        tick = self.begin_tick(
+            timestamp_s=timestamp_s,
+            ego_transform=ego_transform,
+            ego_speed_kmh=ego_speed_kmh,
+        )
+        perception = self.perceive(
+            tick,
+            detected_objects=detected_objects,
+            cp_payload=cp_payload,
+            ignore_dynamic_objects=ignore_dynamic_objects,
+        )
+        emergency_gap_m = effective_emergency_gap_m(
+            base_emergency_gap_m=max(0.5, float(base_emergency_gap_m)),
+            ego_speed_mps=float(tick.ego_speed_mps),
+            front_obstacle_speed_mps=perception.front_actor_speed_mps,
+            standstill_buffer_m=max(0.0, float(emergency_standstill_buffer_m)),
+            time_headway_s=max(0.1, float(following_time_headway_s)),
+        )
+        stop_required = bool(
+            perception.front_gap_m is not None
+            and float(perception.front_gap_m) <= float(emergency_gap_m)
+        )
+        return PlanningCycle(
+            tick=tick,
+            perception=perception,
+            emergency_gap_m=float(emergency_gap_m),
+            emergency_stop_required=stop_required,
+            requested_speed_mps=(
+                0.0 if stop_required else max(0.0, float(cruise_speed_mps))
+            ),
         )
 
     def front_gap(self, **kwargs):

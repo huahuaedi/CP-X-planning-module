@@ -1488,28 +1488,7 @@ class CPXMPCPlannerBridge:
             PlannerOutput,
         )
         latest_update = dict(getattr(self, "_latest_opencda_update", {}) or {})
-        tick = self.pipeline.begin_tick(
-            timestamp_s=float(self._sim_time_s()),
-            ego_transform=(
-                latest_update.get("ego_transform")
-                or self.vehicle_manager.localizer.get_ego_pos()
-            ),
-            ego_speed_kmh=float(
-                latest_update.get(
-                    "ego_speed_kmh",
-                    self.vehicle_manager.localizer.get_ego_spd(),
-                )
-            ),
-        )
-        sim_time_s = float(tick.timestamp_s)
-        ego_transform = tick.ego_transform
-        ego_location = tick.ego_location
-        ego_speed_mps = float(tick.ego_speed_mps)
-        ego_yaw_rad = float(tick.ego_yaw_rad)
-        measured_accel_mps2 = float(tick.measured_accel_mps2)
-
         self._clean_functional_test_dynamic_actors_once()
-
         if self.cp_provider is not None:
             try:
                 self.cp_provider.publish(
@@ -1522,8 +1501,15 @@ class CPXMPCPlannerBridge:
             except Exception as exc:
                 if self.debug:
                     print(f"[CP-X OpenCDA Bridge] native CP publish failed: {exc}")
-        perception = self.pipeline.perceive(
-            tick,
+        cycle = self.pipeline.begin_cycle(
+            timestamp_s=float(self._sim_time_s()),
+            ego_transform=(
+                latest_update.get("ego_transform")
+                or self.vehicle_manager.localizer.get_ego_pos()
+            ),
+            ego_speed_kmh=float(latest_update.get(
+                "ego_speed_kmh", self.vehicle_manager.localizer.get_ego_spd()
+            )),
             detected_objects=(
                 latest_update.get("detected_objects")
                 if latest_update.get("detected_objects") is not None
@@ -1535,47 +1521,33 @@ class CPXMPCPlannerBridge:
             ignore_dynamic_objects=bool(
                 self.functional_test_ignore_dynamic_objects
             ),
+            cruise_speed_mps=float(self.target_speed_mps),
+            base_emergency_gap_m=float(
+                self.config.get("following_emergency_gap_m", 3.0)
+            ),
+            emergency_standstill_buffer_m=float(
+                self.config.get("following_emergency_standstill_buffer_m", 1.0)
+            ),
+            following_time_headway_s=float(
+                self.config.get("following_time_headway_s", 1.5)
+            ),
         )
+        tick = cycle.tick
+        perception = cycle.perception
+        sim_time_s = float(tick.timestamp_s)
+        ego_transform = tick.ego_transform
+        ego_location = tick.ego_location
+        ego_speed_mps = float(tick.ego_speed_mps)
+        ego_yaw_rad = float(tick.ego_yaw_rad)
+        measured_accel_mps2 = float(tick.measured_accel_mps2)
         cp_payload = dict(perception.cp_payload)
-        object_snapshots = [dict(item) for item in perception.fused_objects]
-        mpc_object_snapshots = [dict(item) for item in perception.mpc_objects]
-        local_object_snapshots = [dict(item) for item in perception.local_objects]
+        object_snapshots = [dict(item) for item in cycle.object_snapshots]
+        mpc_object_snapshots = [dict(item) for item in cycle.mpc_object_snapshots]
+        local_object_snapshots = [dict(item) for item in cycle.local_object_snapshots]
         front_gap_m = perception.front_gap_m
-        front_gap_obstacle_speed_mps_early = perception.front_actor_speed_mps
-        from opencda.planning_module.pipeline.speed_planner import (
-            effective_emergency_gap_m as _effective_emergency_gap_m,
-        )
-
-        emergency_front_gap_m = _effective_emergency_gap_m(
-            base_emergency_gap_m=max(
-                0.5,
-                float(self.config.get("following_emergency_gap_m", 3.0)),
-            ),
-            ego_speed_mps=float(ego_speed_mps),
-            front_obstacle_speed_mps=front_gap_obstacle_speed_mps_early,
-            standstill_buffer_m=max(
-                0.0,
-                float(
-                    self.config.get(
-                        "following_emergency_standstill_buffer_m", 1.0
-                    )
-                ),
-            ),
-            time_headway_s=max(
-                0.1, float(self.config.get("following_time_headway_s", 1.5))
-            ),
-        )
-        front_gap_at_emergency_threshold = (
-            front_gap_m is not None
-            and float(front_gap_m) <= float(emergency_front_gap_m)
-        )
-        # A maneuver commitment owns lateral intent, never collision safety.
-        # The former 0.5 m/s "committed lane-change crawl" bypassed this stop
-        # and drove into the blocked vehicle.  Every maneuver now observes the
-        # same emergency-gap contract; recovery is handled by the trajectory
-        # fallback owner after the vehicle is safe, not by overriding speed.
-        stop_goal_active = bool(front_gap_at_emergency_threshold)
-        requested_speed_mps = 0.0 if stop_goal_active else self.target_speed_mps
+        emergency_front_gap_m = float(cycle.emergency_gap_m)
+        stop_goal_active = bool(cycle.emergency_stop_required)
+        requested_speed_mps = float(cycle.requested_speed_mps)
         current_state = list(tick.current_state)
 
         behavior_debug: dict[str, Any] = {}
