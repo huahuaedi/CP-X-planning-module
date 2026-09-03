@@ -133,6 +133,10 @@ def build_longitudinal_corridor(
                     _cap(k, station[k] - gap, tag.agent_id)
 
         elif tag.tag == CUT_IN:
+            # A cooperative peer that lost the arbitration (role proceed) is
+            # expected to yield to ego, so ego takes no bound from it.
+            if proceed:
+                continue
             start = 0
             if tag.conflict_t_s is not None:
                 start = max(0, int(tag.conflict_t_s / dt))
