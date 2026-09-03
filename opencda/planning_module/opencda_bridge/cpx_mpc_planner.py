@@ -66,6 +66,7 @@ from opencda.planning_module.pipeline.reference_publication_stage import (
 )
 from opencda.planning_module.pipeline.mpc_entry_stage import MPCEntryStage
 from opencda.planning_module.pipeline.perception_stage import PerceptionStage
+from opencda.planning_module.pipeline.execution_pipeline import PlanningPipeline
 from opencda.planning_module.pipeline.behavior_stage import (
     BehaviorCandidateRequest,
     BehaviorOverrideRequest,
@@ -974,7 +975,7 @@ class CPXMPCPlannerBridge:
         self.mpc = MPC(mpc_cfg=mpc_cfg, road_cfg=road_cfg)
         from opencda.planning_module.pipeline.actuator_mapper import CarlaActuatorMapper
         self.actuator_mapper = CarlaActuatorMapper(self.config)
-        self.runtime_input_stage = RuntimeInputStage(self.actuator_mapper)
+        runtime_input_stage = RuntimeInputStage(self.actuator_mapper)
         vehicle_curvature_margin = min(
             1.0,
             max(
@@ -1024,7 +1025,7 @@ class CPXMPCPlannerBridge:
             getattr(self.vehicle_manager.vehicle, "bounding_box", None),
             "extent", None,
         )
-        self.perception_stage = PerceptionStage(
+        perception_stage = PerceptionStage(
             max_mpc_obstacles=int(self.max_mpc_obstacles),
             ego_length_m=2.0 * float(getattr(ego_extent, "x", 2.25)),
             ego_width_m=2.0 * float(getattr(ego_extent, "y", 1.0)),
@@ -1032,6 +1033,10 @@ class CPXMPCPlannerBridge:
             lane_change_boundary_overlap_m=float(
                 self.config.get("lane_change_boundary_overlap_m", 0.75)
             ),
+        )
+        self.pipeline = PlanningPipeline(
+            runtime_input=runtime_input_stage,
+            perception=perception_stage,
         )
         self.final_reference_gate = FinalReferenceGate(self.config)
         self.reference_pipeline = ReferencePipeline(
@@ -1507,7 +1512,7 @@ class CPXMPCPlannerBridge:
         )
 
         latest_update = dict(getattr(self, "_latest_opencda_update", {}) or {})
-        tick = self.runtime_input_stage.build(
+        tick = self.pipeline.begin_tick(
             timestamp_s=float(self._sim_time_s()),
             ego_transform=(
                 latest_update.get("ego_transform")
@@ -1541,7 +1546,8 @@ class CPXMPCPlannerBridge:
             except Exception as exc:
                 if self.debug:
                     print(f"[CP-X OpenCDA Bridge] native CP publish failed: {exc}")
-        perception = self.perception_stage.build(
+        perception = self.pipeline.perceive(
+            tick,
             detected_objects=(
                 latest_update.get("detected_objects")
                 if latest_update.get("detected_objects") is not None
@@ -1550,9 +1556,6 @@ class CPXMPCPlannerBridge:
                 ) or {}
             ),
             cp_payload=self._load_cp_message_payload(),
-            ego_location=ego_location,
-            ego_yaw_rad=float(ego_yaw_rad),
-            timestamp_s=float(sim_time_s),
             ignore_dynamic_objects=bool(
                 self.functional_test_ignore_dynamic_objects
             ),
@@ -5215,7 +5218,7 @@ class CPXMPCPlannerBridge:
             )
             if callable(reset_lane_change):
                 reset_lane_change(reason=str(override_result.reset_lane_change_reason))
-        front_gap_m, front_gap_actor_id = self.perception_stage.front_gap(
+        front_gap_m, front_gap_actor_id = self.pipeline.front_gap(
             ego_location=ego_location,
             ego_yaw_rad=float(ego_yaw_rad),
             object_snapshots=object_snapshots,

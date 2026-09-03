@@ -1219,10 +1219,10 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         self.assertEqual(by_id["99"]["source"], "opencda_v2x")
 
         bridge.max_mpc_obstacles = 1
-        bridge.perception_stage = PerceptionStage(
+        perception_stage = PerceptionStage(
             max_mpc_obstacles=1,
         )
-        limited = bridge.perception_stage.limit_for_mpc(
+        limited = perception_stage.limit_for_mpc(
             fused,
             ego_location=sys.modules["carla"].Location(0.0, 0.0, 0.0),
         )
