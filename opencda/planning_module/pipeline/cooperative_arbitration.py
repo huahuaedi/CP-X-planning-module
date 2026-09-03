@@ -1,12 +1,9 @@
 """Cross-CAV cooperative arbitration for spatially-conflicting maneuvers.
 
-Pure and CARLA-free: callers translate their own maneuver state and peer
-broadcast messages into ``ResourceClaim``s plus flat (x, y) positions, and
-``should_yield`` decides who proceeds. This is the shared primitive behind
-every "two CPX-controlled CAVs both want to do X near each other" gate
-(lane change, static-obstacle avoidance lane selection, junction entry --
-see call sites in ``cpx_mpc_planner.py``), so the priority rule only needs
-to be got right once.
+Pure and CARLA-free: callers translate maneuver state and peer broadcasts
+into ``ResourceClaim`` and ``CavIntent`` values. ``assign_conflict_roles``
+is the sole priority/latching implementation consumed by the conflict
+pipeline.
 
 Priority is "earliest commitment wins" (``committed_at_s``), which is the
 only rule that generalizes across all of the above -- lane changes have a
@@ -43,63 +40,10 @@ class ResourceClaim:
     require_ahead: bool = True
 
 
-def should_yield(
-    *,
-    my_claim: ResourceClaim,
-    my_actor_id: int,
-    my_position_xy: Tuple[float, float],
-    my_heading_rad: float,
-    peers: Sequence[Tuple[int, ResourceClaim, Tuple[float, float]]],
-    range_m: float = 40.0,
-) -> Optional[str]:
-    """Return a yield reason, or ``None`` if ``my_claim`` may proceed.
-
-    ``peers`` is ``(peer_actor_id, peer_claim, peer_position_xy)`` for every
-    other CAV whose latest broadcast intent is available this tick.
-    """
-
-    forward_x = math.cos(float(my_heading_rad))
-    forward_y = math.sin(float(my_heading_rad))
-    for peer_actor_id, peer_claim, peer_position_xy in peers:
-        if not bool(peer_claim.active):
-            continue
-        if str(peer_claim.kind) != str(my_claim.kind):
-            continue
-        if str(peer_claim.resource_id) != str(my_claim.resource_id):
-            continue
-        dx = float(peer_position_xy[0]) - float(my_position_xy[0])
-        dy = float(peer_position_xy[1]) - float(my_position_xy[1])
-        distance_m = math.hypot(dx, dy)
-        if distance_m > float(range_m):
-            continue
-        if bool(my_claim.require_ahead):
-            # A peer only has an ordering claim on ego's own maneuver if
-            # it's ahead along ego's heading -- a peer already behind
-            # cannot be the reason ego holds back.
-            forward_distance_m = dx * forward_x + dy * forward_y
-            if forward_distance_m <= 0.0:
-                continue
-        peer_wins = float(peer_claim.committed_at_s) < float(
-            my_claim.committed_at_s
-        ) or (
-            float(peer_claim.committed_at_s) == float(my_claim.committed_at_s)
-            and int(peer_actor_id) < int(my_actor_id)
-        )
-        if not peer_wins:
-            continue
-        return (
-            "blocked_by_peer_claim:"
-            f"kind={my_claim.kind}:resource={my_claim.resource_id}:"
-            f"peer={peer_actor_id}:distance_m={distance_m:.1f}"
-        )
-    return None
-
-
 # --------------------------------------------------------------------------- #
 # Stage B: cooperative role assignment
 #
-# ``should_yield`` answers one binary question ("may I proceed?"). The
-# interaction-aware plan needs a stable role (proceed / yield / make-gap)
+# The interaction-aware plan needs a stable role (proceed / yield / make-gap)
 # for each conflict. The hysteresis latch is passed in and returned; the
 # caller owns persistence. Lateral path choice remains in candidate generation.
 # --------------------------------------------------------------------------- #
@@ -179,8 +123,8 @@ def assign_conflict_roles(
 ) -> Tuple[Sequence[ConflictAssignment], Dict[str, ArbitrationLatchEntry]]:
     """Assign a stable role per conflicting cooperative cav.
 
-    Role decision uses the exact ``should_yield`` rule (earliest
-    ``committed_at_s`` wins, ``actor_id`` breaks ties) so every CAV resolves
+    The earliest ``committed_at_s`` wins and ``actor_id`` breaks ties, so
+    every CAV resolves
     the same winner independently. On a merge-kind conflict the loser's role
     is ``make_gap`` rather than a bare ``yield``.
 
