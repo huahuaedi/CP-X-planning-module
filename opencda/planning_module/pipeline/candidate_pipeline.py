@@ -655,7 +655,69 @@ def shape_lane_change_reference(
         dy = float(second["y_ref_m"]) - float(first["y_ref_m"])
         if math.hypot(dx, dy) > 1.0e-6:
             sample["heading_rad"] = math.atan2(dy, dx)
+    _apply_lane_change_drivable_union(
+        samples=result,
+        source_reference=source,
+        target_reference=target,
+        blended_count=count,
+    )
     return result
+
+
+def _apply_lane_change_drivable_union(
+    *,
+    samples: list[Dict[str, object]],
+    source_reference: Sequence[Mapping[str, object]],
+    target_reference: Sequence[Mapping[str, object]],
+    blended_count: int,
+) -> None:
+    """Annotate a lane-change path with one continuous AD-map corridor.
+
+    A vehicle is allowed to cross the shared marking between two authorized
+    adjacent lanes. Applying either lane's inset road bounds to an
+    intermediate Frenet sample creates an artificial forbidden strip at that
+    marking and makes an otherwise smooth MPC trajectory infeasible. The
+    outer bounds of both lane records form the sole corridor for the blend.
+    """
+
+    count = min(
+        max(0, int(blended_count)), len(samples),
+        len(source_reference), len(target_reference),
+    )
+    for index in range(count):
+        sample = samples[index]
+        source = source_reference[index]
+        target = target_reference[index]
+        heading = float(sample.get("heading_rad", 0.0))
+        normal_x, normal_y = -math.sin(heading), math.cos(heading)
+        center_x = float(sample.get("x_ref_m", sample.get("x", 0.0)))
+        center_y = float(sample.get("y_ref_m", sample.get("y", 0.0)))
+        bounds = []
+        for lane in (source, target):
+            lane_x = float(lane.get("x_ref_m", lane.get("x", center_x)))
+            lane_y = float(lane.get("y_ref_m", lane.get("y", center_y)))
+            lane_width = max(0.1, float(lane.get("lane_width_m", 3.5)))
+            half_width = 0.5 * lane_width
+            left_width = max(
+                0.1, float(lane.get("road_left_width_m", half_width))
+            )
+            right_width = max(
+                0.1, float(lane.get("road_right_width_m", half_width))
+            )
+            road_center = float(lane.get("road_center_offset_m", 0.0))
+            lane_offset = (
+                (lane_x - center_x) * normal_x
+                + (lane_y - center_y) * normal_y
+            )
+            bounds.append((
+                lane_offset + road_center - right_width,
+                lane_offset + road_center + left_width,
+            ))
+        lower = min(bound[0] for bound in bounds)
+        upper = max(bound[1] for bound in bounds)
+        sample["road_center_offset_m"] = 0.5 * (lower + upper)
+        sample["road_left_width_m"] = 0.5 * (upper - lower)
+        sample["road_right_width_m"] = 0.5 * (upper - lower)
 
 
 def select_comfortable_lane_change_duration_s(

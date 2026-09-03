@@ -1956,9 +1956,15 @@ class CPXMPCPlannerBridge:
                 )))),
                 steer=0.0,
             ),
-            safe_stop_control=lambda steering_rad: self.carla.VehicleControl(
+            safe_stop_control=lambda acceleration_mps2, steering_rad: self.carla.VehicleControl(
                 throttle=0.0,
-                brake=0.3,
+                brake=min(1.0, max(
+                    0.0,
+                    -float(acceleration_mps2) / max(
+                        1e-6,
+                        abs(float(self.mpc.constraints.min_acceleration_mps2)),
+                    ),
+                )),
                 steer=min(1.0, max(-1.0, float(steering_rad) / max(
                     1e-6, float(self.mpc.constraints.max_steer_rad),
                 ))),

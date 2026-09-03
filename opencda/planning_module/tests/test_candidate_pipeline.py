@@ -853,6 +853,39 @@ class CandidatePipelineTest(unittest.TestCase):
         # half_width reflects the lane half-width minus the boundary margin.
         self.assertAlmostEqual(source_block.half_width_m, 1.75 - 0.5, places=6)
 
+    def test_lane_change_reference_uses_continuous_two_lane_corridor(self):
+        source = [
+            {
+                "x_ref_m": float(index + 1), "y_ref_m": 0.0,
+                "heading_rad": 0.0, "lane_width_m": 3.5,
+                "road_left_width_m": 1.75, "road_right_width_m": 1.75,
+            }
+            for index in range(20)
+        ]
+        target = [
+            {
+                "x_ref_m": float(index + 1), "y_ref_m": 3.5,
+                "heading_rad": 0.0, "lane_width_m": 3.5,
+                "road_left_width_m": 1.75, "road_right_width_m": 1.75,
+            }
+            for index in range(20)
+        ]
+        shaped = candidate_pipeline.shape_lane_change_reference(
+            target_reference=target,
+            source_reference=source,
+            duration_s=2.0,
+            dt_s=0.1,
+            current_lane_id=1,
+            target_lane_id=2,
+            target_speed_mps=10.0,
+        )
+        for sample in shaped:
+            half_width = float(sample["road_left_width_m"])
+            self.assertGreater(half_width, 3.4)
+            self.assertAlmostEqual(
+                half_width, float(sample["road_right_width_m"]), places=7
+            )
+
     def test_envelope_blocks_empty_when_references_missing(self):
         self.assertEqual(
             candidate_pipeline.build_route_tracking_lane_change_envelope_blocks(

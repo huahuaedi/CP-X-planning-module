@@ -59,7 +59,7 @@ class MPCExecutionStage:
         request: MPCExecutionRequest,
         *,
         normal_stop_control: Callable[[], Any],
-        safe_stop_control: Callable[[float], Any],
+        safe_stop_control: Callable[[float, float], Any],
         emergency_stop_control: Callable[[], Any],
     ) -> MPCExecutionResult:
         context = request.control_context
@@ -178,11 +178,25 @@ class MPCExecutionStage:
                 reused_after_failure = True
                 status = "buffer_reuse_after_failed_replan"
             else:
+                constraints = self._mpc.constraints
+                jerk_step_mps2 = max(
+                    0.0,
+                    float(constraints.max_jerk_mps3) * float(self._mpc.dt_s),
+                )
+                acceleration = max(
+                    float(constraints.min_acceleration_mps2),
+                    min(
+                        0.0,
+                        float(request.current_acceleration_mps2)
+                        - float(jerk_step_mps2),
+                    ),
+                )
                 control = (
                     emergency_stop_control()
-                    if hard_gate else safe_stop_control(float(steering))
+                    if hard_gate else safe_stop_control(
+                        float(acceleration), float(steering)
+                    )
                 )
-                acceleration = float(request.current_acceleration_mps2)
                 steering = 0.0 if hard_gate else float(steering)
                 status = "candidate_hard_gate" if hard_gate else "bounded_safe_stop"
             return MPCExecutionResult(
