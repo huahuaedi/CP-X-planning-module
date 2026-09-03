@@ -223,9 +223,6 @@ class CPXMPCPlannerBridge:
         self.last_debug: dict[str, Any] = {}
         self._last_accel_mps2 = 0.0
         self._last_steer_rad = 0.0
-        self._actuator_ego_speed_mps = 0.0
-        self._actuator_target_speed_mps = 0.0
-        self._actuator_stop_goal_active = False
         self._warned = False
         self._diagnostic_hd_map_matcher = DiagnosticHDMapMatcher()
         self._diagnostic_local_lane_frame: dict[str, object] = {}
@@ -882,7 +879,17 @@ class CPXMPCPlannerBridge:
         mpc_cfg, road_cfg = self._load_mpc_config()
         self.mpc = MPC(mpc_cfg=mpc_cfg, road_cfg=road_cfg)
         from opencda.planning_module.pipeline.actuator_mapper import CarlaActuatorMapper
+        from opencda.planning_module.opencda_bridge.platform_ports import (
+            ActuatorPort,
+            MapLookupPort,
+        )
         self.actuator_mapper = CarlaActuatorMapper(self.config)
+        self.actuator_port = ActuatorPort(
+            actuator_mapper=self.actuator_mapper,
+            constraints=self.mpc.constraints,
+            carla_module=carla,
+            clock=self._sim_time_s,
+        )
         runtime_input_stage = RuntimeInputStage(self.actuator_mapper)
         vehicle_curvature_margin = min(
             1.0,
@@ -920,6 +927,11 @@ class CPXMPCPlannerBridge:
         self.behavior_runtime_cfg = dict(mpc_cfg.get("behavior_planner_runtime", {}))
         self.lane_safety_scorer = LaneSafetyScorer()
         self.reference_map = _WaypointMapAdapter(self.map_planner)
+        self.map_lookup_port = MapLookupPort(
+            reference_map=self.reference_map,
+            waypoint_map=self.waypoint_map_planner,
+            carla_module=carla,
+        )
         self.input_adapter = OpenCDAPlanningAdapter(self)
         self.tracker = CPXObstacleTracker(
             max_stale_s=float(self.config.get("tracker_max_stale_s", 0.5)),
@@ -1075,6 +1087,11 @@ class CPXMPCPlannerBridge:
         # lane and reference waypoint query is owned by AD-map.
         self.waypoint_map_planner = self.topology_map
         self.reference_map = _WaypointMapAdapter(self.waypoint_map_planner)
+        self.map_lookup_port = MapLookupPort(
+            reference_map=self.reference_map,
+            waypoint_map=self.waypoint_map_planner,
+            carla_module=carla,
+        )
         self.reference_generator.map_planner = self.waypoint_map_planner
         self.waypoint_backend = "admap"
         self.route_manager = CPXRouteManager(
@@ -7806,35 +7823,9 @@ class CPXMPCPlannerBridge:
         return display
 
     def _map_waypoint_from_location(self, location: carla.Location):
-        waypoint_map_planner = getattr(
-            self,
-            "waypoint_map_planner",
-            self.map_planner,
-        )
-        if waypoint_map_planner is None:
-            return None
-        point = {
-            "x": float(location.x),
-            "y": float(location.y),
-            "z": float(location.z),
-        }
-        get_waypoint = getattr(waypoint_map_planner, "get_waypoint", None)
-        if not callable(get_waypoint):
-            return None
-        try:
-            return get_waypoint(point)
-        except Exception:
-            pass
-        try:
-            return get_waypoint(
-                carla.Location(
-                    x=float(location.x),
-                    y=float(location.y),
-                    z=float(location.z),
-                )
-            )
-        except Exception:
-            return None
+        from opencda.planning_module.opencda_bridge.platform_ports import MapLookupPort
+        port = getattr(self, "map_lookup_port", None) or MapLookupPort.from_owner(self)
+        return port.waypoint(location)
 
     def _drivable_waypoint_from_location(
         self,
@@ -7842,78 +7833,19 @@ class CPXMPCPlannerBridge:
     ):
         """Return a waypoint only when the point is on a driving lane."""
 
-        waypoint_map_planner = getattr(
-            self,
-            "waypoint_map_planner",
-            self.map_planner,
-        )
-        get_drivable_waypoint = getattr(
-            waypoint_map_planner,
-            "get_drivable_waypoint",
-            None,
-        )
-        if callable(get_drivable_waypoint):
-            try:
-                return get_drivable_waypoint({
-                    "x": float(location.x),
-                    "y": float(location.y),
-                    "z": float(location.z),
-                })
-            except Exception:
-                return None
-
-        try:
-            world = self.vehicle_manager.vehicle.get_world()
-            carla_map = world.get_map()
-            return carla_map.get_waypoint(
-                carla.Location(
-                    x=float(location.x),
-                    y=float(location.y),
-                    z=float(location.z),
-                ),
-                project_to_road=False,
-                lane_type=self.carla.LaneType.Driving,
-            )
-        except TypeError:
-            try:
-                return carla_map.get_waypoint(
-                    carla.Location(
-                        x=float(location.x),
-                        y=float(location.y),
-                        z=float(location.z),
-                    ),
-                    project_to_road=False,
-                )
-            except Exception:
-                return None
-        except Exception:
-            return None
+        from opencda.planning_module.opencda_bridge.platform_ports import MapLookupPort
+        port = getattr(self, "map_lookup_port", None) or MapLookupPort.from_owner(self)
+        return port.drivable_waypoint(location) or port.waypoint(location)
 
     def _lane_id_at_location(self, location: carla.Location) -> int:
-        waypoint = self.reference_map.get_waypoint(
-            {
-                "x": float(location.x),
-                "y": float(location.y),
-                "z": float(getattr(location, "z", 0.0)),
-            }
-        )
-        if waypoint is None:
-            return 0
-        try:
-            from utility.global_planner import canonical_lane_id_for_waypoint
-
-            lane_id = int(canonical_lane_id_for_waypoint(waypoint) or 0)
-            return lane_id
-        except Exception:
-            return int(getattr(waypoint, "ad_lane_id", 0) or 0)
+        from opencda.planning_module.opencda_bridge.platform_ports import MapLookupPort
+        port = getattr(self, "map_lookup_port", None) or MapLookupPort.from_owner(self)
+        return port.lane_id(location)
 
     @staticmethod
     def _location_to_point(location: Any) -> dict[str, float]:
-        return {
-            "x": float(getattr(location, "x", 0.0)),
-            "y": float(getattr(location, "y", 0.0)),
-            "z": float(getattr(location, "z", 0.0)),
-        }
+        from opencda.planning_module.opencda_bridge.platform_ports import MapLookupPort
+        return MapLookupPort.location_to_point(location)
 
     @staticmethod
     def _body_frame_xy(
@@ -7924,13 +7856,14 @@ class CPXMPCPlannerBridge:
         target_x_m: float,
         target_y_m: float,
     ) -> tuple[float, float]:
-        dx_m = float(target_x_m) - float(origin_x_m)
-        dy_m = float(target_y_m) - float(origin_y_m)
-        cos_h = math.cos(float(heading_rad))
-        sin_h = math.sin(float(heading_rad))
-        forward_m = dx_m * cos_h + dy_m * sin_h
-        lateral_m = -dx_m * sin_h + dy_m * cos_h
-        return float(forward_m), float(lateral_m)
+        from opencda.planning_module.opencda_bridge.platform_ports import MapLookupPort
+        return MapLookupPort.body_frame_xy(
+            origin_x_m=origin_x_m,
+            origin_y_m=origin_y_m,
+            heading_rad=heading_rad,
+            target_x_m=target_x_m,
+            target_y_m=target_y_m,
+        )
 
     def _set_actuator_context(
         self,
@@ -7939,46 +7872,20 @@ class CPXMPCPlannerBridge:
         target_speed_mps: float,
         stop_goal_active: bool,
     ) -> None:
-        self._actuator_ego_speed_mps = float(ego_speed_mps)
-        self._actuator_target_speed_mps = float(target_speed_mps)
-        self._actuator_stop_goal_active = bool(stop_goal_active)
+        self.actuator_port.set_context(
+            ego_speed_mps=ego_speed_mps,
+            target_speed_mps=target_speed_mps,
+            stop_goal_active=stop_goal_active,
+        )
 
     def _control_from_mpc(self, acceleration_mps2: float, steering_angle_rad: float) -> carla.VehicleControl:
-        max_accel = max(1e-6, float(self.mpc.constraints.max_acceleration_mps2))
-        max_brake = max(1e-6, abs(float(self.mpc.constraints.min_acceleration_mps2)))
-        max_steer = max(1e-6, float(self.mpc.constraints.max_steer_rad))
-        pedals = self.actuator_mapper.map_acceleration(
-            acceleration_mps2=float(acceleration_mps2),
-            max_acceleration_mps2=float(max_accel),
-            min_acceleration_mps2=-float(max_brake),
-            ego_speed_mps=float(self._actuator_ego_speed_mps),
-            target_speed_mps=float(self._actuator_target_speed_mps),
-            stop_goal_active=bool(self._actuator_stop_goal_active),
-            timestamp_s=float(self._sim_time_s()),
-        )
-        steer = min(1.0, max(-1.0, float(steering_angle_rad) / max_steer))
-        return carla.VehicleControl(
-            throttle=float(pedals.throttle),
-            brake=float(pedals.brake),
-            steer=steer,
-        )
+        return self.actuator_port.control(acceleration_mps2, steering_angle_rad)
 
     def _accel_from_control(self, control: carla.VehicleControl) -> float:
-        max_accel = max(1e-6, float(self.mpc.constraints.max_acceleration_mps2))
-        max_brake = max(1e-6, abs(float(self.mpc.constraints.min_acceleration_mps2)))
-        return self.actuator_mapper.acceleration_from_command(
-            throttle=float(getattr(control, "throttle", 0.0)),
-            brake=float(getattr(control, "brake", 0.0)),
-            max_acceleration_mps2=float(max_accel),
-            min_acceleration_mps2=-float(max_brake),
-            ego_speed_mps=float(self._actuator_ego_speed_mps),
-            target_speed_mps=float(self._actuator_target_speed_mps),
-            stop_goal_active=bool(self._actuator_stop_goal_active),
-        )
+        return self.actuator_port.acceleration(control)
 
     def _steer_rad_from_control(self, control: carla.VehicleControl) -> float:
-        max_steer = max(1e-6, float(self.mpc.constraints.max_steer_rad))
-        return float(getattr(control, "steer", 0.0)) * float(max_steer)
+        return self.actuator_port.steering(control)
 
     def _emergency_stop_control(self) -> carla.VehicleControl:
         self._last_accel_mps2 = float(getattr(self.mpc.constraints, "min_acceleration_mps2", -3.0))
