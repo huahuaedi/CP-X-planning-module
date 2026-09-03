@@ -46,7 +46,7 @@ from .destination_speed_stage import (
     DestinationSpeedStage,
     DestinationSpeedStageResult,
 )
-from .execution_pipeline import PlanningPipeline
+from .execution_pipeline import PlanningPipeline, ScenarioPlanningFrameRequest
 from .mpc_feedback import BehaviorMPCFeedback
 from .mpc_command_extractor import MPCCommandExtractor, MPCTrackingCommand
 from .mpc_entry_stage import MPCEntryStage, MPCEntryStageResult
@@ -133,6 +133,7 @@ __all__ = [
     "ConflictResolutionRequest",
     "ConflictResolutionResult",
     "RouteBehaviorContextResult",
+    "ScenarioPlanningFrameRequest",
     "MPCCommandExtractor",
     "MPCTrackingCommand",
     "MPCEntryStage",

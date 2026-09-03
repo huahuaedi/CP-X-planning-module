@@ -2,7 +2,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from pipeline.execution_pipeline import PlanningPipeline
+from pipeline.execution_pipeline import (
+    PlanningPipeline,
+    ScenarioPlanningFrameRequest,
+)
 from pipeline.perception_stage import PerceptionStage
 from pipeline.runtime_input_stage import RuntimeInputStage
 
@@ -79,6 +82,57 @@ def test_pipeline_cycle_owns_initial_emergency_speed_intent():
     assert cycle.emergency_stop_required
     assert cycle.requested_speed_mps == 0.0
     assert cycle.perception.front_actor_id == "front"
+
+
+def test_pipeline_observes_scenario_from_frozen_adapter_frame():
+    captured = {}
+
+    class Behavior:
+        def prepare_turn_scenario_context(self, **kwargs):
+            captured["turn"] = kwargs
+            return "turn-context"
+
+    class Scenario:
+        def observe_planning_context(self, **kwargs):
+            captured["scenario"] = kwargs
+            assert kwargs["prepare_turn_context"]() == "turn-context"
+            return "scenario-observation"
+
+    pipeline = PlanningPipeline(
+        runtime_input=RuntimeInputStage(_Mapper()), perception=PerceptionStage(),
+        behavior=Behavior(), scenario=Scenario(), static_obstacle=object(),
+        control_safety=object(), speed=object(), destination_speed=object(),
+        reference_publication=object(), mpc_entry=object(),
+    )
+    stop_target = SimpleNamespace(active=False)
+    route = SimpleNamespace(
+        current_road_option="LANEFOLLOW", next_macro_maneuver="turn_right",
+        next_macro_distance_m=20.0,
+    )
+    adapter = SimpleNamespace(
+        signal_context={"source": "test"},
+        frame=SimpleNamespace(
+            planning=SimpleNamespace(route=route, traffic_control=SimpleNamespace(
+                signal_state="green", stop_target=stop_target,
+            )),
+            map_lane=SimpleNamespace(in_junction=False),
+        ),
+    )
+    ego = SimpleNamespace(x=1.0, y=2.0)
+    result = pipeline.observe_planning_frame(
+        ScenarioPlanningFrameRequest(
+            adapter_output=adapter, traffic_memory=object(),
+            route_manager=object(), ego_location=ego, ego_yaw_rad=0.0,
+            ego_speed_mps=5.0, current_lane_id=10, cruise_speed_mps=8.0,
+            sim_time_s=3.0, config={},
+        ),
+        resolve_actor_state=lambda **_kwargs: ("green", ""),
+        project_stop_target=lambda **_kwargs: (float("inf"), False),
+    )
+
+    assert result == "scenario-observation"
+    assert captured["scenario"]["raw_traffic_state"] == "green"
+    assert captured["turn"]["next_macro_maneuver"] == "turn_right"
 
 
 def test_pipeline_owns_speed_resolution_sequence():

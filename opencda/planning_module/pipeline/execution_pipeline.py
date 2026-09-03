@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from .perception_stage import PerceptionStage, PerceptionStageResult
 from .runtime_input_stage import RuntimeInputStage, RuntimeTickSnapshot
@@ -45,6 +45,23 @@ class TrajectoryAdmission:
         fields = dict(self.publication.debug_fields)
         fields.update(self.entry.trace_fields())
         return fields
+
+
+@dataclass(frozen=True)
+class ScenarioPlanningFrameRequest:
+    """Immutable adapter-frame view consumed by scenario observation."""
+
+    adapter_output: Any
+    traffic_memory: Any
+    route_manager: Any
+    ego_location: Any
+    ego_yaw_rad: float
+    ego_speed_mps: float
+    current_lane_id: int
+    cruise_speed_mps: float
+    sim_time_s: float
+    config: Mapping[str, object]
+    boundary_recovery_request: Any = None
 
 
 class PlanningPipeline:
@@ -194,14 +211,50 @@ class PlanningPipeline:
     def resolve_route_context(self, **kwargs):
         return self.behavior.resolve_route_context(**kwargs)
 
-    def prepare_turn_scenario_context(self, **kwargs):
-        return self.behavior.prepare_turn_scenario_context(**kwargs)
+    def observe_planning_frame(
+        self, request: ScenarioPlanningFrameRequest, *,
+        resolve_actor_state: Callable[..., Any],
+        project_stop_target: Callable[..., Any],
+    ):
+        """Resolve traffic memory and turn context from one frozen frame."""
 
-    def resolve_scenario(self, **kwargs):
-        return self.scenario.update_planning_context(**kwargs)
-
-    def observe_scenario(self, **kwargs):
-        return self.scenario.observe_planning_context(**kwargs)
+        frame = request.adapter_output.frame
+        route = frame.planning.route
+        traffic = frame.planning.traffic_control
+        raw_stop_target = (
+            traffic.stop_target.as_dict() if traffic.stop_target.active else None
+        )
+        return self.scenario.observe_planning_context(
+            raw_traffic_state=str(traffic.signal_state),
+            raw_stop_target=raw_stop_target,
+            signal_context=dict(request.adapter_output.signal_context),
+            traffic_memory=request.traffic_memory,
+            resolve_actor_state=resolve_actor_state,
+            project_stop_target=project_stop_target,
+            prepare_turn_context=lambda: self.behavior.prepare_turn_scenario_context(
+                route_manager=request.route_manager,
+                ego_x_m=float(request.ego_location.x),
+                ego_y_m=float(request.ego_location.y),
+                ego_heading_rad=float(request.ego_yaw_rad),
+                cruise_speed_mps=float(request.cruise_speed_mps),
+                next_macro_maneuver=str(route.next_macro_maneuver),
+                next_macro_distance_m=float(route.next_macro_distance_m),
+                config=request.config,
+            ),
+            sim_time_s=float(request.sim_time_s),
+            ego_x_m=float(request.ego_location.x),
+            ego_y_m=float(request.ego_location.y),
+            ego_yaw_rad=float(request.ego_yaw_rad),
+            ego_speed_mps=float(request.ego_speed_mps),
+            current_lane_id=int(request.current_lane_id),
+            ego_in_junction=bool(frame.map_lane.in_junction),
+            current_road_option=str(route.current_road_option),
+            next_macro_maneuver=str(route.next_macro_maneuver),
+            virtual_stop_distance_m=float(request.config.get(
+                "full_latched_virtual_stop_distance_m", 12.0
+            )),
+            boundary_recovery_request=request.boundary_recovery_request,
+        )
 
     def resolve_static_obstacle(self, **kwargs):
         return self.static_obstacle.evaluate(**kwargs)

@@ -69,7 +69,10 @@ from opencda.planning_module.pipeline.mpc_execution_stage import (
     MPCExecutionStage,
 )
 from opencda.planning_module.pipeline.perception_stage import PerceptionStage
-from opencda.planning_module.pipeline.execution_pipeline import PlanningPipeline
+from opencda.planning_module.pipeline.execution_pipeline import (
+    PlanningPipeline,
+    ScenarioPlanningFrameRequest,
+)
 from opencda.planning_module.pipeline.static_obstacle_stage import StaticObstacleStage
 from opencda.planning_module.pipeline.control_safety_stage import ControlSafetyStage
 from opencda.planning_module.pipeline.candidate_evaluation import (
@@ -2831,45 +2834,30 @@ class CPXMPCPlannerBridge:
                 trigger_reason=str(route_behavior.replan_reason),
             )
         route_lane_change_required = bool(lane_change_authorization.required_by_route)
-        signal_context = dict(adapter_output.signal_context)
         source_quality = dict(adapter_output.source_quality)
-        raw_traffic_state = str(
-            planner_input_frame.planning.traffic_control.signal_state
-        )
-        raw_stop_target = (
-            planner_input_frame.planning.traffic_control.stop_target.as_dict()
-            if planner_input_frame.planning.traffic_control.stop_target.active
-            else None
-        )
-        scenario_observation = self.pipeline.observe_scenario(
-            raw_traffic_state=str(raw_traffic_state), raw_stop_target=raw_stop_target,
-            signal_context=signal_context, traffic_memory=self._full_traffic_memory,
+        scenario_observation = self.pipeline.observe_planning_frame(
+            ScenarioPlanningFrameRequest(
+                adapter_output=adapter_output,
+                traffic_memory=self._full_traffic_memory,
+                route_manager=self.route_manager,
+                ego_location=ego_location,
+                ego_yaw_rad=float(ego_yaw_rad),
+                ego_speed_mps=float(ego_speed_mps),
+                current_lane_id=int(current_lane_id),
+                cruise_speed_mps=float(self.target_speed_mps),
+                sim_time_s=float(sim_time_s),
+                config=self.config,
+                boundary_recovery_request=(
+                    getattr(self, "_boundary_recovery_request", None)
+                    if bool(self.config.get("boundary_recovery_enabled", False))
+                    else None
+                ),
+            ),
             resolve_actor_state=self._resolve_full_traffic_state_from_carla_actor,
             project_stop_target=lambda *, stop_target: self.reference_generator.stop_target_forward(
                 ego_location=ego_location, ego_yaw_rad=float(ego_yaw_rad),
                 stop_target=(dict(stop_target) if isinstance(stop_target, Mapping) else None),
                 fallback_destination_state=[],
-            ),
-            prepare_turn_context=lambda: self.pipeline.prepare_turn_scenario_context(
-                route_manager=self.route_manager, ego_x_m=float(ego_location.x),
-                ego_y_m=float(ego_location.y), ego_heading_rad=float(ego_yaw_rad),
-                cruise_speed_mps=float(self.target_speed_mps),
-                next_macro_maneuver=str(route_context.next_macro_maneuver),
-                next_macro_distance_m=float(route_context.next_macro_distance_m),
-                config=self.config,
-            ),
-            sim_time_s=float(sim_time_s), ego_x_m=float(ego_location.x),
-            ego_y_m=float(ego_location.y), ego_yaw_rad=float(ego_yaw_rad),
-            ego_speed_mps=float(ego_speed_mps), current_lane_id=int(current_lane_id),
-            ego_in_junction=bool(planner_input_frame.map_lane.in_junction),
-            current_road_option=str(route_context.current_road_option),
-            next_macro_maneuver=str(route_context.next_macro_maneuver),
-            virtual_stop_distance_m=float(
-                self.config.get("full_latched_virtual_stop_distance_m", 12.0)
-            ),
-            boundary_recovery_request=(
-                getattr(self, "_boundary_recovery_request", None)
-                if bool(self.config.get("boundary_recovery_enabled", False)) else None
             ),
         )
         turn_context = scenario_observation.turn_context
