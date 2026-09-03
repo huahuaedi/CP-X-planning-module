@@ -1,0 +1,39 @@
+base_config: cpx_two_cav_merge_conflict.yaml
+
+description: |-
+  Same two-CAV merge as cpx_two_cav_merge_conflict but with the interaction
+  pipeline OFF: each CAV plans as if the other were an ordinary obstacle
+  (exponential potential only, no classify/assign/corridor). Run both and
+  compare with compare_cav_interaction.py.
+
+vehicle_base:
+  planner:
+    cav_conflict_enabled: false
+
+scenario:
+  single_cav_list:
+    - name: cav1
+      spawn_position: [6.31, 108.0, 0.3, 0, -92, 0]
+      destination: [9.8, -60.0, 0.3]
+      v2x:
+        enabled: true
+        communication_range: 80
+      behavior:
+        local_planner:
+          debug_trajectory: true
+          debug: true
+      planner:
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_two_cav_merge_off_cav1
+
+    - name: cav2
+      spawn_position: [6.31, 122.0, 0.3, 0, -92, 0]
+      destination: [9.8, -60.0, 0.3]
+      v2x:
+        enabled: true
+        communication_range: 80
+      behavior:
+        local_planner:
+          debug_trajectory: true
+          debug: true
+      planner:
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_two_cav_merge_off_cav2

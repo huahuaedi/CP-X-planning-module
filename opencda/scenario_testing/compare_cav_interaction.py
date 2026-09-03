@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+"""Show whether the multi-CAV interaction pipeline is effective.
+
+Reads the two CAVs' debug CSVs for the ON run (cpx_two_cav_merge_conflict)
+and the OFF run (..._baseline) and prints a side-by-side metrics table plus
+the inter-CAV gap time series.
+
+    python opencda/scenario_testing/compare_cav_interaction.py
+
+Override dirs:
+    --on-cav1 DIR --on-cav2 DIR --off-cav1 DIR --off-cav2 DIR
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import math
+from pathlib import Path
+from typing import Dict, List, Optional
+
+_REPO = Path(__file__).resolve().parents[2]
+_DBG = _REPO / "opencda" / "planning_module" / "opencda_bridge"
+_DEFAULTS = {
+    "on_cav1": _DBG / "debug_two_cav_merge_cav1",
+    "on_cav2": _DBG / "debug_two_cav_merge_cav2",
+    "off_cav1": _DBG / "debug_two_cav_merge_off_cav1",
+    "off_cav2": _DBG / "debug_two_cav_merge_off_cav2",
+}
+_HARD_BRAKE = 0.6
+_HARD_DECEL = -3.0
+_STALL_SPEED = 0.3
+_STALL_SECONDS = 3.0
+
+
+def _f(row: dict, key: str) -> Optional[float]:
+    v = row.get(key, "")
+    if v in ("", None):
+        return None
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return None
+    return x if math.isfinite(x) else None
+
+
+def _truthy(row: dict, key: str) -> bool:
+    return str(row.get(key, "")).strip().lower() in ("true", "1", "1.0", "yes")
+
+
+def _rows(d: Path) -> List[dict]:
+    p = d / "opencda_planner_debug.csv"
+    if not p.is_file():
+        return []
+    with p.open(newline="", encoding="utf-8") as fh:
+        return list(csv.DictReader(fh))
+
+
+def _status(d: Path) -> dict:
+    p = d / "run_status.json"
+    if p.is_file():
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def _inter_cav_gap(rows_a: List[dict], rows_b: List[dict]) -> List[tuple]:
+    """(t, euclidean_gap_m) joined on the nearest sim_time_s."""
+    b_by_t = {}
+    for r in rows_b:
+        t = _f(r, "sim_time_s")
+        if t is not None:
+            b_by_t[round(t, 2)] = r
+    out = []
+    for r in rows_a:
+        t = _f(r, "sim_time_s")
+        if t is None:
+            continue
+        rb = b_by_t.get(round(t, 2))
+        if rb is None:
+            continue
+        ax, ay = _f(r, "x_m"), _f(r, "y_m")
+        bx, by = _f(rb, "x_m"), _f(rb, "y_m")
+        if None in (ax, ay, bx, by):
+            continue
+        out.append((t, math.hypot(ax - bx, ay - by)))
+    return out
+
+
+def _stalled_seconds(rows: List[dict]) -> float:
+    """Longest run of consecutive ticks with speed < _STALL_SPEED, before the
+    vehicle first reaches DESTINATION_STOP (a real stall, not the goal)."""
+    worst = run_s = 0.0
+    prev_t = None
+    for r in rows:
+        if r.get("behavior_fsm_state", "") == "DESTINATION_STOP":
+            break
+        t, v = _f(r, "sim_time_s"), _f(r, "speed_mps")
+        if t is None or v is None:
+            continue
+        dt = 0.0 if prev_t is None else max(0.0, t - prev_t)
+        prev_t = t
+        if v < _STALL_SPEED:
+            run_s += dt
+            worst = max(worst, run_s)
+        else:
+            run_s = 0.0
+    return worst
+
+
+def _one_cav(rows: List[dict], status: dict) -> Dict[str, object]:
+    if not rows:
+        return {"ticks": 0}
+    n = len(rows)
+    t = [_f(r, "sim_time_s") or i for i, r in enumerate(rows)]
+    acc = [(t[i], _f(r, "post_supervisor_accel_cmd_mps2"))
+           for i, r in enumerate(rows)]
+    acc = [(tt, a) for tt, a in acc if a is not None]
+    jerk = max(
+        (abs(acc[i + 1][1] - acc[i][1]) / max(1e-3, acc[i + 1][0] - acc[i][0])
+         for i in range(len(acc) - 1)),
+        default=0.0,
+    )
+    ttc = [v for v in (_f(r, "nearest_ttc_s") for r in rows) if v and v > 0.0]
+    bump = [v for v in (_f(r, "nearest_ttc_bumper_gap_m") for r in rows)
+            if v is not None and v >= 0.0]
+    coll = max((int(cs.get("collision_count", 0) or 0)
+                for cs in status.get("cav_states", []) or []), default=0)
+    coll = max(coll, max((int(_f(r, "collision_count") or 0) for r in rows), default=0))
+    fsm = [r.get("behavior_fsm_state", "") for r in rows]
+    return {
+        "ticks": n,
+        "termination": status.get("termination_reason", ""),
+        "reached_goal": bool(status.get("cav_states", [{}])[0].get("agent_finished", False))
+        if status.get("cav_states") else ("DESTINATION_STOP" in fsm),
+        "collisions": coll,
+        "min_ttc_s": round(min(ttc), 2) if ttc else None,
+        "min_bumper_gap_m": round(min(bump), 2) if bump else None,
+        "hard_brake_ticks": sum(
+            1 for r in rows if (_f(r, "applied_brake") or 0.0) >= _HARD_BRAKE),
+        "hard_decel_ticks": sum(1 for _, a in acc if a <= _HARD_DECEL),
+        "peak_decel_mps2": round(min((a for _, a in acc), default=0.0), 2),
+        "peak_jerk_mps3": round(jerk, 1),
+        "fallback_ticks": sum(_truthy(r, "fallback_active") for r in rows),
+        "infeasible_ticks": sum(
+            1 for r in rows if "infeasible" in str(r.get("mpc_feasibility_reason", ""))),
+        "lc_completion_lat_err_m": next(
+            (round(_f(r, "lane_change_completion_lateral_error_m"), 3)
+             for r in reversed(rows)
+             if r.get("lane_change_completion_reason", "")
+             and _f(r, "lane_change_completion_lateral_error_m") is not None),
+            None,
+        ),
+        "stalled_s": round(_stalled_seconds(rows), 1),
+        "cav_roles_seen": ";".join(sorted({
+            r.get("cav_conflict_summary", "") for r in rows
+            if r.get("cav_conflict_summary", "") not in ("", "no_conflict")
+        })) or "-",
+        "cav_role_flips": _role_flips(rows),
+    }
+
+
+def _role_flips(rows: List[dict]) -> int:
+    """How many times cav1's own role (make_gap/proceed/yield) changed."""
+    def role(r):
+        s = r.get("cav_conflict_summary", "")
+        for part in s.split(";"):
+            if part.startswith("cav") and "=" in part:
+                return part.split("=", 1)[1]
+        return ""
+    seq = [role(r) for r in rows]
+    seq = [x for x in seq if x]
+    return sum(1 for a, b in zip(seq, seq[1:]) if a != b)
+
+
+def _fmt(v) -> str:
+    if v is None:
+        return "-"
+    if isinstance(v, bool):
+        return "yes" if v else "NO"
+    if isinstance(v, float):
+        return f"{v:g}"
+    return str(v)
+
+
+_ROWS = [
+    ("reached_goal", "both reach goal", "yes"),
+    ("collisions", "collisions", "0"),
+    ("min_ttc_s", "min TTC to nearest obstacle (s)", "higher"),
+    ("min_bumper_gap_m", "min bumper gap to nearest (m)", "higher"),
+    ("stalled_s", "longest stall (s, pre-goal)", "0"),
+    ("hard_brake_ticks", "hard-brake ticks (>=0.6)", "lower"),
+    ("hard_decel_ticks", "hard-decel ticks (<=-3)", "lower"),
+    ("peak_decel_mps2", "peak decel (m/s^2)", "higher"),
+    ("peak_jerk_mps3", "peak |jerk| (m/s^3)", "lower"),
+    ("fallback_ticks", "MPC-fallback ticks", "lower"),
+    ("infeasible_ticks", "MPC-infeasible ticks", "lower"),
+    ("lc_completion_lat_err_m", "LC completion lat err (m)", "lower"),
+    ("cav_role_flips", "cav1 role flips", "lower (0)"),
+    ("cav_roles_seen", "cav_conflict_summary seen", None),
+]
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    for k, v in _DEFAULTS.items():
+        ap.add_argument("--" + k.replace("_", "-"), default=str(v))
+    a = ap.parse_args()
+    dirs = {k: Path(getattr(a, k)) for k in _DEFAULTS}
+
+    data = {}
+    for arm in ("on", "off"):
+        for cav in ("cav1", "cav2"):
+            d = dirs[f"{arm}_{cav}"]
+            data[(arm, cav)] = _one_cav(_rows(d), _status(d))
+
+    present = {k for k, v in data.items() if v.get("ticks", 0)}
+    if not present:
+        print("no debug CSVs found; looked in:")
+        for k, d in dirs.items():
+            print(f"  {k:10s} {d}")
+        return 1
+
+    cols = [(arm, cav) for arm in ("off", "on") for cav in ("cav1", "cav2")
+            if (arm, cav) in present]
+    w0, wc = 32, 14
+    print()
+    print("multi-CAV interaction: OFF (baseline) vs ON".center(w0 + wc * len(cols)))
+    print("-" * (w0 + wc * len(cols)))
+    print("metric".ljust(w0) + "".join(f"{arm}/{cav}".rjust(wc) for arm, cav in cols)
+          + "   better")
+    print("-" * (w0 + wc * len(cols)))
+    for key, label, better in _ROWS:
+        line = label.ljust(w0) + "".join(
+            _fmt(data[c].get(key))[: wc - 1].rjust(wc) for c in cols)
+        print(line + (f"   {better}" if better else ""))
+    print("-" * (w0 + wc * len(cols)))
+
+    # inter-CAV gap
+    for arm in ("off", "on"):
+        ga = _inter_cav_gap(_rows(dirs[f"{arm}_cav1"]), _rows(dirs[f"{arm}_cav2"]))
+        if not ga:
+            continue
+        gaps = [g for _, g in ga]
+        tmin = min(ga, key=lambda x: x[1])
+        print(f"\n[{arm}] inter-CAV gap (m): min={min(gaps):.2f} @ t={tmin[0]:.1f}s"
+              f"  mean={sum(gaps) / len(gaps):.2f}  end={gaps[-1]:.2f}")
+    print()
+    print("Effective if, ON vs OFF: min TTC / min gap not worse (ideally better),"
+          " 0 collisions, 0 stall, fewer hard-brake/infeasible ticks in the merge,"
+          " cav1 role stable (0-1 flips) at make_gap.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
