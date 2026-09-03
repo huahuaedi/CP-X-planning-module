@@ -137,12 +137,12 @@ class ConflictResolutionRequest:
     ego_yaw_rad: float
 
     # --- multi-CAV interaction inputs (default: inactive, single-vehicle) ---
-    # When ``cav_enabled`` and there is at least one peer/obstacle, the
+    # When ``cav_enabled`` and there is at least one cav/obstacle, the
     # interaction-aware pipeline (classify -> assign -> corridor) runs and
     # its output rides along on the result. Everything above is untouched.
     cav_enabled: bool = False
     reference_samples: Sequence[Mapping[str, object]] = ()
-    peer_intents: Sequence[Any] = ()
+    cav_intents: Sequence[Any] = ()
     obstacle_snapshots: Sequence[Mapping[str, object]] = ()
     cav_latch_state: Optional[Mapping[str, Any]] = None
     my_actor_id: int = -1
@@ -1262,7 +1262,7 @@ class BehaviorStage:
         }
         if not bool(request.cav_enabled):
             return empty
-        if not request.peer_intents and not request.obstacle_snapshots:
+        if not request.cav_intents and not request.obstacle_snapshots:
             return empty
 
         from opencda.planning_module.pipeline.cav_conflict_pipeline import (
@@ -1290,7 +1290,7 @@ class BehaviorStage:
             my_actor_id=int(request.my_actor_id),
             my_claim=request.my_claim,
             obstacle_snapshots=request.obstacle_snapshots,
-            peer_intents=request.peer_intents,
+            cav_intents=request.cav_intents,
             latch_state=request.cav_latch_state,
             classifier_params=ClassifierParams(horizon_steps=n, dt_s=dt),
             corridor_params=CorridorParams(horizon_steps=n, dt_s=dt),

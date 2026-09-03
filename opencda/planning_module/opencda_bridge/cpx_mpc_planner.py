@@ -218,6 +218,10 @@ class CPXMPCPlannerBridge:
         self._last_cav_corridor = None
         self._last_cav_corridor_reference: list = []
         self._last_cav_diagnostics: dict[str, Any] = {}
+        # This CAV's own broadcast for nearby CP-X CAVs to read (its planned
+        # trajectory + ResourceClaim + pose). Read peer-to-peer through
+        # v2x_manager.cav_nearby; see _publish_cav_intent / _collect_cav_intents.
+        self.last_cav_intent = None
         self._warned = False
         self._diagnostic_hd_map_matcher = DiagnosticHDMapMatcher()
         self._diagnostic_local_lane_frame: dict[str, object] = {}
@@ -1888,6 +1892,13 @@ class CPXMPCPlannerBridge:
         if fallback_reason and not self._warned:
             print("[CP-X OpenCDA Bridge] MPC fallback active: " + fallback_reason)
             self._warned = True
+        if self._cav_conflict_enabled:
+            self._publish_cav_intent(
+                ego_location=ego_location,
+                ego_yaw_rad=float(ego_yaw_rad),
+                ego_speed_mps=float(ego_speed_mps),
+                sim_time_s=float(sim_time_s),
+            )
         control = finalized_control.control
         accel_mps2 = float(finalized_control.acceleration_mps2)
         steer_rad = float(finalized_control.steering_rad)
@@ -2927,7 +2938,7 @@ class CPXMPCPlannerBridge:
                     {"x_ref_m": float(p[0]), "y_ref_m": float(p[1])}
                     for p in route_points
                 ],
-                peer_intents=self._collect_cav_peer_intents(),
+                cav_intents=self._collect_cav_intents(),
                 obstacle_snapshots=list(object_snapshots or []),
                 cav_latch_state=self._cav_latch,
                 my_actor_id=int(
@@ -3504,16 +3515,41 @@ class CPXMPCPlannerBridge:
             speed_plan,
         )
 
-    def _collect_cav_peer_intents(self) -> list:
-        """Build PeerIntent list for every nearby CP-X CAV.
+    def _publish_cav_intent(
+        self, *, ego_location: Any, ego_yaw_rad: float,
+        ego_speed_mps: float, sim_time_s: float,
+    ) -> None:
+        """Store this CAV's broadcast (planned trajectory + claim + pose) on
+        ``self.last_cav_intent`` for nearby CP-X CAVs to read this tick."""
 
-        OpenCDA's ``v2x_manager.cav_nearby`` maps peer id -> peer
-        VehicleManager (populated by v2x_manager.search()); ``cav_intents``
-        is never written in this codebase, so read the peer's own bridge
-        state directly through that graph: its maneuver-commitment (for the
-        ResourceClaim) and its live transform/velocity. Peers running
-        OpenCDA's BehaviorAgent (no ``cpx_planner``) are left to the
-        obstacle path -- not returned here.
+        from opencda.planning_module.pipeline.cav_intent_codec import (
+            build_ego_cav_intent,
+        )
+
+        states = getattr(self.mpc, "_last_x_solution", None)
+        planned = (
+            [] if states is None
+            else [[float(s[0]), float(s[1]), float(s[2]), float(s[3])] for s in states]
+        )
+        self.last_cav_intent = build_ego_cav_intent(
+            actor_id=int(getattr(self.vehicle_manager.vehicle, "id", -1)),
+            position_xy=(float(ego_location.x), float(ego_location.y)),
+            heading_rad=float(ego_yaw_rad),
+            speed_mps=float(ego_speed_mps),
+            claim=self._ego_cav_claim(sim_time_s=float(sim_time_s)),
+            planned_states=planned,
+            dt_s=float(self.mpc.dt_s),
+        )
+
+    def _collect_cav_intents(self) -> list:
+        """CavIntent list for every nearby CP-X CAV.
+
+        OpenCDA's ``v2x_manager.cav_nearby`` maps cav id -> its
+        VehicleManager (populated by v2x_manager.search()). Prefer the cav's
+        own published ``last_cav_intent`` (its planned trajectory + claim);
+        fall back to reading its maneuver-commitment + live transform on the
+        first tick before it has solved. Cavs on OpenCDA's BehaviorAgent
+        (no ``cpx_planner``) go to the obstacle path -- not returned here.
         """
 
         if not self._cav_conflict_enabled:
@@ -3522,49 +3558,60 @@ class CPXMPCPlannerBridge:
         cav_nearby = dict(getattr(v2x_manager, "cav_nearby", {}) or {})
         if not cav_nearby:
             return []
+        from dataclasses import replace as _replace
         from opencda.planning_module.pipeline.cooperative_arbitration import (
-            PeerIntent,
+            CavIntent,
             ResourceClaim,
         )
 
         out: list = []
-        for peer_id, peer_manager in cav_nearby.items():
-            try:
-                actor_id = int(getattr(peer_manager.vehicle, "id", peer_id))
-            except (TypeError, ValueError, AttributeError):
-                continue
-            peer_bridge = getattr(peer_manager, "cpx_planner", None)
-            peer_vehicle = getattr(peer_manager, "vehicle", None)
-            if peer_bridge is None or peer_vehicle is None:
+        for cav_id, cav_manager in cav_nearby.items():
+            cav_bridge = getattr(cav_manager, "cpx_planner", None)
+            cav_vehicle = getattr(cav_manager, "vehicle", None)
+            if cav_bridge is None or cav_vehicle is None:
                 continue
             try:
-                tf = peer_vehicle.get_transform()
-                vel = peer_vehicle.get_velocity()
+                actor_id = int(getattr(cav_vehicle, "id", cav_id))
+            except (TypeError, ValueError):
+                continue
+            published = getattr(cav_bridge, "last_cav_intent", None)
+            try:
+                tf = cav_vehicle.get_transform()
+                vel = cav_vehicle.get_velocity()
             except Exception:
+                tf = vel = None
+            if isinstance(published, CavIntent) and published.claim is not None:
+                # Refresh the pose to this tick; keep the shared plan + claim.
+                if tf is not None and vel is not None:
+                    published = _replace(
+                        published,
+                        position_xy=(float(tf.location.x), float(tf.location.y)),
+                        heading_rad=math.radians(float(tf.rotation.yaw)),
+                        speed_mps=math.sqrt(vel.x ** 2 + vel.y ** 2 + vel.z ** 2),
+                    )
+                out.append(published)
                 continue
-            speed = math.sqrt(vel.x ** 2 + vel.y ** 2 + vel.z ** 2)
-            peer_lc = getattr(
-                getattr(peer_bridge, "maneuver_manager", None), "lane_change", None
+            if tf is None or vel is None:
+                continue
+            cav_lc = getattr(
+                getattr(cav_bridge, "maneuver_manager", None), "lane_change", None
             )
-            committed_at_s = float(getattr(peer_lc, "committed_at_s", 0.0))
+            committed_at_s = float(getattr(cav_lc, "committed_at_s", 0.0))
             if not math.isfinite(committed_at_s):
                 committed_at_s = 0.0
-            active = bool(getattr(peer_lc, "active", False)) or str(
-                getattr(peer_lc, "phase", "")
+            active = bool(getattr(cav_lc, "active", False)) or str(
+                getattr(cav_lc, "phase", "")
             ) in ("executing", "target_lane_stabilization")
-            out.append(PeerIntent(
+            out.append(CavIntent(
                 actor_id=actor_id,
                 position_xy=(float(tf.location.x), float(tf.location.y)),
                 claim=ResourceClaim(
-                    kind="lane_change",
-                    resource_id="lane_change",
-                    committed_at_s=float(committed_at_s),
-                    active=bool(active),
+                    kind="lane_change", resource_id="lane_change",
+                    committed_at_s=float(committed_at_s), active=bool(active),
                 ),
                 heading_rad=math.radians(float(tf.rotation.yaw)),
-                speed_mps=float(speed),
-                planned_path=(),
-                cooperative=True,
+                speed_mps=math.sqrt(vel.x ** 2 + vel.y ** 2 + vel.z ** 2),
+                planned_path=(), cooperative=True,
             ))
         return out
 

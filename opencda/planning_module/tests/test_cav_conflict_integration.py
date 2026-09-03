@@ -5,7 +5,7 @@
             -> MPC.plan_trajectory(corridor_rows=..., cost.corridor.enabled)
 
 Asserts the solved ego trajectory actually yields to a crossing vehicle
-and opens a gap for a cooperative merging peer -- with the real OSQP
+and opens a gap for a cooperative merging cav -- with the real OSQP
 solve, no bridge, no CARLA.
 """
 
@@ -18,7 +18,7 @@ import yaml
 from MPC.mpc import MPC
 from pipeline.cav_conflict_pipeline import resolve_conflicts
 from pipeline.conflict_classifier import ClassifierParams
-from pipeline.cooperative_arbitration import PeerIntent, ResourceClaim
+from pipeline.cooperative_arbitration import CavIntent, ResourceClaim
 from pipeline.mpc_corridor_constraints import corridor_rows
 from pipeline.spatiotemporal_corridor import CorridorParams
 
@@ -79,7 +79,7 @@ class CavConflictIntegrationTests(unittest.TestCase):
         }
         r = resolve_conflicts(
             reference_samples=REF, ego_snapshot=ego, my_actor_id=1, my_claim=None,
-            obstacle_snapshots=[crosser], peer_intents=[],
+            obstacle_snapshots=[crosser], cav_intents=[],
             classifier_params=cls_p, corridor_params=cor_p,
         )
         self.assertEqual(r.diagnostics["tags"]["x"], "CROSSING")
@@ -92,27 +92,27 @@ class CavConflictIntegrationTests(unittest.TestCase):
         self.assertLess(capped, 18.0)           # did not reach the crossing point
         self.assertLess(capped, free - 2.0)     # and clearly less than unyielded
 
-    def test_ego_opens_a_gap_for_a_cooperative_merging_peer(self):
+    def test_ego_opens_a_gap_for_a_cooperative_merging_cav(self):
         mpc = _mpc(corridor_enabled=True)
         cls_p, cor_p = self._params(mpc)
         ego = {"x": 0.0, "y": 0.0, "v": 9.0, "psi": np.pi / 2.0}
-        # peer one lane over (x=+3.4), ahead, merging toward x=0, committed
-        # EARLIER than ego -> peer wins -> ego opens the gap behind it.
-        peer_path = tuple(
+        # cav one lane over (x=+3.4), ahead, merging toward x=0, committed
+        # EARLIER than ego -> cav wins -> ego opens the gap behind it.
+        cav_path = tuple(
             (0.1 * k, 3.4 - 0.12 * k, 12.0 + 9.0 * 0.1 * k, 9.0)
             for k in range(mpc.horizon_steps + 1)
         )
-        peer = PeerIntent(
+        cav = CavIntent(
             actor_id=2, position_xy=(3.4, 12.0),
             claim=ResourceClaim(kind="lane_change", resource_id="lane_change",
                                 committed_at_s=3.0, active=True),
-            heading_rad=np.pi / 2.0, speed_mps=9.0, planned_path=peer_path,
+            heading_rad=np.pi / 2.0, speed_mps=9.0, planned_path=cav_path,
         )
         my_claim = ResourceClaim(kind="lane_change", resource_id="lane_change",
                                  committed_at_s=10.0, active=True)
         r = resolve_conflicts(
             reference_samples=REF, ego_snapshot=ego, my_actor_id=1,
-            my_claim=my_claim, obstacle_snapshots=[], peer_intents=[peer],
+            my_claim=my_claim, obstacle_snapshots=[], cav_intents=[cav],
             classifier_params=cls_p, corridor_params=cor_p,
         )
         self.assertEqual(r.diagnostics["roles"].get("2"), "make_gap")
@@ -121,7 +121,7 @@ class CavConflictIntegrationTests(unittest.TestCase):
         rows = corridor_rows(r.corridor, REF, ego_origin_xy=(0.0, 0.0))
         capped = _solve_progress(mpc, (0.0, 0.0), 9.0, rows)
         free = _solve_progress(_mpc(corridor_enabled=True), (0.0, 0.0), 9.0, None)
-        # ego holds back behind the peer's projected station (starts at y=12)
+        # ego holds back behind the cav's projected station (starts at y=12)
         self.assertLess(capped, free - 1.0)
 
 

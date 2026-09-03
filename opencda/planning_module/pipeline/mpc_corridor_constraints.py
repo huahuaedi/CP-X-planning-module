@@ -14,7 +14,7 @@ Two producers:
   linearization station (so ``t_k . p`` is arc-length along the path,
   first-order).
 
-* ``homotopy_keepout_rows`` -- one half-space per (assigned peer, stage):
+* ``homotopy_keepout_rows`` -- one half-space per (assigned cav, stage):
       n . (x_k - p_k) >= d_safe - sigma
   with ``n`` the inward normal for the Stage-B pass side.
 
@@ -135,28 +135,28 @@ def corridor_rows(
 @dataclass(frozen=True)
 class HalfSpaceRow:
     """``n_x * x_k + n_y * y_k >= rhs - sigma`` at MPC stage ``k``
-    (ego-origin frame). Encodes "stay on the chosen side of the peer"."""
+    (ego-origin frame). Encodes "stay on the chosen side of the cav"."""
 
     stage: int
     n_x: float
     n_y: float
     rhs: float
-    peer_actor_id: int
+    cav_actor_id: int
     slack_group: str = "homotopy_keepout"
 
 
 def homotopy_keepout_rows(
     assignments: Sequence[Any],
-    peer_positions_by_stage: Mapping[int, Sequence[Tuple[float, float]]],
+    cav_positions_by_stage: Mapping[int, Sequence[Tuple[float, float]]],
     ego_heading_rad: float,
     ego_origin_xy: XY = (0.0, 0.0),
     *,
     d_safe_m: float = 3.0,
 ) -> List[HalfSpaceRow]:
-    """For each assignment with a left/right ``homotopy_side`` and a peer
+    """For each assignment with a left/right ``homotopy_side`` and a cav
     position track, one half-space per stage keeping the ego on that side.
 
-    ``peer_positions_by_stage`` maps ``peer_actor_id -> [(x, y), ...]`` in
+    ``cav_positions_by_stage`` maps ``cav_actor_id -> [(x, y), ...]`` in
     world coords (index = MPC stage).
     """
 
@@ -167,9 +167,9 @@ def homotopy_keepout_rows(
         side = str(getattr(a, "homotopy_side", "") or "")
         if side not in ("left", "right"):
             continue
-        pid = int(getattr(a, "peer_actor_id", -1))
-        track = list(peer_positions_by_stage.get(pid, []) or [])
-        # Inward normal: ego stays left of the peer -> the vector from peer
+        pid = int(getattr(a, "cav_actor_id", -1))
+        track = list(cav_positions_by_stage.get(pid, []) or [])
+        # Inward normal: ego stays left of the cav -> the vector from cav
         # to ego points to the ego-heading's left, i.e. (-sin, cos); stays
         # right -> (sin, -cos).
         nx, ny = (-sh, ch) if side == "left" else (sh, -ch)
@@ -179,7 +179,7 @@ def homotopy_keepout_rows(
                 HalfSpaceRow(
                     stage=k, n_x=nx, n_y=ny,
                     rhs=float(nx * px + ny * py + float(d_safe_m)),
-                    peer_actor_id=pid,
+                    cav_actor_id=pid,
                 )
             )
     return rows

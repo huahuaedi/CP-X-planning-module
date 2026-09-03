@@ -12,7 +12,7 @@ as linear constraints:
 * CROSSING / ONCOMING, ego proceeds -> no upper bound from that agent
   (Stage D still keeps a residual keep-out).
 * MERGE, ego opens the gap (role make_gap) -> s_hi capped a gap behind
-  the peer's projected station (ego takes the slot behind).
+  the cav's projected station (ego takes the slot behind).
 * MERGE / anything, ego proceeds -> no bound.
 
 Lateral corridor is left to the road-boundary / spatial-envelope term and
@@ -133,7 +133,7 @@ def build_longitudinal_corridor(
                     _cap(k, station[k] - gap, tag.agent_id)
 
         elif tag.tag == CUT_IN:
-            # A cooperative peer that lost the arbitration (role proceed) is
+            # A cooperative cav that lost the arbitration (role proceed) is
             # expected to yield to ego, so ego takes no bound from it.
             if proceed:
                 continue

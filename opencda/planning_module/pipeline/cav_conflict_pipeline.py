@@ -7,13 +7,13 @@ into one per-tick call.
         my_claim=ResourceClaim(...) or None,
         my_actor_id=<ego id>,
         obstacle_snapshots=[...],          # non-connected road users
-        peer_intents=[PeerIntent, ...],    # from collect_peer_intents(...)
+        cav_intents=[CavIntent, ...],    # from collect_cav_intents(...)
         latch_state=<prev tick's>,
     )
     # -> resolution.corridor (Stage C), .assignments (Stage B),
     #    .tags (Stage A), .latch_state (feed back next tick), .diagnostics
 
-Pure. The bridge is expected to: build ``peer_intents`` from its CP
+Pure. The bridge is expected to: build ``cav_intents`` from its CP
 payload, pass its own ``ResourceClaim`` when it is mid-maneuver (else
 None), persist ``latch_state``, and feed ``resolution.corridor`` to the
 MPC constraint builder.
@@ -33,7 +33,7 @@ from opencda.planning_module.pipeline.conflict_classifier import (
 from opencda.planning_module.pipeline.cooperative_arbitration import (
     ArbitrationLatchEntry,
     ConflictAssignment,
-    PeerIntent,
+    CavIntent,
     ResourceClaim,
     assign_conflict_roles,
 )
@@ -54,18 +54,18 @@ class ConflictResolution:
     diagnostics: Dict[str, Any] = field(default_factory=dict)
 
 
-def _peer_to_agent_snapshot(peer: PeerIntent) -> dict:
+def _cav_to_agent_snapshot(cav: CavIntent) -> dict:
     return {
-        "id": int(peer.actor_id),
-        "vehicle_id": int(peer.actor_id),
-        "x": float(peer.position_xy[0]),
-        "y": float(peer.position_xy[1]),
-        "v": float(peer.speed_mps),
-        "psi": float(peer.heading_rad),
-        "cooperative": bool(peer.cooperative),
+        "id": int(cav.actor_id),
+        "vehicle_id": int(cav.actor_id),
+        "x": float(cav.position_xy[0]),
+        "y": float(cav.position_xy[1]),
+        "v": float(cav.speed_mps),
+        "psi": float(cav.heading_rad),
+        "cooperative": bool(cav.cooperative),
         "predicted_trajectory": [
             {"x": float(x), "y": float(y), "t": float(t)}
-            for (t, x, y, _v) in peer.planned_path
+            for (t, x, y, _v) in cav.planned_path
         ],
     }
 
@@ -77,7 +77,7 @@ def resolve_conflicts(
     my_actor_id: int,
     my_claim: Optional[ResourceClaim] = None,
     obstacle_snapshots: Sequence[Mapping[str, Any]] = (),
-    peer_intents: Sequence[PeerIntent] = (),
+    cav_intents: Sequence[CavIntent] = (),
     latch_state: Optional[Mapping[str, ArbitrationLatchEntry]] = None,
     classifier_params: ClassifierParams = ClassifierParams(),
     corridor_params: CorridorParams = CorridorParams(),
@@ -85,9 +85,9 @@ def resolve_conflicts(
     arbitration_range_m: float = 40.0,
     hysteresis_ticks: int = 3,
 ) -> ConflictResolution:
-    peers = list(peer_intents or [])
-    peer_agents = [_peer_to_agent_snapshot(p) for p in peers]
-    all_agents: List[Mapping[str, Any]] = list(obstacle_snapshots or []) + peer_agents
+    cavs = list(cav_intents or [])
+    cav_agents = [_cav_to_agent_snapshot(c) for c in cavs]
+    all_agents: List[Mapping[str, Any]] = list(obstacle_snapshots or []) + cav_agents
 
     # Stage A -----------------------------------------------------------------
     tags = classify_conflicts(
@@ -95,18 +95,18 @@ def resolve_conflicts(
     )
     tag_by_id = {t.agent_id: t for t in tags}
 
-    # Stage B (only cooperative peers, only when ego holds an active claim) ---
+    # Stage B (only cooperative cavs, only when ego holds an active claim) ---
     assignments: List[ConflictAssignment] = []
     new_latch: Dict[str, ArbitrationLatchEntry] = dict(latch_state or {})
     if my_claim is not None and bool(my_claim.active):
-        conflicting_peers = []
-        for p in peers:
-            if not bool(p.cooperative):
+        conflicting_cavs = []
+        for c in cavs:
+            if not bool(c.cooperative):
                 continue
-            t = tag_by_id.get(str(p.actor_id))
+            t = tag_by_id.get(str(c.actor_id))
             if t is None or t.tag == IGNORE:
                 continue
-            conflicting_peers.append(p)
+            conflicting_cavs.append(c)
         assignments, new_latch = assign_conflict_roles(
             my_claim=my_claim,
             my_actor_id=int(my_actor_id),
@@ -117,12 +117,12 @@ def resolve_conflicts(
             my_heading_rad=float(
                 ego_snapshot.get("psi", ego_snapshot.get("heading_rad", 0.0))
             ),
-            peers=conflicting_peers,
+            cavs=conflicting_cavs,
             latch_state=latch_state,
             range_m=float(arbitration_range_m),
             hysteresis_ticks=int(hysteresis_ticks),
         )
-    assign_by_id = {str(a.peer_actor_id): a for a in assignments}
+    assign_by_id = {str(a.cav_actor_id): a for a in assignments}
 
     # Stage C ---------------------------------------------------------------
     items: List[Tuple[Mapping[str, Any], ConflictTag, Optional[ConflictAssignment]]] = []
@@ -141,10 +141,10 @@ def resolve_conflicts(
 
     diagnostics = {
         "conflict_agent_count": len(all_agents),
-        "peer_count": len(peers),
+        "cav_count": len(cavs),
         "non_ignore_count": sum(1 for t in tags if t.tag != IGNORE),
         "tags": {t.agent_id: t.tag for t in tags},
-        "roles": {str(a.peer_actor_id): a.role for a in assignments},
+        "roles": {str(a.cav_actor_id): a.role for a in assignments},
         "corridor_feasible": bool(corridor.feasible),
         "corridor_first_infeasible_stage": corridor.first_infeasible_stage,
         "corridor_binding": [b for b in corridor.binding if b],

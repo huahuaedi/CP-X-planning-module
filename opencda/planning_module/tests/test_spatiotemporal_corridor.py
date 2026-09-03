@@ -30,8 +30,8 @@ def _tag(agent_id, tag, s=None, t=None):
 
 def _assign(role):
     return ConflictAssignment(
-        peer_actor_id=2, role=role, homotopy_side="", conflict_xy=None,
-        peer_wins=(role != "proceed"), reason="",
+        cav_actor_id=2, role=role, homotopy_side="", conflict_xy=None,
+        cav_wins=(role != "proceed"), reason="",
     )
 
 
@@ -75,19 +75,19 @@ def test_crossing_proceed_adds_no_bound():
     assert all(h >= _BIG for h in cor.s_hi)
 
 
-def test_merge_make_gap_puts_ego_behind_peer():
-    peer = {"x": 25.0, "v": 9.0, **_track([(25.0 + 0.9 * k, 0.2) for k in range(21)])}
+def test_merge_make_gap_puts_ego_behind_cav():
+    cav = {"x": 25.0, "v": 9.0, **_track([(25.0 + 0.9 * k, 0.2) for k in range(21)])}
     cor = build_longitudinal_corridor(
-        REF, EGO, [(peer, _tag("peer", MERGE), _assign("make_gap"))], P
+        REF, EGO, [(cav, _tag("cav", MERGE), _assign("make_gap"))], P
     )
     assert cor.s_hi[5] < 25.0 + 0.9 * 5
-    assert cor.binding[5] == "peer"
+    assert cor.binding[5] == "cav"
 
 
 def test_merge_proceed_adds_no_bound():
-    peer = {"x": 25.0, "v": 9.0, **_track([(25.0, 0.2)] * 21)}
+    cav = {"x": 25.0, "v": 9.0, **_track([(25.0, 0.2)] * 21)}
     cor = build_longitudinal_corridor(
-        REF, EGO, [(peer, _tag("peer", MERGE), _assign("proceed"))], P
+        REF, EGO, [(cav, _tag("cav", MERGE), _assign("proceed"))], P
     )
     assert all(h >= _BIG for h in cor.s_hi)
 

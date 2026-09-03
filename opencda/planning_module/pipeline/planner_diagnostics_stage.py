@@ -11,7 +11,7 @@ from .reference_line_provider import LANE_FOLLOW
 
 
 def _cav_conflict_summary(diag: Mapping[str, Any]) -> str:
-    """One-line CSV field: per-agent tag + per-peer role + corridor status."""
+    """One-line CSV field: per-agent tag + per-cav role + corridor status."""
 
     diag = dict(diag or {})
     if not diag:
@@ -19,7 +19,7 @@ def _cav_conflict_summary(diag: Mapping[str, Any]) -> str:
     tags = dict(diag.get("tags", {}) or {})
     roles = dict(diag.get("roles", {}) or {})
     parts = [f"{k}:{v}" for k, v in tags.items() if v != "IGNORE"]
-    parts += [f"peer{k}={v}" for k, v in roles.items()]
+    parts += [f"cav{k}={v}" for k, v in roles.items()]
     feasible = diag.get("corridor_feasible")
     if feasible is not None:
         parts.append("corridor_feasible" if feasible else "corridor_infeasible")

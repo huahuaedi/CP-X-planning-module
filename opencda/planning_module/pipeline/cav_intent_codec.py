@@ -1,18 +1,18 @@
-"""C1: connected-peer intent -- schema, codec, and construction.
+"""C1: connected-cav intent -- schema, codec, and construction.
 
-The bridge broadcasts the ego's own ``PeerIntent`` on the V2X / CP channel
-and receives peers' intents back. This module is the pure boundary:
+The bridge broadcasts the ego's own ``CavIntent`` on the V2X / CP channel
+and receives cavs' intents back. This module is the pure boundary:
 
-* ``build_ego_peer_intent`` -- assemble the ego broadcast from its plan;
-* ``peer_intent_to_payload`` / ``peer_intent_from_payload`` -- flat,
-  JSON-safe, schema-versioned dict <-> ``PeerIntent`` (defensive parse:
-  a malformed peer record yields ``None``, never an exception);
-* ``collect_peer_intents`` -- pull every usable peer intent out of a
+* ``build_ego_cav_intent`` -- assemble the ego broadcast from its plan;
+* ``cav_intent_to_payload`` / ``cav_intent_from_payload`` -- flat,
+  JSON-safe, schema-versioned dict <-> ``CavIntent`` (defensive parse:
+  a malformed cav record yields ``None``, never an exception);
+* ``collect_cav_intents`` -- pull every usable cav intent out of a
   CP-message-shaped list of per-actor records, skipping the ego;
-* ``sample_peer_path_at`` -- linear-interpolate a peer's shared plan at a
+* ``sample_cav_path_at`` -- linear-interpolate a cav's shared plan at a
   horizon time, for Stage A / Stage C.
 
-``PeerIntent`` / ``ResourceClaim`` themselves live in
+``CavIntent`` / ``ResourceClaim`` themselves live in
 ``cooperative_arbitration`` so Stage B can consume them without importing
 this module.
 """
@@ -22,7 +22,7 @@ from __future__ import annotations
 from typing import Any, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from opencda.planning_module.pipeline.cooperative_arbitration import (
-    PeerIntent,
+    CavIntent,
     ResourceClaim,
 )
 
@@ -53,7 +53,7 @@ def _actor_id(m: Mapping[str, Any]) -> Optional[int]:
 # --------------------------------------------------------------------------- #
 # construction
 # --------------------------------------------------------------------------- #
-def build_ego_peer_intent(
+def build_ego_cav_intent(
     *,
     actor_id: int,
     position_xy: Tuple[float, float],
@@ -65,7 +65,7 @@ def build_ego_peer_intent(
     t0_s: float = 0.0,
     max_samples: int = 30,
     cooperative: bool = True,
-) -> PeerIntent:
+) -> CavIntent:
     """Assemble the ego's broadcast.
 
     ``planned_states`` is the MPC state sequence ``[x, y, v, psi]`` (world
@@ -85,7 +85,7 @@ def build_ego_peer_intent(
                 float(st[2]),
             )
         )
-    return PeerIntent(
+    return CavIntent(
         actor_id=int(actor_id),
         position_xy=(float(position_xy[0]), float(position_xy[1])),
         claim=claim,
@@ -99,7 +99,7 @@ def build_ego_peer_intent(
 # --------------------------------------------------------------------------- #
 # codec
 # --------------------------------------------------------------------------- #
-def peer_intent_to_payload(intent: PeerIntent) -> dict:
+def cav_intent_to_payload(intent: CavIntent) -> dict:
     c = intent.claim
     return {
         "schema": SCHEMA_VERSION,
@@ -123,7 +123,7 @@ def peer_intent_to_payload(intent: PeerIntent) -> dict:
     }
 
 
-def peer_intent_from_payload(payload: Mapping[str, Any]) -> Optional[PeerIntent]:
+def cav_intent_from_payload(payload: Mapping[str, Any]) -> Optional[CavIntent]:
     """Defensive parse. Returns None for anything unusable."""
 
     if not isinstance(payload, Mapping):
@@ -158,7 +158,7 @@ def peer_intent_from_payload(payload: Mapping[str, Any]) -> Optional[PeerIntent]
                 path.append((float(s[0]), float(s[1]), float(s[2]), float(s[3])))
             except (TypeError, ValueError):
                 continue
-    return PeerIntent(
+    return CavIntent(
         actor_id=aid,
         position_xy=(_f(payload, "x", "x_m"), _f(payload, "y", "y_m")),
         claim=claim,
@@ -169,13 +169,13 @@ def peer_intent_from_payload(payload: Mapping[str, Any]) -> Optional[PeerIntent]
     )
 
 
-def collect_peer_intents(
+def collect_cav_intents(
     records: Iterable[Mapping[str, Any]],
     *,
     self_actor_id: int,
     intent_key: str = "cooperative_intent",
-) -> List[PeerIntent]:
-    """Extract peer intents from a CP-message-shaped iterable.
+) -> List[CavIntent]:
+    """Extract cav intents from a CP-message-shaped iterable.
 
     Each record is one other vehicle; its cooperative intent is either the
     record itself (already payload-shaped) or a nested dict under
@@ -183,7 +183,7 @@ def collect_peer_intents(
     parseable intent, are dropped.
     """
 
-    out: List[PeerIntent] = []
+    out: List[CavIntent] = []
     for rec in list(records or []):
         if not isinstance(rec, Mapping):
             continue
@@ -195,7 +195,7 @@ def collect_peer_intents(
         # intent omits them.
         if isinstance(nested, Mapping) and "actor_id" not in payload and _actor_id(rec) is not None:
             payload = {**payload, "actor_id": _actor_id(rec)}
-        intent = peer_intent_from_payload(payload)
+        intent = cav_intent_from_payload(payload)
         if intent is not None:
             out.append(intent)
     return out
@@ -204,11 +204,11 @@ def collect_peer_intents(
 # --------------------------------------------------------------------------- #
 # query
 # --------------------------------------------------------------------------- #
-def sample_peer_path_at(
-    intent: PeerIntent, t_rel_s: float
+def sample_cav_path_at(
+    intent: CavIntent, t_rel_s: float
 ) -> Optional[Tuple[float, float, float]]:
-    """(x, y, v) of the peer's shared plan at ``t_rel_s`` (linear interp,
-    clamped to the sample span). None if the peer shared no plan."""
+    """(x, y, v) of the cav's shared plan at ``t_rel_s`` (linear interp,
+    clamped to the sample span). None if the cav shared no plan."""
 
     path = intent.planned_path
     if not path:
