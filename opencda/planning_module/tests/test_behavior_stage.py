@@ -356,6 +356,63 @@ def test_active_lane_change_is_not_invalidated_by_missed_cursor():
     assert result.replan_reason == ""
 
 
+def test_lateral_ownership_denies_lane_change_that_cannot_finish_before_turn():
+    stage = BehaviorStage()
+    manager = ManeuverManager()
+    authorization = stage.authorize_route_lane_change(
+        _route_lane_change_request(), maneuver_manager=manager
+    )
+
+    result = stage.resolve_lateral_ownership(
+        authorization=authorization,
+        maneuver_manager=manager,
+        owner_state="LANE_FOLLOW",
+        ego_speed_mps=8.0,
+        planning_speed_mps=8.0,
+        lane_change_duration_s=4.0,
+        dt_s=0.1,
+        lane_width_m=3.5,
+        distance_to_turn_m=2.0,
+        config={},
+    )
+
+    assert result.start_transition.action == "deny"
+    assert not result.authorization.allowed
+    assert "no_longer_feasible" in result.authorization.reason
+    assert result.geometry_arc_m > 2.0
+
+
+def test_turn_lateral_owner_releases_lane_change_commitment_once():
+    stage = BehaviorStage()
+    manager = ManeuverManager()
+    manager.remember_required_lane_change(11, 1011)
+    manager.begin_lane_change(
+        "lane_change_right", "executing", 10, 11, 8.0, []
+    )
+    authorization = stage.authorize_route_lane_change(
+        _route_lane_change_request(), maneuver_manager=manager
+    )
+
+    result = stage.resolve_lateral_ownership(
+        authorization=authorization,
+        maneuver_manager=manager,
+        owner_state="PREPARE_TURN",
+        ego_speed_mps=8.0,
+        planning_speed_mps=8.0,
+        lane_change_duration_s=4.0,
+        dt_s=0.1,
+        lane_width_m=3.5,
+        distance_to_turn_m=40.0,
+        config={},
+    )
+
+    assert result.handoff.action == "release"
+    assert not manager.lane_change.active
+    assert manager.lane_change.required_target_lane_id is None
+    assert not result.authorization.allowed
+    assert result.authorization.reason.startswith("scenario_lateral_owner:")
+
+
 def test_opportunistic_authorization_is_owned_by_behavior_stage():
     stage = BehaviorStage()
     allowed = stage.authorize_opportunistic_lane_change(

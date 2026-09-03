@@ -86,6 +86,17 @@ class TurnScenarioContext:
 
 
 @dataclass(frozen=True)
+class LateralOwnershipResult:
+    """One arbitration result for lane-change versus turn ownership."""
+
+    authorization: Any
+    start_transition: Any
+    handoff: Any
+    geometry_arc_m: float
+    operational_curvature_1pm: float
+
+
+@dataclass(frozen=True)
 class OpportunisticLaneChangeRequest:
     enabled: bool
     sim_time_s: float
@@ -674,6 +685,90 @@ class BehaviorStage:
             context=context,
             authorization=authorization,
             replan_reason=replan_reason,
+        )
+
+    def resolve_lateral_ownership(
+        self,
+        *,
+        authorization: Any,
+        maneuver_manager: Any,
+        owner_state: str,
+        ego_speed_mps: float,
+        planning_speed_mps: float,
+        lane_change_duration_s: float,
+        dt_s: float,
+        lane_width_m: float,
+        distance_to_turn_m: float,
+        config: Mapping[str, object],
+    ) -> LateralOwnershipResult:
+        """Arbitrate start feasibility and exclusive lateral ownership once."""
+
+        from .candidate_pipeline import (
+            lane_change_geometry_requirements,
+            lane_change_operational_curvature_limit_1pm,
+        )
+        from .route_authorization import suppress_lane_change_for_lateral_owner
+
+        operational_curvature = lane_change_operational_curvature_limit_1pm(
+            planning_speed_mps=float(planning_speed_mps),
+            lateral_accel_limit_mps2=float(config.get(
+                "route_tracking_lane_change_lateral_accel_limit_mps2", 1.3
+            )),
+            vehicle_max_curvature_1pm=float(config.get(
+                "reference_vehicle_max_curvature_1pm", 0.35
+            )),
+            minimum_speed_mps=float(config.get(
+                "lane_change_min_geometry_speed_mps", 2.0
+            )),
+        )
+        _, geometry_arc_m, _ = lane_change_geometry_requirements(
+            ego_speed_mps=float(ego_speed_mps),
+            target_speed_mps=float(planning_speed_mps),
+            duration_s=float(lane_change_duration_s),
+            dt_s=float(dt_s),
+            lane_width_m=float(lane_width_m),
+            max_curvature_1pm=float(operational_curvature),
+            minimum_geometry_speed_mps=float(config.get(
+                "lane_change_min_geometry_speed_mps", 2.0
+            )),
+            minimum_length_m=float(config.get("lane_change_min_length_m", 10.0)),
+            acceleration_limit_mps2=float(config.get(
+                "lane_change_planning_acceleration_limit_mps2", 2.0
+            )),
+        )
+        handoff_arc_m = max(0.0, float(config.get(
+            "lane_change_to_turn_reference_transition_arc_m", 10.0
+        )))
+        start_transition = maneuver_manager.lane_change_start_feasibility(
+            authorization_allowed=bool(authorization.allowed),
+            distance_to_turn_m=float(distance_to_turn_m),
+            geometry_arc_m=float(geometry_arc_m),
+            handoff_arc_m=float(handoff_arc_m),
+        )
+        if str(start_transition.action) == "deny":
+            self.reset_route_lane_change_authorization()
+            authorization = replace(
+                authorization,
+                allowed=False,
+                reason=str(start_transition.reason),
+            )
+
+        handoff = maneuver_manager.transfer_lateral_ownership_to_turn(
+            owner_state=str(owner_state)
+        )
+        if str(handoff.action) == "release":
+            self.reset_route_lane_change_authorization()
+            maneuver_manager.clear_required_lane_change()
+        authorization = suppress_lane_change_for_lateral_owner(
+            authorization,
+            owner_state=str(owner_state),
+        )
+        return LateralOwnershipResult(
+            authorization=authorization,
+            start_transition=start_transition,
+            handoff=handoff,
+            geometry_arc_m=float(geometry_arc_m),
+            operational_curvature_1pm=float(operational_curvature),
         )
 
     @staticmethod

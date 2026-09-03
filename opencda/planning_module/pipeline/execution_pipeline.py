@@ -78,6 +78,9 @@ class PlanningPipeline:
     def resolve_route_lane_change(self, context, **kwargs):
         return self.behavior.resolve_route_lane_change(context, **kwargs)
 
+    def resolve_lateral_ownership(self, **kwargs):
+        return self.behavior.resolve_lateral_ownership(**kwargs)
+
     def prepare_route_lane_change(self, **kwargs):
         return self.behavior.prepare_route_lane_change(**kwargs)
 

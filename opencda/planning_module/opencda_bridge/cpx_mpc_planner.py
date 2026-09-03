@@ -4111,8 +4111,6 @@ class CPXMPCPlannerBridge:
         )
         from opencda.planning_module.pipeline.candidate_pipeline import (
             build_candidate_intents,
-            lane_change_geometry_requirements,
-            lane_change_operational_curvature_limit_1pm,
         )
         sim_time_s = self._sim_time_s()
         additional_speed_constraints = []
@@ -4146,10 +4144,6 @@ class CPXMPCPlannerBridge:
         # on permission to use the global route as XY reference geometry.
         # AD-map owns geometry even when route_reference_allowed is false.
         route_lane_change_allowed = bool(route_context.route_found)
-        from opencda.planning_module.pipeline.route_authorization import (
-            suppress_lane_change_for_lateral_owner,
-        )
-
         # BehaviorStage owns all AD-map topology interpretation (lane direction,
         # physical adjacency, trigger windows) for the route-required lane
         # change.  The bridge only supplies one immutable map/route snapshot and
@@ -4397,77 +4391,23 @@ class CPXMPCPlannerBridge:
                 else None
             ),
         )
-        # Do not start a Frenet lane change that cannot finish, including its
-        # fixed target-lane handoff, before the next turn connector.
-        lane_change_operational_curvature_1pm = (
-            lane_change_operational_curvature_limit_1pm(
-                planning_speed_mps=float(speed_ref_mps),
-                lateral_accel_limit_mps2=float(
-                    self.config.get(
-                        "route_tracking_lane_change_lateral_accel_limit_mps2",
-                        1.3,
-                    )
-                ),
-                vehicle_max_curvature_1pm=float(
-                    self.config.get("reference_vehicle_max_curvature_1pm", 0.35)
-                ),
-                minimum_speed_mps=float(
-                    self.config.get("lane_change_min_geometry_speed_mps", 2.0)
-                ),
-            )
-        )
-        _, lane_change_geometry_arc_m, _ = lane_change_geometry_requirements(
+        lateral_ownership = self.pipeline.resolve_lateral_ownership(
+            authorization=lane_change_authorization,
+            maneuver_manager=self.maneuver_manager,
+            owner_state=str(scenario_decision.state),
             ego_speed_mps=float(ego_speed_mps),
-            target_speed_mps=float(speed_ref_mps),
-            duration_s=float(self.candidate_lane_change_normal_duration_s),
+            planning_speed_mps=float(speed_ref_mps),
+            lane_change_duration_s=float(
+                self.candidate_lane_change_normal_duration_s
+            ),
             dt_s=float(self.mpc.dt_s),
             lane_width_m=float(getattr(self.mpc, "lane_width_m", 3.5)),
-            max_curvature_1pm=float(lane_change_operational_curvature_1pm),
-            minimum_geometry_speed_mps=float(
-                self.config.get("lane_change_min_geometry_speed_mps", 2.0)
-            ),
-            minimum_length_m=float(
-                self.config.get("lane_change_min_length_m", 10.0)
-            ),
-            acceleration_limit_mps2=float(
-                self.config.get(
-                    "lane_change_planning_acceleration_limit_mps2", 2.0
-                )
-            ),
+            distance_to_turn_m=float(upcoming_turn_distance_m),
+            config=self.config,
         )
-        lane_change_handoff_arc_m = max(
-            0.0,
-            float(
-                self.config.get(
-                    "lane_change_to_turn_reference_transition_arc_m", 10.0
-                )
-            ),
-        )
-        lane_change_start_transition = (
-            self.maneuver_manager.lane_change_start_feasibility(
-                authorization_allowed=bool(lane_change_authorization.allowed),
-                distance_to_turn_m=float(upcoming_turn_distance_m),
-                geometry_arc_m=float(lane_change_geometry_arc_m),
-                handoff_arc_m=float(lane_change_handoff_arc_m),
-            )
-        )
-        if lane_change_start_transition.action == "deny":
-            self.pipeline.reset_route_lane_change_authorization()
-            lane_change_authorization = dataclasses.replace(
-                lane_change_authorization,
-                allowed=False,
-                reason=str(lane_change_start_transition.reason),
-            )
-
-        # Turn and lane-change references cannot both own lateral geometry.
-        # Release the semantic commitment and persistent reference together,
-        # before candidate commitment selection can revive the old maneuver.
-        lateral_handoff = self.maneuver_manager.transfer_lateral_ownership_to_turn(
-            owner_state=scenario_decision.state,
-        )
+        lane_change_authorization = lateral_ownership.authorization
+        lateral_handoff = lateral_ownership.handoff
         if lateral_handoff.action == "release":
-            self.pipeline.reset_route_lane_change_authorization()
-            self.maneuver_manager.clear_required_lane_change()
             self._stable_reference_line_provider.release(
                 LANE_CHANGE,
                 event=str(lateral_handoff.reason),
@@ -4477,10 +4417,6 @@ class CPXMPCPlannerBridge:
             )
             if callable(reset_lane_change):
                 reset_lane_change(reason=str(lateral_handoff.reason))
-        lane_change_authorization = suppress_lane_change_for_lateral_owner(
-            lane_change_authorization,
-            owner_state=scenario_decision.state,
-        )
         lane_change_authorized = bool(lane_change_authorization.allowed)
         if str(lane_change_authorization.reason).startswith(
             "scenario_lateral_owner:"
