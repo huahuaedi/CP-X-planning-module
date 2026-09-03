@@ -36,6 +36,7 @@ class MPCExecutionResult:
     fallback_reason: str
     replan_executed: bool
     failed_replan_buffer_reused: bool
+    jerk_seed_acceleration_mps2: float = 0.0
 
 
 class MPCExecutionStage:
@@ -53,6 +54,8 @@ class MPCExecutionStage:
         self._minimum_replan_speed_mps = max(
             0.0, float(minimum_replan_speed_mps)
         )
+        self._planned_acceleration_mps2 = None
+        self._last_command_time_s = None
 
     def run(
         self,
@@ -66,6 +69,23 @@ class MPCExecutionStage:
         context_key = str(context.key)
         anchor = context.reference_anchor_relative_m
         hard_gate = bool(str(request.hard_gate_reason))
+        jerk_seed_acceleration_mps2 = (
+            float(request.current_acceleration_mps2)
+            if self._planned_acceleration_mps2 is None
+            else float(self._planned_acceleration_mps2)
+        )
+        elapsed_s = (
+            float(self._mpc.dt_s)
+            if self._last_command_time_s is None
+            else max(
+                1.0e-3,
+                min(
+                    float(self._mpc.dt_s),
+                    float(request.sim_time_s) - float(self._last_command_time_s),
+                ),
+            )
+        )
+        self._last_command_time_s = float(request.sim_time_s)
         if hard_gate:
             self._buffer.reset(reason="control_buffer_reference_hard_veto")
         elif request.stationary_stop_hold:
@@ -113,7 +133,7 @@ class MPCExecutionStage:
                     destination_state=request.destination_state,
                     object_snapshots=request.object_snapshots,
                     current_acceleration_mps2=float(
-                        request.current_acceleration_mps2
+                        jerk_seed_acceleration_mps2
                     ),
                     current_steering_rad=float(request.current_steering_rad),
                     lane_center_reference_samples=request.reference_samples,
@@ -157,9 +177,11 @@ class MPCExecutionStage:
                 )
             if request.stationary_stop_hold:
                 control = normal_stop_control()
+                acceleration = 0.0
+            self._planned_acceleration_mps2 = float(acceleration)
             return MPCExecutionResult(
                 float(acceleration), float(steering), control, str(status), "",
-                bool(replan), False,
+                bool(replan), False, float(jerk_seed_acceleration_mps2),
             )
         except Exception as exc:
             fallback_reason = str(exc)
@@ -181,13 +203,13 @@ class MPCExecutionStage:
                 constraints = self._mpc.constraints
                 jerk_step_mps2 = max(
                     0.0,
-                    float(constraints.max_jerk_mps3) * float(self._mpc.dt_s),
+                    float(constraints.max_jerk_mps3) * float(elapsed_s),
                 )
                 acceleration = max(
                     float(constraints.min_acceleration_mps2),
                     min(
                         0.0,
-                        float(request.current_acceleration_mps2)
+                        float(jerk_seed_acceleration_mps2)
                         - float(jerk_step_mps2),
                     ),
                 )
@@ -199,7 +221,9 @@ class MPCExecutionStage:
                 )
                 steering = 0.0 if hard_gate else float(steering)
                 status = "candidate_hard_gate" if hard_gate else "bounded_safe_stop"
+            self._planned_acceleration_mps2 = float(acceleration)
             return MPCExecutionResult(
                 float(acceleration), float(steering), control, str(status),
                 fallback_reason, bool(replan), bool(reused_after_failure),
+                float(jerk_seed_acceleration_mps2),
             )

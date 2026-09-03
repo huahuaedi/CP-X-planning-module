@@ -121,3 +121,21 @@ def test_hard_gate_resets_buffer_and_uses_emergency_stop():
     assert result.status == "candidate_hard_gate"
     assert result.control == "emergency-stop"
     assert buffer.reset_reason == "control_buffer_reference_hard_veto"
+
+
+def test_fallback_jerk_uses_last_planned_acceleration_and_tick_elapsed_time():
+    buffer = _Buffer(replan=True)
+    mpc = _MPC(status="solved")
+    stage = MPCExecutionStage(mpc=mpc, control_buffer=buffer)
+    solved = _run(stage, _request(sim_time_s=1.0))
+    assert solved.acceleration_mps2 == 0.4
+
+    mpc._last_status = "primal infeasible"
+    failed = _run(stage, _request(
+        sim_time_s=1.05,
+        current_acceleration_mps2=-4.0,
+    ))
+    # The OpenCDA PID's pedal-equivalent -4.0 input is not MPC memory.
+    # With j_max=10 and a 0.05 s tick, 0.4 may only fall to -0.1.
+    assert abs(failed.jerk_seed_acceleration_mps2 - 0.4) < 1.0e-9
+    assert abs(failed.acceleration_mps2 - (-0.1)) < 1.0e-9

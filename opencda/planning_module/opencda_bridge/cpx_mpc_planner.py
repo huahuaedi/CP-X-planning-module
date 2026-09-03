@@ -1971,6 +1971,9 @@ class CPXMPCPlannerBridge:
             ),
             emergency_stop_control=self._emergency_stop_control,
         )
+        mpc_jerk_seed_accel_mps2 = float(
+            execution_result.jerk_seed_acceleration_mps2
+        )
         accel_mps2 = float(execution_result.acceleration_mps2)
         steer_rad = float(execution_result.steering_rad)
         control = execution_result.control
