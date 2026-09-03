@@ -1165,7 +1165,6 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
 
         stage = PerceptionStage(
             collect_local=lambda **_kwargs: (),
-            front_gap=lambda **_kwargs: (None, None),
             object_track_id=lambda item: str(item.get("vehicle_id", "")),
             max_mpc_obstacles=10,
         )
@@ -1224,7 +1223,6 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         bridge.max_mpc_obstacles = 1
         bridge.perception_stage = PerceptionStage(
             collect_local=lambda **_kwargs: (),
-            front_gap=lambda **_kwargs: (None, None),
             object_track_id=lambda item: str(item.get("vehicle_id", "")),
             max_mpc_obstacles=1,
         )
@@ -1278,7 +1276,6 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
 
         stage = PerceptionStage(
             collect_local=lambda **_kwargs: (),
-            front_gap=lambda **_kwargs: (None, None),
             object_track_id=lambda item: str(item.get("vehicle_id", "")),
             max_mpc_obstacles=10,
         )

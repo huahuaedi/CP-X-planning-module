@@ -1020,11 +1020,20 @@ class CPXMPCPlannerBridge:
             ),
             max_position_jump_m=float(self.config.get("tracker_max_position_jump_m", 12.0)),
         )
+        ego_extent = getattr(
+            getattr(self.vehicle_manager.vehicle, "bounding_box", None),
+            "extent", None,
+        )
         self.perception_stage = PerceptionStage(
             collect_local=self._collect_object_snapshots,
-            front_gap=self._front_gap_m,
             object_track_id=self._object_track_id,
             max_mpc_obstacles=int(self.max_mpc_obstacles),
+            ego_length_m=2.0 * float(getattr(ego_extent, "x", 2.25)),
+            ego_width_m=2.0 * float(getattr(ego_extent, "y", 1.0)),
+            lane_width_m=float(getattr(self.mpc, "lane_width_m", 3.5)),
+            lane_change_boundary_overlap_m=float(
+                self.config.get("lane_change_boundary_overlap_m", 0.75)
+            ),
         )
         self.final_reference_gate = FinalReferenceGate(self.config)
         self.reference_pipeline = ReferencePipeline(
@@ -5202,7 +5211,7 @@ class CPXMPCPlannerBridge:
             )
             if callable(reset_lane_change):
                 reset_lane_change(reason=str(override_result.reset_lane_change_reason))
-        front_gap_m, front_gap_actor_id = self._front_gap_m(
+        front_gap_m, front_gap_actor_id = self.perception_stage.front_gap(
             ego_location=ego_location,
             ego_yaw_rad=float(ego_yaw_rad),
             object_snapshots=object_snapshots,
@@ -10618,187 +10627,6 @@ class CPXMPCPlannerBridge:
             "y": float(getattr(location, "y", 0.0)),
             "z": float(getattr(location, "z", 0.0)),
         }
-
-    def _front_gap_m(
-        self,
-        ego_location: carla.Location,
-        ego_yaw_rad: float,
-        object_snapshots: Sequence[Mapping[str, Any]],
-        *,
-        lane_change_direction: str = "",
-        lane_change_progress: float = 0.0,
-        current_lane_id: Optional[int] = None,
-        lane_assignments: Optional[Mapping[str, int]] = None,
-        return_actor_id: bool = False,
-    ):
-        """Nearest-ahead gap in ego's body frame.
-
-        Outside an active lane change (``lane_change_direction == ""``),
-        this is a plain nearest-ahead search within a +/-2.5 m lateral
-        gate -- unchanged from before.
-
-        During an active lane change ("left"/"right"), the source lane's
-        front vehicle must not be dropped the instant the maneuver starts
-        (ego hasn't moved yet -- it's still physically in the source lane),
-        but also must not keep braking ego once ego's body has actually
-        cleared it. This computes the source-lane gap and target-lane gap
-        *separately* (split at ego's current heading, not by lane_id) and
-        blends between them as a smooth function of ``lane_change_progress``
-        (alpha in [0, 1], 0 = still at the source lane center, 1 = at the
-        target lane center -- pass ManeuverManager lane-change progress):
-
-          - alpha <= alpha_clear: fully the source-lane gap. alpha_clear is
-            the progress at which ego's own body -- not just its center --
-            has crossed the source/target lane boundary, derived from
-            vehicle width and lane width, not a fixed distance or a
-            lane_id switch: alpha_clear = 0.5 + vehicle_width_m / (2 *
-            lane_width_m).
-          - alpha_clear < alpha < 1: smoothstep blend toward the
-            target-lane gap.
-          - alpha >= 1: fully the target-lane gap.
-
-        Sign convention (lateral = -dx*sin_h + dy*cos_h): validated against
-        the cpx_lane_change_speed_* scenarios -- positive lateral is the
-        left-hand side of ego's current heading.
-
-        ``return_actor_id=True`` also returns the id of whichever object
-        dominates the blended gap (None if neither side has one), so a
-        caller can detect "the object being used as my front-vehicle
-        reference just changed" even when the gap distance itself moves
-        smoothly -- see control_context_key in _run_full_cpx_pipeline_step.
-        """
-
-        cos_h = math.cos(ego_yaw_rad)
-        sin_h = math.sin(ego_yaw_rad)
-        ego_half_length_m = 2.25
-        try:
-            ego_half_length_m = max(
-                0.0,
-                float(self.vehicle_manager.vehicle.bounding_box.extent.x),
-            )
-        except Exception:
-            pass
-
-        def _nearest_gap(
-            *, min_lateral_m: float, max_lateral_m: float
-        ) -> tuple[Optional[float], Optional[str]]:
-            best_gap = None
-            best_actor_id = None
-            for snapshot in object_snapshots:
-                if current_lane_id is not None and lane_assignments is not None:
-                    obstacle_id = self._object_track_id(snapshot)
-                    assigned_lane_id = int(
-                        lane_assignments.get(str(obstacle_id), 0) or 0
-                    )
-                    if assigned_lane_id != int(current_lane_id):
-                        continue
-                dx = float(snapshot.get("x", 0.0)) - float(ego_location.x)
-                dy = float(snapshot.get("y", 0.0)) - float(ego_location.y)
-                longitudinal = dx * cos_h + dy * sin_h
-                lateral = -dx * sin_h + dy * cos_h
-                if (
-                    longitudinal <= 0.0
-                    or lateral < float(min_lateral_m)
-                    or lateral > float(max_lateral_m)
-                ):
-                    continue
-                object_half_length_m = max(
-                    0.0,
-                    0.5 * float(snapshot.get("length_m", 4.5) or 4.5),
-                )
-                clearance_m = max(
-                    0.0,
-                    float(longitudinal)
-                    - float(ego_half_length_m)
-                    - float(object_half_length_m),
-                )
-                if best_gap is None or float(clearance_m) < float(best_gap):
-                    best_gap = float(clearance_m)
-                    best_actor_id = self._object_track_id(snapshot)
-            return best_gap, best_actor_id
-
-        # When stable map assignments are available, "own lane" is the
-        # currently map-matched ego lane. Adjacent-lane actors never enter
-        # longitudinal following, including during a lane change; once ego's
-        # map match moves to the target lane, that lane naturally becomes its
-        # own lane on the next tick.
-        strict_current_lane = bool(
-            current_lane_id is not None and lane_assignments is not None
-        )
-        direction = (
-            ""
-            if strict_current_lane
-            else str(lane_change_direction or "").strip().lower()
-        )
-        if direction not in {"left", "right"}:
-            best_gap, best_actor_id = _nearest_gap(
-                min_lateral_m=-2.5, max_lateral_m=2.5
-            )
-            if bool(return_actor_id):
-                return best_gap, (
-                    None if best_gap is None else str(best_actor_id)
-                )
-            return best_gap
-
-        # A small overlap around the ego-heading split line keeps an object
-        # sitting right at the boundary visible to both searches, instead
-        # of a strict 0.0 cutoff creating a blind seam between them.
-        boundary_overlap_m = max(
-            0.0, float(self.config.get("lane_change_boundary_overlap_m", 0.75))
-        )
-        if direction == "left":
-            source_gap, source_actor_id = _nearest_gap(
-                min_lateral_m=-2.5, max_lateral_m=boundary_overlap_m
-            )
-            target_gap, target_actor_id = _nearest_gap(
-                min_lateral_m=-boundary_overlap_m, max_lateral_m=2.5
-            )
-        else:
-            source_gap, source_actor_id = _nearest_gap(
-                min_lateral_m=-boundary_overlap_m, max_lateral_m=2.5
-            )
-            target_gap, target_actor_id = _nearest_gap(
-                min_lateral_m=-2.5, max_lateral_m=boundary_overlap_m
-            )
-
-        try:
-            vehicle_width_m = max(
-                0.5,
-                float(self.vehicle_manager.vehicle.bounding_box.extent.y) * 2.0,
-            )
-        except Exception:
-            vehicle_width_m = 2.0
-        lane_width_m = max(1.0, float(getattr(self.mpc, "lane_width_m", 3.5)))
-        alpha_clear = min(
-            0.95, 0.5 + float(vehicle_width_m) / (2.0 * float(lane_width_m))
-        )
-        alpha = max(0.0, min(1.0, float(lane_change_progress)))
-        if alpha <= alpha_clear:
-            blend_weight = 0.0
-        else:
-            span = max(1.0e-6, 1.0 - float(alpha_clear))
-            ramp = min(1.0, (float(alpha) - float(alpha_clear)) / float(span))
-            blend_weight = float(ramp) * float(ramp) * (3.0 - 2.0 * float(ramp))
-
-        _no_constraint_gap_m = 1.0e6
-        source_value = (
-            _no_constraint_gap_m if source_gap is None else float(source_gap)
-        )
-        target_value = (
-            _no_constraint_gap_m if target_gap is None else float(target_gap)
-        )
-        blended_gap = (
-            (1.0 - blend_weight) * source_value + blend_weight * target_value
-        )
-        best_gap = (
-            None if blended_gap >= 0.5 * _no_constraint_gap_m else float(blended_gap)
-        )
-        best_actor_id = (
-            target_actor_id if blend_weight >= 0.5 else source_actor_id
-        )
-        if bool(return_actor_id):
-            return best_gap, (None if best_gap is None else str(best_actor_id))
-        return best_gap
 
     @staticmethod
     def _body_frame_xy(

@@ -29,14 +29,22 @@ class PerceptionStage:
         self,
         *,
         collect_local: Callable[..., Sequence[Mapping[str, Any]]],
-        front_gap: Callable[..., Any],
         object_track_id: Callable[[Mapping[str, Any]], str],
-        max_mpc_obstacles: int,
+        max_mpc_obstacles: int = 0,
+        ego_length_m: float = 4.5,
+        ego_width_m: float = 2.0,
+        lane_width_m: float = 3.5,
+        lane_change_boundary_overlap_m: float = 0.75,
     ) -> None:
         self._collect_local = collect_local
-        self._front_gap = front_gap
         self._object_track_id = object_track_id
         self._max_mpc_obstacles = max(0, int(max_mpc_obstacles))
+        self._ego_half_length_m = 0.5 * max(0.0, float(ego_length_m))
+        self._ego_width_m = max(0.5, float(ego_width_m))
+        self._lane_width_m = max(1.0, float(lane_width_m))
+        self._boundary_overlap_m = max(
+            0.0, float(lane_change_boundary_overlap_m)
+        )
 
     def build(
         self,
@@ -57,7 +65,7 @@ class PerceptionStage:
         if bool(ignore_dynamic_objects):
             fused = []
         mpc_objects = self.limit_for_mpc(fused, ego_location=ego_location)
-        gap_m, actor_id = self._front_gap(
+        gap_m, actor_id = self.front_gap(
             ego_location=ego_location,
             ego_yaw_rad=float(ego_yaw_rad),
             object_snapshots=fused,
@@ -87,6 +95,72 @@ class PerceptionStage:
             front_actor_id=actor_id,
             front_actor_speed_mps=actor_speed_mps,
         )
+
+    def front_gap(
+        self, *, ego_location, ego_yaw_rad, object_snapshots,
+        lane_change_direction="", lane_change_progress=0.0,
+        current_lane_id=None, lane_assignments=None, return_actor_id=False,
+    ):
+        cosine = math.cos(float(ego_yaw_rad))
+        sine = math.sin(float(ego_yaw_rad))
+
+        def nearest(min_lateral_m, max_lateral_m):
+            best_gap, best_actor = None, None
+            for obstacle in object_snapshots:
+                actor_id = str(self._object_track_id(obstacle))
+                if current_lane_id is not None and lane_assignments is not None:
+                    assigned = int(lane_assignments.get(actor_id, 0) or 0)
+                    if assigned != int(current_lane_id):
+                        continue
+                dx = float(obstacle.get("x", 0.0)) - float(ego_location.x)
+                dy = float(obstacle.get("y", 0.0)) - float(ego_location.y)
+                longitudinal = dx * cosine + dy * sine
+                lateral = -dx * sine + dy * cosine
+                if (
+                    longitudinal <= 0.0
+                    or lateral < float(min_lateral_m)
+                    or lateral > float(max_lateral_m)
+                ):
+                    continue
+                clearance = max(
+                    0.0,
+                    longitudinal - self._ego_half_length_m
+                    - 0.5 * max(0.0, float(obstacle.get("length_m", 4.5) or 4.5)),
+                )
+                if best_gap is None or clearance < best_gap:
+                    best_gap, best_actor = float(clearance), actor_id
+            return best_gap, best_actor
+
+        strict_lane = current_lane_id is not None and lane_assignments is not None
+        direction = "" if strict_lane else str(lane_change_direction or "").lower()
+        if direction not in {"left", "right"}:
+            gap, actor = nearest(-2.5, 2.5)
+        else:
+            overlap = self._boundary_overlap_m
+            if direction == "left":
+                source_gap, source_actor = nearest(-2.5, overlap)
+                target_gap, target_actor = nearest(-overlap, 2.5)
+            else:
+                source_gap, source_actor = nearest(-overlap, 2.5)
+                target_gap, target_actor = nearest(-2.5, overlap)
+            alpha_clear = min(
+                0.95,
+                0.5 + self._ego_width_m / (2.0 * self._lane_width_m),
+            )
+            alpha = max(0.0, min(1.0, float(lane_change_progress)))
+            ramp = 0.0 if alpha <= alpha_clear else min(
+                1.0, (alpha - alpha_clear) / max(1.0e-6, 1.0 - alpha_clear)
+            )
+            weight = ramp * ramp * (3.0 - 2.0 * ramp)
+            unconstrained = 1.0e6
+            source_value = unconstrained if source_gap is None else source_gap
+            target_value = unconstrained if target_gap is None else target_gap
+            blended = (1.0 - weight) * source_value + weight * target_value
+            gap = None if blended >= 0.5 * unconstrained else float(blended)
+            actor = target_actor if weight >= 0.5 else source_actor
+        if return_actor_id:
+            return gap, None if gap is None else str(actor)
+        return gap
 
     def fuse(self, *, local_objects, cp_obstacles, timestamp_s):
         fused = {}
