@@ -208,6 +208,16 @@ class CPXMPCPlannerBridge:
         self.last_debug: dict[str, Any] = {}
         self._last_accel_mps2 = 0.0
         self._last_steer_rad = 0.0
+        # Multi-CAV interaction pipeline (classify -> assign -> corridor).
+        # Off unless cav_conflict_enabled; also needs cost.corridor.enabled in
+        # mpc.yaml for the corridor to bind in the QP.
+        self._cav_conflict_enabled = bool(
+            self.config.get("cav_conflict_enabled", False)
+        )
+        self._cav_latch: dict[str, Any] = {}
+        self._last_cav_corridor = None
+        self._last_cav_corridor_reference: list = []
+        self._last_cav_diagnostics: dict[str, Any] = {}
         self._warned = False
         self._diagnostic_hd_map_matcher = DiagnosticHDMapMatcher()
         self._diagnostic_local_lane_frame: dict[str, object] = {}
@@ -597,6 +607,8 @@ class CPXMPCPlannerBridge:
             "planner_executed",
             "fallback_active",
             "prediction_mode",
+            "cav_conflict_summary",
+            "cav_corridor_binding",
             "local_object_count",
             "traffic_signal_state",
             "traffic_signal_raw_state",
@@ -1800,6 +1812,7 @@ class CPXMPCPlannerBridge:
                 speed_crossing_deadband_mps=float(self.config.get(
                     "control_buffer_speed_crossing_deadband_mps", 0.15,
                 )),
+                corridor_rows=self._cav_corridor_rows(ego_location),
             ),
             normal_stop_control=lambda: self.carla.VehicleControl(
                 throttle=0.0,
@@ -2904,6 +2917,19 @@ class CPXMPCPlannerBridge:
                 config=self.config,
                 ego_location=ego_location,
                 ego_yaw_rad=float(ego_yaw_rad),
+                cav_enabled=bool(self._cav_conflict_enabled),
+                reference_samples=[
+                    {"x_ref_m": float(p[0]), "y_ref_m": float(p[1])}
+                    for p in route_points
+                ],
+                peer_intents=self._collect_cav_peer_intents(),
+                obstacle_snapshots=list(object_snapshots or []),
+                cav_latch_state=self._cav_latch,
+                my_actor_id=int(
+                    getattr(self.vehicle_manager.vehicle, "id", -1)
+                ),
+                my_claim=self._ego_cav_claim(sim_time_s=float(sim_time_s)),
+                cav_horizon_steps=int(self.mpc.horizon_steps),
             ),
             maneuver_manager=self.maneuver_manager,
             cooperative_yield_reason=lambda location, yaw: (
@@ -2922,6 +2948,16 @@ class CPXMPCPlannerBridge:
         lane_change_authorization = conflict_resolution.authorization
         lateral_ownership = conflict_resolution.lateral_ownership
         lateral_handoff = lateral_ownership.handoff
+        if self._cav_conflict_enabled:
+            self._cav_latch = dict(conflict_resolution.cav_latch_state or {})
+            self._last_cav_corridor = conflict_resolution.corridor
+            self._last_cav_corridor_reference = [
+                {"x_ref_m": float(p[0]), "y_ref_m": float(p[1])}
+                for p in route_points
+            ]
+            self._last_cav_diagnostics = dict(
+                conflict_resolution.cav_diagnostics or {}
+            )
         opportunistic_lane_change_allowed = bool(
             conflict_resolution.opportunistic_allowed
         )
@@ -3052,14 +3088,12 @@ class CPXMPCPlannerBridge:
             next_macro_maneuver="",
         )
         if bool(route_advanced_to_lane_change):
-            # The AD route has consumed the connector. A stale CARLA road
-            # option must not recreate the turn after ScenarioManager released
-            # it, even while CARLA still reports ego inside the junction.
+            # Suppress a stale turn proposal once topology reports a later
+            # lane change. ManeuverManager owns turn commitment and
+            # ReferenceLineProvider owns TURN geometry lifetime; this routing
+            # hint must not clear either owner (it can also be observed before
+            # an upcoming turn while a prerequisite lane change is pending).
             route_turn_decision = ""
-            self.maneuver_manager.clear_turn(
-                reason="route_advanced_to_lane_change"
-            )
-            self._clear_turn_master_reference()
         route_turn_prepare_decision = ""
         scenario_behavior_override = str(scenario_decision.behavior_override_decision or "")
         override_result = self.pipeline.apply_behavior_overrides(
@@ -3463,6 +3497,109 @@ class CPXMPCPlannerBridge:
             ),
             reference_debug,
             speed_plan,
+        )
+
+    def _collect_cav_peer_intents(self) -> list:
+        """Build PeerIntent list from OpenCDA's V2X manager (cav_intents +
+        cav_nearby), the same channel the cooperative-yield gate reads."""
+
+        if not self._cav_conflict_enabled:
+            return []
+        v2x_manager = getattr(self.vehicle_manager, "v2x_manager", None)
+        cav_intents = dict(getattr(v2x_manager, "cav_intents", {}) or {})
+        cav_nearby = dict(getattr(v2x_manager, "cav_nearby", {}) or {})
+        if not cav_intents or not cav_nearby:
+            return []
+        from opencda.planning_module.pipeline.cooperative_arbitration import (
+            PeerIntent,
+            ResourceClaim,
+        )
+
+        out: list = []
+        for peer_id, message in cav_intents.items():
+            if not isinstance(message, Mapping):
+                continue
+            try:
+                actor_id = int(peer_id)
+            except (TypeError, ValueError):
+                continue
+            peer_manager = cav_nearby.get(str(peer_id))
+            peer_vehicle = getattr(peer_manager, "vehicle", None)
+            if peer_vehicle is None:
+                continue
+            try:
+                tf = peer_vehicle.get_transform()
+                vel = peer_vehicle.get_velocity()
+            except Exception:
+                continue
+            speed = math.sqrt(vel.x ** 2 + vel.y ** 2 + vel.z ** 2)
+            decision = str(message.get("maneuver_commitment_decision", ""))
+            kind = (
+                "lane_change"
+                if decision.startswith("lane_change")
+                else "junction_entry"
+                if decision in ("intersection_turn_left", "intersection_turn_right")
+                else "lane_change"
+            )
+            out.append(PeerIntent(
+                actor_id=actor_id,
+                position_xy=(float(tf.location.x), float(tf.location.y)),
+                claim=ResourceClaim(
+                    kind=kind,
+                    resource_id=kind,
+                    committed_at_s=float(
+                        message.get("maneuver_commitment_committed_at_s", 0.0) or 0.0
+                    ),
+                    active=bool(message.get("maneuver_commitment_active", False)),
+                ),
+                heading_rad=math.radians(float(tf.rotation.yaw)),
+                speed_mps=float(speed),
+                planned_path=(),
+                cooperative=True,
+            ))
+        return out
+
+    def _cav_corridor_rows(self, ego_location: Any):
+        """Convert the last conflict corridor (Stage C) into linear QP rows
+        (Stage D) in the MPC's ego-origin frame. Empty when CAV is off or no
+        corridor was produced this tick."""
+
+        corridor = getattr(self, "_last_cav_corridor", None)
+        if not self._cav_conflict_enabled or corridor is None:
+            return ()
+        from opencda.planning_module.pipeline.mpc_corridor_constraints import (
+            corridor_rows,
+        )
+
+        return tuple(corridor_rows(
+            corridor,
+            self._last_cav_corridor_reference,
+            ego_origin_xy=(float(ego_location.x), float(ego_location.y)),
+        ))
+
+    def _ego_cav_claim(self, *, sim_time_s: float):
+        """Ego's own cooperative ResourceClaim, active while it is committed
+        to a lateral maneuver -- else None (Stage B is skipped, Stage A/C
+        still handle plain obstacle conflicts)."""
+
+        if not self._cav_conflict_enabled:
+            return None
+        from opencda.planning_module.pipeline.cooperative_arbitration import (
+            ResourceClaim,
+        )
+
+        lane_change = getattr(self.maneuver_manager, "lane_change", None)
+        active = bool(getattr(lane_change, "active", False)) or str(
+            getattr(lane_change, "phase", "")
+        ) in ("executing", "target_lane_stabilization")
+        committed_at_s = float(
+            getattr(lane_change, "committed_at_s", 0.0) or 0.0
+        ) or float(sim_time_s)
+        return ResourceClaim(
+            kind="lane_change",
+            resource_id="lane_change",
+            committed_at_s=float(committed_at_s),
+            active=bool(active),
         )
 
     def _cooperative_lane_change_yield_reason(
@@ -4988,6 +5125,7 @@ class CPXMPCPlannerBridge:
             self._local_map_snapshot = build_local_map_snapshot(
                 frame_id=int(self._local_map_frame_id),
                 timestamp_s=float(self._sim_time_s()),
+                route_revision=str(self.route_manager.route_revision),
                 match=self._diagnostic_map_matching,
                 local_graph=self._diagnostic_local_lane_frame,
                 route_target_lane_id=int(ad_target_lane_id),

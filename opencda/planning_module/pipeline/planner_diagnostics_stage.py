@@ -10,6 +10,22 @@ from .local_map_snapshot import LocalMapSnapshot
 from .reference_line_provider import LANE_FOLLOW
 
 
+def _cav_conflict_summary(diag: Mapping[str, Any]) -> str:
+    """One-line CSV field: per-agent tag + per-peer role + corridor status."""
+
+    diag = dict(diag or {})
+    if not diag:
+        return ""
+    tags = dict(diag.get("tags", {}) or {})
+    roles = dict(diag.get("roles", {}) or {})
+    parts = [f"{k}:{v}" for k, v in tags.items() if v != "IGNORE"]
+    parts += [f"peer{k}={v}" for k, v in roles.items()]
+    feasible = diag.get("corridor_feasible")
+    if feasible is not None:
+        parts.append("corridor_feasible" if feasible else "corridor_infeasible")
+    return ";".join(parts) if parts else "no_conflict"
+
+
 class PlannerDiagnosticsStage:
     """Build diagnostics without participating in planning or control."""
 
@@ -197,6 +213,15 @@ class PlannerDiagnosticsStage:
             "mpc_object_count": len(mpc_object_snapshots),
             "local_object_count": len(local_object_snapshots),
             "prediction_mode": str(self._prediction_mode),
+            "cav_conflict_summary": _cav_conflict_summary(
+                getattr(self, "_last_cav_diagnostics", {})
+            ),
+            "cav_corridor_binding": ",".join(
+                str(b) for b in
+                dict(getattr(self, "_last_cav_diagnostics", {})).get(
+                    "corridor_binding", []
+                )
+            ),
             **self._perception_diagnostics(),
             "v2x_nearby_count": len(getattr(self.vehicle_manager.v2x_manager, "cav_nearby", {}) or {}),
             "cp_provider_summary": dict(cp_summary),
