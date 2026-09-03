@@ -1796,6 +1796,29 @@ class CPXMPCPlannerBridge:
                 behavior_decision=str(behavior_decision.maneuver),
                 reference_samples=lane_center_reference,
             )
+        if self._cav_conflict_enabled:
+            cav_result = self.pipeline.resolve_cav_interaction(
+                reference_samples=lane_center_reference,
+                ego_location=ego_location,
+                ego_yaw_rad=float(ego_yaw_rad),
+                ego_speed_mps=float(ego_speed_mps),
+                actor_id=int(getattr(self.vehicle_manager.vehicle, "id", -1)),
+                claim=self._ego_cav_claim(sim_time_s=float(sim_time_s)),
+                obstacle_snapshots=object_snapshots,
+                cav_intents=self._collect_cav_intents(),
+                latch_state=self._cav_latch,
+                horizon_steps=int(self.mpc.horizon_steps),
+                dt_s=float(self.mpc.dt_s),
+            )
+            self._cav_latch = dict(cav_result.latch_state or {})
+            self._last_cav_corridor = cav_result.corridor
+            self._last_cav_corridor_reference = [
+                dict(sample) for sample in lane_center_reference
+            ]
+            self._last_cav_diagnostics = dict(cav_result.diagnostics or {})
+            reference_debug["cav_conflict_diagnostics"] = dict(
+                self._last_cav_diagnostics
+            )
         execution_result = self.pipeline.execute_mpc(
             MPCExecutionRequest(
                 sim_time_s=float(sim_time_s),
@@ -3399,30 +3422,6 @@ class CPXMPCPlannerBridge:
             reference_debug = dict(candidate_result.diagnostics)
         else:
             reference_debug["candidate_pipeline_enabled"] = False
-
-        if self._cav_conflict_enabled:
-            cav_result = self.pipeline.resolve_cav_interaction(
-                reference_samples=local_lane_center_reference,
-                ego_location=ego_location,
-                ego_yaw_rad=float(ego_yaw_rad),
-                ego_speed_mps=float(ego_speed_mps),
-                actor_id=int(getattr(self.vehicle_manager.vehicle, "id", -1)),
-                claim=self._ego_cav_claim(sim_time_s=float(sim_time_s)),
-                obstacle_snapshots=list(object_snapshots or []),
-                cav_intents=self._collect_cav_intents(),
-                latch_state=self._cav_latch,
-                horizon_steps=int(self.mpc.horizon_steps),
-                dt_s=float(self.mpc.dt_s),
-            )
-            self._cav_latch = dict(cav_result.latch_state or {})
-            self._last_cav_corridor = cav_result.corridor
-            self._last_cav_corridor_reference = [
-                dict(sample) for sample in local_lane_center_reference
-            ]
-            self._last_cav_diagnostics = dict(cav_result.diagnostics or {})
-            reference_debug["cav_conflict_diagnostics"] = dict(
-                self._last_cav_diagnostics
-            )
 
         boundary_recovery_active = bool(
             self.config.get("boundary_recovery_enabled", False)
