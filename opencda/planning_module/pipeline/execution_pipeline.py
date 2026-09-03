@@ -99,6 +99,13 @@ class PlanningPipeline:
         )
         return target, ceiling
 
+    def propose_speed(self, **kwargs):
+        return self.speed.propose(**kwargs)
+
+    @property
+    def destination_stop_latched(self) -> bool:
+        return bool(self.destination_speed.stop_latched)
+
     def publish_reference(self, **kwargs):
         return self.reference_publication.run(**kwargs)
 

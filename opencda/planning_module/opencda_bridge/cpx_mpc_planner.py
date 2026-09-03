@@ -205,22 +205,6 @@ class CPXMPCPlannerBridge:
             self._stable_reference_line_provider = provider
         provider.attach_builder(builder)
 
-    @property
-    def speed_target_planner(self):
-        return self.pipeline.speed
-
-    @property
-    def destination_speed_stage(self):
-        return self.pipeline.destination_speed
-
-    @property
-    def reference_publication_stage(self):
-        return self.pipeline.reference_publication
-
-    @property
-    def mpc_entry_stage(self):
-        return self.pipeline.mpc_entry
-
     def __init__(
         self,
         vehicle_manager: Any,
@@ -2849,7 +2833,7 @@ class CPXMPCPlannerBridge:
             ),
             "route_reached_destination": bool(self.route_manager.last_status.reached_destination),
             "destination_stop_latched": bool(
-                self.destination_speed_stage.stop_latched
+                self.pipeline.destination_stop_latched
             ),
             "destination_stop_reason": reference_debug.get(
                 "destination_stop_reason", ""
@@ -5283,7 +5267,7 @@ class CPXMPCPlannerBridge:
                 or lane_change_commitment_pending_stabilization
             )
         )
-        speed_plan = self.speed_target_planner.propose(
+        speed_plan = self.pipeline.propose_speed(
             scenario_decision=scenario_decision,
             behavior_decision=str(decision),
             requested_speed_mps=float(speed_ref_mps),
