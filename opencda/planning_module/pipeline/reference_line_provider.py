@@ -1186,6 +1186,79 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             sample["reference_mode"] = "boundary_recovery"
         return generated, samples, str(conditioning_reason)
 
+    def start_post_turn_exit(
+        self, *, local_map: Any, ego_x_m: float, ego_y_m: float,
+        current_lane_id: int, target_speed_mps: float, horizon_steps: int,
+        dt_s: float, hold_arc_m: float, route_revision: str, map_epoch: str,
+    ) -> bool:
+        """Build and install the one immutable outgoing-lane centerline."""
+
+        step_m = max(0.25, float(dt_s) * max(1.0, float(target_speed_mps)))
+        required_arc_m = max(step_m, float(hold_arc_m)) + max(
+            2.0, 0.5 * float(horizon_steps) * float(dt_s)
+            * max(1.0, float(target_speed_mps))
+        )
+        reference, source = self.post_turn_master(
+            local_map, start_lane_id=int(current_lane_id),
+            target_speed_mps=float(target_speed_mps),
+            horizon_steps=int(horizon_steps), required_arc_m=required_arc_m,
+        )
+        if not reference:
+            return False
+        lane_ids = [int(x.get("lane_id", 0) or 0) for x in reference
+                    if int(x.get("lane_id", 0) or 0) != 0]
+        installed, _ = self.install(
+            POST_TURN, reference, route_revision=str(route_revision),
+            map_epoch=str(map_epoch), event="phase_transition",
+            source_lane_id=int(current_lane_id),
+            target_lane_id=int(lane_ids[-1] if lane_ids else current_lane_id),
+            build_reason=str(source), ego_x_m=float(ego_x_m),
+            ego_y_m=float(ego_y_m),
+        )
+        return bool(installed)
+
+    def post_turn_exit_window(
+        self, *, ego_x_m: float, ego_y_m: float, target_speed_mps: float,
+        horizon_steps: int, dt_s: float, first_forward_m: float,
+    ) -> tuple[list[dict[str, object]], str]:
+        """Advance and return the sole persistent post-turn reference."""
+
+        if not self.snapshot(POST_TURN).active:
+            return [], "post_turn_exit_reference_missing"
+        spacing_m = max(0.25, float(dt_s) * max(1.0, float(target_speed_mps)))
+        stable_window = self.window(
+            POST_TURN, ego_x_m=float(ego_x_m), ego_y_m=float(ego_y_m),
+            first_forward_m=float(first_forward_m), spacing_m=spacing_m,
+            count=int(horizon_steps),
+            max_projection_advance_m=max(2.0, 2.0 * spacing_m),
+        )
+        snapshot = self.snapshot(POST_TURN)
+        window = [dict(sample) for sample in stable_window.samples]
+        remaining = sum(math.hypot(
+            float(b.get("x_ref_m", b.get("x", 0.0)))
+            - float(a.get("x_ref_m", a.get("x", 0.0))),
+            float(b.get("y_ref_m", b.get("y", 0.0)))
+            - float(a.get("y_ref_m", a.get("y", 0.0))),
+        ) for a, b in zip(window[:-1], window[1:]))
+        required = max(
+            1.5, 0.5 * float(horizon_steps) * float(dt_s)
+            * max(1.0, float(target_speed_mps)),
+        )
+        if remaining + 1.0e-3 < required:
+            self.release(POST_TURN, event="phase_transition")
+            return [], (
+                f"post_turn_exit_reference_exhausted:remaining_arc_m={remaining:.2f}:"
+                f"required_m={required:.2f}"
+            )
+        for sample in window:
+            sample["speed_ref_mps"] = sample["v_ref_mps"] = (
+                sample["speed_mps"]
+            ) = float(target_speed_mps)
+        return window, (
+            f"post_turn_exit_locked_window:s={snapshot.progress_s_m:.2f}:"
+            f"travel={snapshot.travelled_s_m:.2f}:provider={stable_window.reason}"
+        )
+
     @staticmethod
     def mode_for(behavior: BehaviorDecision, *, segment_kind: str = "") -> str:
         maneuver = str(behavior.maneuver or "").strip().lower()

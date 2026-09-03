@@ -30,7 +30,7 @@ from opencda_bridge.cpx_mpc_planner import (
     _adaptive_target_horizon_s,
 )
 from pipeline.reference_generator import ReferenceGenerator
-from pipeline.local_map_snapshot import build_local_map_snapshot
+from pipeline.local_map_snapshot import LocalMapSnapshot, build_local_map_snapshot
 from pipeline.maneuver_manager import ManeuverManager
 from pipeline.fallback_manager import TrajectoryFallbackManager
 from pipeline.candidate_evaluation import CandidateTrajectoryEvaluator
@@ -721,15 +721,19 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
             route_target_lane_id=540156,
         )
 
-        activated = bridge._start_post_turn_exit_reference(
-            ego_location=bridge.carla.Location(x=10.0, y=0.0),
-            ego_yaw_rad=0.0,
+        activated = bridge._stable_reference_line_provider.start_post_turn_exit(
+            local_map=bridge._local_map_snapshot,
+            ego_x_m=10.0, ego_y_m=0.0,
             current_lane_id=5960149,
             target_speed_mps=2.2,
+            horizon_steps=bridge.mpc.horizon_steps, dt_s=bridge.mpc.dt_s,
+            hold_arc_m=12.0, route_revision="route-1", map_epoch="town06",
         )
-        window, reason = bridge._post_turn_exit_reference_window(
-            ego_location=bridge.carla.Location(x=11.0, y=0.0),
+        window, reason = bridge._stable_reference_line_provider.post_turn_exit_window(
+            ego_x_m=11.0, ego_y_m=0.0,
             target_speed_mps=2.2,
+            horizon_steps=bridge.mpc.horizon_steps, dt_s=bridge.mpc.dt_s,
+            first_forward_m=0.0,
         )
 
         self.assertTrue(activated)
@@ -785,11 +789,13 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
             route_target_lane_id=540156,
         )
 
-        activated = bridge._start_post_turn_exit_reference(
-            ego_location=bridge.carla.Location(x=10.0, y=-34.0),
-            ego_yaw_rad=-math.pi / 2.0,
+        activated = bridge._stable_reference_line_provider.start_post_turn_exit(
+            local_map=bridge._local_map_snapshot,
+            ego_x_m=10.0, ego_y_m=-34.0,
             current_lane_id=5960149,
             target_speed_mps=2.2,
+            horizon_steps=bridge.mpc.horizon_steps, dt_s=bridge.mpc.dt_s,
+            hold_arc_m=12.0, route_revision="route-1", map_epoch="town06",
         )
 
         self.assertTrue(activated)
@@ -828,11 +834,13 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
             ]
         )
 
-        activated = bridge._start_post_turn_exit_reference(
-            ego_location=bridge.carla.Location(x=0.0, y=0.0),
-            ego_yaw_rad=0.0,
+        activated = bridge._stable_reference_line_provider.start_post_turn_exit(
+            local_map=LocalMapSnapshot(),
+            ego_x_m=0.0, ego_y_m=0.0,
             current_lane_id=5960149,
             target_speed_mps=2.2,
+            horizon_steps=bridge.mpc.horizon_steps, dt_s=bridge.mpc.dt_s,
+            hold_arc_m=12.0, route_revision="route-1", map_epoch="town06",
         )
 
         self.assertFalse(activated)
@@ -857,9 +865,11 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
             event="phase_transition",
         )
 
-        window, reason = bridge._post_turn_exit_reference_window(
-            ego_location=bridge.carla.Location(x=0.0, y=0.0),
+        window, reason = bridge._stable_reference_line_provider.post_turn_exit_window(
+            ego_x_m=0.0, ego_y_m=0.0,
             target_speed_mps=2.2,
+            horizon_steps=bridge.mpc.horizon_steps, dt_s=bridge.mpc.dt_s,
+            first_forward_m=0.0,
         )
 
         self.assertEqual(window, [])

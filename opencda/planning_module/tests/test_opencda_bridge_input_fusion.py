@@ -432,6 +432,7 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
             source="test",
         )
         bridge.maneuver_manager = ManeuverManager({})
+        bridge._stable_reference_line_provider = ReferenceLineProvider()
         bridge.maneuver_manager.resolve_post_turn_phase(
             decision="lane_follow",
             scenario_state="LANE_FOLLOW",

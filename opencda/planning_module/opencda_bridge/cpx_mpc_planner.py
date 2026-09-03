@@ -1342,7 +1342,9 @@ class CPXMPCPlannerBridge:
             maneuver_manager.reset(reason="destination_updated")
         self.maneuver_manager.clear_turn(reason="destination_updated")
         self._clear_turn_master_reference()
-        self._clear_post_turn_exit_reference()
+        self._stable_reference_line_provider.release(
+            POST_TURN, event="phase_transition"
+        )
 
     def set_external_global_plan(self, world_plan: Sequence[Any]) -> None:
         """Accept only mission endpoints; AD-map owns the route between them."""
@@ -5338,11 +5340,17 @@ class CPXMPCPlannerBridge:
             exit_aligned=bool(exit_aligned),
         )
         if str(post_turn_action) == "activate":
-            activated = self._start_post_turn_exit_reference(
-                ego_location=ego_location,
-                ego_yaw_rad=float(ego_yaw_rad),
+            activated = self._stable_reference_line_provider.start_post_turn_exit(
+                local_map=self._local_map_snapshot,
+                ego_x_m=float(ego_location.x),
+                ego_y_m=float(ego_location.y),
                 current_lane_id=int(current_lane_id),
                 target_speed_mps=float(planned_speed_mps),
+                horizon_steps=int(self.mpc.horizon_steps),
+                dt_s=float(self.mpc.dt_s),
+                hold_arc_m=float(hold_arc_m),
+                route_revision=str(self.route_manager.route_revision),
+                map_epoch=str(self.waypoint_backend or "admap"),
             )
             if bool(activated):
                 self._clear_turn_master_reference()
@@ -5353,12 +5361,22 @@ class CPXMPCPlannerBridge:
         post_turn_exit_active = bool(post_turn_snapshot.active)
         if bool(post_turn_exit_active):
             if str(post_turn_action) == "complete":
-                self._clear_post_turn_exit_reference()
+                self._stable_reference_line_provider.release(
+                    POST_TURN, event="phase_transition"
+                )
                 post_turn_exit_active = False
             else:
-                exit_reference, exit_reason = self._post_turn_exit_reference_window(
-                    ego_location=ego_location,
+                exit_reference, exit_reason = (
+                    self._stable_reference_line_provider.post_turn_exit_window(
+                    ego_x_m=float(ego_location.x),
+                    ego_y_m=float(ego_location.y),
                     target_speed_mps=float(planned_speed_mps),
+                    horizon_steps=int(self.mpc.horizon_steps),
+                    dt_s=float(self.mpc.dt_s),
+                    first_forward_m=float(self.config.get(
+                        "reference_contract_lane_follow_min_first_forward_m", 0.0
+                    )),
+                    )
                 )
                 if exit_reference:
                     from opencda.planning_module.behavior_planner.reference_pipeline import (
@@ -6747,141 +6765,6 @@ class CPXMPCPlannerBridge:
         provider = getattr(self, "_stable_reference_line_provider", None)
         if provider is not None:
             provider.release(TURN, event="reset")
-
-    def _start_post_turn_exit_reference(
-        self,
-        *,
-        ego_location: Any,
-        ego_yaw_rad: float,
-        current_lane_id: int,
-        target_speed_mps: float,
-    ) -> bool:
-        """Lock the immutable AD-map route centreline after a completed turn."""
-
-        step_distance_m = max(
-            0.25,
-            float(self.mpc.dt_s) * max(1.0, float(target_speed_mps)),
-        )
-        hold_arc_m = max(
-            step_distance_m,
-            float(self.config.get("post_turn_exit_reference_arc_m", 12.0)),
-        )
-        stable_provider = getattr(
-            self, "_stable_reference_line_provider", ReferenceLineProvider()
-        )
-        self._stable_reference_line_provider = stable_provider
-        required_arc_m = float(hold_arc_m) + max(
-            2.0,
-            0.5
-            * float(self.mpc.horizon_steps)
-            * float(self.mpc.dt_s)
-            * max(1.0, float(target_speed_mps)),
-        )
-        reference, reference_source = stable_provider.post_turn_master(
-            getattr(self, "_local_map_snapshot", LocalMapSnapshot()),
-            start_lane_id=int(current_lane_id),
-            target_speed_mps=float(target_speed_mps),
-            horizon_steps=int(self.mpc.horizon_steps),
-            required_arc_m=float(required_arc_m),
-        )
-        if not reference:
-            return False
-        terminal_lane_ids = [
-            int(sample.get("lane_id", 0) or 0)
-            for sample in reference
-            if int(sample.get("lane_id", 0) or 0) != 0
-        ]
-        target_lane_id = int(
-            terminal_lane_ids[-1] if terminal_lane_ids else current_lane_id
-        )
-        installed, _ = stable_provider.install(
-            POST_TURN,
-            reference,
-            route_revision=str(
-                getattr(getattr(self, "route_manager", None), "route_revision", "")
-            ),
-            map_epoch=str(getattr(self, "waypoint_backend", "admap") or "admap"),
-            event="phase_transition",
-            source_lane_id=int(current_lane_id),
-            target_lane_id=int(target_lane_id),
-            build_reason=str(reference_source),
-            ego_x_m=float(ego_location.x),
-            ego_y_m=float(ego_location.y),
-        )
-        return bool(installed)
-
-    def _post_turn_exit_reference_window(
-        self,
-        *,
-        ego_location: Any,
-        target_speed_mps: float,
-    ) -> tuple[list[dict[str, object]], str]:
-        """Return a monotonic rolling window over the locked exit centerline."""
-
-        stable_provider = getattr(
-            self, "_stable_reference_line_provider", ReferenceLineProvider()
-        )
-        self._stable_reference_line_provider = stable_provider
-        if not stable_provider.snapshot(POST_TURN).active:
-            return [], "post_turn_exit_reference_missing"
-        spacing_m = max(
-            0.25,
-            float(self.mpc.dt_s) * max(1.0, float(target_speed_mps)),
-        )
-        stable_window = stable_provider.window(
-            POST_TURN,
-            ego_x_m=float(ego_location.x),
-            ego_y_m=float(ego_location.y),
-            first_forward_m=float(
-                self.config.get("reference_contract_lane_follow_min_first_forward_m", 0.0)
-            ),
-            spacing_m=float(spacing_m),
-            count=int(self.mpc.horizon_steps),
-            max_projection_advance_m=max(2.0, 2.0 * float(spacing_m)),
-        )
-        post_turn_snapshot = stable_provider.snapshot(POST_TURN)
-        window = [dict(sample) for sample in stable_window.samples]
-        remaining_arc_m = 0.0
-        for first, second in zip(window[:-1], window[1:]):
-            first_x = float(first.get("x_ref_m", first.get("x", 0.0)))
-            first_y = float(first.get("y_ref_m", first.get("y", 0.0)))
-            second_x = float(second.get("x_ref_m", second.get("x", first_x)))
-            second_y = float(second.get("y_ref_m", second.get("y", first_y)))
-            remaining_arc_m += math.hypot(
-                float(second_x) - float(first_x),
-                float(second_y) - float(first_y),
-            )
-        minimum_remaining_arc_m = max(
-            1.5,
-            0.5
-            * float(self.mpc.horizon_steps)
-            * float(self.mpc.dt_s)
-            * max(1.0, float(target_speed_mps)),
-        )
-        if float(remaining_arc_m) + 1.0e-3 < float(minimum_remaining_arc_m):
-            self._clear_post_turn_exit_reference()
-            return (
-                [],
-                "post_turn_exit_reference_exhausted:"
-                f"remaining_arc_m={float(remaining_arc_m):.2f}:"
-                f"required_m={float(minimum_remaining_arc_m):.2f}",
-            )
-        for sample in window:
-            sample["speed_ref_mps"] = float(target_speed_mps)
-            sample["v_ref_mps"] = float(target_speed_mps)
-            sample["speed_mps"] = float(target_speed_mps)
-        return (
-            window,
-            "post_turn_exit_locked_window:"
-            f"s={float(post_turn_snapshot.progress_s_m):.2f}:"
-            f"travel={float(post_turn_snapshot.travelled_s_m):.2f}:"
-            f"provider={str(stable_window.reason)}",
-        )
-
-    def _clear_post_turn_exit_reference(self) -> None:
-        provider = getattr(self, "_stable_reference_line_provider", None)
-        if provider is not None:
-            provider.release(POST_TURN, event="phase_transition")
 
     @staticmethod
     def _normalized_final_lc_state(
