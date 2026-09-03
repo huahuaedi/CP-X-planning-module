@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 from types import MappingProxyType
-from typing import Any, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from .speed_planner import turn_approach_lookahead_m
 
@@ -103,6 +103,19 @@ class ScenarioStageResult:
         return dict(target) if isinstance(target, Mapping) else None
 
 
+@dataclass(frozen=True)
+class ScenarioObservationResult:
+    """One normalized traffic-control and turn observation for behavior."""
+
+    scenario: ScenarioStageResult
+    turn_context: Any
+    raw_traffic_state: str
+    resolved_traffic_state: str
+    filtered_traffic_state: str
+    stop_forward_m: float
+    stop_target_reliable: bool
+
+
 class CPXScenarioManager:
     """Manage traffic-light and intersection-turn scenario states."""
 
@@ -191,6 +204,64 @@ class CPXScenarioManager:
         self._turn_connector_seen = False
         self._boundary_recovery_stable_frames = 0
         self._turn_exit_stable_frames = 0
+
+    def observe_planning_context(
+        self, *, raw_traffic_state: str,
+        raw_stop_target: Optional[Mapping[str, object]],
+        signal_context: Mapping[str, object], traffic_memory: Any,
+        resolve_actor_state: Callable[..., tuple[str, str]],
+        project_stop_target: Callable[..., tuple[float, bool]],
+        prepare_turn_context: Callable[..., Any], sim_time_s: float,
+        ego_x_m: float, ego_y_m: float, ego_yaw_rad: float,
+        ego_speed_mps: float, current_lane_id: int, ego_in_junction: bool,
+        current_road_option: str, next_macro_maneuver: str,
+        virtual_stop_distance_m: float,
+        boundary_recovery_request: Any = None,
+    ) -> ScenarioObservationResult:
+        """Normalize raw traffic/route observations before updating the FSM."""
+
+        resolved_state, actor_reason = resolve_actor_state(
+            raw_state=str(raw_traffic_state), signal_context=signal_context,
+        )
+        filtered_state, filtered_target, memory_reason = traffic_memory.update(
+            state=str(resolved_state), stop_target=raw_stop_target,
+            sim_time_s=float(sim_time_s),
+        )
+        reasons = [str(reason) for reason in (actor_reason, memory_reason) if str(reason)]
+        filtered_target, latch_reason = traffic_memory.latch_stop_target(
+            traffic_state=str(filtered_state), stop_target=filtered_target,
+            ego_x_m=float(ego_x_m), ego_y_m=float(ego_y_m),
+            ego_yaw_rad=float(ego_yaw_rad), current_lane_id=int(current_lane_id),
+            virtual_stop_distance_m=float(virtual_stop_distance_m),
+        )
+        if str(latch_reason):
+            reasons.append(str(latch_reason))
+        stop_forward_m, stop_reliable = project_stop_target(
+            stop_target=filtered_target,
+        )
+        turn_context = prepare_turn_context()
+        scenario = self.update_planning_context(
+            raw_traffic_state=str(raw_traffic_state),
+            resolved_traffic_state=str(resolved_state),
+            filtered_traffic_state=str(filtered_state),
+            filtered_stop_target=filtered_target,
+            traffic_memory_reason=";".join(reasons),
+            signal_context=signal_context, stop_forward_m=float(stop_forward_m),
+            stop_target_reliable=bool(stop_reliable), ego_speed_mps=float(ego_speed_mps),
+            ego_in_junction=bool(ego_in_junction),
+            current_road_option=str(current_road_option),
+            next_macro_maneuver=str(next_macro_maneuver), sim_time_s=float(sim_time_s),
+            turn_context=turn_context,
+            boundary_recovery_request=boundary_recovery_request,
+        )
+        return ScenarioObservationResult(
+            scenario=scenario, turn_context=turn_context,
+            raw_traffic_state=str(raw_traffic_state),
+            resolved_traffic_state=str(resolved_state),
+            filtered_traffic_state=str(filtered_state),
+            stop_forward_m=float(stop_forward_m),
+            stop_target_reliable=bool(stop_reliable),
+        )
 
     def update_planning_context(
         self,

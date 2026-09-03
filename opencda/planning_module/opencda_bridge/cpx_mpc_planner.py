@@ -2985,71 +2985,49 @@ class CPXMPCPlannerBridge:
         raw_traffic_state = str(
             planner_input_frame.planning.traffic_control.signal_state
         )
-        resolved_traffic_state, signal_actor_resolution_reason = (
-            self._resolve_full_traffic_state_from_carla_actor(
-                raw_state=str(raw_traffic_state),
-                signal_context=signal_context,
-            )
-        )
         raw_stop_target = (
             planner_input_frame.planning.traffic_control.stop_target.as_dict()
             if planner_input_frame.planning.traffic_control.stop_target.active
             else None
         )
-        filtered_traffic_state, filtered_stop_target, full_traffic_memory_reason = (
-            self._full_traffic_memory.update(
-                state=str(resolved_traffic_state),
-                stop_target=raw_stop_target,
-                sim_time_s=float(sim_time_s),
-            )
-        )
-        if str(signal_actor_resolution_reason):
-            full_traffic_memory_reason = (
-                f"{signal_actor_resolution_reason};{full_traffic_memory_reason}"
-                if str(full_traffic_memory_reason)
-                else str(signal_actor_resolution_reason)
-            )
-        filtered_stop_target, stop_latch_reason = self._full_traffic_memory.latch_stop_target(
-            traffic_state=str(filtered_traffic_state),
-            stop_target=(
-                dict(filtered_stop_target)
-                if isinstance(filtered_stop_target, Mapping)
-                else None
+        scenario_observation = self.pipeline.observe_scenario(
+            raw_traffic_state=str(raw_traffic_state), raw_stop_target=raw_stop_target,
+            signal_context=signal_context, traffic_memory=self._full_traffic_memory,
+            resolve_actor_state=self._resolve_full_traffic_state_from_carla_actor,
+            project_stop_target=lambda *, stop_target: self.reference_generator.stop_target_forward(
+                ego_location=ego_location, ego_yaw_rad=float(ego_yaw_rad),
+                stop_target=(dict(stop_target) if isinstance(stop_target, Mapping) else None),
+                fallback_destination_state=[],
             ),
-            ego_x_m=float(ego_location.x),
-            ego_y_m=float(ego_location.y),
-            ego_yaw_rad=float(ego_yaw_rad),
-            current_lane_id=int(current_lane_id),
+            prepare_turn_context=lambda: self.pipeline.prepare_turn_scenario_context(
+                route_manager=self.route_manager, ego_x_m=float(ego_location.x),
+                ego_y_m=float(ego_location.y), ego_heading_rad=float(ego_yaw_rad),
+                cruise_speed_mps=float(self.target_speed_mps),
+                next_macro_maneuver=str(route_context.next_macro_maneuver),
+                next_macro_distance_m=float(route_context.next_macro_distance_m),
+                config=self.config,
+            ),
+            sim_time_s=float(sim_time_s), ego_x_m=float(ego_location.x),
+            ego_y_m=float(ego_location.y), ego_yaw_rad=float(ego_yaw_rad),
+            ego_speed_mps=float(ego_speed_mps), current_lane_id=int(current_lane_id),
+            ego_in_junction=bool(planner_input_frame.map_lane.in_junction),
+            current_road_option=str(route_context.current_road_option),
+            next_macro_maneuver=str(route_context.next_macro_maneuver),
             virtual_stop_distance_m=float(
                 self.config.get("full_latched_virtual_stop_distance_m", 12.0)
             ),
-        )
-        if str(stop_latch_reason):
-            full_traffic_memory_reason = (
-                f"{full_traffic_memory_reason};{stop_latch_reason}"
-                if str(full_traffic_memory_reason)
-                else str(stop_latch_reason)
-            )
-        traffic_stop_forward_m, traffic_stop_target_reliable = self.reference_generator.stop_target_forward(
-            ego_location=ego_location,
-            ego_yaw_rad=float(ego_yaw_rad),
-            stop_target=(
-                dict(filtered_stop_target)
-                if isinstance(filtered_stop_target, Mapping)
-                else None
+            boundary_recovery_request=(
+                getattr(self, "_boundary_recovery_request", None)
+                if bool(self.config.get("boundary_recovery_enabled", False)) else None
             ),
-            fallback_destination_state=[],
         )
-        turn_context = self.pipeline.prepare_turn_scenario_context(
-            route_manager=self.route_manager,
-            ego_x_m=float(ego_location.x),
-            ego_y_m=float(ego_location.y),
-            ego_heading_rad=float(ego_yaw_rad),
-            cruise_speed_mps=float(self.target_speed_mps),
-            next_macro_maneuver=str(route_context.next_macro_maneuver),
-            next_macro_distance_m=float(route_context.next_macro_distance_m),
-            config=self.config,
-        )
+        turn_context = scenario_observation.turn_context
+        scenario_result = scenario_observation.scenario
+        resolved_traffic_state = str(scenario_observation.resolved_traffic_state)
+        filtered_traffic_state = str(scenario_observation.filtered_traffic_state)
+        full_traffic_memory_reason = str(scenario_result.traffic_memory_reason)
+        traffic_stop_forward_m = float(scenario_observation.stop_forward_m)
+        traffic_stop_target_reliable = bool(scenario_observation.stop_target_reliable)
         upcoming_turn_direction = str(turn_context.direction)
         upcoming_turn_distance_m = float(turn_context.distance_m)
         upcoming_turn_reason = str(turn_context.reason)
@@ -3065,32 +3043,6 @@ class CPXMPCPlannerBridge:
         )
         turn_exit_alignment_valid = bool(turn_context.exit_alignment_valid)
         turn_exit_aligned = bool(turn_context.exit_aligned)
-        scenario_result = self.pipeline.resolve_scenario(
-            raw_traffic_state=str(raw_traffic_state),
-            resolved_traffic_state=str(resolved_traffic_state),
-            filtered_traffic_state=str(filtered_traffic_state),
-            filtered_stop_target=filtered_stop_target,
-            traffic_memory_reason=str(full_traffic_memory_reason),
-            signal_context=signal_context,
-            stop_forward_m=float(traffic_stop_forward_m),
-            stop_target_reliable=bool(traffic_stop_target_reliable),
-            ego_speed_mps=float(ego_speed_mps),
-            ego_in_junction=bool(planner_input_frame.map_lane.in_junction),
-            current_road_option=str(route_context.current_road_option),
-            next_macro_maneuver=str(route_context.next_macro_maneuver),
-            sim_time_s=float(sim_time_s),
-            turn_context=turn_context,
-            boundary_recovery_request=(
-                getattr(self, "_boundary_recovery_request", None)
-                if bool(
-                    self.config.get(
-                        "boundary_recovery_enabled",
-                        False,
-                    )
-                )
-                else None
-            ),
-        )
         scenario_decision = scenario_result.decision
         lateral_ownership = self.pipeline.resolve_lateral_ownership(
             authorization=lane_change_authorization,

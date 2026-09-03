@@ -194,6 +194,9 @@ class PlanningPipeline:
     def resolve_scenario(self, **kwargs):
         return self.scenario.update_planning_context(**kwargs)
 
+    def observe_scenario(self, **kwargs):
+        return self.scenario.observe_planning_context(**kwargs)
+
     def resolve_static_obstacle(self, **kwargs):
         return self.static_obstacle.evaluate(**kwargs)
 
