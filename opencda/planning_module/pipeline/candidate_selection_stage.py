@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
 from .candidate_evaluation import CandidateSelectionResult
-from .candidate_pipeline import summarize_candidate_results
+from .candidate_pipeline import build_candidate_intents, summarize_candidate_results
 from .reference_line_provider import LANE_CHANGE
 
 
@@ -59,6 +59,77 @@ class CandidateSelectionStage:
         self._strict_ownership = bool(strict_ownership)
         self._target_speed_mps = float(target_speed_mps)
         self._lane_change_lifecycle = None
+
+    def build_intents(
+        self, *, selected_decision: str, selected_target_lane_id: int,
+        current_lane_id: int, target_speed_mps: float,
+        candidate_lane_ids: Sequence[int], lane_safety_scores: Mapping[int, float],
+        lane_prediction_risks: Mapping[int, Mapping[str, object]],
+        stop_goal_active: bool, traffic_stop_active: bool,
+        lane_change_authorized: bool, lane_change_target_lane_id: int,
+        lane_change_authorization_source: str,
+        lane_change_authorization_direction: str,
+        local_obstacle_avoidance_active: bool, stop_target: Any,
+        ego_speed_mps: float, lane_width_m: float,
+        lane_change_available_distance_m: Any,
+    ) -> list[Any]:
+        """Construct the complete candidate set from one frozen behavior frame."""
+
+        cfg = self._config
+        return build_candidate_intents(
+            selected_decision=str(selected_decision),
+            selected_target_lane_id=int(selected_target_lane_id),
+            current_lane_id=int(current_lane_id),
+            target_speed_mps=float(target_speed_mps),
+            candidate_lane_ids=list(candidate_lane_ids),
+            lane_safety_scores=lane_safety_scores,
+            lane_prediction_risks=lane_prediction_risks,
+            stop_goal_active=bool(stop_goal_active),
+            traffic_stop_active=bool(traffic_stop_active),
+            lane_change_authorized=bool(lane_change_authorized),
+            lane_change_authorized_target_lane_id=int(lane_change_target_lane_id),
+            allow_lane_change_candidates=bool(lane_change_authorized),
+            stop_target=(dict(stop_target) if isinstance(stop_target, Mapping) else None),
+            lane_change_assertive_duration_s=max(
+                0.1, float(cfg.get("candidate_lane_change_assertive_duration_s", 3.2))
+            ),
+            lane_change_normal_duration_s=max(
+                0.1, float(cfg.get("candidate_lane_change_normal_duration_s", 4.0))
+            ),
+            lane_change_conservative_duration_s=max(
+                0.1, float(cfg.get("candidate_lane_change_conservative_duration_s", 5.5))
+            ),
+            lane_change_assertive_speed_scale=max(
+                0.1, float(cfg.get("candidate_lane_change_assertive_speed_scale", 1.0))
+            ),
+            lane_change_normal_speed_scale=max(
+                0.1, float(cfg.get("candidate_lane_change_normal_speed_scale", 0.9))
+            ),
+            lane_change_conservative_speed_scale=max(
+                0.1, float(cfg.get("candidate_lane_change_conservative_speed_scale", 0.7))
+            ),
+            lane_change_authorization_source=str(lane_change_authorization_source),
+            lane_change_authorization_direction=str(lane_change_authorization_direction),
+            lane_change_defer_cost=float(cfg.get("candidate_lane_change_defer_cost", 10.0)),
+            turn_obstacle_stop_defer_cost=float(
+                cfg.get("candidate_turn_obstacle_stop_defer_cost", 90.0)
+            ),
+            local_obstacle_avoidance_active=bool(local_obstacle_avoidance_active),
+            local_obstacle_stop_defer_cost=float(
+                cfg.get("candidate_local_obstacle_stop_defer_cost", 25.0)
+            ),
+            human_like_lane_change_enabled=bool(
+                cfg.get("human_like_lane_change_enabled", True)
+            ),
+            ego_speed_mps=float(ego_speed_mps), lane_width_m=float(lane_width_m),
+            lane_change_available_distance_m=lane_change_available_distance_m,
+            human_lane_change_min_duration_s=float(
+                cfg.get("human_lane_change_min_duration_s", 3.0)
+            ),
+            human_lane_change_max_duration_s=float(
+                cfg.get("human_lane_change_max_duration_s", 6.5)
+            ),
+        )
 
     def set_lane_change_lifecycle(self, lifecycle: Any) -> None:
         if self._lane_change_lifecycle is not None:

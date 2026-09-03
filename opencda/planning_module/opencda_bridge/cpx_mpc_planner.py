@@ -375,30 +375,6 @@ class CPXMPCPlannerBridge:
             mpc_probe_top_k=int(self.candidate_mpc_probe_top_k),
             mpc_probe_interval_s=float(self.candidate_mpc_probe_interval_s),
         )
-        self.candidate_lane_change_assertive_duration_s = max(
-            0.1,
-            float(self.config.get("candidate_lane_change_assertive_duration_s", 3.2)),
-        )
-        self.candidate_lane_change_normal_duration_s = max(
-            0.1,
-            float(self.config.get("candidate_lane_change_normal_duration_s", 4.0)),
-        )
-        self.candidate_lane_change_conservative_duration_s = max(
-            0.1,
-            float(self.config.get("candidate_lane_change_conservative_duration_s", 5.5)),
-        )
-        self.candidate_lane_change_assertive_speed_scale = max(
-            0.1,
-            float(self.config.get("candidate_lane_change_assertive_speed_scale", 1.0)),
-        )
-        self.candidate_lane_change_normal_speed_scale = max(
-            0.1,
-            float(self.config.get("candidate_lane_change_normal_speed_scale", 0.9)),
-        )
-        self.candidate_lane_change_conservative_speed_scale = max(
-            0.1,
-            float(self.config.get("candidate_lane_change_conservative_speed_scale", 0.7)),
-        )
         self.strict_decision_ownership_enabled = bool(
             self.config.get("strict_decision_ownership_enabled", True)
         )
@@ -2806,9 +2782,6 @@ class CPXMPCPlannerBridge:
         stop_goal_active: bool,
         cp_payload: Mapping[str, Any] | None = None,
     ):
-        from opencda.planning_module.pipeline.candidate_pipeline import (
-            build_candidate_intents,
-        )
         sim_time_s = self._sim_time_s()
         additional_speed_constraints = []
         adapter_output = self.input_adapter.build(
@@ -3046,9 +3019,9 @@ class CPXMPCPlannerBridge:
             owner_state=str(scenario_decision.state),
             ego_speed_mps=float(ego_speed_mps),
             planning_speed_mps=float(speed_ref_mps),
-            lane_change_duration_s=float(
-                self.candidate_lane_change_normal_duration_s
-            ),
+            lane_change_duration_s=max(0.1, float(
+                self.config.get("candidate_lane_change_normal_duration_s", 4.0)
+            )),
             dt_s=float(self.mpc.dt_s),
             lane_width_m=float(getattr(self.mpc, "lane_width_m", 3.5)),
             distance_to_turn_m=float(upcoming_turn_distance_m),
@@ -3551,7 +3524,7 @@ class CPXMPCPlannerBridge:
             candidate_lane_change_authorization_source = (
                 "route" if lane_change_authorized else "opportunistic"
             )
-            candidate_intents = build_candidate_intents(
+            candidate_intents = self.pipeline.build_candidate_intents(
                 selected_decision=str(decision),
                 selected_target_lane_id=int(target_lane_id),
                 current_lane_id=int(current_lane_id),
@@ -3562,36 +3535,13 @@ class CPXMPCPlannerBridge:
                 stop_goal_active=bool(stop_goal_active or scenario_decision.stop_goal_active),
                 traffic_stop_active=bool(traffic_stop_active),
                 lane_change_authorized=bool(candidate_lane_change_authorized),
-                lane_change_authorized_target_lane_id=int(
+                lane_change_target_lane_id=int(
                     candidate_lane_change_target_lane_id
-                ),
-                # Route-required and explicitly proposed opportunistic changes
-                # share one downstream candidate/reference/MPC gate.
-                allow_lane_change_candidates=bool(
-                    candidate_lane_change_authorized
                 ),
                 stop_target=(
                     dict(behavior_stop_target)
                     if isinstance(behavior_stop_target, Mapping)
                     else None
-                ),
-                lane_change_assertive_duration_s=float(
-                    self.candidate_lane_change_assertive_duration_s
-                ),
-                lane_change_normal_duration_s=float(
-                    self.candidate_lane_change_normal_duration_s
-                ),
-                lane_change_conservative_duration_s=float(
-                    self.candidate_lane_change_conservative_duration_s
-                ),
-                lane_change_assertive_speed_scale=float(
-                    self.candidate_lane_change_assertive_speed_scale
-                ),
-                lane_change_normal_speed_scale=float(
-                    self.candidate_lane_change_normal_speed_scale
-                ),
-                lane_change_conservative_speed_scale=float(
-                    self.candidate_lane_change_conservative_speed_scale
                 ),
                 lane_change_authorization_source=str(
                     candidate_lane_change_authorization_source
@@ -3603,22 +3553,8 @@ class CPXMPCPlannerBridge:
                     else "right" if str(decision) == "lane_change_right"
                     else ""
                 ),
-                lane_change_defer_cost=float(
-                    self.config.get("candidate_lane_change_defer_cost", 10.0)
-                ),
-                turn_obstacle_stop_defer_cost=float(
-                    self.config.get("candidate_turn_obstacle_stop_defer_cost", 90.0)
-                ),
                 local_obstacle_avoidance_active=bool(
                     static_obstacle_local_avoidance_active
-                ),
-                local_obstacle_stop_defer_cost=float(
-                    self.config.get(
-                        "candidate_local_obstacle_stop_defer_cost", 25.0
-                    )
-                ),
-                human_like_lane_change_enabled=bool(
-                    self.config.get("human_like_lane_change_enabled", True)
                 ),
                 ego_speed_mps=float(ego_speed_mps),
                 lane_width_m=float(getattr(self.mpc, "lane_width_m", 3.5)),
@@ -3626,12 +3562,6 @@ class CPXMPCPlannerBridge:
                     lane_change_authorization.distance_to_maneuver_m
                     if bool(candidate_lane_change_authorized)
                     else None
-                ),
-                human_lane_change_min_duration_s=float(
-                    self.config.get("human_lane_change_min_duration_s", 3.0)
-                ),
-                human_lane_change_max_duration_s=float(
-                    self.config.get("human_lane_change_max_duration_s", 6.5)
                 ),
             )
             (
