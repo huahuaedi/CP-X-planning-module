@@ -109,6 +109,36 @@ class OpportunisticLaneChangeRequest:
 
 
 @dataclass(frozen=True)
+class ConflictResolutionRequest:
+    """Frozen inputs to the lateral/cooperative arbitration seam."""
+
+    route_authorization: Any
+    opportunistic_request: OpportunisticLaneChangeRequest
+    owner_state: str
+    ego_speed_mps: float
+    planning_speed_mps: float
+    lane_change_duration_s: float
+    dt_s: float
+    lane_width_m: float
+    distance_to_turn_m: float
+    config: Mapping[str, object]
+    ego_location: Any
+    ego_yaw_rad: float
+
+
+@dataclass(frozen=True)
+class ConflictResolutionResult:
+    """One authoritative answer for all lane-change ownership conflicts."""
+
+    authorization: Any
+    lateral_ownership: LateralOwnershipResult
+    opportunistic_allowed: bool
+    lane_change_gate_reason: str
+    cooperative_yield_reason: str
+    cooperative_wait_speed_cap_mps: Optional[float]
+
+
+@dataclass(frozen=True)
 class BehaviorCandidateRequest:
     lane_safety_scores: Mapping[int, float]
     lane_prediction_risks: Mapping[int, Mapping[str, object]]
@@ -922,6 +952,77 @@ class BehaviorStage:
             handoff=handoff,
             geometry_arc_m=float(geometry_arc_m),
             operational_curvature_1pm=float(operational_curvature),
+        )
+
+    def resolve_conflicts(
+        self,
+        request: ConflictResolutionRequest,
+        *,
+        maneuver_manager: Any,
+        cooperative_yield_reason: Any,
+        cooperative_wait_speed_cap: Any,
+    ) -> ConflictResolutionResult:
+        """Resolve cooperative, opportunistic and lateral-owner conflicts.
+
+        This is the explicit seam where prediction/cooperation may constrain a
+        behavior proposal.  It returns policy data only; releasing reference
+        geometry remains the caller's lifecycle side effect.
+        """
+
+        authorization = request.route_authorization
+        yield_reason = (
+            str(cooperative_yield_reason(
+                request.ego_location, float(request.ego_yaw_rad)
+            ) or "")
+            if bool(authorization.allowed)
+            else ""
+        )
+        wait_cap = None
+        if yield_reason:
+            authorization = replace(
+                authorization, allowed=False, reason=str(yield_reason)
+            )
+            wait_cap = cooperative_wait_speed_cap(
+                request.ego_location,
+                float(request.ego_speed_mps),
+                str(yield_reason),
+            )
+            if wait_cap is not None:
+                wait_cap = float(wait_cap)
+
+        opportunistic = self.authorize_opportunistic_lane_change(
+            request.opportunistic_request
+        )
+        opportunistic_allowed = bool(opportunistic.allowed)
+        gate_reason = (
+            "" if opportunistic_allowed else str(opportunistic.reason)
+        )
+        ownership = self.resolve_lateral_ownership(
+            authorization=authorization,
+            maneuver_manager=maneuver_manager,
+            owner_state=str(request.owner_state),
+            ego_speed_mps=float(request.ego_speed_mps),
+            planning_speed_mps=float(request.planning_speed_mps),
+            lane_change_duration_s=float(request.lane_change_duration_s),
+            dt_s=float(request.dt_s),
+            lane_width_m=float(request.lane_width_m),
+            distance_to_turn_m=float(request.distance_to_turn_m),
+            config=request.config,
+        )
+        authorization = ownership.authorization
+        if str(authorization.reason).startswith("scenario_lateral_owner:"):
+            opportunistic_allowed = False
+            gate_reason = (
+                "opportunistic_lane_change_suppressed:"
+                + str(authorization.reason)
+            )
+        return ConflictResolutionResult(
+            authorization=authorization,
+            lateral_ownership=ownership,
+            opportunistic_allowed=bool(opportunistic_allowed),
+            lane_change_gate_reason=str(gate_reason),
+            cooperative_yield_reason=str(yield_reason),
+            cooperative_wait_speed_cap_mps=wait_cap,
         )
 
     @staticmethod

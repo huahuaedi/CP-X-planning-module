@@ -185,8 +185,8 @@ class PlanningPipeline:
     def resolve_route_lane_change(self, context, **kwargs):
         return self.behavior.resolve_route_lane_change(context, **kwargs)
 
-    def resolve_lateral_ownership(self, **kwargs):
-        return self.behavior.resolve_lateral_ownership(**kwargs)
+    def resolve_conflicts(self, request, **kwargs):
+        return self.behavior.resolve_conflicts(request, **kwargs)
 
     def prepare_route_lane_change(self, **kwargs):
         return self.behavior.prepare_route_lane_change(**kwargs)
@@ -205,9 +205,6 @@ class PlanningPipeline:
 
     def reset_route_lane_change_authorization(self):
         self.behavior.reset_route_lane_change_authorization()
-
-    def authorize_opportunistic_lane_change(self, request):
-        return self.behavior.authorize_opportunistic_lane_change(request)
 
     def evaluate_behavior_candidates(self, request):
         return self.behavior.evaluate_lane_candidates(request)

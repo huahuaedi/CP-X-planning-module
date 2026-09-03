@@ -5,6 +5,7 @@ from pipeline.behavior_stage import (
     BehaviorCandidateRequest,
     BehaviorOverrideRequest,
     BehaviorStage,
+    ConflictResolutionRequest,
     OpportunisticLaneChangeRequest,
     RouteLaneChangeRequest,
 )
@@ -436,6 +437,45 @@ def test_opportunistic_authorization_is_owned_by_behavior_stage():
     assert allowed.allowed
     assert not blocked.allowed
     assert blocked.reason == "opportunistic_lane_change_dense_traffic_lock"
+
+
+def test_conflict_resolution_exposes_cooperative_prediction_seam():
+    stage = BehaviorStage()
+    manager = ManeuverManager()
+    authorization = stage.authorize_route_lane_change(
+        _route_lane_change_request(), maneuver_manager=manager
+    )
+    opportunistic = OpportunisticLaneChangeRequest(
+        enabled=True, sim_time_s=10.0, start_lock_until_s=2.0,
+        dense_traffic_lock_enabled=False, object_count=1,
+        dense_object_count=5, lane_prediction_risks={},
+        dense_risky_lane_count=2,
+    )
+
+    result = stage.resolve_conflicts(
+        ConflictResolutionRequest(
+            route_authorization=authorization,
+            opportunistic_request=opportunistic,
+            owner_state="LANE_FOLLOW",
+            ego_speed_mps=8.0,
+            planning_speed_mps=8.0,
+            lane_change_duration_s=4.0,
+            dt_s=0.1,
+            lane_width_m=3.5,
+            distance_to_turn_m=100.0,
+            config={},
+            ego_location=SimpleNamespace(x=0.0, y=0.0),
+            ego_yaw_rad=0.0,
+        ),
+        maneuver_manager=manager,
+        cooperative_yield_reason=lambda _location, _yaw: "yield:peer=2",
+        cooperative_wait_speed_cap=lambda _location, _speed, _reason: 3.0,
+    )
+
+    assert not result.authorization.allowed
+    assert result.authorization.reason == "yield:peer=2"
+    assert result.cooperative_wait_speed_cap_mps == 3.0
+    assert result.opportunistic_allowed
 
 
 def test_behavior_stage_consumes_prediction_when_selecting_lane_candidate():

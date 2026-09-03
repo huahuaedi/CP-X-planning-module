@@ -23,7 +23,12 @@ from .candidate_pipeline import (
 )
 from .control_buffer import MPCControlBuffer
 from .behavior_decision import BehaviorConstraint, BehaviorDecision
-from .behavior_stage import BehaviorStage, BehaviorStageResult
+from .behavior_stage import (
+    BehaviorStage,
+    BehaviorStageResult,
+    ConflictResolutionRequest,
+    ConflictResolutionResult,
+)
 from .fallback_manager import (
     FailureReason,
     FallbackRequest,
@@ -116,6 +121,8 @@ from .tracker import CPXObstacleTracker
 __all__ = [
     "ActuatorCommand",
     "BehaviorMPCFeedback",
+    "ConflictResolutionRequest",
+    "ConflictResolutionResult",
     "MPCCommandExtractor",
     "MPCTrackingCommand",
     "MPCEntryStage",

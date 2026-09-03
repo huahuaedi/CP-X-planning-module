@@ -9,7 +9,6 @@ OpenCDA's behavior agent and PID controller when enabled.
 from __future__ import annotations
 
 import csv
-import dataclasses
 import json
 import math
 import os
@@ -81,6 +80,7 @@ from opencda.planning_module.pipeline.behavior_stage import (
     BehaviorCandidateRequest,
     BehaviorOverrideRequest,
     BehaviorStage,
+    ConflictResolutionRequest,
     OpportunisticLaneChangeRequest,
 )
 
@@ -2887,65 +2887,7 @@ class CPXMPCPlannerBridge:
                 ego_location=ego_location,
                 trigger_reason=str(lane_change_stage_result.replan_reason),
             )
-        cooperative_lane_change_yield_reason = (
-            self._cooperative_lane_change_yield_reason(
-                ego_location=ego_location,
-                ego_yaw_rad=float(ego_yaw_rad),
-            )
-            if bool(lane_change_authorization.allowed)
-            else ""
-        )
-        if cooperative_lane_change_yield_reason:
-            lane_change_authorization = dataclasses.replace(
-                lane_change_authorization,
-                allowed=False,
-                reason=cooperative_lane_change_yield_reason,
-            )
-            cooperative_wait_speed_cap_mps = self._cooperative_wait_speed_cap_mps(
-                ego_location=ego_location,
-                ego_speed_mps=float(ego_speed_mps),
-                cooperative_lane_change_yield_reason=(
-                    cooperative_lane_change_yield_reason
-                ),
-            )
-            if cooperative_wait_speed_cap_mps is not None:
-                additional_speed_constraints.append(
-                    SpeedConstraint(
-                        owner="cooperative_wait",
-                        maximum_mps=float(cooperative_wait_speed_cap_mps),
-                        reason=str(cooperative_lane_change_yield_reason),
-                    )
-                )
         route_lane_change_required = bool(lane_change_authorization.required_by_route)
-        lane_change_authorized = bool(lane_change_authorization.allowed)
-        opportunistic_authorization = (
-            self.pipeline.authorize_opportunistic_lane_change(
-                OpportunisticLaneChangeRequest(
-                    enabled=bool(self.full_allow_opportunistic_lane_change),
-                    sim_time_s=float(sim_time_s),
-                    start_lock_until_s=float(self.full_lane_change_start_lock_s),
-                    dense_traffic_lock_enabled=bool(
-                        self.full_dense_traffic_lane_change_lock_enabled
-                    ),
-                    object_count=len(list(object_snapshots or [])),
-                    dense_object_count=int(self.full_dense_traffic_object_count),
-                    lane_prediction_risks=dict(
-                        planner_input_frame.prediction.lane_prediction_risks
-                    ),
-                    dense_risky_lane_count=int(
-                        self.full_dense_traffic_risky_lane_count
-                    ),
-                )
-            )
-        )
-        opportunistic_lane_change_allowed = bool(
-            opportunistic_authorization.allowed
-        )
-        lane_change_gate_reason = (
-            ""
-            if bool(opportunistic_lane_change_allowed)
-            else str(opportunistic_authorization.reason)
-        )
         signal_context = dict(adapter_output.signal_context)
         source_quality = dict(adapter_output.source_quality)
         raw_traffic_state = str(
@@ -3010,22 +2952,69 @@ class CPXMPCPlannerBridge:
         turn_exit_alignment_valid = bool(turn_context.exit_alignment_valid)
         turn_exit_aligned = bool(turn_context.exit_aligned)
         scenario_decision = scenario_result.decision
-        lateral_ownership = self.pipeline.resolve_lateral_ownership(
-            authorization=lane_change_authorization,
+        conflict_resolution = self.pipeline.resolve_conflicts(
+            ConflictResolutionRequest(
+                route_authorization=lane_change_authorization,
+                opportunistic_request=OpportunisticLaneChangeRequest(
+                    enabled=bool(self.full_allow_opportunistic_lane_change),
+                    sim_time_s=float(sim_time_s),
+                    start_lock_until_s=float(self.full_lane_change_start_lock_s),
+                    dense_traffic_lock_enabled=bool(
+                        self.full_dense_traffic_lane_change_lock_enabled
+                    ),
+                    object_count=len(list(object_snapshots or [])),
+                    dense_object_count=int(self.full_dense_traffic_object_count),
+                    lane_prediction_risks=dict(
+                        planner_input_frame.prediction.lane_prediction_risks
+                    ),
+                    dense_risky_lane_count=int(
+                        self.full_dense_traffic_risky_lane_count
+                    ),
+                ),
+                owner_state=str(scenario_decision.state),
+                ego_speed_mps=float(ego_speed_mps),
+                planning_speed_mps=float(speed_ref_mps),
+                lane_change_duration_s=max(0.1, float(self.config.get(
+                    "candidate_lane_change_normal_duration_s", 4.0
+                ))),
+                dt_s=float(self.mpc.dt_s),
+                lane_width_m=float(getattr(self.mpc, "lane_width_m", 3.5)),
+                distance_to_turn_m=float(upcoming_turn_distance_m),
+                config=self.config,
+                ego_location=ego_location,
+                ego_yaw_rad=float(ego_yaw_rad),
+            ),
             maneuver_manager=self.maneuver_manager,
-            owner_state=str(scenario_decision.state),
-            ego_speed_mps=float(ego_speed_mps),
-            planning_speed_mps=float(speed_ref_mps),
-            lane_change_duration_s=max(0.1, float(
-                self.config.get("candidate_lane_change_normal_duration_s", 4.0)
-            )),
-            dt_s=float(self.mpc.dt_s),
-            lane_width_m=float(getattr(self.mpc, "lane_width_m", 3.5)),
-            distance_to_turn_m=float(upcoming_turn_distance_m),
-            config=self.config,
+            cooperative_yield_reason=lambda location, yaw: (
+                self._cooperative_lane_change_yield_reason(
+                    ego_location=location, ego_yaw_rad=float(yaw)
+                )
+            ),
+            cooperative_wait_speed_cap=lambda location, speed, reason: (
+                self._cooperative_wait_speed_cap_mps(
+                    ego_location=location,
+                    ego_speed_mps=float(speed),
+                    cooperative_lane_change_yield_reason=str(reason),
+                )
+            ),
         )
-        lane_change_authorization = lateral_ownership.authorization
+        lane_change_authorization = conflict_resolution.authorization
+        lateral_ownership = conflict_resolution.lateral_ownership
         lateral_handoff = lateral_ownership.handoff
+        opportunistic_lane_change_allowed = bool(
+            conflict_resolution.opportunistic_allowed
+        )
+        lane_change_gate_reason = str(
+            conflict_resolution.lane_change_gate_reason
+        )
+        if conflict_resolution.cooperative_wait_speed_cap_mps is not None:
+            additional_speed_constraints.append(SpeedConstraint(
+                owner="cooperative_wait",
+                maximum_mps=float(
+                    conflict_resolution.cooperative_wait_speed_cap_mps
+                ),
+                reason=str(conflict_resolution.cooperative_yield_reason),
+            ))
         if lateral_handoff.action == "release":
             self._stable_reference_line_provider.release(
                 LANE_CHANGE,
@@ -3037,14 +3026,6 @@ class CPXMPCPlannerBridge:
             if callable(reset_lane_change):
                 reset_lane_change(reason=str(lateral_handoff.reason))
         lane_change_authorized = bool(lane_change_authorization.allowed)
-        if str(lane_change_authorization.reason).startswith(
-            "scenario_lateral_owner:"
-        ):
-            opportunistic_lane_change_allowed = False
-            lane_change_gate_reason = (
-                "opportunistic_lane_change_suppressed:"
-                + str(lane_change_authorization.reason)
-            )
         behavior_traffic_state = str(scenario_result.behavior_traffic_state)
         behavior_stop_target = scenario_result.behavior_stop_target
         traffic_stop_commit_distance_m = float(
