@@ -67,6 +67,20 @@ class _FakeRouteManager:
         return self._edge_id
 
 
+class _FakeTurnRouteManager:
+    def __init__(self, turn, alignment):
+        self.turn = turn
+        self.alignment = alignment
+        self.lookahead_m = None
+
+    def upcoming_turn(self, **kwargs):
+        self.lookahead_m = float(kwargs["lookahead_m"])
+        return self.turn
+
+    def route_alignment(self, **kwargs):
+        return self.alignment
+
+
 def _prepare(**overrides):
     kwargs = dict(
         route_manager=_FakeRouteManager(
@@ -132,6 +146,75 @@ def test_prepare_route_lane_change_scales_trigger_windows_with_speed():
     assert slow.request.preparation_start_distance_m == 45.0
     assert fast.request.preparation_start_distance_m == 150.0
     assert fast.preparation_start_distance_m == fast.request.preparation_start_distance_m
+
+
+def test_turn_context_keeps_route_geometry_as_authoritative_source():
+    route = _FakeTurnRouteManager(
+        ("right", 18.0, "route_geometry_turn_ahead"),
+        (0.04, 0.2, "route_alignment"),
+    )
+
+    context = BehaviorStage.prepare_turn_scenario_context(
+        route_manager=route,
+        ego_x_m=1.0,
+        ego_y_m=2.0,
+        ego_heading_rad=0.1,
+        cruise_speed_mps=8.0,
+        next_macro_maneuver="Turn Left",
+        next_macro_distance_m=40.0,
+        config={},
+    )
+
+    assert context.direction == "right"
+    assert context.distance_m == 18.0
+    assert context.reason == "route_geometry_turn_ahead"
+    assert context.exit_alignment_valid
+    assert context.exit_aligned
+    assert route.lookahead_m is not None
+
+
+def test_turn_context_uses_route_macro_only_when_geometry_has_no_turn():
+    route = _FakeTurnRouteManager(
+        ("", float("inf"), "route_geometry_no_turn_in_lookahead"),
+        (float("nan"), float("nan"), "route_alignment_unavailable"),
+    )
+
+    context = BehaviorStage.prepare_turn_scenario_context(
+        route_manager=route,
+        ego_x_m=0.0,
+        ego_y_m=0.0,
+        ego_heading_rad=0.0,
+        cruise_speed_mps=8.0,
+        next_macro_maneuver="Turn Right",
+        next_macro_distance_m=27.0,
+        config={},
+    )
+
+    assert context.direction == "right"
+    assert context.distance_m == 27.0
+    assert context.reason == "admap_route_macro_direction_fallback"
+    assert not context.exit_alignment_valid
+    assert not context.exit_aligned
+
+
+def test_turn_context_marks_route_advance_to_lane_change():
+    route = _FakeTurnRouteManager(
+        ("", float("inf"), "route_geometry_no_turn_in_lookahead"),
+        (0.0, 0.0, "route_alignment"),
+    )
+
+    context = BehaviorStage.prepare_turn_scenario_context(
+        route_manager=route,
+        ego_x_m=0.0,
+        ego_y_m=0.0,
+        ego_heading_rad=0.0,
+        cruise_speed_mps=8.0,
+        next_macro_maneuver="lane-change-left",
+        next_macro_distance_m=12.0,
+        config={},
+    )
+
+    assert context.route_advanced_to_lane_change
 
 
 def test_behavior_stage_produces_typed_decision_and_separate_diagnostics():

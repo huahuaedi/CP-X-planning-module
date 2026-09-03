@@ -4114,10 +4114,6 @@ class CPXMPCPlannerBridge:
             lane_change_geometry_requirements,
             lane_change_operational_curvature_limit_1pm,
         )
-        from opencda.planning_module.pipeline.speed_planner import (
-            turn_approach_lookahead_m,
-        )
-
         sim_time_s = self._sim_time_s()
         additional_speed_constraints = []
         adapter_output = self.input_adapter.build(
@@ -4345,76 +4341,31 @@ class CPXMPCPlannerBridge:
             ),
             fallback_destination_state=[],
         )
-        (
-            upcoming_turn_direction,
-            upcoming_turn_distance_m,
-            upcoming_turn_reason,
-        ) = self.route_manager.upcoming_turn(
+        turn_context = self.pipeline.prepare_turn_scenario_context(
+            route_manager=self.route_manager,
             ego_x_m=float(ego_location.x),
             ego_y_m=float(ego_location.y),
             ego_heading_rad=float(ego_yaw_rad),
-            lookahead_m=float(
-                turn_approach_lookahead_m(
-                    cruise_speed_mps=float(self.target_speed_mps),
-                    config=dict(self.config),
-                )
-            ),
+            cruise_speed_mps=float(self.target_speed_mps),
+            next_macro_maneuver=str(route_context.next_macro_maneuver),
+            next_macro_distance_m=float(route_context.next_macro_distance_m),
+            config=self.config,
         )
-        route_macro_text = str(route_context.next_macro_maneuver or "").strip().lower()
-        route_macro_normalized = route_macro_text.replace("-", "_").replace(" ", "_")
-        route_advanced_to_lane_change = route_macro_normalized in {
-            "lane_change_left",
-            "lane_change_right",
-            "change_lane_left",
-            "change_lane_right",
-        }
-        route_macro_direction = (
-            "left" if "turn left" in route_macro_text
-            else "right" if "turn right" in route_macro_text
-            else ""
+        upcoming_turn_direction = str(turn_context.direction)
+        upcoming_turn_distance_m = float(turn_context.distance_m)
+        upcoming_turn_reason = str(turn_context.reason)
+        route_advanced_to_lane_change = bool(
+            turn_context.route_advanced_to_lane_change
         )
-        # L1: RouteGeometry.next_turn() is the authoritative turn source. The
-        # next-macro text is only a *fallback* for when the arc-length model
-        # does not (yet) see a junction turn in the lookahead -- it must not
-        # overwrite a geometry hit, which previously masked next_turn()
-        # entirely and made a route-geometry turn regression invisible.
-        if route_macro_direction and str(upcoming_turn_reason) != "route_geometry_turn_ahead":
-            upcoming_turn_direction = str(route_macro_direction)
-            upcoming_turn_distance_m = float(route_context.next_macro_distance_m)
-            upcoming_turn_reason = "admap_route_macro_direction_fallback"
-        (
-            turn_exit_heading_error_rad,
-            turn_exit_lateral_m,
-            turn_exit_alignment_reason,
-        ) = self.route_manager.route_alignment(
-            ego_x_m=float(ego_location.x),
-            ego_y_m=float(ego_location.y),
-            ego_heading_rad=float(ego_yaw_rad),
-            heading_lookahead_m=float(
-                self.config.get("scenario_turn_exit_heading_lookahead_m", 5.0)
-            ),
+        turn_exit_heading_error_rad = float(
+            turn_context.exit_heading_error_rad
         )
-        turn_exit_alignment_valid = bool(
-            math.isfinite(float(turn_exit_heading_error_rad))
-            and math.isfinite(float(turn_exit_lateral_m))
+        turn_exit_lateral_m = float(turn_context.exit_lateral_m)
+        turn_exit_alignment_reason = str(
+            turn_context.exit_alignment_reason
         )
-        turn_exit_aligned = bool(
-            turn_exit_alignment_valid
-            and abs(float(turn_exit_heading_error_rad))
-            <= float(
-                self.config.get(
-                    "scenario_turn_exit_max_heading_error_rad",
-                    0.15,
-                )
-            )
-            and float(turn_exit_lateral_m)
-            <= float(
-                self.config.get(
-                    "scenario_turn_exit_max_lateral_m",
-                    0.75,
-                )
-            )
-        )
+        turn_exit_alignment_valid = bool(turn_context.exit_alignment_valid)
+        turn_exit_aligned = bool(turn_context.exit_aligned)
         scenario_decision = self._scenario_manager.update(
             traffic_state=str(filtered_traffic_state),
             stop_target=(

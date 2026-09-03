@@ -71,6 +71,21 @@ class RouteLaneChangeStageResult:
 
 
 @dataclass(frozen=True)
+class TurnScenarioContext:
+    """Route-derived turn facts consumed by ScenarioManager."""
+
+    direction: str
+    distance_m: float
+    reason: str
+    route_advanced_to_lane_change: bool
+    exit_heading_error_rad: float
+    exit_lateral_m: float
+    exit_alignment_reason: str
+    exit_alignment_valid: bool
+    exit_aligned: bool
+
+
+@dataclass(frozen=True)
 class OpportunisticLaneChangeRequest:
     enabled: bool
     sim_time_s: float
@@ -148,6 +163,82 @@ class BehaviorStage:
 
     def reset_route_lane_change_authorization(self) -> None:
         self._route_lane_change_latch.reset()
+
+    @staticmethod
+    def prepare_turn_scenario_context(
+        *,
+        route_manager: Any,
+        ego_x_m: float,
+        ego_y_m: float,
+        ego_heading_rad: float,
+        cruise_speed_mps: float,
+        next_macro_maneuver: str,
+        next_macro_distance_m: float,
+        config: Mapping[str, object],
+    ) -> TurnScenarioContext:
+        """Resolve one authoritative topology/geometry view of the next turn."""
+
+        from .speed_planner import turn_approach_lookahead_m
+
+        direction, distance_m, reason = route_manager.upcoming_turn(
+            ego_x_m=float(ego_x_m),
+            ego_y_m=float(ego_y_m),
+            ego_heading_rad=float(ego_heading_rad),
+            lookahead_m=float(turn_approach_lookahead_m(
+                cruise_speed_mps=float(cruise_speed_mps),
+                config=dict(config),
+            )),
+        )
+        macro_text = str(next_macro_maneuver or "").strip().lower()
+        normalized = macro_text.replace("-", "_").replace(" ", "_")
+        advanced_to_lane_change = normalized in {
+            "lane_change_left", "lane_change_right",
+            "change_lane_left", "change_lane_right",
+        }
+        macro_direction = (
+            "left" if "turn left" in macro_text
+            else "right" if "turn right" in macro_text
+            else ""
+        )
+        if macro_direction and str(reason) != "route_geometry_turn_ahead":
+            direction = macro_direction
+            distance_m = float(next_macro_distance_m)
+            reason = "admap_route_macro_direction_fallback"
+
+        heading_error, lateral_m, alignment_reason = (
+            route_manager.route_alignment(
+                ego_x_m=float(ego_x_m),
+                ego_y_m=float(ego_y_m),
+                ego_heading_rad=float(ego_heading_rad),
+                heading_lookahead_m=float(
+                    config.get("scenario_turn_exit_heading_lookahead_m", 5.0)
+                ),
+            )
+        )
+        valid = bool(
+            math.isfinite(float(heading_error))
+            and math.isfinite(float(lateral_m))
+        )
+        aligned = bool(
+            valid
+            and abs(float(heading_error)) <= float(
+                config.get("scenario_turn_exit_max_heading_error_rad", 0.15)
+            )
+            and float(lateral_m) <= float(
+                config.get("scenario_turn_exit_max_lateral_m", 0.75)
+            )
+        )
+        return TurnScenarioContext(
+            direction=str(direction),
+            distance_m=float(distance_m),
+            reason=str(reason),
+            route_advanced_to_lane_change=advanced_to_lane_change,
+            exit_heading_error_rad=float(heading_error),
+            exit_lateral_m=float(lateral_m),
+            exit_alignment_reason=str(alignment_reason),
+            exit_alignment_valid=valid,
+            exit_aligned=aligned,
+        )
 
     @staticmethod
     def prepare_route_lane_change(

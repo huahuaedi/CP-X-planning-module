@@ -81,6 +81,9 @@ class PlanningPipeline:
     def prepare_route_lane_change(self, **kwargs):
         return self.behavior.prepare_route_lane_change(**kwargs)
 
+    def prepare_turn_scenario_context(self, **kwargs):
+        return self.behavior.prepare_turn_scenario_context(**kwargs)
+
     def reset_route_lane_change_authorization(self):
         self.behavior.reset_route_lane_change_authorization()
 
