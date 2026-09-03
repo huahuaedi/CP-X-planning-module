@@ -958,6 +958,7 @@ class CPXMPCPlannerBridge:
             ReferencePipeline,
         )
         from opencda.planning_module.pipeline.safety_supervisor import SafetySupervisor
+        from opencda.planning_module.pipeline.runtime_input_stage import RuntimeInputStage
         from opencda.planning_module.pipeline.velocity_steering_adapter import (
             OpenCDAVelocitySteeringAdapter,
         )
@@ -972,6 +973,7 @@ class CPXMPCPlannerBridge:
         self.mpc = MPC(mpc_cfg=mpc_cfg, road_cfg=road_cfg)
         from opencda.planning_module.pipeline.actuator_mapper import CarlaActuatorMapper
         self.actuator_mapper = CarlaActuatorMapper(self.config)
+        self.runtime_input_stage = RuntimeInputStage(self.actuator_mapper)
         vehicle_curvature_margin = min(
             1.0,
             max(
@@ -1491,18 +1493,25 @@ class CPXMPCPlannerBridge:
         )
 
         latest_update = dict(getattr(self, "_latest_opencda_update", {}) or {})
-        sim_time_s = float(self._sim_time_s())
-        ego_transform = latest_update.get("ego_transform") or self.vehicle_manager.localizer.get_ego_pos()
-        ego_speed_kmh = float(
-            latest_update.get("ego_speed_kmh", self.vehicle_manager.localizer.get_ego_spd())
+        tick = self.runtime_input_stage.build(
+            timestamp_s=float(self._sim_time_s()),
+            ego_transform=(
+                latest_update.get("ego_transform")
+                or self.vehicle_manager.localizer.get_ego_pos()
+            ),
+            ego_speed_kmh=float(
+                latest_update.get(
+                    "ego_speed_kmh",
+                    self.vehicle_manager.localizer.get_ego_spd(),
+                )
+            ),
         )
-        ego_speed_mps = ego_speed_kmh / 3.6
-        measured_accel_mps2 = self.actuator_mapper.update_measurement(
-            speed_mps=float(ego_speed_mps),
-            timestamp_s=float(sim_time_s),
-        )
-        ego_location = ego_transform.location
-        ego_yaw_rad = math.radians(float(ego_transform.rotation.yaw))
+        sim_time_s = float(tick.timestamp_s)
+        ego_transform = tick.ego_transform
+        ego_location = tick.ego_location
+        ego_speed_mps = float(tick.ego_speed_mps)
+        ego_yaw_rad = float(tick.ego_yaw_rad)
+        measured_accel_mps2 = float(tick.measured_accel_mps2)
 
         self._clean_functional_test_dynamic_actors_once()
 
@@ -1586,12 +1595,7 @@ class CPXMPCPlannerBridge:
         # fallback owner after the vehicle is safe, not by overriding speed.
         stop_goal_active = bool(front_gap_at_emergency_threshold)
         requested_speed_mps = 0.0 if stop_goal_active else self.target_speed_mps
-        current_state = [
-            float(ego_location.x),
-            float(ego_location.y),
-            float(ego_speed_mps),
-            float(ego_yaw_rad),
-        ]
+        current_state = list(tick.current_state)
 
         behavior_debug: dict[str, Any] = {}
         reference_debug: dict[str, Any] = {}

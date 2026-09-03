@@ -76,6 +76,7 @@ from .reference_publication_stage import (
     ReferencePublicationStage,
     ReferencePublicationStageResult,
 )
+from .runtime_input_stage import RuntimeInputStage, RuntimeTickSnapshot
 from .traffic_light_memory import TrafficLightMemory
 from .stage_contracts import ManeuverCommitment
 from .route_authorization import (
@@ -165,6 +166,8 @@ __all__ = [
     "ReferencePipelineResult",
     "ReferencePublicationStage",
     "ReferencePublicationStageResult",
+    "RuntimeInputStage",
+    "RuntimeTickSnapshot",
     "ConditionedReference",
     "TrafficLightMemory",
     "ManeuverCommitment",
