@@ -59,7 +59,7 @@ class MPCExecutionStage:
         request: MPCExecutionRequest,
         *,
         normal_stop_control: Callable[[], Any],
-        safe_stop_control: Callable[[], Any],
+        safe_stop_control: Callable[[float], Any],
         emergency_stop_control: Callable[[], Any],
     ) -> MPCExecutionResult:
         context = request.control_context
@@ -180,10 +180,10 @@ class MPCExecutionStage:
             else:
                 control = (
                     emergency_stop_control()
-                    if hard_gate else safe_stop_control()
+                    if hard_gate else safe_stop_control(float(steering))
                 )
                 acceleration = float(request.current_acceleration_mps2)
-                steering = 0.0
+                steering = 0.0 if hard_gate else float(steering)
                 status = "candidate_hard_gate" if hard_gate else "bounded_safe_stop"
             return MPCExecutionResult(
                 float(acceleration), float(steering), control, str(status),
