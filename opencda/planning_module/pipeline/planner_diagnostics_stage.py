@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from typing import Any, Mapping
 
 from .local_map_snapshot import LocalMapSnapshot
@@ -11,6 +12,128 @@ from .reference_line_provider import LANE_FOLLOW
 
 class PlannerDiagnosticsStage:
     """Build diagnostics without participating in planning or control."""
+
+    @staticmethod
+    def build_reference_debug(owner: Any, context: Mapping[str, Any]) -> dict[str, Any]:
+        """Assemble the read-only behavior/reference trace for one frame."""
+
+        self = owner
+        c = context
+        debug = dict(c["built_reference"].diagnostics)
+        debug.update(c["planner_input_frame"].trace_fields())
+        topology = self.route_manager.route_topology_validation
+        debug.update({
+            "stage": debug.get("reference_pipeline_stage", ""),
+            "intent_mode": debug.get("reference_pipeline_intent_mode", ""),
+            "fallback_reason": str(c["built_reference"].fallback_reason),
+            "reference_source": "behavior_reference_pipeline",
+            "front_gap_actor_id": str(c["front_gap_actor_id"] or ""),
+            "front_gap_obstacle_speed_mps": (
+                "" if c["front_gap_obstacle_speed_mps"] is None
+                else float(c["front_gap_obstacle_speed_mps"])
+            ),
+            "front_gap_obstacle_lane_id": int(c["front_obstacle_lane_id"]),
+            "front_gap_obstacle_is_source_lane": bool(c["front_obstacle_is_source_lane"]),
+            "snapshot_repr_diag": str([
+                {k: v for k, v in dict(row).items() if k in (
+                    "track_id", "object_id", "vehicle_id", "actor_id", "id",
+                    "v", "speed_mps", "x", "y",
+                )}
+                for row in list(c["object_snapshots"] or ())
+            ]),
+            "route_reference_allowed": bool(c["route_reference_allowed"]),
+            "route_reference_gate_reason": str(c["route_reference_gate_reason"]),
+            "route_lane_change_allowed": bool(c["route_lane_change_allowed"]),
+            "opportunistic_lane_change_allowed": bool(c["opportunistic_lane_change_allowed"]),
+            "lane_change_gate_reason": str(c["lane_change_gate_reason"]),
+            "static_obstacle_local_avoidance_active": bool(
+                c["static_obstacle_local_avoidance_active"]
+            ),
+            "static_obstacle_local_target_lane_id": (
+                "" if c["static_obstacle_local_target_lane_id"] is None
+                else int(c["static_obstacle_local_target_lane_id"])
+            ),
+            "static_obstacle_candidate_since_s": float(
+                c["static_obstacle_result"].candidate_since_s
+            ),
+            "static_obstacle_global_replan_enabled": bool(self.config.get(
+                "static_obstacle_global_replan_enabled",
+                self.behavior_runtime_cfg.get("static_obstacle_global_replan_enabled", False),
+            )),
+            "route_lane_change_required": bool(c["route_lane_change_required"]),
+            "route_progress_s_m": float(self.route_manager.route_progress_s_m),
+            "route_progress_lane_index": int(self.route_manager.route_progress_lane_index),
+            "route_topology_valid": bool(topology.valid),
+            "route_topology_signature": " -> ".join(topology.signature),
+            "route_topology_errors": ";".join(topology.errors),
+            "route_topology_warnings": ";".join(topology.warnings),
+            "route_lane_change_edge_id": str(self.maneuver_manager.route_lane_change_edge_id),
+            "completed_route_lane_change_edge_id": str(
+                self.maneuver_manager.completed_route_lane_change_edge_id
+            ),
+            "route_lane_change_edge_completed": bool(
+                self.maneuver_manager.route_lane_change_edge_completed
+            ),
+            "route_geometry_lane_change_direction": str(
+                c["route_geometry_lane_change_direction"] or ""
+            ),
+            "route_geometry_lane_change_distance_m": float(
+                c["route_geometry_lane_change_distance_m"]
+            ),
+            "route_geometry_lane_change_reason": str(c["route_geometry_lane_change_reason"]),
+            "route_physical_target_lane_id": int(c["physical_route_target_lane_id"]),
+            "route_topology_target_lane_id": int(c["topology_route_target_lane_id"]),
+            "behavior_lane_lateral_error_m": float(c["behavior_lane_lateral_error_m"]),
+            "behavior_lane_heading_error_deg": math.degrees(
+                float(c["behavior_lane_heading_error_rad"])
+            ),
+            "behavior_lane_alignment_valid": bool(c["behavior_lane_alignment_valid"]),
+            "behavior_lane_change_completion_allowed": not bool(
+                self._stable_reference_line_provider.snapshot("lane_change").mutable_samples()
+            ),
+            **dict(c["lane_change_authorization"].as_debug_fields()),
+            "behavior_override_reason": str(c["behavior_override_reason"]),
+            "turn_latch_reason": "scenario_manager:" + str(c["scenario_decision"].reason),
+            "route_current_road_option": str(c["route_context"].current_road_option),
+            "route_next_macro_maneuver": str(c["route_context"].next_macro_maneuver),
+            "traffic_memory_reason": str(c["full_traffic_memory_reason"]),
+            "traffic_signal_raw_state": str(
+                c["planner_input_frame"].planning.traffic_control.signal_state
+            ),
+            "traffic_signal_resolved_state": str(c["resolved_traffic_state"]),
+            "traffic_signal_filtered_state": str(c["filtered_traffic_state"]),
+            "traffic_signal_behavior_state": str(c["behavior_traffic_state"]),
+            "traffic_stop_forward_m": float(c["traffic_stop_forward_m"]),
+            "traffic_stop_commit_distance_m": float(c["traffic_stop_commit_distance_m"]),
+            "traffic_stop_approach_reason": str(c["traffic_stop_approach_reason"]),
+            **dict(c["speed_plan"].as_debug_fields()),
+            "traffic_signal_state_raw": str(
+                c["planner_input_frame"].planning.traffic_control.signal_state
+            ),
+            "traffic_signal_state_filtered": str(c["filtered_traffic_state"]),
+            "candidate_evaluation_summary": str(c["candidate_frame"].summary()),
+            "candidate_selected_decision": str(c["candidate_frame"].selected.decision),
+            "candidate_selected_lane_id": int(c["candidate_frame"].selected.target_lane_id),
+            "candidate_selected_cost": float(c["candidate_frame"].selected.total_cost),
+            "mpc_feedback_summary": str(c["mpc_feedback"].get("summary", "")),
+            "mpc_feedback_blocked_lane_ids": json.dumps(
+                list(c["mpc_feedback"].get("blocked_lane_ids", []) or []), default=str,
+            ),
+            "prediction_trajectories": dict(
+                c["planner_input_frame"].prediction.obstacle_future_trajectories
+            ),
+        })
+        debug.update(c["scenario_decision"].as_debug_fields())
+        distance_m = float(c["upcoming_turn_distance_m"])
+        debug.update({
+            "route_upcoming_turn_direction": str(c["upcoming_turn_direction"]),
+            "route_upcoming_turn_distance_m": (
+                "" if not math.isfinite(distance_m) else distance_m
+            ),
+            "route_upcoming_turn_reason": str(c["upcoming_turn_reason"]),
+        })
+        debug.update(c["source_quality"])
+        return debug
 
     @staticmethod
     def build(owner: Any, context: Mapping[str, Any]) -> dict[str, Any]:

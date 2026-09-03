@@ -970,6 +970,37 @@ class BehaviorStage:
         fields.update(decision.as_debug_fields())
         return BehaviorStageResult(decision, MappingProxyType(fields))
 
+    def finalize_planning_frame(
+        self, *, maneuver: str, phase: str, source_lane_id: int,
+        target_lane_id: int, requested_speed_mps: float, stop_required: bool,
+        route_required: bool, traffic_signal_state: str,
+        boundary_recovery_active: bool,
+        stop_target: Optional[Mapping[str, object]], reason: str,
+        lane_safety_scores: Mapping[int, float], raw_signal_state: str,
+        resolved_signal_state: str, filtered_signal_state: str,
+        traffic_control_from_cp: bool, scenario_state: str,
+    ) -> BehaviorStageResult:
+        """Publish the one typed behavior value consumed downstream."""
+
+        return self.finalize(
+            maneuver=maneuver, phase=phase, source_lane_id=source_lane_id,
+            target_lane_id=target_lane_id,
+            requested_speed_mps=requested_speed_mps,
+            stop_required=stop_required, route_required=route_required,
+            traffic_signal_state=traffic_signal_state,
+            boundary_recovery_active=boundary_recovery_active,
+            stop_target=stop_target, reason=reason,
+            diagnostics={
+                "lane_safety_scores": dict(lane_safety_scores),
+                "traffic_signal_raw_state": str(raw_signal_state),
+                "traffic_signal_resolved_state": str(resolved_signal_state),
+                "traffic_signal_filtered_state": str(filtered_signal_state),
+                "traffic_signal_behavior_state": str(traffic_signal_state),
+                "traffic_control_from_cp": bool(traffic_control_from_cp),
+                "boundary_recovery_scenario_state": str(scenario_state),
+            },
+        )
+
     @staticmethod
     def destination_stop(result: BehaviorStageResult) -> BehaviorStageResult:
         decision = replace(

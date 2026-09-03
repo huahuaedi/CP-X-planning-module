@@ -3350,155 +3350,53 @@ class CPXMPCPlannerBridge:
         local_lane_center_reference = built_reference.mutable_samples()
         nominal_destination_state = built_reference.mutable_destination_state()
         nominal_freeze_count = int(built_reference.reference_freeze_count)
-        reference_debug = dict(built_reference.diagnostics)
-        reference_debug.update(planner_input_frame.trace_fields())
-        route_topology_validation = self.route_manager.route_topology_validation
-        reference_debug.update({
-            "stage": reference_debug.get("reference_pipeline_stage", ""),
-            "intent_mode": reference_debug.get("reference_pipeline_intent_mode", ""),
-            "fallback_reason": str(built_reference.fallback_reason),
-            "reference_source": "behavior_reference_pipeline",
-            "front_gap_actor_id": str(front_gap_actor_id or ""),
-            "front_gap_obstacle_speed_mps": (
-                ""
-                if front_gap_obstacle_speed_mps is None
-                else float(front_gap_obstacle_speed_mps)
-            ),
-            "front_gap_obstacle_lane_id": int(front_obstacle_lane_id),
-            "front_gap_obstacle_is_source_lane": bool(
-                front_obstacle_is_source_lane
-            ),
-            "snapshot_repr_diag": str(
-                [
-                    {
-                        k: v
-                        for k, v in dict(snap).items()
-                        if k in (
-                            "track_id", "object_id", "vehicle_id",
-                            "actor_id", "id", "v", "speed_mps", "x", "y",
-                        )
-                    }
-                    for snap in list(object_snapshots or [])
-                ]
-            ),
-            "route_reference_allowed": bool(route_reference_allowed),
-            "route_reference_gate_reason": str(route_reference_gate_reason),
-            "route_lane_change_allowed": bool(route_lane_change_allowed),
-            "opportunistic_lane_change_allowed": bool(opportunistic_lane_change_allowed),
-            "lane_change_gate_reason": str(lane_change_gate_reason),
-            "static_obstacle_local_avoidance_active": bool(
-                static_obstacle_local_avoidance_active
-            ),
-            "static_obstacle_local_target_lane_id": (
-                ""
-                if static_obstacle_local_target_lane_id is None
-                else int(static_obstacle_local_target_lane_id)
-            ),
-            "static_obstacle_candidate_since_s": float(
-                static_obstacle_result.candidate_since_s
-            ),
-            "static_obstacle_global_replan_enabled": bool(
-                self.config.get(
-                    "static_obstacle_global_replan_enabled",
-                    self.behavior_runtime_cfg.get(
-                        "static_obstacle_global_replan_enabled", False
-                    ),
-                )
-            ),
-            "route_lane_change_required": bool(route_lane_change_required),
-            "route_progress_s_m": float(self.route_manager.route_progress_s_m),
-            "route_progress_lane_index": int(
-                self.route_manager.route_progress_lane_index
-            ),
-            "route_topology_valid": bool(route_topology_validation.valid),
-            "route_topology_signature": " -> ".join(
-                route_topology_validation.signature
-            ),
-            "route_topology_errors": ";".join(route_topology_validation.errors),
-            "route_topology_warnings": ";".join(route_topology_validation.warnings),
-            "route_lane_change_edge_id": str(
-                self.maneuver_manager.route_lane_change_edge_id
-            ),
-            "completed_route_lane_change_edge_id": str(
-                self.maneuver_manager.completed_route_lane_change_edge_id
-            ),
-            "route_lane_change_edge_completed": bool(
-                self.maneuver_manager.route_lane_change_edge_completed
-            ),
-            "route_geometry_lane_change_direction": str(
-                route_geometry_lane_change_direction or ""
-            ),
-            "route_geometry_lane_change_distance_m": float(
-                route_geometry_lane_change_distance_m
-            ),
-            "route_geometry_lane_change_reason": str(
-                route_geometry_lane_change_reason
-            ),
-            "route_physical_target_lane_id": int(
-                physical_route_target_lane_id
-            ),
-            "route_topology_target_lane_id": int(
-                topology_route_target_lane_id
-            ),
-            "behavior_lane_lateral_error_m": float(
-                behavior_lane_lateral_error_m
-            ),
-            "behavior_lane_heading_error_deg": math.degrees(
-                float(behavior_lane_heading_error_rad)
-            ),
-            "behavior_lane_alignment_valid": bool(
-                behavior_lane_alignment_valid
-            ),
-            "behavior_lane_change_completion_allowed": not bool(
-                self._stable_reference_line_provider.snapshot(LANE_CHANGE).mutable_samples()
-            ),
-            **dict(lane_change_authorization.as_debug_fields()),
-            "behavior_override_reason": str(behavior_override_reason),
-            # ScenarioManager is the sole turn-intent owner.  The former
-            # bridge-local turn_latch_reason variable was removed with that
-            # migration; expose the authoritative FSM reason instead.
-            "turn_latch_reason": "scenario_manager:" + str(
-                scenario_decision.reason
-            ),
-            "route_current_road_option": str(route_context.current_road_option),
-            "route_next_macro_maneuver": str(route_context.next_macro_maneuver),
-            "traffic_memory_reason": str(full_traffic_memory_reason),
-            "traffic_signal_raw_state": str(
-                planner_input_frame.planning.traffic_control.signal_state
-            ),
-            "traffic_signal_resolved_state": str(resolved_traffic_state),
-            "traffic_signal_filtered_state": str(filtered_traffic_state),
-            "traffic_signal_behavior_state": str(behavior_traffic_state),
-            "traffic_stop_forward_m": float(traffic_stop_forward_m),
-            "traffic_stop_commit_distance_m": float(traffic_stop_commit_distance_m),
-            "traffic_stop_approach_reason": str(traffic_stop_approach_reason),
-            **dict(speed_plan.as_debug_fields()),
-            "traffic_signal_state_raw": str(planner_input_frame.planning.traffic_control.signal_state),
-            "traffic_signal_state_filtered": str(filtered_traffic_state),
-            "candidate_evaluation_summary": str(candidate_frame.summary()),
-            "candidate_selected_decision": str(candidate_frame.selected.decision),
-            "candidate_selected_lane_id": int(candidate_frame.selected.target_lane_id),
-            "candidate_selected_cost": float(candidate_frame.selected.total_cost),
-            "mpc_feedback_summary": str(mpc_feedback.get("summary", "")),
-            "mpc_feedback_blocked_lane_ids": json.dumps(
-                list(mpc_feedback.get("blocked_lane_ids", []) or []),
-                default=str,
-            ),
-            "prediction_trajectories": dict(
-                planner_input_frame.prediction.obstacle_future_trajectories
-            ),
+        from opencda.planning_module.pipeline.planner_diagnostics_stage import (
+            PlannerDiagnosticsStage,
+        )
+        reference_debug = PlannerDiagnosticsStage.build_reference_debug(self, {
+            "built_reference": built_reference,
+            "planner_input_frame": planner_input_frame,
+            "front_gap_actor_id": front_gap_actor_id,
+            "front_gap_obstacle_speed_mps": front_gap_obstacle_speed_mps,
+            "front_obstacle_lane_id": front_obstacle_lane_id,
+            "front_obstacle_is_source_lane": front_obstacle_is_source_lane,
+            "object_snapshots": object_snapshots,
+            "route_reference_allowed": route_reference_allowed,
+            "route_reference_gate_reason": route_reference_gate_reason,
+            "route_lane_change_allowed": route_lane_change_allowed,
+            "opportunistic_lane_change_allowed": opportunistic_lane_change_allowed,
+            "lane_change_gate_reason": lane_change_gate_reason,
+            "static_obstacle_local_avoidance_active": static_obstacle_local_avoidance_active,
+            "static_obstacle_local_target_lane_id": static_obstacle_local_target_lane_id,
+            "static_obstacle_result": static_obstacle_result,
+            "route_lane_change_required": route_lane_change_required,
+            "route_geometry_lane_change_direction": route_geometry_lane_change_direction,
+            "route_geometry_lane_change_distance_m": route_geometry_lane_change_distance_m,
+            "route_geometry_lane_change_reason": route_geometry_lane_change_reason,
+            "physical_route_target_lane_id": physical_route_target_lane_id,
+            "topology_route_target_lane_id": topology_route_target_lane_id,
+            "behavior_lane_lateral_error_m": behavior_lane_lateral_error_m,
+            "behavior_lane_heading_error_rad": behavior_lane_heading_error_rad,
+            "behavior_lane_alignment_valid": behavior_lane_alignment_valid,
+            "lane_change_authorization": lane_change_authorization,
+            "behavior_override_reason": behavior_override_reason,
+            "scenario_decision": scenario_decision,
+            "route_context": route_context,
+            "full_traffic_memory_reason": full_traffic_memory_reason,
+            "resolved_traffic_state": resolved_traffic_state,
+            "filtered_traffic_state": filtered_traffic_state,
+            "behavior_traffic_state": behavior_traffic_state,
+            "traffic_stop_forward_m": traffic_stop_forward_m,
+            "traffic_stop_commit_distance_m": traffic_stop_commit_distance_m,
+            "traffic_stop_approach_reason": traffic_stop_approach_reason,
+            "speed_plan": speed_plan,
+            "candidate_frame": candidate_frame,
+            "mpc_feedback": mpc_feedback,
+            "upcoming_turn_direction": upcoming_turn_direction,
+            "upcoming_turn_distance_m": upcoming_turn_distance_m,
+            "upcoming_turn_reason": upcoming_turn_reason,
+            "source_quality": source_quality,
         })
-        reference_debug.update(scenario_decision.as_debug_fields())
-        reference_debug.update({
-            "route_upcoming_turn_direction": str(upcoming_turn_direction),
-            "route_upcoming_turn_distance_m": (
-                ""
-                if not math.isfinite(float(upcoming_turn_distance_m))
-                else float(upcoming_turn_distance_m)
-            ),
-            "route_upcoming_turn_reason": str(upcoming_turn_reason),
-        })
-        reference_debug.update(source_quality)
         if bool(self.full_candidate_pipeline_enabled):
             traffic_stop_active = bool(scenario_decision.stop_goal_active)
             behavior_lane_change_proposed = str(decision) in {
@@ -3690,7 +3588,7 @@ class CPXMPCPlannerBridge:
         return (
             list(nominal_destination_state),
             list(local_lane_center_reference),
-            self.pipeline.finalize_behavior(
+            self.pipeline.finalize_behavior_frame(
                 maneuver=str(decision),
                 phase=str(lc_state),
                 source_lane_id=int(current_lane_id),
@@ -3706,19 +3604,16 @@ class CPXMPCPlannerBridge:
                     else None
                 ),
                 reason=str(behavior_override_reason),
-                diagnostics={
-                "lane_safety_scores": dict(lane_safety_scores),
-                "traffic_signal_raw_state": str(
+                lane_safety_scores=lane_safety_scores,
+                raw_signal_state=str(
                     planner_input_frame.planning.traffic_control.signal_state
                 ),
-                "traffic_signal_resolved_state": str(resolved_traffic_state),
-                "traffic_signal_filtered_state": str(filtered_traffic_state),
-                "traffic_signal_behavior_state": str(behavior_traffic_state),
-                "traffic_control_from_cp": bool(planner_input_frame.planning.traffic_control.from_cp),
-                "boundary_recovery_scenario_state": str(
-                    scenario_decision.state
+                resolved_signal_state=str(resolved_traffic_state),
+                filtered_signal_state=str(filtered_traffic_state),
+                traffic_control_from_cp=bool(
+                    planner_input_frame.planning.traffic_control.from_cp
                 ),
-                },
+                scenario_state=str(scenario_decision.state),
             ),
             reference_debug,
             speed_plan,

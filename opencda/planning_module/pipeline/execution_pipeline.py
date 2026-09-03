@@ -171,6 +171,9 @@ class PlanningPipeline:
     def finalize_behavior(self, **kwargs):
         return self.behavior.finalize(**kwargs)
 
+    def finalize_behavior_frame(self, **kwargs):
+        return self.behavior.finalize_planning_frame(**kwargs)
+
     def destination_stop_behavior(self, result):
         return self.behavior.destination_stop(result)
 
