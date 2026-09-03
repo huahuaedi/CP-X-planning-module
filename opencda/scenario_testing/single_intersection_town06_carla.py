@@ -170,7 +170,10 @@ def run_scenario(opt, scenario_params):
             EvaluationManager(scenario_manager.cav_world,
                               script_name='single_intersection_town06_carla',
                               current_time=scenario_params['current_time'])
-        if OpenCDADebugViewer.enabled_from_env() and single_cav_list:
+        viewer_enabled = bool(
+            scenario_params.get("debug_viewer", {}).get("enabled", False)
+        )
+        if OpenCDADebugViewer.enabled_from_env(viewer_enabled) and single_cav_list:
             debug_viewer = OpenCDADebugViewer(
                 world=scenario_manager.world,
                 carla_module=carla,

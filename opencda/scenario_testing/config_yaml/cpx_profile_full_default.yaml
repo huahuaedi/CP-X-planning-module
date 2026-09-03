@@ -21,6 +21,10 @@ description: |-
   OpenCDA's default `BehaviorAgent` instead -- omit `planner:` entirely for
   that CAV rather than copying this block).
 
+debug_viewer:
+  # One diagnostics owner: left top-down camera + right chase camera + HUD.
+  enabled: true
+
 vehicle_base:
   sensing:
     perception:
@@ -44,10 +48,10 @@ vehicle_base:
     enabled: true
     type: cpx_mpc
     mode: full_cpx_mpc
-    # CARLA diagnostic layer: global route (yellow), active reference
-    # (white), and MPC solution (green). This does not affect planning.
-    draw_world_debug: true
-    draw_world_debug_destination: true
+    # The two-camera viewer owns visualization. Disable CARLA emissive debug
+    # lines so route/reference colors do not bloom in either camera.
+    draw_world_debug: false
+    draw_world_debug_destination: false
     architecture_profile: unified_full_v2
     fallback_policy: emergency_stop
     safety_supervisor_enabled: true

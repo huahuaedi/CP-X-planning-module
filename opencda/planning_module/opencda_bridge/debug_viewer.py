@@ -101,8 +101,13 @@ class OpenCDADebugViewer:
         )
 
     @staticmethod
-    def enabled_from_env() -> bool:
-        return str(os.environ.get("OPENCDA_DEBUG_VIEW", "")).strip().lower() in {
+    def enabled_from_env(default: bool = False) -> bool:
+        """Return the explicit environment override or scenario default."""
+
+        raw_value = os.environ.get("OPENCDA_DEBUG_VIEW")
+        if raw_value is None:
+            return bool(default)
+        return str(raw_value).strip().lower() in {
             "1",
             "true",
             "yes",

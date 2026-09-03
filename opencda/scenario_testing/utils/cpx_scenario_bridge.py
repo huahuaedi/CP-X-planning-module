@@ -734,7 +734,10 @@ def run_legacy_scenario_port(
     )
 
     debug_viewer: Optional[OpenCDADebugViewer] = None
-    if OpenCDADebugViewer.enabled_from_env() and single_cav_list:
+    viewer_enabled = bool(
+        scenario_params.get("debug_viewer", {}).get("enabled", False)
+    )
+    if OpenCDADebugViewer.enabled_from_env(viewer_enabled) and single_cav_list:
         debug_viewer = OpenCDADebugViewer(
             world=world,
             carla_module=carla_module,

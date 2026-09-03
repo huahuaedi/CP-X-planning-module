@@ -90,7 +90,10 @@ def run_mature_scenario(opt, scenario_params, *, script_name):
             script_name=str(script_name),
             current_time=scenario_params["current_time"],
         )
-        if OpenCDADebugViewer.enabled_from_env() and single_cav_list:
+        viewer_enabled = bool(
+            scenario_params.get("debug_viewer", {}).get("enabled", False)
+        )
+        if OpenCDADebugViewer.enabled_from_env(viewer_enabled) and single_cav_list:
             debug_viewer = OpenCDADebugViewer(
                 world=scenario_manager.world,
                 carla_module=carla,
