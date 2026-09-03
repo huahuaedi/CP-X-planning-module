@@ -33,6 +33,20 @@ class PlanningCycle:
         return self.perception.local_objects
 
 
+@dataclass(frozen=True)
+class TrajectoryAdmission:
+    """Published reference together with its sole MPC admission decision."""
+
+    publication: Any
+    entry: Any
+    control_context: Any
+
+    def trace_fields(self) -> dict[str, object]:
+        fields = dict(self.publication.debug_fields)
+        fields.update(self.entry.trace_fields())
+        return fields
+
+
 class PlanningPipeline:
     """Own and sequence planning stages without owning OpenCDA runtime I/O."""
 
@@ -214,6 +228,52 @@ class PlanningPipeline:
 
     def publish_reference(self, **kwargs):
         return self.reference_publication.run(**kwargs)
+
+    def prepare_trajectory_execution(
+        self,
+        *,
+        publication_kwargs,
+        behavior,
+        stop_goal_active,
+        ego_speed_mps,
+        ego_x_m,
+        ego_y_m,
+        ego_yaw_rad,
+        mode_transition_reason,
+        front_gap_actor_id,
+        candidate_status,
+        candidate_name,
+        candidate_reason,
+    ) -> TrajectoryAdmission:
+        publication = self.reference_publication.run(**publication_kwargs)
+        entry = self.mpc_entry.evaluate(
+            candidate_status=candidate_status,
+            candidate_name=candidate_name,
+            candidate_reason=candidate_reason,
+            final_reference_accepted=bool(publication.gate.accepted),
+            final_reference_reason=str(publication.gate.reason),
+            behavior_decision=str(behavior.maneuver),
+            stop_goal_active=bool(stop_goal_active),
+            ego_speed_mps=float(ego_speed_mps),
+        )
+        control_context = self.mpc_entry.prepare_control_context(
+            behavior=behavior,
+            reference_source=str(
+                publication.debug_fields.get("reference_source", "")
+            ),
+            stop_goal_active=bool(stop_goal_active),
+            front_gap_actor_id=str(front_gap_actor_id),
+            reference_samples=publication.mutable_samples(),
+            ego_x_m=float(ego_x_m),
+            ego_y_m=float(ego_y_m),
+            ego_yaw_rad=float(ego_yaw_rad),
+            mode_transition_reason=str(mode_transition_reason),
+        )
+        return TrajectoryAdmission(
+            publication=publication,
+            entry=entry,
+            control_context=control_context,
+        )
 
     def evaluate_mpc_entry(self, **kwargs):
         return self.mpc_entry.evaluate(**kwargs)

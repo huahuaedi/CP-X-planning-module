@@ -159,3 +159,53 @@ def test_pipeline_is_the_only_fallback_stage_caller():
     assert pipeline.resolve_fallback(reason="failure") == "fallback"
     assert pipeline.bounded_safe_stop(reason="destination") == "safe-stop"
     assert [call[0] for call in calls] == ["record", "resolve", "stop"]
+
+
+def test_pipeline_owns_reference_publication_and_mpc_admission_sequence():
+    calls = []
+    publication = SimpleNamespace(
+        gate=SimpleNamespace(accepted=True, reason="accepted"),
+        debug_fields={"reference_source": "lane_follow"},
+        mutable_samples=lambda: [{"x_ref_m": 1.0, "y_ref_m": 0.0}],
+    )
+
+    class Publication:
+        def run(self, **kwargs):
+            calls.append(("publish", kwargs))
+            return publication
+
+    class Entry:
+        def evaluate(self, **kwargs):
+            calls.append(("entry", kwargs))
+            return SimpleNamespace(trace_fields=lambda: {"mpc_entry_allowed": True})
+
+        def prepare_control_context(self, **kwargs):
+            calls.append(("context", kwargs))
+            return "control-context"
+
+    pipeline = PlanningPipeline(
+        runtime_input=RuntimeInputStage(_Mapper()),
+        perception=PerceptionStage(), behavior=object(), scenario=object(),
+        static_obstacle=object(), control_safety=object(), speed=object(),
+        destination_speed=object(), reference_publication=Publication(),
+        mpc_entry=Entry(),
+    )
+    behavior = SimpleNamespace(maneuver="lane_follow")
+    result = pipeline.prepare_trajectory_execution(
+        publication_kwargs={"reference_samples": []},
+        behavior=behavior,
+        stop_goal_active=False,
+        ego_speed_mps=2.0,
+        ego_x_m=0.0,
+        ego_y_m=0.0,
+        ego_yaw_rad=0.0,
+        mode_transition_reason="",
+        front_gap_actor_id="",
+        candidate_status="feasible",
+        candidate_name="lane_follow",
+        candidate_reason="",
+    )
+    assert result.publication is publication
+    assert result.control_context == "control-context"
+    assert result.trace_fields()["mpc_entry_allowed"] is True
+    assert [call[0] for call in calls] == ["publish", "entry", "context"]

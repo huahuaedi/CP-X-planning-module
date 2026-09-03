@@ -1710,48 +1710,73 @@ class CPXMPCPlannerBridge:
             except Exception:
                 stop_target_forward_m_debug = ""
 
-        publication_result = self.pipeline.publish_reference(
-            destination_state=destination_state,
-            reference_samples=lane_center_reference,
-            current_state=current_state,
-            ego_location=ego_location,
-            ego_yaw_rad=float(ego_yaw_rad),
-            ego_speed_mps=float(ego_speed_mps),
-            target_speed_mps=float(speed_ref_mps),
+        mode_transition_guard_reason = self._apply_behavior_mode_transition_guard(
+            decision=str(behavior_decision.maneuver),
+            lc_state=str(behavior_decision.phase),
+            target_lane_id=int(behavior_decision.target_lane_id),
+            stop_goal_active=bool(mpc_stop_goal_active),
+        )
+        candidate_status = str(reference_debug.get(
+            "candidate_pipeline_selected_status", ""
+        ))
+        candidate_name = str(reference_debug.get(
+            "candidate_pipeline_selected", ""
+        ))
+        candidate_reason = str(reference_debug.get(
+            "candidate_pipeline_selected_reason", ""
+        ))
+        admission = self.pipeline.prepare_trajectory_execution(
+            publication_kwargs={
+                "destination_state": destination_state,
+                "reference_samples": lane_center_reference,
+                "current_state": current_state,
+                "ego_location": ego_location,
+                "ego_yaw_rad": float(ego_yaw_rad),
+                "ego_speed_mps": float(ego_speed_mps),
+                "target_speed_mps": float(speed_ref_mps),
+                "behavior": behavior_decision,
+                "stop_goal_active": bool(mpc_stop_goal_active),
+                "route_points": self._active_global_route_points(),
+                "local_map": self._local_map_snapshot,
+                "route_cursor": self.route_manager.route_cursor,
+                "route_revision": str(self.route_manager.route_revision),
+                "map_epoch": str(getattr(self, "waypoint_backend", "admap") or "admap"),
+                "reference_source": str(reference_debug.get(
+                    "reference_source", "planning_reference"
+                )),
+                "candidate_status": candidate_status,
+                "candidate_reason": candidate_reason,
+                "heading_error_rad": (
+                    math.radians(float(reference_debug["behavior_lane_heading_error_deg"]))
+                    if reference_debug.get("behavior_lane_heading_error_deg", "") != ""
+                    else float("nan")
+                ),
+            },
             behavior=behavior_decision,
             stop_goal_active=bool(mpc_stop_goal_active),
-            route_points=self._active_global_route_points(),
-            local_map=self._local_map_snapshot,
-            route_cursor=self.route_manager.route_cursor,
-            route_revision=str(self.route_manager.route_revision),
-            map_epoch=str(getattr(self, "waypoint_backend", "admap") or "admap"),
-            reference_source=str(
-                reference_debug.get("reference_source", "planning_reference")
-            ),
-            candidate_status=str(reference_debug.get(
-                "candidate_pipeline_selected_status", ""
-            )),
-            candidate_reason=str(reference_debug.get(
-                "candidate_pipeline_selected_reason", ""
-            )),
-            heading_error_rad=(
-                math.radians(float(reference_debug["behavior_lane_heading_error_deg"]))
-                if reference_debug.get("behavior_lane_heading_error_deg", "") != ""
-                else float("nan")
-            ),
+            ego_speed_mps=float(ego_speed_mps),
+            ego_x_m=float(ego_location.x),
+            ego_y_m=float(ego_location.y),
+            ego_yaw_rad=float(ego_yaw_rad),
+            mode_transition_reason=str(mode_transition_guard_reason),
+            front_gap_actor_id=str(reference_debug.get("front_gap_actor_id", "")),
+            candidate_status=candidate_status,
+            candidate_name=candidate_name,
+            candidate_reason=candidate_reason,
         )
+        publication_result = admission.publication
         destination_state = publication_result.mutable_destination()
         lane_center_reference = publication_result.mutable_samples()
         final_reference_gate = publication_result.gate
-        mpc_reference_stabilizer_reason = str(
-            publication_result.stabilizer_reason
-        )
-        reference_debug.update(publication_result.debug_fields)
+        mpc_reference_stabilizer_reason = str(publication_result.stabilizer_reason)
+        reference_debug.update(admission.trace_fields())
+        mpc_entry = admission.entry
+        candidate_hard_gate_reason = str(mpc_entry.hard_gate_reason)
+        stationary_traffic_stop_hold = bool(mpc_entry.stationary_stop_hold)
+        mpc_control_context = admission.control_context
         destination_forward_m, destination_lateral_m = self._body_frame_xy(
-            origin_x_m=float(ego_location.x),
-            origin_y_m=float(ego_location.y),
-            heading_rad=float(ego_yaw_rad),
-            target_x_m=float(destination_state[0]),
+            origin_x_m=float(ego_location.x), origin_y_m=float(ego_location.y),
+            heading_rad=float(ego_yaw_rad), target_x_m=float(destination_state[0]),
             target_y_m=float(destination_state[1]),
         )
         reference_first_forward_m = ""
@@ -1759,50 +1784,12 @@ class CPXMPCPlannerBridge:
         if lane_center_reference:
             first_reference = lane_center_reference[0]
             reference_first_forward_m, reference_first_lateral_m = self._body_frame_xy(
-                origin_x_m=float(ego_location.x),
-                origin_y_m=float(ego_location.y),
+                origin_x_m=float(ego_location.x), origin_y_m=float(ego_location.y),
                 heading_rad=float(ego_yaw_rad),
                 target_x_m=float(first_reference.get("x_ref_m", first_reference.get("x", ego_location.x))),
                 target_y_m=float(first_reference.get("y_ref_m", first_reference.get("y", ego_location.y))),
             )
-
         mpc_status = str(getattr(self.mpc, "_last_status", ""))
-        mode_transition_guard_reason = self._apply_behavior_mode_transition_guard(
-            decision=str(behavior_decision.maneuver),
-            lc_state=str(behavior_decision.phase),
-            target_lane_id=int(behavior_decision.target_lane_id),
-            stop_goal_active=bool(mpc_stop_goal_active),
-        )
-        mpc_entry = self.pipeline.evaluate_mpc_entry(
-            candidate_status=reference_debug.get(
-                "candidate_pipeline_selected_status", ""
-            ),
-            candidate_name=reference_debug.get(
-                "candidate_pipeline_selected", ""
-            ),
-            candidate_reason=reference_debug.get(
-                "candidate_pipeline_selected_reason", ""
-            ),
-            final_reference_accepted=bool(final_reference_gate.accepted),
-            final_reference_reason=str(final_reference_gate.reason),
-            behavior_decision=str(behavior_decision.maneuver),
-            stop_goal_active=bool(mpc_stop_goal_active),
-            ego_speed_mps=float(ego_speed_mps),
-        )
-        reference_debug.update(mpc_entry.trace_fields())
-        candidate_hard_gate_reason = str(mpc_entry.hard_gate_reason)
-        stationary_traffic_stop_hold = bool(mpc_entry.stationary_stop_hold)
-        mpc_control_context = self.pipeline.prepare_mpc_control_context(
-            behavior=behavior_decision,
-            reference_source=str(reference_debug.get("reference_source", "")),
-            stop_goal_active=bool(mpc_stop_goal_active),
-            front_gap_actor_id=str(reference_debug.get("front_gap_actor_id", "")),
-            reference_samples=lane_center_reference,
-            ego_x_m=float(ego_location.x),
-            ego_y_m=float(ego_location.y),
-            ego_yaw_rad=float(ego_yaw_rad),
-            mode_transition_reason=str(mode_transition_guard_reason),
-        )
         # MPC constrains jerk between the previous control input and the new
         # acceleration sequence. Seed that constraint with the acceleration
         # command actually sent last tick, not the measured vehicle response.
