@@ -166,6 +166,22 @@ class BehaviorStageResult:
         return dict(self.diagnostics)
 
 
+@dataclass(frozen=True)
+class BehaviorCommandResult:
+    """BehaviorPlanner command plus the observations that produced it."""
+
+    decision: str
+    target_lane_id: int
+    phase: str
+    lane_alignment_valid: bool
+    lane_lateral_error_m: float
+    lane_heading_error_rad: float
+    traffic_control_stop_active: bool
+    static_obstacle_result: Any
+    opportunistic_lane_change_allowed: bool
+    preferred_target_lane_id: int
+
+
 class BehaviorStage:
     """Sole constructor and transition owner for BehaviorDecision."""
 
@@ -174,6 +190,143 @@ class BehaviorStage:
 
     def reset_route_lane_change_authorization(self) -> None:
         self._route_lane_change_latch.reset()
+
+    @staticmethod
+    def produce_command(
+        *, behavior_planner: Any, static_obstacle_stage: Any,
+        reference_map: Any, ego_pose: Any, ego_x_m: float, ego_y_m: float,
+        ego_yaw_rad: float, ego_speed_mps: float, max_deceleration_mps2: float,
+        current_lane_id: int, route_optimal_lane_id: int,
+        next_macro_maneuver: str, in_junction: bool, sim_time_s: float,
+        target_speed_mps: float, lane_safety_scores: Mapping[int, float],
+        lane_prediction_risks: Mapping[int, Mapping[str, object]],
+        front_distance_by_lane: Mapping[int, float], route_points: Sequence,
+        nearest_front_obstacles_by_lane: Mapping[int, Mapping[str, object]],
+        available_lane_ids: Sequence[int], behavior_traffic_state: str,
+        behavior_stop_target: Optional[Mapping[str, object]],
+        signal_context: Mapping[str, object], scenario_stop_required: bool,
+        preferred_target_lane_id: int, opportunistic_lane_change_allowed: bool,
+        lane_change_reference_active: bool, config: Mapping[str, object],
+        runtime_config: Mapping[str, object],
+        cooperative_yield: Any, attempt_replan: Any, object_track_id: Any,
+    ) -> BehaviorCommandResult:
+        """Produce one behavior command through the sole obstacle arbitration path."""
+
+        from opencda.planning_module.behavior_planner import (
+            compute_ego_lane_offset,
+            evaluate_intersection_obstacle_response,
+        )
+
+        try:
+            alignment = compute_ego_lane_offset(reference_map, ego_pose)
+        except Exception:
+            alignment = {
+                "lane_id": 0, "lateral_offset_m": float("inf"),
+                "heading_error_rad": float("inf"),
+            }
+        lateral_m = float(alignment.get("lateral_offset_m", float("inf")))
+        heading_rad = float(alignment.get("heading_error_rad", float("inf")))
+        alignment_valid = bool(
+            int(alignment.get("lane_id", 0) or 0) != 0
+            and math.isfinite(lateral_m) and math.isfinite(heading_rad)
+        )
+        if not alignment_valid:
+            lateral_m = heading_rad = float("inf")
+
+        front_obstacle = nearest_front_obstacles_by_lane.get(int(current_lane_id))
+        actual_mode = "INTERSECTION" if in_junction else "NORMAL"
+        evaluation_mode = str(actual_mode)
+        if evaluation_mode == "NORMAL" and bool(config.get(
+            "static_obstacle_replan_normal_mode_enabled",
+            runtime_config.get("static_obstacle_replan_normal_mode_enabled", True),
+        )):
+            evaluation_mode = "INTERSECTION"
+        response = evaluate_intersection_obstacle_response(
+            mode=evaluation_mode,
+            front_obstacle_speed_mps=(
+                None if front_obstacle is None else float(front_obstacle.get("v", 0.0))
+            ),
+            original_max_velocity_mps=float(target_speed_mps),
+            moving_obstacle_speed_threshold_mps=float(config.get(
+                "static_obstacle_speed_threshold_mps",
+                runtime_config.get("static_obstacle_speed_threshold_mps",
+                    runtime_config.get("intersection_obstacle_moving_speed_threshold_mps", 0.5)),
+            )),
+            route_lane_safety_score=float(lane_safety_scores.get(int(current_lane_id), 1.0)),
+            static_obstacle_replan_lane_safety_threshold=float(config.get(
+                "static_obstacle_replan_lane_safety_threshold",
+                runtime_config.get("static_obstacle_replan_lane_safety_threshold",
+                    runtime_config.get("intersection_static_obstacle_replan_lane_safety_threshold", 0.5)),
+            )),
+        )
+        traffic_stop = bool(
+            scenario_stop_required
+            or str(behavior_traffic_state).strip().lower() in {"red", "yellow", "stop"}
+        )
+        requested = bool(
+            config.get("static_obstacle_replan_enabled",
+                runtime_config.get("static_obstacle_replan_enabled", True))
+            and response.get("request_static_obstacle_replan", False)
+            and not traffic_stop
+        )
+        obstacle_result = static_obstacle_stage.evaluate(
+            requested=requested, traffic_control_stop_active=traffic_stop,
+            obstacle_id="" if front_obstacle is None else object_track_id(front_obstacle),
+            current_lane_id=int(current_lane_id),
+            lane_change_reference_active=bool(lane_change_reference_active),
+            sim_time_s=float(sim_time_s), normal_mode=actual_mode == "NORMAL",
+            available_lane_ids=tuple(available_lane_ids),
+            lane_safety_scores=lane_safety_scores,
+            lane_prediction_risks=lane_prediction_risks,
+            cooperative_yield=cooperative_yield,
+            attempt_replan=lambda: attempt_replan(dict(front_obstacle or {})),
+        )
+        local_avoidance = bool(obstacle_result.local_avoidance_active)
+        local_target = obstacle_result.target_lane_id
+        opportunistic_allowed = bool(opportunistic_lane_change_allowed or local_avoidance)
+        preferred_lane = int(local_target) if local_avoidance else int(preferred_target_lane_id)
+        command = behavior_planner.update(
+            static_obstacle_stop_active=bool(obstacle_result.stop_active),
+            lane_safety_scores=lane_safety_scores, ego_lane_id=int(current_lane_id),
+            selected_lane_id=int(current_lane_id), ego_lateral_offset_m=float(lateral_m),
+            ego_heading_error_rad=float(heading_rad), mode=actual_mode,
+            route_optimal_lane_id=int(route_optimal_lane_id),
+            next_macro_maneuver=str(next_macro_maneuver),
+            front_obstacle_distance_by_lane=front_distance_by_lane,
+            current_time_s=float(sim_time_s), wall_time_s=float(sim_time_s),
+            traffic_signal_state=str(behavior_traffic_state),
+            traffic_stop_target=(
+                dict(behavior_stop_target)
+                if isinstance(behavior_stop_target, Mapping) else None
+            ),
+            traffic_signal_context=dict(signal_context or {}),
+            ego_speed_mps=float(ego_speed_mps),
+            ego_max_deceleration_mps2=abs(float(max_deceleration_mps2)),
+            ego_in_junction=bool(in_junction),
+            ego_position_xy=(float(ego_x_m), float(ego_y_m)),
+            global_route_points=list(route_points or ()),
+            nearest_front_obstacles_by_lane=nearest_front_obstacles_by_lane,
+            lane_prediction_risks=lane_prediction_risks,
+            preferred_target_lane_id=int(preferred_lane),
+            local_avoidance_target_lane_id=(
+                int(local_target)
+                if local_avoidance and local_target is not None else None
+            ),
+            lane_change_completion_allowed=not bool(lane_change_reference_active),
+        )
+        decision = str(command.get("decision", "lane_follow"))
+        static_obstacle_stage.observe_behavior(decision, traffic_stop)
+        return BehaviorCommandResult(
+            decision=decision,
+            target_lane_id=int(command.get("target_lane_id", current_lane_id) or current_lane_id),
+            phase=str(command.get("lc_state", "LANE_KEEP")),
+            lane_alignment_valid=alignment_valid,
+            lane_lateral_error_m=float(lateral_m), lane_heading_error_rad=float(heading_rad),
+            traffic_control_stop_active=traffic_stop,
+            static_obstacle_result=obstacle_result,
+            opportunistic_lane_change_allowed=opportunistic_allowed,
+            preferred_target_lane_id=int(preferred_lane),
+        )
 
     @staticmethod
     def prepare_turn_scenario_context(
