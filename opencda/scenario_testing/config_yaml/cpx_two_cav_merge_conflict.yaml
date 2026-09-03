@@ -1,0 +1,68 @@
+base_config: single_intersection_town06_carla.yaml
+
+description: |-
+  Two CP-X CAVs on the Town06 southbound arterial (x ~= 6.31, y: 122 -> -60).
+  Both start in the same lane -- cav2 ~14 m ahead of cav1 -- and both have a
+  route-required lane change into the adjacent lane at x ~= 9.8. The leader
+  (cav2) triggers and commits its lane change first, so:
+    Stage B  -> cav2 role = proceed, cav1 role = make_gap
+    Stage C  -> cav1's corridor s_hi capped a RSS gap behind cav2's
+                projected station in the target lane
+    Stage D  -> that corridor becomes a linear QP row; cav1's MPC holds the
+                slot behind cav2 instead of both merging into the same spot.
+
+  Interaction goes CAV-to-CAV through v2x_manager.cav_nearby (each peer's
+  cpx_planner.maneuver_manager is read directly); no cav_intents broadcast
+  is needed. TM traffic and traffic-light response are off so the only
+  thing shaping the trajectories is the merge conflict.
+
+  Watch the two debug CSVs (debug_two_cav_merge_cav1/ , _cav2/):
+    cav_conflict_summary   e.g. "peer<id>=make_gap;corridor_feasible"
+    cav_corridor_binding   the peer id capping each stage
+
+carla_traffic_manager:
+  vehicle_list: []
+  range: ~
+
+vehicle_base:
+  behavior:
+    ignore_traffic_light: true
+  planner:
+    global_planner_mode: dij
+    global_planner_xodr_path: Global_Planner/maps/Town06.xodr
+    global_planner_strict: false
+    ignore_traffic_control: true
+    route_replan_enabled: false
+    # master switch: peer intents -> classify -> assign -> corridor -> QP row.
+    # Also flips MPC.corridor_constraint_enabled on at bridge construction.
+    cav_conflict_enabled: true
+
+scenario:
+  max_ticks: 4000
+  destination_tolerance_m: 3.0
+  single_cav_list:
+    - name: cav1
+      spawn_position: [6.31, 108.0, 0.3, 0, -92, 0]
+      destination: [9.8, -60.0, 0.3]
+      v2x:
+        enabled: true
+        communication_range: 80
+      behavior:
+        local_planner:
+          debug_trajectory: true
+          debug: true
+      planner:
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_two_cav_merge_cav1
+
+    - name: cav2
+      spawn_position: [6.31, 122.0, 0.3, 0, -92, 0]
+      destination: [9.8, -60.0, 0.3]
+      v2x:
+        enabled: true
+        communication_range: 80
+      behavior:
+        local_planner:
+          debug_trajectory: true
+          debug: true
+      planner:
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_two_cav_merge_cav2

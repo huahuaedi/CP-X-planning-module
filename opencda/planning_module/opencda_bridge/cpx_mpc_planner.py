@@ -861,6 +861,11 @@ class CPXMPCPlannerBridge:
 
         mpc_cfg, road_cfg = self._load_mpc_config()
         self.mpc = MPC(mpc_cfg=mpc_cfg, road_cfg=road_cfg)
+        if self._cav_conflict_enabled:
+            # One switch: cav_conflict_enabled also binds the Stage-C corridor
+            # in the QP (else it is computed but ignored). mpc.yaml's
+            # cost.corridor block still tunes w_slack / max_slack_m.
+            self.mpc.corridor_constraint_enabled = True
         from opencda.planning_module.pipeline.actuator_mapper import CarlaActuatorMapper
         from opencda.planning_module.opencda_bridge.platform_ports import (
             ActuatorPort,
@@ -3500,15 +3505,22 @@ class CPXMPCPlannerBridge:
         )
 
     def _collect_cav_peer_intents(self) -> list:
-        """Build PeerIntent list from OpenCDA's V2X manager (cav_intents +
-        cav_nearby), the same channel the cooperative-yield gate reads."""
+        """Build PeerIntent list for every nearby CP-X CAV.
+
+        OpenCDA's ``v2x_manager.cav_nearby`` maps peer id -> peer
+        VehicleManager (populated by v2x_manager.search()); ``cav_intents``
+        is never written in this codebase, so read the peer's own bridge
+        state directly through that graph: its maneuver-commitment (for the
+        ResourceClaim) and its live transform/velocity. Peers running
+        OpenCDA's BehaviorAgent (no ``cpx_planner``) are left to the
+        obstacle path -- not returned here.
+        """
 
         if not self._cav_conflict_enabled:
             return []
         v2x_manager = getattr(self.vehicle_manager, "v2x_manager", None)
-        cav_intents = dict(getattr(v2x_manager, "cav_intents", {}) or {})
         cav_nearby = dict(getattr(v2x_manager, "cav_nearby", {}) or {})
-        if not cav_intents or not cav_nearby:
+        if not cav_nearby:
             return []
         from opencda.planning_module.pipeline.cooperative_arbitration import (
             PeerIntent,
@@ -3516,16 +3528,14 @@ class CPXMPCPlannerBridge:
         )
 
         out: list = []
-        for peer_id, message in cav_intents.items():
-            if not isinstance(message, Mapping):
-                continue
+        for peer_id, peer_manager in cav_nearby.items():
             try:
-                actor_id = int(peer_id)
-            except (TypeError, ValueError):
+                actor_id = int(getattr(peer_manager.vehicle, "id", peer_id))
+            except (TypeError, ValueError, AttributeError):
                 continue
-            peer_manager = cav_nearby.get(str(peer_id))
+            peer_bridge = getattr(peer_manager, "cpx_planner", None)
             peer_vehicle = getattr(peer_manager, "vehicle", None)
-            if peer_vehicle is None:
+            if peer_bridge is None or peer_vehicle is None:
                 continue
             try:
                 tf = peer_vehicle.get_transform()
@@ -3533,24 +3543,23 @@ class CPXMPCPlannerBridge:
             except Exception:
                 continue
             speed = math.sqrt(vel.x ** 2 + vel.y ** 2 + vel.z ** 2)
-            decision = str(message.get("maneuver_commitment_decision", ""))
-            kind = (
-                "lane_change"
-                if decision.startswith("lane_change")
-                else "junction_entry"
-                if decision in ("intersection_turn_left", "intersection_turn_right")
-                else "lane_change"
+            peer_lc = getattr(
+                getattr(peer_bridge, "maneuver_manager", None), "lane_change", None
             )
+            committed_at_s = float(getattr(peer_lc, "committed_at_s", 0.0))
+            if not math.isfinite(committed_at_s):
+                committed_at_s = 0.0
+            active = bool(getattr(peer_lc, "active", False)) or str(
+                getattr(peer_lc, "phase", "")
+            ) in ("executing", "target_lane_stabilization")
             out.append(PeerIntent(
                 actor_id=actor_id,
                 position_xy=(float(tf.location.x), float(tf.location.y)),
                 claim=ResourceClaim(
-                    kind=kind,
-                    resource_id=kind,
-                    committed_at_s=float(
-                        message.get("maneuver_commitment_committed_at_s", 0.0) or 0.0
-                    ),
-                    active=bool(message.get("maneuver_commitment_active", False)),
+                    kind="lane_change",
+                    resource_id="lane_change",
+                    committed_at_s=float(committed_at_s),
+                    active=bool(active),
                 ),
                 heading_rad=math.radians(float(tf.rotation.yaw)),
                 speed_mps=float(speed),
@@ -3592,9 +3601,9 @@ class CPXMPCPlannerBridge:
         active = bool(getattr(lane_change, "active", False)) or str(
             getattr(lane_change, "phase", "")
         ) in ("executing", "target_lane_stabilization")
-        committed_at_s = float(
-            getattr(lane_change, "committed_at_s", 0.0) or 0.0
-        ) or float(sim_time_s)
+        committed_at_s = float(getattr(lane_change, "committed_at_s", 0.0))
+        if not math.isfinite(committed_at_s):
+            committed_at_s = float(sim_time_s)
         return ResourceClaim(
             kind="lane_change",
             resource_id="lane_change",
