@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Any, Mapping, Optional, Sequence
@@ -39,6 +40,25 @@ class RouteLaneChangeRequest:
     topology_target_in_local_frame: bool
     route_geometry_direction: str
     route_geometry_distance_m: Optional[float]
+
+
+@dataclass(frozen=True)
+class RouteLaneChangeContext:
+    """Topology-derived lane-change facts consumed by behavior planning."""
+
+    request: RouteLaneChangeRequest
+    topology_current_lane_id: int
+    topology_target_lane_id: int
+    topology_lane_offset: int
+    topology_target_in_local_frame: bool
+    physical_target_lane_id: int
+    physical_direction: str
+    physical_direction_reason: str
+    preparation_start_distance_m: float
+    geometry_direction: str
+    geometry_distance_m: float
+    geometry_reason: str
+    edge_id: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -119,6 +139,177 @@ class BehaviorStage:
 
     def reset_route_lane_change_authorization(self) -> None:
         self._route_lane_change_latch.reset()
+
+    @staticmethod
+    def prepare_route_lane_change(
+        *,
+        route_manager: Any,
+        local_map_snapshot: Any,
+        route_summary: Mapping[str, object],
+        current_lane_id: int,
+        route_optimal_lane_id: int,
+        route_found: bool,
+        next_macro_maneuver: str,
+        current_road_option: str,
+        next_macro_distance_m: float,
+        available_lane_ids: Sequence[int],
+        lane_safety_scores: Mapping[int, float],
+        lane_prediction_risks: Mapping[int, Mapping[str, object]],
+        ego_x_m: float,
+        ego_y_m: float,
+        ego_heading_rad: float,
+        ego_speed_mps: float,
+        config: Mapping[str, object],
+    ) -> RouteLaneChangeContext:
+        """Interpret AD-map topology once and build the authorization request.
+
+        This is deliberately pure with respect to maneuver state.  The bridge
+        supplies one immutable map/route snapshot; BehaviorStage owns all
+        interpretation of lane direction, physical adjacency and trigger
+        windows.
+        """
+
+        frame_valid = int(getattr(local_map_snapshot, "frame_id", 0)) > 0
+        direction = str(route_summary.get("lane_change_direction", "") or "").strip().lower()
+        adjacent_directions = {}
+        if direction in {"left", "right"}:
+            adjacent_directions[int(route_optimal_lane_id)] = direction
+
+        topology_current = int(
+            getattr(local_map_snapshot, "ego_lane_id", 0)
+            if frame_valid
+            else route_summary.get("ad_current_lane_id", 0) or 0
+        )
+        topology_target = int(
+            getattr(local_map_snapshot, "route_target_lane_id", 0)
+            if frame_valid
+            else route_summary.get("ad_target_lane_id", 0) or 0
+        )
+        topology_offset = int(
+            getattr(local_map_snapshot, "route_target_offset", 0)
+            if frame_valid
+            else route_summary.get("lane_change_offset", 0) or 0
+        )
+        target_in_frame = bool(
+            getattr(local_map_snapshot, "route_target_in_frame", False)
+            if frame_valid
+            else route_summary.get("target_in_local_frame", False)
+        )
+        physical_target = topology_target
+        if frame_valid and topology_offset != 0:
+            physical_target = int(
+                local_map_snapshot.lane_at_ego_station(topology_offset) or 0
+            )
+            if physical_target == 0:
+                physical_target = topology_target
+        if target_in_frame and topology_offset != 0:
+            direction = "left" if topology_offset > 0 else "right"
+            adjacent_directions[int(route_optimal_lane_id)] = direction
+            adjacent_directions[int(physical_target)] = direction
+
+        preparation_m = max(
+            float(config.get("route_lane_change_preparation_start_distance_m", 45.0)),
+            float(ego_speed_mps)
+            * float(config.get("route_lane_change_preparation_time_margin_s", 15.0)),
+        )
+        latest_m = max(
+            float(config.get("route_lane_change_latest_start_distance_m", 12.0)),
+            float(ego_speed_mps)
+            * float(config.get("route_lane_change_latest_retry_time_margin_s", 9.0)),
+        )
+        explicit_start_m = max(
+            float(config.get("route_lane_change_min_trigger_distance_m", 8.0)),
+            float(ego_speed_mps)
+            * float(config.get("route_tracking_lane_change_duration_s", 4.0))
+            + float(config.get("route_lane_change_trigger_buffer_m", 3.0)),
+        )
+        geometry_direction, geometry_distance, geometry_reason = (
+            route_manager.upcoming_lane_change(
+                ego_x_m=float(ego_x_m),
+                ego_y_m=float(ego_y_m),
+                ego_heading_rad=float(ego_heading_rad),
+                lookahead_m=float(preparation_m),
+            )
+        )
+        edge_id = route_manager.upcoming_lane_change_edge_id(
+            lookahead_m=float(preparation_m)
+        )
+
+        # Maneuver naming follows the topology direction resolved so far, before
+        # the arc-length geometry model gets to override physical adjacency --
+        # this matches the ordering the bridge used inline.
+        maneuver = str(next_macro_maneuver)
+        normalized_maneuver = maneuver.strip().lower().replace("-", "_").replace(" ", "_")
+        if direction in {"left", "right"} and normalized_maneuver in {
+            "lane_change_left", "lane_change_right",
+            "change_lane_left", "change_lane_right",
+        }:
+            maneuver = "lane_change_" + direction
+
+        authorization_offset = topology_offset
+        normalized_geometry_direction = str(geometry_direction or "").strip().lower()
+        if normalized_geometry_direction in {"left", "right"} and frame_valid:
+            adjacent_offset = 1 if normalized_geometry_direction == "left" else -1
+            adjacent_lane_id = int(
+                local_map_snapshot.lane_at_ego_station(adjacent_offset) or 0
+            )
+            if adjacent_lane_id != 0:
+                physical_target = adjacent_lane_id
+                authorization_offset = adjacent_offset
+                direction = normalized_geometry_direction
+                adjacent_directions[adjacent_lane_id] = direction
+
+        request = RouteLaneChangeRequest(
+            route_lane_change_allowed=bool(route_found),
+            current_lane_id=int(current_lane_id),
+            route_required_lane_id=int(physical_target),
+            next_macro_maneuver=maneuver,
+            current_road_option=str(current_road_option),
+            remaining_distance_m=float(next_macro_distance_m),
+            available_lane_ids=tuple(available_lane_ids),
+            lane_safety_scores=dict(lane_safety_scores),
+            lane_prediction_risks=dict(lane_prediction_risks),
+            preparation_start_distance_m=float(preparation_m),
+            latest_start_distance_m=float(latest_m),
+            target_safety_threshold=float(config.get("route_lane_change_target_safety_threshold", 0.65)),
+            require_adjacent=bool(config.get("route_lane_change_require_adjacent", True)),
+            explicit_lane_change_start_distance_m=float(explicit_start_m),
+            adjacent_lane_directions=adjacent_directions,
+            topology_current_lane_id=int(topology_current),
+            topology_target_lane_id=int(physical_target),
+            topology_lane_offset=int(authorization_offset),
+            topology_target_in_local_frame=bool(target_in_frame),
+            route_geometry_direction=str(geometry_direction or ""),
+            route_geometry_distance_m=(
+                float(geometry_distance)
+                if geometry_distance is not None
+                and math.isfinite(float(geometry_distance))
+                else None
+            ),
+        )
+        return RouteLaneChangeContext(
+            request=request,
+            topology_current_lane_id=topology_current,
+            topology_target_lane_id=topology_target,
+            topology_lane_offset=topology_offset,
+            topology_target_in_local_frame=target_in_frame,
+            physical_target_lane_id=physical_target,
+            physical_direction=direction,
+            physical_direction_reason=(
+                "admap_topology_direction"
+                if direction in {"left", "right"}
+                else "admap_topology_direction_missing"
+            ),
+            preparation_start_distance_m=preparation_m,
+            geometry_direction=str(geometry_direction or ""),
+            geometry_distance_m=(
+                float(geometry_distance)
+                if geometry_distance is not None
+                else float("inf")
+            ),
+            geometry_reason=str(geometry_reason),
+            edge_id=(str(edge_id) if edge_id is not None else None),
+        )
 
     @staticmethod
     def authorize_opportunistic_lane_change(

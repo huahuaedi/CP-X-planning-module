@@ -11,6 +11,7 @@ from pipeline.reference_line_provider import (
     TURN,
     ReferenceLineProvider,
     ReferenceLineRequest,
+    TurnReferenceRequest,
 )
 
 
@@ -201,6 +202,71 @@ def test_provider_owns_boundary_recovery_conditioning_and_speed_tags():
     assert samples
     assert all(row["speed_ref_mps"] == pytest.approx(2.5) for row in samples)
     assert all(row["reference_mode"] == "boundary_recovery" for row in samples)
+
+
+def test_preturn_candidate_keeps_current_lane_outside_transition_arc():
+    provider = ReferenceLineProvider()
+    provider.preturn_lane_reference = lambda *_args, **_kwargs: (
+        _line(1.0)[:8], "current_lane"
+    )
+    request = TurnReferenceRequest(
+        local_map=SimpleNamespace(valid=True),
+        config={"lane_follow_to_turn_reference_transition_arc_m": 12.0},
+        horizon_steps=8,
+        dt_s=0.1,
+        ego_location=SimpleNamespace(x=0.0, y=0.0),
+        ego_yaw_rad=0.0,
+        current_state=[0.0, 0.0, 5.0, 0.0],
+        current_lane_id=10,
+        target_lane_id=20,
+        target_speed_mps=5.0,
+        destination_state=[8.0, 1.0, 5.0, 0.0, 10],
+        turn_direction="right",
+    )
+
+    result = provider.preturn_candidate(
+        request, upcoming_turn_distance_m=20.0, first_forward_m=0.5
+    )
+
+    assert result.samples[0]["y_ref_m"] == pytest.approx(1.0)
+    assert result.diagnostics["reference_source"] == (
+        "admap_current_lane_center_preturn"
+    )
+    assert "lane_follow_turn_geometry_hold_reason" not in result.diagnostics
+
+
+def test_preturn_candidate_locks_connector_and_preserves_speed_owner():
+    provider = ReferenceLineProvider()
+    provider.preturn_lane_reference = lambda *_args, **_kwargs: (
+        _line(1.0)[:8], "current_lane"
+    )
+    provider.turn_reference = lambda request: (
+        _line(-1.0)[:8], [8.0, -1.0, 2.2, 0.0, 20], "turn_locked"
+    )
+    request = TurnReferenceRequest(
+        local_map=SimpleNamespace(valid=True),
+        config={"lane_follow_to_turn_reference_transition_arc_m": 12.0},
+        horizon_steps=8,
+        dt_s=0.1,
+        ego_location=SimpleNamespace(x=0.0, y=0.0),
+        ego_yaw_rad=0.0,
+        current_state=[0.0, 0.0, 5.0, 0.0],
+        current_lane_id=10,
+        target_lane_id=20,
+        target_speed_mps=5.0,
+        destination_state=[8.0, 1.0, 5.0, 0.0, 10],
+        turn_direction="right",
+    )
+
+    result = provider.preturn_candidate(
+        request, upcoming_turn_distance_m=8.0, first_forward_m=0.5
+    )
+
+    assert result.diagnostics["reference_source"] == (
+        "admap_preturn_connector_transition"
+    )
+    assert all(row["speed_ref_mps"] == pytest.approx(5.0) for row in result.samples)
+    assert result.destination_state[2] == pytest.approx(5.0)
 
 
 def test_modes_do_not_overwrite_each_other():

@@ -1,3 +1,5 @@
+import math
+
 from pipeline.behavior_stage import (
     BehaviorCandidateRequest,
     BehaviorOverrideRequest,
@@ -34,6 +36,101 @@ def _route_lane_change_request(**overrides):
     )
     values.update(overrides)
     return RouteLaneChangeRequest(**values)
+
+
+class _FakeSnapshot:
+    def __init__(self, *, frame_id, ego_lane_id, target_lane_id, offset,
+                 in_frame, lane_by_offset):
+        self.frame_id = frame_id
+        self.ego_lane_id = ego_lane_id
+        self.route_target_lane_id = target_lane_id
+        self.route_target_offset = offset
+        self.route_target_in_frame = in_frame
+        self._lane_by_offset = dict(lane_by_offset)
+
+    def lane_at_ego_station(self, offset):
+        return self._lane_by_offset.get(int(offset), 0)
+
+
+class _FakeRouteManager:
+    def __init__(self, *, direction, distance_m, reason, edge_id):
+        self._result = (direction, distance_m, reason)
+        self._edge_id = edge_id
+        self.calls = []
+
+    def upcoming_lane_change(self, *, ego_x_m, ego_y_m, ego_heading_rad, lookahead_m):
+        self.calls.append(float(lookahead_m))
+        return self._result
+
+    def upcoming_lane_change_edge_id(self, *, lookahead_m):
+        return self._edge_id
+
+
+def _prepare(**overrides):
+    kwargs = dict(
+        route_manager=_FakeRouteManager(
+            direction="right", distance_m=18.0,
+            reason="route_geometry_lane_change_ahead", edge_id="edge-7",
+        ),
+        local_map_snapshot=_FakeSnapshot(
+            frame_id=5, ego_lane_id=100, target_lane_id=340154, offset=-1,
+            in_frame=True, lane_by_offset={-1: 340155},
+        ),
+        route_summary={"lane_change_direction": "right"},
+        current_lane_id=100,
+        route_optimal_lane_id=101,
+        route_found=True,
+        next_macro_maneuver="LANE-CHANGE-RIGHT",
+        current_road_option="LANEFOLLOW",
+        next_macro_distance_m=30.0,
+        available_lane_ids=(100, 340155),
+        lane_safety_scores={100: 1.0, 340155: 1.0},
+        lane_prediction_risks={},
+        ego_x_m=0.0,
+        ego_y_m=0.0,
+        ego_heading_rad=0.0,
+        ego_speed_mps=5.0,
+        config={},
+    )
+    kwargs.update(overrides)
+    return BehaviorStage.prepare_route_lane_change(**kwargs)
+
+
+def test_prepare_route_lane_change_resolves_physical_adjacent_target():
+    context = _prepare()
+
+    # Topology named a downstream AD segment; the physically adjacent corridor
+    # in the local frame wins.
+    assert context.topology_target_lane_id == 340154
+    assert context.physical_target_lane_id == 340155
+    assert context.request.route_required_lane_id == 340155
+    assert context.request.topology_target_lane_id == 340155
+    assert context.request.next_macro_maneuver == "lane_change_right"
+    assert context.request.route_geometry_distance_m == 18.0
+    assert context.geometry_direction == "right"
+    assert context.edge_id == "edge-7"
+
+
+def test_prepare_route_lane_change_drops_non_finite_geometry_distance():
+    context = _prepare(
+        route_manager=_FakeRouteManager(
+            direction="", distance_m=float("inf"),
+            reason="route_geometry_no_lane_change_in_lookahead", edge_id="",
+        ),
+    )
+
+    assert context.request.route_geometry_distance_m is None
+    assert math.isinf(context.geometry_distance_m)
+    assert context.request.next_macro_maneuver == "lane_change_right"
+
+
+def test_prepare_route_lane_change_scales_trigger_windows_with_speed():
+    slow = _prepare(ego_speed_mps=0.0)
+    fast = _prepare(ego_speed_mps=10.0)
+
+    assert slow.request.preparation_start_distance_m == 45.0
+    assert fast.request.preparation_start_distance_m == 150.0
+    assert fast.preparation_start_distance_m == fast.request.preparation_start_distance_m
 
 
 def test_behavior_stage_produces_typed_decision_and_separate_diagnostics():

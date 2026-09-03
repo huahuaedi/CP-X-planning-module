@@ -94,3 +94,33 @@ def test_pipeline_is_the_only_behavior_stage_caller():
     assert pipeline.finalize_behavior(maneuver="lane_follow") == "decision"
     pipeline.reset_route_lane_change_authorization()
     assert [call[0] for call in calls] == ["finalize", "reset"]
+
+
+def test_pipeline_is_the_only_fallback_stage_caller():
+    calls = []
+
+    class Fallback:
+        def record_valid(self, trajectory, **kwargs):
+            calls.append(("record", trajectory, kwargs))
+            return True
+
+        def resolve(self, **kwargs):
+            calls.append(("resolve", kwargs))
+            return "fallback"
+
+        def bounded_safe_stop(self, **kwargs):
+            calls.append(("stop", kwargs))
+            return "safe-stop"
+
+    pipeline = PlanningPipeline(
+        runtime_input=RuntimeInputStage(_Mapper()),
+        perception=PerceptionStage(),
+        behavior=object(), speed=object(), destination_speed=object(),
+        reference_publication=object(), mpc_entry=object(),
+        fallback=Fallback(),
+    )
+
+    assert pipeline.record_valid_trajectory([{"x": 1.0}], sim_time_s=1.0)
+    assert pipeline.resolve_fallback(reason="failure") == "fallback"
+    assert pipeline.bounded_safe_stop(reason="destination") == "safe-stop"
+    assert [call[0] for call in calls] == ["record", "resolve", "stop"]

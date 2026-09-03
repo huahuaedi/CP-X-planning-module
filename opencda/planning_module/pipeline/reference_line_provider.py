@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from types import MappingProxyType
 from typing import Any, Mapping, Optional, Sequence
@@ -120,6 +120,68 @@ class LaneChangeWindowResult:
         return [dict(sample) for sample in self.samples]
 
 
+@dataclass(frozen=True)
+class LaneChangeAlignment:
+    """Ego alignment to the immutable target-corridor completion geometry."""
+
+    available: bool
+    lateral_error_m: float
+    heading_error_rad: float
+    target_sample: Mapping[str, object]
+
+    def mutable_target_sample(self):
+        return dict(self.target_sample)
+
+
+@dataclass(frozen=True)
+class BehaviorReferenceResult:
+    """Provider-owned output of the legacy reference geometry builder."""
+
+    samples: tuple
+    destination_state: tuple
+    reference_freeze_count: int
+    diagnostics: Mapping[str, object]
+    fallback_reason: str
+
+    def mutable_samples(self):
+        return [dict(sample) for sample in self.samples]
+
+    def mutable_destination_state(self):
+        return list(self.destination_state)
+
+
+@dataclass(frozen=True)
+class TurnReferenceRequest:
+    local_map: Any
+    config: Mapping[str, object]
+    horizon_steps: int
+    dt_s: float
+    ego_location: Any
+    ego_yaw_rad: float
+    current_state: Sequence[float]
+    current_lane_id: int
+    target_lane_id: int
+    target_speed_mps: float
+    destination_state: Optional[Sequence[float]] = None
+    lock_master: bool = False
+    turn_direction: str = ""
+    route_revision: str = ""
+    map_epoch: str = "admap"
+
+
+@dataclass(frozen=True)
+class CandidateReferenceOverrideResult:
+    samples: tuple
+    destination_state: tuple
+    diagnostics: Mapping[str, object]
+
+    def mutable_samples(self):
+        return [dict(sample) for sample in self.samples]
+
+    def mutable_destination_state(self):
+        return list(self.destination_state)
+
+
 class ReferenceLineProvider(StableReferenceLineProvider):
     """Own immutable masters and monotonic windows for every planning mode.
 
@@ -145,6 +207,57 @@ class ReferenceLineProvider(StableReferenceLineProvider):
 
     def snapshot(self, mode: str) -> ReferenceLineSnapshot:
         return self._snapshots[self._normalize_mode(mode)]
+
+    def lane_change_completion_alignment(
+        self, *, reference_samples, ego_x_m, ego_y_m, ego_heading_rad
+    ) -> LaneChangeAlignment:
+        """Measure completion alignment without changing reference ownership."""
+
+        samples = [dict(sample) for sample in list(reference_samples or [])]
+        terminal = [
+            sample
+            for sample in samples
+            if float(sample.get("lane_change_progress", 0.0) or 0.0) >= 0.9
+        ]
+        # A target-corridor centerline is already completion geometry and
+        # intentionally carries no scheduled Frenet progress tag.
+        if not terminal:
+            terminal = samples
+        if not terminal:
+            return LaneChangeAlignment(
+                available=False,
+                lateral_error_m=float("inf"),
+                heading_error_rad=float("inf"),
+                target_sample=MappingProxyType({}),
+            )
+        target = min(
+            terminal,
+            key=lambda sample: (
+                float(sample.get("x_ref_m", sample.get("x", ego_x_m)))
+                - float(ego_x_m)
+            ) ** 2
+            + (
+                float(sample.get("y_ref_m", sample.get("y", ego_y_m)))
+                - float(ego_y_m)
+            ) ** 2,
+        )
+        target_x_m = float(target.get("x_ref_m", target.get("x", ego_x_m)))
+        target_y_m = float(target.get("y_ref_m", target.get("y", ego_y_m)))
+        target_heading_rad = float(target.get("heading_rad", ego_heading_rad))
+        dx_m = float(ego_x_m) - target_x_m
+        dy_m = float(ego_y_m) - target_y_m
+        return LaneChangeAlignment(
+            available=True,
+            lateral_error_m=(
+                -math.sin(target_heading_rad) * dx_m
+                + math.cos(target_heading_rad) * dy_m
+            ),
+            heading_error_rad=math.atan2(
+                math.sin(float(ego_heading_rad) - target_heading_rad),
+                math.cos(float(ego_heading_rad) - target_heading_rad),
+            ),
+            target_sample=MappingProxyType(dict(target)),
+        )
 
     def publish(
         self,
@@ -240,13 +353,178 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             geometry_revision=int(snapshot.geometry_revision),
         )
 
-    def turn_reference(
-            self, *, local_map, config, horizon_steps, dt_s,
-            ego_location, ego_yaw_rad, current_state, current_lane_id,
-            target_lane_id, target_speed_mps, destination_state=None,
-            lock_master=False, turn_direction="", route_revision="",
-            map_epoch="admap"):
+    def build_behavior_reference(
+        self,
+        *,
+        map_planner,
+        ego_pose,
+        ego_state,
+        route_points,
+        previous_reference,
+        previous_target_state,
+        behavior_runtime_config,
+        decision,
+        lane_change_state,
+        target_lane_id,
+        current_lane_id,
+        route_optimal_lane_id,
+        route_reference_allowed,
+        route_reference_gate_reason,
+        in_junction,
+        next_macro_maneuver,
+        planner_mode,
+        lookahead_m,
+        target_speed_mps,
+        ego_speed_mps,
+        horizon_steps,
+        dt_s,
+        reference_freeze_count,
+        sim_time_s,
+        stop_release_smooth_until_s,
+        authoritative_ego_waypoint,
+        lane_reference_step_distance_m=None,
+    ) -> BehaviorReferenceResult:
+        """Build one behavior reference through the provider-owned entry.
+
+        This is the compatibility boundary around the existing geometric
+        builder.  Callers no longer construct its context or invoke it
+        directly, which leaves one place to replace when the AD-map-native
+        implementation fully supersedes it.
+        """
+
+        from opencda.planning_module.behavior_planner import (
+            MpcReferenceGenerationContext,
+            compute_temp_destination,
+            generate_mpc_reference,
+            select_reference_intent,
+        )
+
+        prior = list(previous_target_state or [])
+        destination = compute_temp_destination(
+            map_planner=map_planner,
+            ego_pose=ego_pose,
+            target_lane_id=int(target_lane_id),
+            decision=str(decision),
+            lookahead_m=float(lookahead_m),
+            target_v_mps=float(target_speed_mps),
+            global_route_points=list(route_points or []),
+            mode_reference_xy=(
+                (float(prior[0]), float(prior[1])) if len(prior) >= 2 else None
+            ),
+            prev_mode=(float(prior[5]) if len(prior) >= 6 else None),
+            prev_road_id=(int(prior[6]) if len(prior) >= 7 else None),
+            prev_entered_intersection=(
+                bool(float(prior[7]) > 0.5) if len(prior) >= 8 else False
+            ),
+            next_macro_maneuver=str(next_macro_maneuver),
+            mode_override=str(planner_mode),
+            follow_global_route_lane=bool(route_reference_allowed and in_junction),
+        )
+        intent = select_reference_intent(
+            behavior_decision=str(decision),
+            planner_fsm_state=str(lane_change_state),
+            ego_in_junction=bool(in_junction),
+            reference_target_lane_id=int(target_lane_id),
+            current_lane_id=int(current_lane_id),
+            route_optimal_lane_id=int(route_optimal_lane_id),
+            global_route_reference_allowed=bool(route_reference_allowed),
+            traffic_control_lane_lock_active=False,
+        )
+        context = MpcReferenceGenerationContext(
+            map_planner=map_planner,
+            ego_pose=ego_pose,
+            ego_state=ego_state,
+            active_global_route_points=list(route_points or []),
+            previous_lane_center_reference=[
+                dict(sample) for sample in list(previous_reference or [])
+            ],
+            behavior_runtime_cfg=behavior_runtime_config,
+            reference_intent=intent,
+            current_applied_behavior=str(decision),
+            cached_planner_lc_state=str(lane_change_state),
+            reference_target_lane_id=int(target_lane_id),
+            current_lane_id=int(current_lane_id),
+            global_route_reference_allowed=bool(route_reference_allowed),
+            global_route_reference_gate_reason=str(route_reference_gate_reason),
+            should_follow_global_route_lane_for_reference=bool(
+                intent.follow_global_route_lane
+            ),
+            traffic_control_lane_lock_active=False,
+            final_goal_stop_active=False,
+            stop_target_state=None,
+            follow_target_state=None,
+            current_temp_reference_xy=(float(destination[0]), float(destination[1])),
+            current_temp_mode_value=(
+                float(destination[5]) if len(destination) >= 6 else 0.0
+            ),
+            current_temp_road_id=(
+                int(destination[6]) if len(destination) >= 7 else None
+            ),
+            current_temp_entered_intersection=(
+                bool(float(destination[7]) > 0.5) if len(destination) >= 8 else False
+            ),
+            active_reference_maneuver=str(next_macro_maneuver),
+            current_temp_mode_str=str(planner_mode),
+            lane_reference_speed_mps=max(
+                1.0, float(ego_speed_mps), abs(float(target_speed_mps))
+            ),
+            lane_reference_step_distance_m=(
+                max(0.05, float(lane_reference_step_distance_m))
+                if lane_reference_step_distance_m is not None
+                else max(
+                    0.5,
+                    float(dt_s)
+                    * max(
+                        1.0, float(ego_speed_mps), abs(float(target_speed_mps))
+                    ),
+                )
+            ),
+            mpc_horizon_steps=int(horizon_steps),
+            mpc_dt_s=float(dt_s),
+            temporary_destination_state=destination,
+            lane_reference_freeze_count=int(reference_freeze_count),
+            sim_time_s=float(sim_time_s),
+            stop_release_temp_smooth_until_sim_time_s=float(
+                stop_release_smooth_until_s
+            ),
+            authoritative_ego_waypoint=authoritative_ego_waypoint,
+        )
+        output = generate_mpc_reference(context)
+        samples = tuple(
+            MappingProxyType(dict(sample))
+            for sample in list(output.local_lane_center_reference or [])
+        )
+        resolved_destination = tuple(
+            output.temporary_destination_state or destination
+        )
+        diagnostics = MappingProxyType(
+            dict(output.mpc_reference_result.trace.as_trace_fields())
+        )
+        return BehaviorReferenceResult(
+            samples=samples,
+            destination_state=resolved_destination,
+            reference_freeze_count=int(output.lane_reference_freeze_count),
+            diagnostics=diagnostics,
+            fallback_reason=str(output.last_reference_fallback_reason),
+        )
+
+    def turn_reference(self, request: TurnReferenceRequest):
         """Produce and window the sole immutable AD-map turn reference."""
+        local_map = request.local_map
+        config = request.config
+        horizon_steps = int(request.horizon_steps)
+        dt_s = float(request.dt_s)
+        ego_location = request.ego_location
+        ego_yaw_rad = float(request.ego_yaw_rad)
+        current_state = request.current_state
+        current_lane_id = int(request.current_lane_id)
+        target_lane_id = int(request.target_lane_id)
+        target_speed_mps = float(request.target_speed_mps)
+        destination_state = request.destination_state
+        lock_master = bool(request.lock_master)
+        turn_direction = str(request.turn_direction)
+        route_revision = str(request.route_revision)
+        map_epoch = str(request.map_epoch)
         turn_speed_mps = min(
             max(0.4, float(target_speed_mps)),
             float(config.get("waypoint_turn_speed_cap_mps", 2.2)),
@@ -346,6 +624,278 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             ),
         ) or seed
         return [dict(sample) for sample in reference], list(destination), str(reason)
+
+    def intersection_turn_candidate(
+        self, request: TurnReferenceRequest, *, decision: str
+    ) -> CandidateReferenceOverrideResult:
+        """Build the complete candidate-stage view of an AD-map turn."""
+
+        reference, destination, reason = self.turn_reference(request)
+        diagnostics = {"route_turn_reference_reason": str(reason)}
+        if reference:
+            first = reference[0]
+            dx_m = float(first.get("x_ref_m", first.get("x", 0.0))) - float(
+                request.ego_location.x
+            )
+            dy_m = float(first.get("y_ref_m", first.get("y", 0.0))) - float(
+                request.ego_location.y
+            )
+            cos_h = math.cos(float(request.ego_yaw_rad))
+            sin_h = math.sin(float(request.ego_yaw_rad))
+            diagnostics.update({
+                "reference_pipeline_stage": "waypoint_turn",
+                "reference_pipeline_intent": str(decision),
+                "reference_pipeline_intent_mode": "intersection_turn",
+                "reference_pipeline_follow_global_route_lane": 1,
+                "reference_source": "admap_waypoint_turn",
+                "fallback_reason": "",
+                "route_turn_raw_first_forward_m": float(
+                    cos_h * dx_m + sin_h * dy_m
+                ),
+                "route_turn_raw_first_lateral_m": float(
+                    -sin_h * dx_m + cos_h * dy_m
+                ),
+            })
+        return CandidateReferenceOverrideResult(
+            samples=tuple(
+                MappingProxyType(dict(sample)) for sample in reference
+            ),
+            destination_state=tuple(destination),
+            diagnostics=MappingProxyType(diagnostics),
+        )
+
+    def preturn_candidate(
+        self,
+        request: TurnReferenceRequest,
+        *,
+        upcoming_turn_distance_m: float,
+        first_forward_m: float,
+    ) -> CandidateReferenceOverrideResult:
+        """Select current-lane or locked connector geometry before a turn."""
+
+        reference, lane_reason = self.preturn_lane_reference(
+            request.local_map,
+            lane_id=int(request.current_lane_id),
+            ego_x_m=float(request.ego_location.x),
+            ego_y_m=float(request.ego_location.y),
+            target_speed_mps=float(request.target_speed_mps),
+            first_forward_m=float(first_forward_m),
+            spacing_m=float(first_forward_m),
+            horizon_steps=int(request.horizon_steps),
+        )
+        diagnostics = {"preturn_lane_reference_reason": str(lane_reason)}
+        if reference:
+            first = reference[0]
+            dx_m = float(first.get("x_ref_m", first.get("x", 0.0))) - float(
+                request.ego_location.x
+            )
+            dy_m = float(first.get("y_ref_m", first.get("y", 0.0))) - float(
+                request.ego_location.y
+            )
+            diagnostics.update({
+                "preturn_raw_first_lateral_m": float(
+                    -math.sin(float(request.ego_yaw_rad)) * dx_m
+                    + math.cos(float(request.ego_yaw_rad)) * dy_m
+                ),
+                "reference_source": "admap_current_lane_center_preturn",
+            })
+
+        transition_arc_m = max(
+            0.0,
+            float(
+                request.config.get(
+                    "lane_follow_to_turn_reference_transition_arc_m", 12.0
+                )
+            ),
+        )
+        direction = str(request.turn_direction or "").strip().lower()
+        transition_reference = []
+        transition_reason = ""
+        if float(upcoming_turn_distance_m) <= float(transition_arc_m):
+            snapshot = self.snapshot(TURN)
+            if snapshot.active and str(snapshot.maneuver_direction) != direction:
+                self.release(TURN, event="reset")
+            transition_reference, _unused_destination, transition_reason = (
+                self.turn_reference(replace(
+                    request,
+                    lock_master=True,
+                    turn_direction=direction,
+                ))
+            )
+            # PREPARE_TURN remains longitudinally owned by SpeedPlanner.
+            for sample in transition_reference:
+                sample["v_ref_mps"] = float(request.target_speed_mps)
+                sample["speed_ref_mps"] = float(request.target_speed_mps)
+                sample["speed_mps"] = float(request.target_speed_mps)
+        if transition_reference:
+            reference = [dict(sample) for sample in transition_reference]
+            diagnostics.update({
+                "reference_source": "admap_preturn_connector_transition",
+                "route_turn_reference_reason": str(transition_reason),
+                "lane_follow_turn_geometry_hold_reason": (
+                    "lane_follow_to_turn_locked_master_window"
+                ),
+            })
+        return CandidateReferenceOverrideResult(
+            samples=tuple(
+                MappingProxyType(dict(sample)) for sample in reference
+            ),
+            destination_state=tuple(request.destination_state or ()),
+            diagnostics=MappingProxyType(diagnostics),
+        )
+
+    def route_lane_change_target_candidate(
+        self,
+        *,
+        local_map,
+        target_lane_id,
+        target_speed_mps,
+        ego_x_m,
+        ego_y_m,
+        spacing_m,
+        geometry_length_m,
+        horizon_steps,
+        destination_state,
+    ) -> CandidateReferenceOverrideResult:
+        """Resolve one topology-required target corridor from LocalMapSnapshot."""
+
+        spacing_m = max(0.05, float(spacing_m))
+        count = max(
+            int(horizon_steps),
+            int(math.ceil(float(geometry_length_m) / spacing_m))
+            + int(horizon_steps),
+        )
+        master, reason = self.lane_change_target_reference(
+            local_map,
+            target_lane_id=int(target_lane_id),
+            target_speed_mps=float(target_speed_mps),
+        )
+        window = (
+            self.window_from_reference(
+                master,
+                ego_x_m=float(ego_x_m),
+                ego_y_m=float(ego_y_m),
+                lower_s_m=0.0,
+                first_forward_m=spacing_m,
+                spacing_m=spacing_m,
+                count=int(count),
+            )
+            if master
+            else None
+        )
+        reference = (
+            [dict(sample) for sample in window.samples]
+            if window is not None
+            else []
+        )
+        diagnostics = {
+            "admap_target_lane_resolved": bool(reference),
+            "admap_target_lane_reason": str(reason),
+        }
+        if reference:
+            diagnostics["reference_source"] = (
+                "local_map_target_corridor_center"
+            )
+        return CandidateReferenceOverrideResult(
+            samples=tuple(
+                MappingProxyType(dict(sample)) for sample in reference
+            ),
+            destination_state=tuple(destination_state or ()),
+            diagnostics=MappingProxyType(diagnostics),
+        )
+
+    def lane_change_candidate(
+        self,
+        *,
+        local_map,
+        current_state,
+        current_lane_id,
+        target_lane_id,
+        target_reference,
+        source_reference,
+        target_speed_mps,
+        geometry_speed_mps,
+        geometry_length_m,
+        transition_duration_s,
+        spacing_m,
+        horizon_steps,
+        lane_width_m,
+        destination_state,
+        trajectory_variant,
+        duration_s,
+        duration_reason,
+        authorization_source,
+        operational_curvature_limit_1pm,
+    ) -> CandidateReferenceOverrideResult:
+        """Generate and describe one Frenet lane-change candidate."""
+
+        reference, geometry_debug = self.lane_change_nominal(
+            local_map,
+            ego_x_m=float(current_state[0]),
+            ego_y_m=float(current_state[1]),
+            ego_heading_rad=float(current_state[3]),
+            current_lane_id=int(current_lane_id),
+            target_lane_id=int(target_lane_id),
+            target_reference=target_reference,
+            fallback_source_reference=source_reference,
+            target_speed_mps=float(target_speed_mps),
+            geometry_speed_mps=float(geometry_speed_mps),
+            geometry_length_m=float(geometry_length_m),
+            transition_duration_s=float(transition_duration_s),
+            spacing_m=float(spacing_m),
+            horizon_steps=int(horizon_steps),
+            lane_width_m=float(lane_width_m),
+        )
+        destination = list(destination_state or [])
+        if reference and len(destination) >= 4:
+            terminal = reference[-1]
+            destination[0] = float(
+                terminal.get("x_ref_m", terminal.get("x", destination[0]))
+            )
+            destination[1] = float(
+                terminal.get("y_ref_m", terminal.get("y", destination[1]))
+            )
+            destination[2] = float(target_speed_mps)
+            destination[3] = float(
+                terminal.get("heading_rad", destination[3])
+            )
+            if len(destination) >= 5:
+                destination[4] = int(target_lane_id)
+        diagnostics = {
+            "lane_change_source_corridor_reason": str(
+                geometry_debug.get("source_corridor_reason", "")
+            ),
+            "lane_change_trajectory_variant": str(trajectory_variant),
+            "lane_change_duration_s": float(duration_s),
+            "lane_change_duration_comfort_reason": str(duration_reason),
+            "lane_change_reference_profile": "frenet_quintic_d_of_s",
+            "lane_change_geometry_speed_mps": float(geometry_speed_mps),
+            "lane_change_geometry_length_m": float(geometry_length_m),
+            "lane_change_geometry_step_m": float(spacing_m),
+            "lane_change_operational_curvature_limit_1pm": float(
+                operational_curvature_limit_1pm
+            ),
+            "lane_change_authorization_source": str(authorization_source),
+            "lane_change_initial_progress": (
+                float(reference[0].get("lane_change_initial_progress", 0.0))
+                if reference else 0.0
+            ),
+            "lane_change_terminal_progress": (
+                float(reference[-1].get("lane_change_progress", 0.0))
+                if reference else 0.0
+            ),
+        }
+        if geometry_debug.get("rejection"):
+            diagnostics["lane_change_geometry_rejection"] = str(
+                geometry_debug["rejection"]
+            )
+        return CandidateReferenceOverrideResult(
+            samples=tuple(
+                MappingProxyType(dict(sample)) for sample in reference
+            ),
+            destination_state=tuple(destination),
+            diagnostics=MappingProxyType(diagnostics),
+        )
 
     def lane_fallback_reference(
         self,

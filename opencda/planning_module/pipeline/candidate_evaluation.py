@@ -10,6 +10,7 @@ solve rather than solving a full MPC problem for every candidate.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 
@@ -41,6 +42,514 @@ class CandidateEvaluationFrame:
             f"{selected.name}->L{int(selected.target_lane_id)} "
             f"cost={float(selected.total_cost):.2f} {feasibility}"
         )
+
+
+@dataclass(frozen=True)
+class CandidateSelectionResult:
+    """Immutable candidate-stage output consumed by the execution pipeline."""
+
+    decision: str
+    target_lane_id: int
+    target_speed_mps: float
+    reference: tuple
+    destination_state: tuple
+    diagnostics: Mapping
+
+    def mutable_reference(self):
+        return [dict(sample) for sample in self.reference]
+
+    def mutable_destination_state(self):
+        return list(self.destination_state)
+
+    def mutable_diagnostics(self):
+        return dict(self.diagnostics)
+
+
+@dataclass(frozen=True)
+class CandidateGeometryPlan:
+    """Single source for candidate sampling and lane-change geometry limits."""
+
+    step_m: float
+    geometry_speed_mps: float = 0.0
+    geometry_length_m: float = 0.0
+    operational_curvature_limit_1pm: float = 0.0
+
+
+class CandidateTrajectoryEvaluator:
+    """Own cross-tick risk hysteresis for geometric trajectory candidates."""
+
+    def __init__(
+        self,
+        *,
+        mpc_probe_enabled: bool = True,
+        mpc_probe_top_k: int = 2,
+        mpc_probe_interval_s: float = 0.2,
+    ) -> None:
+        self._risk_bucket_by_name: Dict[str, str] = {}
+        self._mpc_probe_enabled = bool(mpc_probe_enabled)
+        self._mpc_probe_top_k = max(2, int(mpc_probe_top_k))
+        self._mpc_probe_interval_s = max(0.05, float(mpc_probe_interval_s))
+        self._mpc_probe_last_time_s = -float("inf")
+        self._mpc_probe_cache = {}
+
+    def reset(self) -> None:
+        self._risk_bucket_by_name.clear()
+        self._mpc_probe_last_time_s = -float("inf")
+        self._mpc_probe_cache.clear()
+
+    @staticmethod
+    def geometry_plan(
+        *, decision, ego_speed_mps, target_speed_mps,
+        lane_change_duration_s, dt_s, lane_width_m, config,
+    ) -> CandidateGeometryPlan:
+        """Resolve sampling once; generation and commitment consume it."""
+
+        from .candidate_pipeline import (
+            lane_change_geometry_requirements,
+            lane_change_operational_curvature_limit_1pm,
+        )
+
+        step_m = max(
+            float(config.get("route_tracking_min_step_m", 0.10)),
+            float(dt_s) * max(
+                0.5, float(ego_speed_mps), abs(float(target_speed_mps))
+            ),
+        )
+        if str(decision) not in {
+            _DECISION_CHANGE_LEFT,
+            _DECISION_CHANGE_RIGHT,
+        }:
+            return CandidateGeometryPlan(step_m=float(step_m))
+        curvature_limit = lane_change_operational_curvature_limit_1pm(
+            planning_speed_mps=float(target_speed_mps),
+            lateral_accel_limit_mps2=float(
+                config.get(
+                    "route_tracking_lane_change_lateral_accel_limit_mps2",
+                    1.3,
+                )
+            ),
+            vehicle_max_curvature_1pm=float(
+                config.get("reference_vehicle_max_curvature_1pm", 0.35)
+            ),
+            minimum_speed_mps=float(
+                config.get("lane_change_min_geometry_speed_mps", 2.0)
+            ),
+        )
+        geometry_speed_mps, geometry_length_m, geometry_step_m = (
+            lane_change_geometry_requirements(
+                ego_speed_mps=float(ego_speed_mps),
+                target_speed_mps=float(target_speed_mps),
+                duration_s=float(lane_change_duration_s or 4.0),
+                dt_s=float(dt_s),
+                lane_width_m=float(lane_width_m),
+                max_curvature_1pm=float(curvature_limit),
+                minimum_geometry_speed_mps=float(
+                    config.get("lane_change_min_geometry_speed_mps", 2.0)
+                ),
+                minimum_length_m=float(
+                    config.get("lane_change_min_length_m", 10.0)
+                ),
+                acceleration_limit_mps2=float(
+                    config.get(
+                        "lane_change_planning_acceleration_limit_mps2", 2.0
+                    )
+                ),
+            )
+        )
+        return CandidateGeometryPlan(
+            step_m=max(float(step_m), float(geometry_step_m)),
+            geometry_speed_mps=float(geometry_speed_mps),
+            geometry_length_m=float(geometry_length_m),
+            operational_curvature_limit_1pm=float(curvature_limit),
+        )
+
+    def evaluate(
+        self,
+        *,
+        candidate,
+        ego_state,
+        object_snapshots,
+        prediction_trajectories,
+        current_lane_id: int,
+        min_object_distance_m: float,
+        risk_hysteresis_margin_m: float,
+    ):
+        """Evaluate and remember exactly one candidate's risk class."""
+
+        from .candidate_pipeline import evaluate_candidate_reference
+
+        name = str(candidate.intent.name)
+        result = evaluate_candidate_reference(
+            candidate=candidate,
+            ego_state=ego_state,
+            object_snapshots=object_snapshots,
+            prediction_trajectories=prediction_trajectories,
+            current_lane_id=int(current_lane_id),
+            min_object_distance_m=float(min_object_distance_m),
+            previous_risk_bucket=str(self._risk_bucket_by_name.get(name, "")),
+            risk_hysteresis_margin_m=float(risk_hysteresis_margin_m),
+        )
+        self._risk_bucket_by_name[name] = str(result.risk_bucket)
+        return result
+
+    def condition_and_evaluate(
+        self,
+        *,
+        intent,
+        destination_state,
+        reference_samples,
+        reference_debug,
+        reference_pipeline,
+        current_state,
+        ego_location,
+        ego_yaw_rad,
+        ego_speed_mps,
+        target_speed_mps,
+        behavior_decision,
+        behavior_fsm_state,
+        current_lane_id,
+        target_lane_id,
+        stop_goal_active,
+        stop_target,
+        route_points,
+        object_snapshots,
+        prediction_trajectories,
+        min_object_distance_m,
+        risk_hysteresis_margin_m,
+    ):
+        """Own the condition -> contract -> risk boundary for one candidate."""
+
+        from .candidate_pipeline import CandidateReferenceResult
+        from .reference_pipeline import ReferencePipelineRequest
+
+        conditioned = reference_pipeline.condition(ReferencePipelineRequest(
+            destination_state=destination_state,
+            reference_samples=reference_samples,
+            current_state=current_state,
+            ego_location=ego_location,
+            ego_yaw_rad=float(ego_yaw_rad),
+            ego_speed_mps=float(ego_speed_mps),
+            target_speed_mps=float(target_speed_mps),
+            behavior_decision=str(behavior_decision),
+            behavior_fsm_state=str(behavior_fsm_state),
+            current_lane_id=int(current_lane_id),
+            target_lane_id=int(target_lane_id),
+            stop_goal_active=bool(stop_goal_active),
+            stop_target=stop_target if isinstance(stop_target, Mapping) else None,
+            route_points=route_points,
+        ))
+        destination = list(conditioned.destination_state)
+        reference = [
+            dict(sample) for sample in conditioned.reference_samples
+        ]
+        diagnostics = dict(reference_debug or {})
+        diagnostics["mpc_reference_stabilizer_reason"] = str(
+            conditioned.reason
+        )
+        candidate = CandidateReferenceResult(
+            intent=intent,
+            destination_state=destination,
+            lane_center_reference=reference,
+            reference_debug=diagnostics,
+            contract_result=conditioned.validation,
+        )
+        evaluated = self.evaluate(
+            candidate=candidate,
+            ego_state=current_state,
+            object_snapshots=object_snapshots,
+            prediction_trajectories=prediction_trajectories,
+            current_lane_id=int(current_lane_id),
+            min_object_distance_m=float(min_object_distance_m),
+            risk_hysteresis_margin_m=float(risk_hysteresis_margin_m),
+        )
+        return evaluated, destination, reference
+
+    @staticmethod
+    def lane_change_state(
+        *, decision: str, baseline_decision: str, baseline_lane_change_state: str
+    ) -> str:
+        if str(decision) == str(baseline_decision):
+            return str(baseline_lane_change_state or "LANE_KEEP")
+        return {
+            "intersection_turn_left": "INTERSECTION_TURN_LEFT",
+            "intersection_turn_right": "INTERSECTION_TURN_RIGHT",
+            "lane_change_left": "EXECUTE_LANE_CHANGE_LEFT",
+            "lane_change_right": "EXECUTE_LANE_CHANGE_RIGHT",
+        }.get(str(decision), "LANE_KEEP")
+
+    def probe_mpc(
+        self,
+        *,
+        candidate_results,
+        mpc,
+        sim_time_s: float,
+        current_state,
+        object_snapshots,
+        current_acceleration_mps2: float,
+        current_steering_rad: float,
+        road_envelope_payload_world=None,
+        required_decision: str = "",
+        required_target_lane_id: int = 0,
+    ) -> str:
+        """Probe the bounded top-k and own its refresh cache across ticks."""
+
+        from .candidate_pipeline import apply_mpc_probe_result, mark_mpc_probe_skipped
+
+        rows = list(candidate_results or [])
+        lane_changes = [
+            row for row in rows
+            if str(getattr(getattr(row, "intent", None), "decision", "")).startswith("lane_change")
+            and bool(getattr(row, "feasible", False))
+        ]
+        if not self._mpc_probe_enabled or not lane_changes:
+            return "mpc_probe_not_applicable"
+        feasible = [row for row in rows if bool(getattr(row, "feasible", False))]
+        feasible.sort(key=lambda row: float(getattr(row, "total_cost", float("inf"))))
+        keep = [
+            row for row in feasible
+            if str(getattr(getattr(row, "intent", None), "decision", "")) == "lane_follow"
+        ]
+        required = [
+            row for row in lane_changes
+            if str(getattr(getattr(row, "intent", None), "decision", "")).strip().lower()
+            == str(required_decision).strip().lower()
+            and int(getattr(getattr(row, "intent", None), "target_lane_id", 0))
+            == int(required_target_lane_id or 0)
+        ]
+        selected = []
+        if required:
+            priority = {"normal": 0, "assertive": 1, "conservative": 2}
+            required.sort(key=lambda row: (
+                priority.get(str(getattr(row.intent, "trajectory_variant", "")).strip().lower(), 3),
+                float(getattr(row, "total_cost", float("inf"))),
+            ))
+            selected.extend(required)
+        else:
+            if keep:
+                selected.append(keep[0])
+            lane_changes.sort(key=lambda row: float(getattr(row, "total_cost", float("inf"))))
+            selected.append(lane_changes[0])
+        for row in feasible:
+            if row not in selected and len(selected) < self._mpc_probe_top_k:
+                selected.append(row)
+        selected = selected[:self._mpc_probe_top_k]
+        order = {id(row): index for index, row in enumerate(selected)}
+        feasible.sort(key=lambda row: (
+            0 if id(row) in order else 1,
+            order.get(id(row), len(order)),
+            float(getattr(row, "total_cost", float("inf"))),
+        ))
+        if float(sim_time_s) - self._mpc_probe_last_time_s >= self._mpc_probe_interval_s:
+            self._mpc_probe_cache.clear()
+            self._mpc_probe_last_time_s = float(sim_time_s)
+
+        selected_ids = {id(row) for row in selected}
+        previous_profile = str(getattr(mpc, "active_cost_profile_name", "lane_follow"))
+        summaries = []
+        for row in feasible:
+            if id(row) not in selected_ids:
+                mark_mpc_probe_skipped(row)
+                continue
+            intent = row.intent
+            cache_key = (
+                str(intent.name), str(intent.decision), int(intent.target_lane_id),
+                str(intent.trajectory_variant), round(float(intent.lane_change_duration_s or 0.0), 2),
+            )
+            probe = self._mpc_probe_cache.get(cache_key)
+            if probe is None:
+                profile = mpc_cost_profile_for_behavior(
+                    behavior=str(intent.decision),
+                    planner_lc_state=(
+                        "EXECUTE_LANE_CHANGE" if str(intent.decision).startswith("lane_change")
+                        else "LANE_KEEP"
+                    ),
+                    planner_mode="NORMAL",
+                    next_macro_maneuver="straight",
+                )
+                if hasattr(mpc, "apply_mode_cost_profile"):
+                    mpc.apply_mode_cost_profile(profile, blend_alpha=1.0)
+                probe = mpc.probe_trajectory_feasibility(
+                    current_state=current_state,
+                    destination_state=list(row.destination_state or []),
+                    object_snapshots=object_snapshots,
+                    current_acceleration_mps2=float(current_acceleration_mps2),
+                    current_steering_rad=float(current_steering_rad),
+                    lane_center_reference_samples=[dict(v) for v in list(row.lane_center_reference or [])],
+                    stop_goal_active=bool(intent.stop_goal_active),
+                    road_envelope_payload_world=(
+                        road_envelope_payload_world
+                        if str(intent.name) == "committed_lane_change_continuation"
+                        else None
+                    ),
+                )
+                self._mpc_probe_cache[cache_key] = dict(probe)
+            apply_mpc_probe_result(
+                candidate=row,
+                solved=bool(probe.get("solved", False)),
+                status=str(probe.get("status", "")),
+                solve_time_ms=float(probe.get("solve_time_ms", 0.0) or 0.0),
+                dynamic_cost=float(probe.get("dynamic_cost", 0.0) or 0.0),
+            )
+            summaries.append("%s:%s" % (str(intent.name), str(probe.get("status", ""))))
+        if hasattr(mpc, "apply_mode_cost_profile"):
+            mpc.apply_mode_cost_profile(previous_profile, blend_alpha=1.0)
+        return "|".join(summaries) if summaries else "mpc_probe_no_feasible_top_k"
+
+    @staticmethod
+    def select_with_commitment(
+        *,
+        candidate_results,
+        lane_change_phase: str,
+        lane_change_option: str,
+        source_lane_id: int,
+        target_lane_id: int,
+        progress: float,
+        reference_locked: bool,
+        required_decision: str = "",
+        required_target_lane_id: int = 0,
+    ):
+        """Resolve the final candidate against one immutable commitment view."""
+
+        from .candidate_pipeline import (
+            select_best_candidate,
+            select_candidate_with_commitment,
+        )
+        from .stage_contracts import ManeuverCommitment
+
+        committed_decision = {
+            "CHANGELANELEFT": "lane_change_left",
+            "CHANGELANERIGHT": "lane_change_right",
+        }.get(str(lane_change_option), "")
+        commitment = ManeuverCommitment(
+            state=(
+                "STABILIZING"
+                if str(lane_change_phase) == "target_lane_stabilization"
+                else "COMMITTED" if bool(reference_locked) else "IDLE"
+            ),
+            decision=str(committed_decision),
+            source_lane_id=int(source_lane_id),
+            target_lane_id=int(target_lane_id),
+            progress=float(progress),
+            reference_locked=bool(reference_locked),
+        )
+        outcome = select_candidate_with_commitment(
+            candidate_results,
+            commitment=commitment,
+            required_decision=str(required_decision),
+            required_target_lane_id=int(required_target_lane_id),
+        )
+        selected = (
+            outcome.selected
+            if outcome.selected is not None
+            else select_best_candidate(candidate_results)
+        )
+        return commitment, outcome, selected
+
+    @staticmethod
+    def finalize_selection(
+        *, selected, candidate_results, selected_reference,
+        selected_destination, selected_debug, prediction_trajectory_count,
+        probe_summary, selection_outcome, commitment,
+        commitment_release_reason, lane_change_phase,
+        lane_change_stabilization_frames, completion_debug,
+    ) -> CandidateSelectionResult:
+        """Publish one selected candidate with a stable diagnostic schema."""
+
+        from .candidate_pipeline import summarize_candidate_results
+
+        diagnostics = dict(selected_debug or {})
+        diagnostics.update({
+            "stage": diagnostics.get("reference_pipeline_stage", ""),
+            "intent_mode": diagnostics.get(
+                "reference_pipeline_intent_mode", ""
+            ),
+            "fallback_reason": diagnostics.get("fallback_reason", ""),
+            "reference_source": str(
+                diagnostics.get(
+                    "reference_source", "candidate_reference_pipeline"
+                )
+            ),
+            "candidate_pipeline_selected": str(selected.intent.name),
+            "candidate_pipeline_selected_status": str(
+                selected.feasibility_status
+            ),
+            "candidate_pipeline_selected_reason": str(
+                selected.feasibility_reason
+            ),
+            "candidate_selected_stop_goal_active": bool(
+                selected.intent.stop_goal_active
+            ),
+            "candidate_pipeline_count": int(len(candidate_results)),
+            "candidate_prediction_trajectory_count": int(
+                prediction_trajectory_count
+            ),
+            "candidate_pipeline_summary": summarize_candidate_results(
+                candidate_results
+            ),
+            "candidate_mpc_probe_summary": str(probe_summary),
+            "candidate_selected_decision": str(selected.intent.decision),
+            "candidate_selected_lane_id": int(selected.intent.target_lane_id),
+            "candidate_selected_cost": float(selected.total_cost),
+            "candidate_evaluation_summary": (
+                "%s->%s:L%d cost=%.2f"
+                % (
+                    str(selected.intent.name),
+                    str(selected.intent.decision),
+                    int(selected.intent.target_lane_id),
+                    float(selected.total_cost),
+                )
+            ),
+            "candidate_selection_status": str(selection_outcome.status),
+            "candidate_selection_reason": str(selection_outcome.reason),
+            "lane_change_commitment_release_reason": str(
+                commitment_release_reason
+            ),
+            "lane_change_phase": str(lane_change_phase),
+            "lane_change_stabilization_frames": int(
+                lane_change_stabilization_frames
+            ),
+        })
+        diagnostics.update(commitment.as_debug_fields())
+        diagnostics.update(dict(completion_debug or {}))
+        return CandidateSelectionResult(
+            decision=str(selected.intent.decision),
+            target_lane_id=int(selected.intent.target_lane_id),
+            target_speed_mps=float(selected.intent.target_speed_mps),
+            reference=tuple(
+                MappingProxyType(dict(sample))
+                for sample in list(selected_reference or [])
+            ),
+            destination_state=tuple(selected_destination or ()),
+            diagnostics=MappingProxyType(diagnostics),
+        )
+
+
+def mpc_cost_profile_for_behavior(
+    *, behavior: str, planner_lc_state: str, planner_mode: str,
+    next_macro_maneuver: str
+) -> str:
+    from opencda.planning_module.behavior_planner import (
+        is_emergency_brake_decision,
+        is_fixed_stop_decision,
+        normalize_behavior_decision,
+    )
+
+    raw = str(behavior or "").strip().lower()
+    normalized = str(normalize_behavior_decision(behavior))
+    state = str(planner_lc_state or "").strip().upper()
+    if is_fixed_stop_decision(normalized):
+        return "stop"
+    if is_emergency_brake_decision(normalized):
+        return "recovery"
+    if state.startswith("PREPARE_LANE_CHANGE"):
+        return "prepare_lane_change"
+    if raw in {"intersection_turn_left", "intersection_turn_right"}:
+        return "intersection_turn"
+    if state.startswith("EXECUTE_LANE_CHANGE") or normalized in {"lane_change_left", "lane_change_right"}:
+        return "execute_lane_change"
+    if str(planner_mode or "").strip().upper() == "INTERSECTION" and str(next_macro_maneuver or "straight").strip().lower() in {"left", "right"}:
+        return "intersection_turn"
+    return "lane_follow"
 
 
 def _risk_for_lane(

@@ -823,7 +823,8 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         bridge.maneuver_manager = ManeuverManager(bridge.config)
         bridge.mpc = types.SimpleNamespace(dt_s=0.1, horizon_steps=3)
         bridge._stable_reference_line_provider = ReferenceLineProvider()
-        bridge._trajectory_fallback_manager = TrajectoryFallbackManager()
+        fallback = TrajectoryFallbackManager()
+        bridge.pipeline = types.SimpleNamespace(resolve_fallback=fallback.resolve)
         bridge.route_manager = types.SimpleNamespace(route_revision="route-1")
         bridge._stable_reference_line_provider.install(
             TURN,
@@ -874,7 +875,7 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
             ),
         )
 
-        decision, _, speed_mps, _, _, debug = bridge._explicit_fallback_candidate_for_mpc(
+        result = fallback.resolve_candidate_failure(
             candidate_results=[
                 types.SimpleNamespace(
                     feasibility_reason="candidate_prediction_collision_risk:0.80"
@@ -884,10 +885,20 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
             baseline_target_lane_id=1,
             current_lane_id=1,
             current_state=[0.0, 0.0, 1.0, 0.0],
-            ego_location=sys.modules["carla"].Location(0.0, 0.0, 0.0),
-            ego_yaw_rad=0.0,
-            summarize_candidate_results=lambda _rows: "collision",
+            ego_x_m=0.0,
+            ego_y_m=0.0,
+            reference_provider=bridge._stable_reference_line_provider,
+            route_revision="route-1",
+            sim_time_s=1.0,
+            mpc_dt_s=0.1,
+            horizon_steps=3,
+            lane_change_min_first_forward_m=0.2,
+            lane_follow_min_first_forward_m=0.2,
+            summarize_candidates=lambda _rows: "collision",
         )
+        decision = result.decision
+        speed_mps = result.target_speed_mps
+        debug = result.mutable_diagnostics()
 
         self.assertEqual(decision, "emergency_brake")
         self.assertEqual(speed_mps, 0.0)
@@ -918,17 +929,17 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
             map_epoch="town06",
             event="maneuver_started",
         )
-        bridge._trajectory_fallback_manager = TrajectoryFallbackManager()
-        bridge._trajectory_fallback_manager.record_valid(
+        fallback = TrajectoryFallbackManager()
+        fallback.record_valid(
             retained_reference,
             sim_time_s=1.0,
             route_revision="route-1",
         )
+        bridge.pipeline = types.SimpleNamespace(resolve_fallback=fallback.resolve)
         bridge.route_manager = types.SimpleNamespace(route_revision="route-1")
         bridge._sim_time_s = lambda: 1.1
 
-        decision, _, speed_mps, reference, _, debug = (
-            bridge._explicit_fallback_candidate_for_mpc(
+        result = fallback.resolve_candidate_failure(
                 candidate_results=[
                     types.SimpleNamespace(
                         feasibility_reason=(
@@ -941,12 +952,22 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
                 baseline_target_lane_id=1,
                 current_lane_id=1,
                 current_state=[0.0, 0.0, 4.0, 0.0],
-                ego_location=sys.modules["carla"].Location(0.0, 0.0, 0.0),
-                ego_yaw_rad=0.0,
-                summarize_candidate_results=lambda _rows: "contract miss",
+                ego_x_m=0.0,
+                ego_y_m=0.0,
+                reference_provider=bridge._stable_reference_line_provider,
+                route_revision="route-1",
+                sim_time_s=1.1,
+                mpc_dt_s=0.1,
+                horizon_steps=3,
+                lane_change_min_first_forward_m=0.2,
+                lane_follow_min_first_forward_m=0.2,
+                summarize_candidates=lambda _rows: "contract miss",
                 selection_reason="no_active_maneuver_commitment",
             )
-        )
+        decision = result.decision
+        speed_mps = result.target_speed_mps
+        reference = result.mutable_trajectory()
+        debug = result.mutable_diagnostics()
 
         self.assertEqual(decision, "intersection_turn_left")
         self.assertEqual(speed_mps, 5.0)

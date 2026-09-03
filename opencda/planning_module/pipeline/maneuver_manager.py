@@ -8,6 +8,11 @@ from dataclasses import dataclass, field
 import math
 from typing import Optional
 
+from .stage_contracts import (
+    LaneChangeContract,
+    evaluate_lane_change_alignment,
+)
+
 
 @dataclass
 class LaneChangeLifecycle:
@@ -293,6 +298,93 @@ class ManeuverManager:
         ):
             return LaneChangeTransition("hold", "transition_arc_incomplete")
         return LaneChangeTransition("complete", str(completion_reason))
+
+    def evaluate_lane_change_completion(
+        self,
+        *,
+        alignment,
+        progress,
+        target_lane_matches,
+        footprint_clearance_m,
+        contract,
+    ):
+        """Turn one geometric observation into the lifecycle contract result."""
+
+        if not isinstance(contract, LaneChangeContract):
+            contract = LaneChangeContract.from_config(self.config)
+        return evaluate_lane_change_alignment(
+            available=bool(getattr(alignment, "available", False)),
+            lateral_error_m=float(alignment.lateral_error_m),
+            heading_error_rad=float(alignment.heading_error_rad),
+            progress=float(progress),
+            previous_stable_frames=int(
+                self.lane_change.completion_stable_frames
+            ),
+            target_lane_matches=bool(target_lane_matches),
+            footprint_clearance_m=float(footprint_clearance_m),
+            min_footprint_clearance_m=0.0,
+            contract=contract,
+        )
+
+    def accept_evaluated_lane_change_completion(
+        self,
+        *,
+        completion,
+        contract,
+        stabilization_geometry_ready,
+        stabilization_lateral_error_m,
+        stabilization_heading_error_rad,
+    ):
+        """Record diagnostics and decide release from one evaluated result."""
+
+        transition_arc_m = max(
+            0.0, float(self.lane_change.transition_to_turn_arc_m)
+        )
+        transition_progress_m = float(self.lane_change.progress_s_m)
+        debug = {
+            **contract.as_debug_fields(),
+            "lane_change_stabilization_entry_lateral_error_m": float(
+                stabilization_lateral_error_m
+            ),
+            "lane_change_stabilization_entry_heading_error_deg": math.degrees(
+                float(stabilization_heading_error_rad)
+            ),
+            "lane_change_stabilization_geometry_ready": bool(
+                stabilization_geometry_ready
+            ),
+            "lane_change_completion_reason": str(completion.reason),
+            "lane_change_completion_stable_frames": int(
+                completion.stable_frames
+            ),
+            "lane_change_completion_lateral_error_m": float(
+                completion.target_lateral_error_m
+            ),
+            "lane_change_completion_heading_error_deg": math.degrees(
+                float(completion.target_heading_error_rad)
+            ),
+            "lane_change_completion_target_lane_matches": bool(
+                completion.target_lane_matches
+            ),
+            "lane_change_completion_footprint_clearance_m": float(
+                completion.footprint_clearance_m
+            ),
+            "lane_change_to_turn_transition_arc_m": float(transition_arc_m),
+            "lane_change_to_turn_transition_progress_m": float(
+                transition_progress_m
+            ),
+        }
+        transition = self.accept_lane_change_completion(
+            stable_frames=int(completion.stable_frames),
+            debug=debug,
+            geometrically_complete=bool(completion.complete),
+            completion_reason=str(completion.reason),
+            transition_progress_m=float(transition_progress_m),
+            transition_arc_m=float(transition_arc_m),
+        )
+        self.lane_change.completion_debug[
+            "lane_change_geometry_completion_latched"
+        ] = bool(self.lane_change.geometry_completion_latched)
+        return transition
 
     def clear_completed_lane_change_if_route_advanced(self, route_option):
         if (self.lane_change.completed_option

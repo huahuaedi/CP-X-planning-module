@@ -21,6 +21,7 @@ class PlanningPipeline:
         destination_speed: Any,
         reference_publication: Any,
         mpc_entry: Any,
+        fallback: Any = None,
     ) -> None:
         self._runtime_input = runtime_input
         self._perception = perception
@@ -29,6 +30,7 @@ class PlanningPipeline:
         self.destination_speed = destination_speed
         self.reference_publication = reference_publication
         self.mpc_entry = mpc_entry
+        self.fallback = fallback
 
     def begin_tick(
         self, *, timestamp_s: float, ego_transform: Any, ego_speed_kmh: float
@@ -68,8 +70,13 @@ class PlanningPipeline:
     def destination_stop_behavior(self, result):
         return self.behavior.destination_stop(result)
 
-    def authorize_route_lane_change(self, request):
-        return self.behavior.authorize_route_lane_change(request)
+    def authorize_route_lane_change(self, request, *, maneuver_manager):
+        return self.behavior.authorize_route_lane_change(
+            request, maneuver_manager=maneuver_manager
+        )
+
+    def prepare_route_lane_change(self, **kwargs):
+        return self.behavior.prepare_route_lane_change(**kwargs)
 
     def reset_route_lane_change_authorization(self):
         self.behavior.reset_route_lane_change_authorization()
@@ -111,3 +118,23 @@ class PlanningPipeline:
 
     def evaluate_mpc_entry(self, **kwargs):
         return self.mpc_entry.evaluate(**kwargs)
+
+    def record_valid_trajectory(self, trajectory, **kwargs):
+        if self.fallback is None:
+            return False
+        return self.fallback.record_valid(trajectory, **kwargs)
+
+    def resolve_fallback(self, **kwargs):
+        if self.fallback is None:
+            raise RuntimeError("fallback stage is not configured")
+        return self.fallback.resolve(**kwargs)
+
+    def bounded_safe_stop(self, **kwargs):
+        if self.fallback is None:
+            raise RuntimeError("fallback stage is not configured")
+        return self.fallback.bounded_safe_stop(**kwargs)
+
+    def resolve_candidate_failure(self, **kwargs):
+        if self.fallback is None:
+            raise RuntimeError("fallback stage is not configured")
+        return self.fallback.resolve_candidate_failure(**kwargs)

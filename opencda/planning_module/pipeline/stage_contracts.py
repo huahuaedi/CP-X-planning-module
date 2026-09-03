@@ -235,15 +235,42 @@ def evaluate_lane_change_completion(
         + math.cos(target_heading_rad) * dy_m
     )
     heading_error_rad = _wrap_angle(float(ego_heading_rad) - target_heading_rad)
+    return evaluate_lane_change_alignment(
+        available=True,
+        lateral_error_m=float(lateral_error_m),
+        heading_error_rad=float(heading_error_rad),
+        progress=float(progress),
+        previous_stable_frames=int(previous_stable_frames),
+        target_lane_matches=bool(target_lane_matches),
+        footprint_clearance_m=float(footprint_clearance_m),
+        min_footprint_clearance_m=float(min_footprint_clearance_m),
+        contract=LaneChangeContract(
+            min_progress=float(min_progress),
+            max_lateral_error_m=float(max_lateral_error_m),
+            max_heading_error_rad=float(max_heading_error_rad),
+            required_stable_frames=int(required_stable_frames),
+        ),
+    )
+
+
+def evaluate_lane_change_alignment(
+    *, available, lateral_error_m, heading_error_rad, progress,
+    previous_stable_frames, target_lane_matches, footprint_clearance_m,
+    min_footprint_clearance_m=0.0, contract
+) -> LaneChangeCompletion:
+    """Evaluate one provider-owned alignment with the shared contract."""
+
     converged = bool(
-        float(progress) >= float(min_progress)
-        and abs(float(lateral_error_m)) <= float(max_lateral_error_m)
-        and abs(float(heading_error_rad)) <= float(max_heading_error_rad)
-        and float(footprint_clearance_m)
-        >= float(min_footprint_clearance_m)
+        bool(available)
+        and contract.convergence_ready(
+            progress=float(progress),
+            lateral_error_m=float(lateral_error_m),
+            heading_error_rad=float(heading_error_rad),
+        )
+        and float(footprint_clearance_m) >= float(min_footprint_clearance_m)
     )
     stable_frames = int(previous_stable_frames) + 1 if converged else 0
-    required_frames = max(1, int(required_stable_frames))
+    required_frames = max(1, int(contract.required_stable_frames))
     complete = bool(stable_frames >= required_frames)
     reason = (
         (

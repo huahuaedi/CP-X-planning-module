@@ -33,12 +33,14 @@ from pipeline.reference_generator import ReferenceGenerator
 from pipeline.local_map_snapshot import build_local_map_snapshot
 from pipeline.maneuver_manager import ManeuverManager
 from pipeline.fallback_manager import TrajectoryFallbackManager
+from pipeline.candidate_evaluation import CandidateTrajectoryEvaluator
 from pipeline.reference_line_provider import (
     LANE_CHANGE,
     LANE_FOLLOW,
     POST_TURN,
     TURN,
     ReferenceLineProvider,
+    TurnReferenceRequest,
 )
 
 
@@ -87,7 +89,8 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
         bridge.maneuver_manager.lane_change.transition_to_turn_arc_m = 0.0
         bridge.maneuver_manager.lane_change.transition_to_turn_step_m = 0.0
         bridge._stable_reference_line_provider = ReferenceLineProvider()
-        bridge._trajectory_fallback_manager = TrajectoryFallbackManager()
+        fallback = TrajectoryFallbackManager()
+        bridge.pipeline = types.SimpleNamespace(resolve_fallback=fallback.resolve)
         bridge.route_manager = types.SimpleNamespace(route_revision="route-test")
         bridge._sim_time_s = lambda: 1.0
         bridge.strict_explicit_fallback_speed_mps = 0.8
@@ -124,19 +127,30 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
             event="initial_route",
         )
 
-        decision, lane_id, speed_mps, reference, destination, debug = (
-            bridge._explicit_fallback_candidate_for_mpc(
+        result = TrajectoryFallbackManager().resolve_candidate_failure(
                 candidate_results=[],
                 baseline_decision="lane_follow",
                 baseline_target_lane_id=500144,
                 current_lane_id=500145,
                 current_state=[0.0, 0.0, 1.0, 0.0],
-                ego_location=bridge.carla.Location(x=0.0, y=0.0),
-                ego_yaw_rad=0.0,
-                summarize_candidate_results=lambda _rows: "[]",
+                ego_x_m=0.0,
+                ego_y_m=0.0,
+                reference_provider=bridge._stable_reference_line_provider,
+                route_revision="route-test",
+                sim_time_s=1.0,
+                mpc_dt_s=0.1,
+                horizon_steps=20,
+                lane_change_min_first_forward_m=0.2,
+                lane_follow_min_first_forward_m=0.2,
+                summarize_candidates=lambda _rows: "[]",
                 selection_reason="all_candidates_infeasible",
             )
-        )
+        decision = result.decision
+        lane_id = result.target_lane_id
+        speed_mps = result.target_speed_mps
+        reference = result.mutable_trajectory()
+        destination = result.mutable_destination_state()
+        debug = result.mutable_diagnostics()
 
         # A recoverable geometry failure owns a bounded stop trajectory, not
         # the emergency behavior state.  Keeping lane_follow here lets the
@@ -246,7 +260,11 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
             )
         )
 
-        first, _destination, first_reason = bridge._waypoint_turn_reference(
+        first, _destination, first_reason = bridge._stable_reference_line_provider.turn_reference(TurnReferenceRequest(
+            local_map=bridge._local_map_snapshot,
+            config=bridge.config,
+            horizon_steps=bridge.mpc.horizon_steps,
+            dt_s=bridge.mpc.dt_s,
             ego_location=bridge.carla.Location(x=0.0, y=0.0),
             ego_yaw_rad=0.0,
             current_state=[0.0, 0.0, 3.0, 0.0],
@@ -256,8 +274,13 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
             destination_state=None,
             lock_master=True,
             turn_direction="right",
-        )
-        second, _destination, second_reason = bridge._waypoint_turn_reference(
+            route_revision="route-test",
+        ))
+        second, _destination, second_reason = bridge._stable_reference_line_provider.turn_reference(TurnReferenceRequest(
+            local_map=bridge._local_map_snapshot,
+            config=bridge.config,
+            horizon_steps=bridge.mpc.horizon_steps,
+            dt_s=bridge.mpc.dt_s,
             ego_location=bridge.carla.Location(x=1.0, y=0.0),
             ego_yaw_rad=0.0,
             current_state=[1.0, 0.0, 3.0, 0.0],
@@ -265,7 +288,8 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
             target_lane_id=5960149,
             target_speed_mps=5.0,
             destination_state=None,
-        )
+            route_revision="route-test",
+        ))
 
         self.assertEqual(len(local_map_calls), 1)
         self.assertIs(local_map_calls[0][0], bridge._local_map_snapshot)
@@ -292,14 +316,11 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
 
     def test_route_required_probe_budget_prioritizes_normal_then_assertive(self):
         bridge = self._bridge()
-        bridge.candidate_mpc_probe_enabled = True
-        bridge.candidate_mpc_probe_top_k = 2
-        bridge.candidate_mpc_probe_interval_s = 0.0
-        bridge._candidate_mpc_probe_last_time_s = -1.0
-        bridge._candidate_mpc_probe_cache = {}
-        bridge._last_accel_mps2 = 0.0
-        bridge._last_steer_rad = 0.0
-        bridge._sim_time_s = lambda: 1.0
+        evaluator = CandidateTrajectoryEvaluator(
+            mpc_probe_enabled=True,
+            mpc_probe_top_k=2,
+            mpc_probe_interval_s=0.05,
+        )
         probed = []
         bridge.mpc.active_cost_profile_name = "lane_follow"
         bridge.mpc.apply_mode_cost_profile = lambda *_args, **_kwargs: None
@@ -322,6 +343,9 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
                 ),
                 destination_state=[marker],
                 lane_center_reference=[],
+                reference_debug={},
+                feasibility_status="feasible",
+                feasibility_reason="",
             )
 
         rows = [
@@ -330,19 +354,20 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
             row("normal", "lane_change_right", "normal", "normal", 10.0),
             row("conservative", "lane_change_right", "conservative", "conservative", 5.0),
         ]
-        skipped = []
-        bridge._probe_candidate_results_for_mpc(
+        evaluator.probe_mpc(
             candidate_results=rows,
+            mpc=bridge.mpc,
+            sim_time_s=1.0,
             current_state=[0.0, 0.0, 0.0, 0.0],
             object_snapshots=[],
-            apply_mpc_probe_result=lambda **_kwargs: None,
-            mark_mpc_probe_skipped=lambda candidate: skipped.append(candidate.intent.name),
+            current_acceleration_mps2=0.0,
+            current_steering_rad=0.0,
             required_decision="lane_change_right",
             required_target_lane_id=2,
         )
 
         self.assertEqual(probed, ["normal", "assertive"])
-        self.assertIn("keep", skipped)
+        self.assertEqual(rows[0].feasibility_status, "mpc_probe_skipped")
 
     def test_target_lane_entry_replaces_quintic_with_stabilization_reference(self):
         bridge = self._bridge()
