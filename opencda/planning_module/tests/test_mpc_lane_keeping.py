@@ -2,6 +2,9 @@ import math
 import numpy as np
 import types
 import unittest
+from pathlib import Path
+
+import yaml
 
 from MPC.lane_keep import (
     LaneKeepingStageReference,
@@ -724,6 +727,117 @@ class MPCLaneKeepingIntegrationTests(unittest.TestCase):
             int(index_enabled.total_variables),
             int(index_disabled.total_variables) + int(mpc_enabled.horizon_steps),
         )
+
+    def _temporal_consistency_build_qp(self, mpc, *, reference_u):
+        x_ref_rollout = np.zeros((mpc.horizon_steps + 1, 4), dtype=float)
+        u_ref_rollout = np.zeros((mpc.horizon_steps, 2), dtype=float)
+        return mpc._build_qp(
+            x0=np.zeros(4, dtype=float),
+            x_ref_target=np.zeros(4, dtype=float),
+            object_snapshots=[],
+            current_acceleration_mps2=0.0,
+            current_steering_rad=0.0,
+            x_ref_rollout=x_ref_rollout,
+            u_ref_rollout=u_ref_rollout,
+            lane_center_reference=None,
+            speed_upper_bound_mps=None,
+            reachable_speed_floor_profile_mps=None,
+            temporal_consistency_reference_u=reference_u,
+        )
+
+    def test_temporal_consistency_weight_zero_is_a_noop(self):
+        cfg = self._minimal_mpc_config(speed_soft_enabled=False)
+        cfg[0]["cost"]["control"]["temporal_consistency_weight"] = 0.0
+        mpc = MPC(*cfg)
+        u_prev = np.tile(np.array([1.5, 0.2]), (mpc.horizon_steps, 1))
+        P0, q0, *_ = self._temporal_consistency_build_qp(mpc, reference_u=None)
+        P1, q1, *_ = self._temporal_consistency_build_qp(mpc, reference_u=u_prev)
+        np.testing.assert_allclose(P0.toarray(), P1.toarray())
+        np.testing.assert_allclose(q0, q1)
+
+    @staticmethod
+    def _yaml_mpc(temporal_consistency_weight):
+        config_path = Path(__file__).resolve().parents[1] / "MPC" / "mpc.yaml"
+        payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        payload["mpc"].setdefault("cost", {}).setdefault("control", {})[
+            "temporal_consistency_weight"
+        ] = float(temporal_consistency_weight)
+        return MPC(payload["mpc"], payload.get("road", {}))
+
+    @staticmethod
+    def _straight_reference(mpc, *, y0, speed_ref_mps):
+        return [
+            {
+                "x_ref_m": 0.0,
+                "y_ref_m": float(y0) + 0.35 * float(k + 1),
+                "x": 0.0,
+                "y": float(y0) + 0.35 * float(k + 1),
+                "heading_rad": np.pi / 2.0,
+                "lane_id": 1,
+                "lane_width_m": 3.5,
+                "speed_ref_mps": float(speed_ref_mps),
+            }
+            for k in range(mpc.horizon_steps)
+        ]
+
+    def _two_tick_input_jump(self, w_tc):
+        """Solve two consecutive ticks; tick 2 has a perturbed speed
+        reference. Return ||u_2 - u_1||, the tick-to-tick input change."""
+        mpc = self._yaml_mpc(w_tc)
+        cur = [0.05, 0.0, 3.0, np.deg2rad(89.87)]
+        dest = [0.0, 7.35, 3.0, np.pi / 2.0, 1]
+        mpc.plan_trajectory(
+            current_state=cur, destination_state=dest, object_snapshots=[],
+            current_acceleration_mps2=0.0, current_steering_rad=0.0,
+            lane_center_reference_samples=self._straight_reference(
+                mpc, y0=0.0, speed_ref_mps=3.0
+            ),
+        )
+        u1 = np.asarray(mpc._last_u_solution, dtype=float).copy()
+        # tick 2: same pose, reference speed steps up -> without the term the
+        # QP is free to jump the input trajectory; with it, it is anchored.
+        dest2 = [0.0, 7.35, 6.0, np.pi / 2.0, 1]
+        mpc.plan_trajectory(
+            current_state=cur, destination_state=dest2, object_snapshots=[],
+            current_acceleration_mps2=0.0, current_steering_rad=0.0,
+            lane_center_reference_samples=self._straight_reference(
+                mpc, y0=0.0, speed_ref_mps=6.0
+            ),
+        )
+        u2 = np.asarray(mpc._last_u_solution, dtype=float)
+        n = min(len(u1), len(u2))
+        return float(np.linalg.norm(u2[:n] - u1[:n]))
+
+    def test_temporal_consistency_term_reduces_tick_to_tick_input_jump(self):
+        jump_off = self._two_tick_input_jump(0.0)
+        jump_on = self._two_tick_input_jump(50.0)
+        self.assertLess(jump_on, jump_off)
+
+    def test_temporal_consistency_term_pulls_inputs_toward_previous_solution(self):
+        w_tc = 3.0
+        cfg_off = self._minimal_mpc_config(speed_soft_enabled=False)
+        cfg_off[0]["cost"]["control"]["temporal_consistency_weight"] = 0.0
+        cfg_on = self._minimal_mpc_config(speed_soft_enabled=False)
+        cfg_on[0]["cost"]["control"]["temporal_consistency_weight"] = w_tc
+        mpc_off, mpc_on = MPC(*cfg_off), MPC(*cfg_on)
+        N = mpc_on.horizon_steps
+        u_prev = np.tile(np.array([1.5, -0.2]), (N, 1))
+
+        P_off, q_off, *_rest_off, idx = self._temporal_consistency_build_qp(
+            mpc_off, reference_u=u_prev
+        )
+        P_on, q_on, *_rest_on, _ = self._temporal_consistency_build_qp(
+            mpc_on, reference_u=u_prev
+        )
+        Pd_off, Pd_on = P_off.toarray(), P_on.toarray()
+        for k in range(N):
+            for i in range(2):
+                ci = idx.control_index(k, i)
+                # add_quadratic adds 2*w to the P diagonal; q gets -2*w*u_prev.
+                self.assertAlmostEqual(Pd_on[ci, ci] - Pd_off[ci, ci], 2.0 * w_tc, places=6)
+                self.assertAlmostEqual(
+                    q_on[ci] - q_off[ci], -2.0 * w_tc * float(u_prev[k, i]), places=6
+                )
 
     def test_soft_speed_cap_makes_an_otherwise_infeasible_speed_drop_solvable(self):
         # v0 = 5.0, min_acceleration = -3.0, dt = 0.1 -> the fastest the QP can

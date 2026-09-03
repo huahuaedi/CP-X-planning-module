@@ -834,6 +834,15 @@ mpc:
       q_a: 5.0 #10
       q_delta: 100 #30, 300,100,20,300
 
+      # Temporal-consistency: w_tc * sum_k ||u_k - u_k^{prev,shift}||^2 .
+      # Pull toward last tick's (shifted) solved input trajectory. Damps
+      # tick-to-tick chatter from re-linearizing the non-convex obstacle
+      # term around a moving reference (roughly-abeam vehicles). Direct
+      # deviation, NOT rate-scaled. 0.0 = disabled (output unchanged).
+      # Start small (~0.5-2.0) and raise until oscillation settles without
+      # visibly lagging genuine setpoint changes.
+      temporal_consistency_weight: 0.0
+
     # Super-ellipsoid obstacle collision potential used in the live MPC objective.
     #
     # For each obstacle and stage:

@@ -349,6 +349,14 @@ class MPC:
             qa=max(0.0, float(control_cfg.get("q_a", cost_cfg.get("q_a", 2.0)))),
             qdelta=max(0.0, float(control_cfg.get("q_delta", cost_cfg.get("q_delta", 4.0)))),
         )
+        # Temporal-consistency term: penalizes deviation of the solved input
+        # trajectory from the previous tick's (shifted) solution. Damps the
+        # tick-to-tick chatter that a non-convex obstacle term re-linearized
+        # around a moving reference produces for roughly-abeam vehicles.
+        # 0.0 (default) => term absent, output bit-identical to before.
+        self.temporal_consistency_weight = max(
+            0.0, float(control_cfg.get("temporal_consistency_weight", 0.0))
+        )
         self.safety_cost = MPCSafetyCostSpec(
             # Attractive weight (legacy fallback: cost.w_safe).
             w_safe=max(0.0, float(attractive_cfg.get("w_attractive", cost_cfg.get("w_safe", 0.7)))),
@@ -2702,6 +2710,7 @@ class MPC:
         reachable_speed_floor_profile_mps: Sequence[float] | None,
         road_envelope_blocks: Mapping[str, object] | None = None,
         speed_tracking_reference_mps: Sequence[float] | None = None,
+        temporal_consistency_reference_u: np.ndarray | None = None,
     ) -> Tuple[sp.csc_matrix, np.ndarray, sp.csc_matrix, np.ndarray, np.ndarray, QPIndex]:
         """
         Intent:
@@ -2821,6 +2830,22 @@ class MPC:
             else:
                 add_rate_penalty(a_idx, index.control_index(k - 1, 0), 0.0, qa_eff)
                 add_rate_penalty(d_idx, index.control_index(k - 1, 1), 0.0, qd_eff)
+
+        # --- Objective: temporal-consistency term ---
+        # w_tc * sum_k || u_k - u_k^{prev,shift} ||^2 . Not rate-scaled: it is a
+        # direct pull toward last tick's plan, not a smoothness term. Inactive
+        # when weight == 0 or no previous solution is available (first tick).
+        w_tc = float(getattr(self, "temporal_consistency_weight", 0.0))
+        if w_tc > 0.0 and temporal_consistency_reference_u is not None:
+            u_prev = np.asarray(temporal_consistency_reference_u, dtype=float)
+            if u_prev.ndim == 2 and u_prev.shape[1] == self.nu and u_prev.shape[0] >= 1:
+                for k in range(self.horizon_steps):
+                    src = min(k, u_prev.shape[0] - 1)
+                    for i in range(self.nu):
+                        add_rate_penalty(
+                            index.control_index(k, i), None,
+                            float(u_prev[src, i]), w_tc,
+                        )
 
         # --- Objective: attractive term Cost_ref ---
         # Quadratic pull to destination reference state.
@@ -3815,6 +3840,9 @@ class MPC:
                     road_envelope_blocks=road_envelope_blocks,
                     speed_tracking_reference_mps=(
                         fixed_speed_tracking_reference_mps
+                    ),
+                    temporal_consistency_reference_u=(
+                        shifted_seed[1] if shifted_seed is not None else None
                     ),
                 )
                 solution, status, solve_time_ms = self._solve_qp(P=P, q=q, A=A, l=l, u=u)
