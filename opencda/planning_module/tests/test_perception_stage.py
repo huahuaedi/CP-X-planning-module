@@ -7,14 +7,7 @@ from pipeline.perception_stage import PerceptionStage
 
 
 def test_perception_stage_builds_one_fused_obstacle_view():
-    calls = []
-
-    def collect_local(**kwargs):
-        calls.append(("collect", kwargs))
-        return [{"vehicle_id": "local", "v": 3.0}]
-
     stage = PerceptionStage(
-        collect_local=collect_local,
         object_track_id=lambda item: str(item["vehicle_id"]),
         max_mpc_obstacles=1,
         ego_length_m=4.5,
@@ -25,7 +18,9 @@ def test_perception_stage_builds_one_fused_obstacle_view():
     location = SimpleNamespace(x=1.0, y=2.0)
 
     result = stage.build(
-        detected_objects={"vehicles": []},
+        detected_objects={"vehicles": [{
+            "vehicle_id": "local", "x": -5.0, "y": 2.0, "v": 3.0,
+        }]},
         cp_payload={"obstacles": [{
             "vehicle_id": "remote", "x": 8.0, "y": 2.0,
             "speed_mps": 4.5,
@@ -44,14 +39,12 @@ def test_perception_stage_builds_one_fused_obstacle_view():
     )
     assert result.front_actor_id == "remote"
     assert result.front_actor_speed_mps == 4.5
-    assert [name for name, _ in calls] == ["collect"]
 
 
 def test_ignore_dynamic_objects_is_applied_before_mpc_and_gap():
     observed = {}
 
     stage = PerceptionStage(
-        collect_local=lambda **_kwargs: [{"vehicle_id": "local"}],
         object_track_id=lambda item: str(item["vehicle_id"]),
         max_mpc_obstacles=8,
         ego_length_m=4.5,
@@ -61,7 +54,7 @@ def test_ignore_dynamic_objects_is_applied_before_mpc_and_gap():
     )
 
     result = stage.build(
-        detected_objects=None,
+        detected_objects={"vehicles": [{"vehicle_id": "local"}]},
         cp_payload={},
         ego_location=SimpleNamespace(x=0.0, y=0.0),
         ego_yaw_rad=0.0,

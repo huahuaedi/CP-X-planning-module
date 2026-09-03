@@ -28,7 +28,6 @@ class PerceptionStage:
     def __init__(
         self,
         *,
-        collect_local: Callable[..., Sequence[Mapping[str, Any]]],
         object_track_id: Callable[[Mapping[str, Any]], str],
         max_mpc_obstacles: int = 0,
         ego_length_m: float = 4.5,
@@ -36,7 +35,6 @@ class PerceptionStage:
         lane_width_m: float = 3.5,
         lane_change_boundary_overlap_m: float = 0.75,
     ) -> None:
-        self._collect_local = collect_local
         self._object_track_id = object_track_id
         self._max_mpc_obstacles = max(0, int(max_mpc_obstacles))
         self._ego_half_length_m = 0.5 * max(0.0, float(ego_length_m))
@@ -56,7 +54,7 @@ class PerceptionStage:
         timestamp_s: float,
         ignore_dynamic_objects: bool,
     ) -> PerceptionStageResult:
-        local = list(self._collect_local(detected_objects=detected_objects))
+        local = self.collect_local(detected_objects)
         fused = self.fuse(
             local_objects=local,
             cp_obstacles=list(cp_payload.get("obstacles", ()) or ()),
@@ -95,6 +93,86 @@ class PerceptionStage:
             front_actor_id=actor_id,
             front_actor_speed_mps=actor_speed_mps,
         )
+
+    @classmethod
+    def collect_local(cls, detected_objects):
+        objects = detected_objects
+        if not isinstance(objects, Mapping):
+            objects = getattr(objects, "objects", {}) or {}
+        vehicles = list(objects.get("vehicles", ()) or ())
+        snapshots = []
+        for index, detected in enumerate(vehicles):
+            if isinstance(detected, Mapping):
+                normalized = cls.normalize_local(detected)
+                if normalized is not None:
+                    snapshots.append(normalized)
+                continue
+            actor = (
+                getattr(detected, "carla_actor", None)
+                or getattr(detected, "vehicle", None)
+                or detected
+            )
+            try:
+                transform_getter = getattr(actor, "get_transform", None)
+                transform = transform_getter() if callable(transform_getter) else None
+                location = getattr(transform, "location", None)
+                if location is None:
+                    location_getter = getattr(actor, "get_location", None)
+                    location = (
+                        location_getter() if callable(location_getter)
+                        else getattr(actor, "location", None)
+                    )
+                if location is None:
+                    continue
+                velocity_getter = getattr(actor, "get_velocity", None)
+                velocity = (
+                    velocity_getter() if callable(velocity_getter)
+                    else getattr(actor, "velocity", None)
+                )
+                velocity_x = float(getattr(velocity, "x", 0.0))
+                velocity_y = float(getattr(velocity, "y", 0.0))
+                velocity_z = float(getattr(velocity, "z", 0.0))
+                speed_mps = math.sqrt(
+                    velocity_x ** 2 + velocity_y ** 2 + velocity_z ** 2
+                )
+                rotation = getattr(transform, "rotation", None)
+                heading_rad = (
+                    math.radians(float(getattr(rotation, "yaw", 0.0)))
+                    if rotation is not None else
+                    math.atan2(velocity_y, velocity_x)
+                    if speed_mps > 0.05 else 0.0
+                )
+                extent = getattr(getattr(actor, "bounding_box", None), "extent", None)
+                length_m = 2.0 * float(getattr(extent, "x", 2.2))
+                width_m = 2.0 * float(getattr(extent, "y", 0.9))
+                if not math.isfinite(length_m) or length_m <= 0.1:
+                    length_m = 4.5
+                if not math.isfinite(width_m) or width_m <= 0.1:
+                    width_m = 2.0
+                raw_id = getattr(actor, "id", getattr(actor, "carla_id", None))
+                try:
+                    stable_id = int(raw_id) >= 0
+                except (TypeError, ValueError):
+                    stable_id = bool(str(raw_id or "").strip())
+                actor_id = (
+                    str(raw_id) if stable_id
+                    else "opencda_detection:%d" % index
+                )
+                snapshots.append({
+                    "vehicle_id": actor_id, "id": actor_id,
+                    "x": float(location.x), "y": float(location.y),
+                    "v": float(speed_mps), "psi": float(heading_rad),
+                    "length_m": float(length_m), "width_m": float(width_m),
+                    "source": (
+                        "opencda_perception" if transform is not None
+                        else "opencda_ml_lidar_fusion"
+                    ),
+                    "provider_source": "native_opencda_perception",
+                    "confidence": float(getattr(actor, "confidence", 1.0)),
+                })
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                continue
+        return snapshots
 
     def front_gap(
         self, *, ego_location, ego_yaw_rad, object_snapshots,

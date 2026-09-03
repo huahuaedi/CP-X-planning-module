@@ -452,8 +452,8 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
 
     def test_collect_object_snapshots_accepts_external_mapping_detections(self):
         bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
-        snapshots = bridge._collect_object_snapshots(
-            detected_objects={
+        snapshots = PerceptionStage.collect_local(
+            {
                 "vehicles": [
                     {
                         "id": "mdrive_detection:7",
@@ -491,8 +491,8 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
                 x=3.0, y=4.0, z=0.0),
         )
 
-        snapshots = bridge._collect_object_snapshots(
-            detected_objects={"vehicles": [fused_vehicle]}
+        snapshots = PerceptionStage.collect_local(
+            {"vehicles": [fused_vehicle]}
         )
 
         self.assertEqual(len(snapshots), 1)
@@ -1164,7 +1164,6 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         bridge.max_mpc_obstacles = 10
 
         stage = PerceptionStage(
-            collect_local=lambda **_kwargs: (),
             object_track_id=lambda item: str(item.get("vehicle_id", "")),
             max_mpc_obstacles=10,
         )
@@ -1222,7 +1221,6 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
 
         bridge.max_mpc_obstacles = 1
         bridge.perception_stage = PerceptionStage(
-            collect_local=lambda **_kwargs: (),
             object_track_id=lambda item: str(item.get("vehicle_id", "")),
             max_mpc_obstacles=1,
         )
@@ -1275,7 +1273,6 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         bridge.max_mpc_obstacles = 10
 
         stage = PerceptionStage(
-            collect_local=lambda **_kwargs: (),
             object_track_id=lambda item: str(item.get("vehicle_id", "")),
             max_mpc_obstacles=10,
         )

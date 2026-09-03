@@ -1025,7 +1025,6 @@ class CPXMPCPlannerBridge:
             "extent", None,
         )
         self.perception_stage = PerceptionStage(
-            collect_local=self._collect_object_snapshots,
             object_track_id=self._object_track_id,
             max_mpc_obstacles=int(self.max_mpc_obstacles),
             ego_length_m=2.0 * float(getattr(ego_extent, "x", 2.25)),
@@ -1544,7 +1543,13 @@ class CPXMPCPlannerBridge:
                 if self.debug:
                     print(f"[CP-X OpenCDA Bridge] native CP publish failed: {exc}")
         perception = self.perception_stage.build(
-            detected_objects=latest_update.get("detected_objects"),
+            detected_objects=(
+                latest_update.get("detected_objects")
+                if latest_update.get("detected_objects") is not None
+                else getattr(
+                    self.vehicle_manager.perception_manager, "objects", {}
+                ) or {}
+            ),
             cp_payload=self._load_cp_message_payload(),
             ego_location=ego_location,
             ego_yaw_rad=float(ego_yaw_rad),
@@ -10063,97 +10068,6 @@ class CPXMPCPlannerBridge:
                 "[CP-X OpenCDA Bridge] Functional isolation removed "
                 f"{int(removed)} non-ego vehicle actor(s)."
             )
-
-    def _collect_object_snapshots(self, detected_objects: Any = None) -> list[dict[str, Any]]:
-        objects = detected_objects
-        if objects is None:
-            objects = getattr(self.vehicle_manager.perception_manager, "objects", {}) or {}
-        if not isinstance(objects, Mapping):
-            objects = getattr(objects, "objects", {}) or {}
-        vehicles = list(objects.get("vehicles", []) or [])
-        snapshots: list[dict[str, Any]] = []
-        for index, obj in enumerate(vehicles):
-            if isinstance(obj, Mapping):
-                normalized = PerceptionStage.normalize_local(obj)
-                if normalized is not None:
-                    snapshots.append(dict(normalized))
-                continue
-            actor = getattr(obj, "carla_actor", None) or getattr(obj, "vehicle", None) or obj
-            if actor is None:
-                continue
-            try:
-                get_transform = getattr(actor, "get_transform", None)
-                transform = get_transform() if callable(get_transform) else None
-                location = getattr(transform, "location", None)
-                if location is None:
-                    get_location = getattr(actor, "get_location", None)
-                    location = (
-                        get_location()
-                        if callable(get_location)
-                        else getattr(actor, "location", None)
-                    )
-                if location is None:
-                    continue
-
-                get_velocity = getattr(actor, "get_velocity", None)
-                velocity = (
-                    get_velocity()
-                    if callable(get_velocity)
-                    else getattr(actor, "velocity", None)
-                )
-                velocity_x = float(getattr(velocity, "x", 0.0))
-                velocity_y = float(getattr(velocity, "y", 0.0))
-                velocity_z = float(getattr(velocity, "z", 0.0))
-                bbox = getattr(actor, "bounding_box", None)
-                extent = getattr(bbox, "extent", None)
-                speed_mps = math.sqrt(
-                    velocity_x ** 2 + velocity_y ** 2 + velocity_z ** 2
-                )
-                rotation = getattr(transform, "rotation", None)
-                if rotation is not None:
-                    heading_rad = math.radians(float(getattr(rotation, "yaw", 0.0)))
-                elif speed_mps > 0.05:
-                    heading_rad = math.atan2(velocity_y, velocity_x)
-                else:
-                    heading_rad = 0.0
-
-                raw_actor_id = getattr(
-                    actor, "id", getattr(actor, "carla_id", None))
-                try:
-                    has_stable_actor_id = int(raw_actor_id) >= 0
-                except (TypeError, ValueError):
-                    has_stable_actor_id = bool(str(raw_actor_id or "").strip())
-                actor_id = (
-                    str(raw_actor_id)
-                    if has_stable_actor_id
-                    else "opencda_detection:%d" % int(index)
-                )
-                length_m = 2.0 * float(getattr(extent, "x", 2.2))
-                width_m = 2.0 * float(getattr(extent, "y", 0.9))
-                if not math.isfinite(length_m) or length_m <= 0.1:
-                    length_m = 4.5
-                if not math.isfinite(width_m) or width_m <= 0.1:
-                    width_m = 2.0
-                snapshots.append({
-                    "vehicle_id": actor_id,
-                    "id": actor_id,
-                    "x": float(location.x),
-                    "y": float(location.y),
-                    "v": float(speed_mps),
-                    "psi": float(heading_rad),
-                    "length_m": float(length_m),
-                    "width_m": float(width_m),
-                    "source": (
-                        "opencda_perception"
-                        if transform is not None
-                        else "opencda_ml_lidar_fusion"
-                    ),
-                    "provider_source": "native_opencda_perception",
-                    "confidence": float(getattr(actor, "confidence", 1.0)),
-                })
-            except (AttributeError, RuntimeError, TypeError, ValueError):
-                continue
-        return snapshots
 
     def _perception_diagnostics(self) -> dict[str, object]:
         manager = getattr(self.vehicle_manager, "perception_manager", None)
