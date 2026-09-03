@@ -205,6 +205,26 @@ class CPXMPCPlannerBridge:
             self._stable_reference_line_provider = provider
         provider.attach_builder(builder)
 
+    @property
+    def behavior_stage(self):
+        return self.pipeline.behavior
+
+    @property
+    def speed_target_planner(self):
+        return self.pipeline.speed
+
+    @property
+    def destination_speed_stage(self):
+        return self.pipeline.destination_speed
+
+    @property
+    def reference_publication_stage(self):
+        return self.pipeline.reference_publication
+
+    @property
+    def mpc_entry_stage(self):
+        return self.pipeline.mpc_entry
+
     def __init__(
         self,
         vehicle_manager: Any,
@@ -285,11 +305,11 @@ class CPXMPCPlannerBridge:
         self._stable_reference_line_provider = ReferenceLineProvider()
         self.maneuver_manager = ManeuverManager(self.config)
         self.nominal_trajectory_generator = NominalTrajectoryGenerator()
-        self.speed_target_planner = SpeedTargetPlanner()
-        self.behavior_stage = BehaviorStage()
-        self.destination_speed_stage = DestinationSpeedStage(
+        speed_target_planner = SpeedTargetPlanner()
+        behavior_stage = BehaviorStage()
+        destination_speed_stage = DestinationSpeedStage(
             config=self.config,
-            speed_planner=self.speed_target_planner,
+            speed_planner=speed_target_planner,
         )
         self._authoritative_ego_waypoint: Any = None
         self._stop_release_temp_smooth_until_sim_time_s = 0.0
@@ -1034,10 +1054,6 @@ class CPXMPCPlannerBridge:
                 self.config.get("lane_change_boundary_overlap_m", 0.75)
             ),
         )
-        self.pipeline = PlanningPipeline(
-            runtime_input=runtime_input_stage,
-            perception=perception_stage,
-        )
         self.final_reference_gate = FinalReferenceGate(self.config)
         self.reference_pipeline = ReferencePipeline(
             config=self.config,
@@ -1047,11 +1063,20 @@ class CPXMPCPlannerBridge:
             dt_s=float(self.mpc.dt_s),
             default_speed_mps=float(self.target_speed_mps),
         )
-        self.reference_publication_stage = ReferencePublicationStage(
+        reference_publication_stage = ReferencePublicationStage(
             reference_pipeline=self.reference_pipeline,
             reference_provider=self._stable_reference_line_provider,
         )
-        self.mpc_entry_stage = MPCEntryStage(self.config)
+        mpc_entry_stage = MPCEntryStage(self.config)
+        self.pipeline = PlanningPipeline(
+            runtime_input=runtime_input_stage,
+            perception=perception_stage,
+            behavior=behavior_stage,
+            speed=speed_target_planner,
+            destination_speed=destination_speed_stage,
+            reference_publication=reference_publication_stage,
+            mpc_entry=mpc_entry_stage,
+        )
         self._build_decision_record = build_decision_record
         self.safety_supervisor = SafetySupervisor(
             enabled=bool(self.config.get("safety_supervisor_enabled", True)),

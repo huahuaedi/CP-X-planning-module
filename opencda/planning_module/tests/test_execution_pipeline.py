@@ -16,6 +16,11 @@ def test_pipeline_sequences_runtime_and_perception_without_bridge():
     pipeline = PlanningPipeline(
         runtime_input=RuntimeInputStage(_Mapper()),
         perception=PerceptionStage(max_mpc_obstacles=4),
+        behavior=object(),
+        speed=object(),
+        destination_speed=object(),
+        reference_publication=object(),
+        mpc_entry=object(),
     )
     transform = SimpleNamespace(
         location=SimpleNamespace(x=1.0, y=2.0, z=0.0),

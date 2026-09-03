@@ -16,9 +16,19 @@ class PlanningPipeline:
         *,
         runtime_input: RuntimeInputStage,
         perception: PerceptionStage,
+        behavior: Any,
+        speed: Any,
+        destination_speed: Any,
+        reference_publication: Any,
+        mpc_entry: Any,
     ) -> None:
         self._runtime_input = runtime_input
         self._perception = perception
+        self.behavior = behavior
+        self.speed = speed
+        self.destination_speed = destination_speed
+        self.reference_publication = reference_publication
+        self.mpc_entry = mpc_entry
 
     def begin_tick(
         self, *, timestamp_s: float, ego_transform: Any, ego_speed_kmh: float
