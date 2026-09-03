@@ -241,7 +241,12 @@ class VehicleManager(object):
         planner_config["record_evaluation_metrics"] = bool(
             planner_config.get("record_evaluation_metrics", False)
         ) or bool(self.store_input_frame)
-        planner_config["draw_world_debug"] = False
+        # Keep CARLA visualization as an explicit planner configuration.
+        # The bridge publishes one frozen route/reference/MPC view through
+        # WorldDebugPort; do not silently disable it at the platform boundary.
+        planner_config["draw_world_debug"] = bool(
+            planner_config.get("draw_world_debug", False)
+        )
         debug_output_dir = Path(str(planner_config.get("debug_output_dir", "opencda/planning_module/opencda_bridge/debug")))
         self.shadow_comparison_timeout_s = max(0.0, float(planner_config.get("shadow_comparison_timeout_s", 5.0)))
         self.shadow_comparison_output_path = debug_output_dir / "planner_comparison.jsonl"

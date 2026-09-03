@@ -44,6 +44,10 @@ vehicle_base:
     enabled: true
     type: cpx_mpc
     mode: full_cpx_mpc
+    # CARLA diagnostic layer: global route (yellow), active reference
+    # (white), and MPC solution (green). This does not affect planning.
+    draw_world_debug: true
+    draw_world_debug_destination: true
     architecture_profile: unified_full_v2
     fallback_policy: emergency_stop
     safety_supervisor_enabled: true
