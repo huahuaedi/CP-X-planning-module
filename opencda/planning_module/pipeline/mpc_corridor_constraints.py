@@ -1,22 +1,15 @@
-"""Stage D: turn a Stage-C ``Corridor`` (and Stage-B homotopy sides) into
-linear inequality rows for the MPC QP.
+"""Stage D: turn a Stage-C ``Corridor`` into linear inequalities for the MPC.
 
 Kept independent of ``mpc.py``'s variable indexing: each row is returned in
 the ego-origin plane as coefficients on ``(x_k, y_k)`` plus a
 ``[lower, upper]`` band. ``mpc.py`` maps stage ``k`` -> its state-variable
 columns and attaches a slack column per row.
 
-Two producers:
-
-* ``corridor_rows`` -- one longitudinal band per stage:
+``corridor_rows`` produces one longitudinal band per stage:
       s_lo(k) - sigma <= t_k . (x_k, y_k) <= s_hi(k) + sigma
   where ``t_k`` is the unit tangent of the ego reference at stage ``k``'s
   linearization station (so ``t_k . p`` is arc-length along the path,
   first-order).
-
-* ``homotopy_keepout_rows`` -- one half-space per (assigned cav, stage):
-      n . (x_k - p_k) >= d_safe - sigma
-  with ``n`` the inward normal for the Stage-B pass side.
 
 Pure. No numpy dependency.
 """
@@ -129,57 +122,4 @@ def corridor_rows(
                 tag=(corridor.binding[k] if k < len(corridor.binding) else ""),
             )
         )
-    return rows
-
-
-@dataclass(frozen=True)
-class HalfSpaceRow:
-    """``n_x * x_k + n_y * y_k >= rhs - sigma`` at MPC stage ``k``
-    (ego-origin frame). Encodes "stay on the chosen side of the cav"."""
-
-    stage: int
-    n_x: float
-    n_y: float
-    rhs: float
-    cav_actor_id: int
-    slack_group: str = "homotopy_keepout"
-
-
-def homotopy_keepout_rows(
-    assignments: Sequence[Any],
-    cav_positions_by_stage: Mapping[int, Sequence[Tuple[float, float]]],
-    ego_heading_rad: float,
-    ego_origin_xy: XY = (0.0, 0.0),
-    *,
-    d_safe_m: float = 3.0,
-) -> List[HalfSpaceRow]:
-    """For each assignment with a left/right ``homotopy_side`` and a cav
-    position track, one half-space per stage keeping the ego on that side.
-
-    ``cav_positions_by_stage`` maps ``cav_actor_id -> [(x, y), ...]`` in
-    world coords (index = MPC stage).
-    """
-
-    ox, oy = float(ego_origin_xy[0]), float(ego_origin_xy[1])
-    ch, sh = math.cos(float(ego_heading_rad)), math.sin(float(ego_heading_rad))
-    rows: List[HalfSpaceRow] = []
-    for a in list(assignments or []):
-        side = str(getattr(a, "homotopy_side", "") or "")
-        if side not in ("left", "right"):
-            continue
-        pid = int(getattr(a, "cav_actor_id", -1))
-        track = list(cav_positions_by_stage.get(pid, []) or [])
-        # Inward normal: ego stays left of the cav -> the vector from cav
-        # to ego points to the ego-heading's left, i.e. (-sin, cos); stays
-        # right -> (sin, -cos).
-        nx, ny = (-sh, ch) if side == "left" else (sh, -ch)
-        for k, (px_w, py_w) in enumerate(track):
-            px, py = px_w - ox, py_w - oy
-            rows.append(
-                HalfSpaceRow(
-                    stage=k, n_x=nx, n_y=ny,
-                    rhs=float(nx * px + ny * py + float(d_safe_m)),
-                    cav_actor_id=pid,
-                )
-            )
     return rows

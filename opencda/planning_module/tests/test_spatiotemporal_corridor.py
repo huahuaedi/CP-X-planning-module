@@ -30,8 +30,7 @@ def _tag(agent_id, tag, s=None, t=None):
 
 def _assign(role):
     return ConflictAssignment(
-        cav_actor_id=2, role=role, homotopy_side="", conflict_xy=None,
-        cav_wins=(role != "proceed"), reason="",
+        cav_actor_id=2, role=role, cav_wins=(role != "proceed"), reason="",
     )
 
 

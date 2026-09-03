@@ -96,16 +96,12 @@ def should_yield(
 
 
 # --------------------------------------------------------------------------- #
-# Stage B: role / homotopy assignment (superset of ``should_yield``)
+# Stage B: cooperative role assignment
 #
 # ``should_yield`` answers one binary question ("may I proceed?"). The
-# interaction-aware MPC plan needs more per conflict: a role
-# (proceed / yield / make-gap), a pass side (homotopy), the conflict
-# location, and tick-to-tick stability so the downstream corridor and MPC
-# constraints don't flip. This block adds that without touching
-# ``should_yield`` -- the two existing bridge call sites and their tests are
-# unaffected. Still pure and CARLA-free: the hysteresis latch is passed in
-# and returned; the caller owns persistence.
+# interaction-aware plan needs a stable role (proceed / yield / make-gap)
+# for each conflict. The hysteresis latch is passed in and returned; the
+# caller owns persistence. Lateral path choice remains in candidate generation.
 # --------------------------------------------------------------------------- #
 
 _ROLE_PROCEED = "proceed"
@@ -148,8 +144,6 @@ class ConflictAssignment:
 
     cav_actor_id: int
     role: str                       # proceed | yield | make_gap
-    homotopy_side: str              # "" | left | right | behind
-    conflict_xy: Optional[Tuple[float, float]]
     cav_wins: bool
     reason: str
 
@@ -157,23 +151,8 @@ class ConflictAssignment:
 @dataclass
 class ArbitrationLatchEntry:
     role: str = _ROLE_PROCEED
-    side: str = ""
     candidate_role: str = ""
-    candidate_side: str = ""
     candidate_count: int = 0
-
-
-def lateral_side(
-    origin_xy: Tuple[float, float],
-    heading_rad: float,
-    target_xy: Tuple[float, float],
-) -> str:
-    """"left" or "right": which side of ``origin``'s heading ``target`` is on."""
-
-    dx = float(target_xy[0]) - float(origin_xy[0])
-    dy = float(target_xy[1]) - float(origin_xy[1])
-    cross = math.cos(float(heading_rad)) * dy - math.sin(float(heading_rad)) * dx
-    return "left" if cross >= 0.0 else "right"
 
 
 def _raw_cav_wins(
@@ -198,14 +177,14 @@ def assign_conflict_roles(
     hysteresis_ticks: int = 3,
     decisive_margin_s: float = 1.0,
 ) -> Tuple[Sequence[ConflictAssignment], Dict[str, ArbitrationLatchEntry]]:
-    """Assign a role + pass side per conflicting cooperative cav.
+    """Assign a stable role per conflicting cooperative cav.
 
     Role decision uses the exact ``should_yield`` rule (earliest
     ``committed_at_s`` wins, ``actor_id`` breaks ties) so every CAV resolves
     the same winner independently. On a merge-kind conflict the loser's role
     is ``make_gap`` rather than a bare ``yield``.
 
-    Hysteresis: a per-cav latch holds the previous role/side unless the new
+    Hysteresis: a per-cav latch holds the previous role unless the new
     decision persists for ``hysteresis_ticks`` calls, or the commitment-time
     margin exceeds ``decisive_margin_s`` (then it switches immediately).
     Returns ``(assignments, new_latch_state)``; pass ``new_latch_state`` back
@@ -246,44 +225,38 @@ def assign_conflict_roles(
             (_ROLE_MAKE_GAP if is_merge else _ROLE_YIELD) if cav_wins
             else _ROLE_PROCEED
         )
-        raw_side = lateral_side(my_position_xy, my_heading_rad, (px, py))
-
         margin_s = abs(
             float(pclaim.committed_at_s) - float(my_claim.committed_at_s)
         )
         prev = old.get(key, ArbitrationLatchEntry())
         entry = ArbitrationLatchEntry(
             role=prev.role or _ROLE_PROCEED,
-            side=prev.side,
             candidate_role=prev.candidate_role,
-            candidate_side=prev.candidate_side,
             candidate_count=int(prev.candidate_count),
         )
 
         decisive = margin_s >= float(decisive_margin_s)
         first_seen = key not in old
-        if raw_role == entry.role and raw_side == entry.side:
-            entry.candidate_role, entry.candidate_side, entry.candidate_count = "", "", 0
+        if raw_role == entry.role:
+            entry.candidate_role, entry.candidate_count = "", 0
         elif decisive or first_seen:
-            entry.role, entry.side = raw_role, raw_side
-            entry.candidate_role, entry.candidate_side, entry.candidate_count = "", "", 0
+            entry.role = raw_role
+            entry.candidate_role, entry.candidate_count = "", 0
         else:
-            if raw_role == entry.candidate_role and raw_side == entry.candidate_side:
+            if raw_role == entry.candidate_role:
                 entry.candidate_count += 1
             else:
-                entry.candidate_role, entry.candidate_side = raw_role, raw_side
+                entry.candidate_role = raw_role
                 entry.candidate_count = 1
             if entry.candidate_count >= int(hysteresis_ticks):
-                entry.role, entry.side = raw_role, raw_side
-                entry.candidate_role, entry.candidate_side, entry.candidate_count = "", "", 0
+                entry.role = raw_role
+                entry.candidate_role, entry.candidate_count = "", 0
 
         new[key] = entry
         assignments.append(
             ConflictAssignment(
                 cav_actor_id=int(cav.actor_id),
                 role=entry.role,
-                homotopy_side=entry.side,
-                conflict_xy=(px, py),
                 cav_wins=bool(cav_wins),
                 reason=(
                     f"kind={my_claim.kind}:resource={my_claim.resource_id}:"
