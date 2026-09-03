@@ -843,6 +843,17 @@ mpc:
       # visibly lagging genuine setpoint changes.
       temporal_consistency_weight: 0.0
 
+    # Stage-D spatiotemporal corridor: a soft per-stage longitudinal band on
+    # the ego position, supplied per tick by the interaction-aware layer
+    # (pipeline.cav_conflict_pipeline.resolve_conflicts ->
+    # mpc_corridor_constraints.corridor_rows). Encodes the yield / follow /
+    # merge-gap decision as a convex constraint instead of the potential
+    # field. Disabled by default; a no-op when no rows are passed.
+    corridor:
+      enabled: false
+      w_slack: 10000.0      # quadratic penalty on band violation (>= road_boundary)
+      max_slack_m: 3.0      # hard cap on how far the band may be violated
+
     # Super-ellipsoid obstacle collision potential used in the live MPC objective.
     #
     # For each obstacle and stage:

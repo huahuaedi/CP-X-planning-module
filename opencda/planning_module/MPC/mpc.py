@@ -37,7 +37,7 @@ import copy
 from dataclasses import dataclass
 import math
 import time
-from typing import Dict, List, Mapping, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
 import numpy as np
 import scipy.sparse as sp
@@ -146,6 +146,21 @@ class MPCRepulsivePotentialSpec:
     cross_track_full_response_m: float
 
 
+def _row_attr(row: Any, name: str, default: float = 0.0) -> float:
+    """Read ``stage``/``a_x``/``a_y``/``lower``/``upper`` from a corridor row
+    that is either an object (``pipeline.mpc_corridor_constraints.LinearRow``)
+    or a plain mapping -- keeps mpc.py free of a pipeline import."""
+
+    if isinstance(row, Mapping):
+        val = row.get(name, default)
+    else:
+        val = getattr(row, name, default)
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return float(default)
+
+
 @dataclass
 class QPIndex:
     """
@@ -161,6 +176,7 @@ class QPIndex:
     road_boundary_slack_pair_count: int = 0
     speed_slack_count: int = 0
     road_envelope_slack_count: int = 0
+    corridor_slack_count: int = 0
 
     @property
     def state_offset(self) -> int:
@@ -187,8 +203,12 @@ class QPIndex:
         return self.speed_slack_offset + int(self.speed_slack_count)
 
     @property
-    def total_variables(self) -> int:
+    def corridor_slack_offset(self) -> int:
         return self.road_envelope_slack_offset + int(self.road_envelope_slack_count)
+
+    @property
+    def total_variables(self) -> int:
+        return self.corridor_slack_offset + int(self.corridor_slack_count)
 
     def state_index(self, k: int, i: int) -> int:
         return self.state_offset + k * self.nx + i
@@ -207,6 +227,9 @@ class QPIndex:
 
     def road_envelope_slack_index(self, k: int) -> int:
         return self.road_envelope_slack_offset + (k - 1)
+
+    def corridor_slack_index(self, k: int) -> int:
+        return self.corridor_slack_offset + (k - 1)
 
 
 class MPC:
@@ -356,6 +379,18 @@ class MPC:
         # 0.0 (default) => term absent, output bit-identical to before.
         self.temporal_consistency_weight = max(
             0.0, float(control_cfg.get("temporal_consistency_weight", 0.0))
+        )
+        # Stage-D spatiotemporal corridor: soft per-stage longitudinal band
+        # supplied by the interaction-aware layer (pipeline.cav_conflict_pipeline
+        # -> mpc_corridor_constraints.corridor_rows). Off by default; when on
+        # and no rows are passed it is still a no-op.
+        corridor_cfg = dict(cost_cfg.get("corridor", {}))
+        self.corridor_constraint_enabled = bool(corridor_cfg.get("enabled", False))
+        self.corridor_slack_weight = max(
+            0.0, float(corridor_cfg.get("w_slack", 1.0e4))
+        )
+        self.corridor_max_slack_m = max(
+            0.0, float(corridor_cfg.get("max_slack_m", 3.0))
         )
         self.safety_cost = MPCSafetyCostSpec(
             # Attractive weight (legacy fallback: cost.w_safe).
@@ -2711,6 +2746,7 @@ class MPC:
         road_envelope_blocks: Mapping[str, object] | None = None,
         speed_tracking_reference_mps: Sequence[float] | None = None,
         temporal_consistency_reference_u: np.ndarray | None = None,
+        corridor_rows: Sequence[Any] | None = None,
     ) -> Tuple[sp.csc_matrix, np.ndarray, sp.csc_matrix, np.ndarray, np.ndarray, QPIndex]:
         """
         Intent:
@@ -2738,6 +2774,14 @@ class MPC:
             and not road_envelope_term_active
         )
         speed_soft_term_active = bool(getattr(self, "speed_soft_constraint_enabled", False))
+        corridor_row_list = [
+            r for r in list(corridor_rows or [])
+            if 1 <= int(_row_attr(r, "stage")) <= int(self.horizon_steps)
+        ]
+        corridor_term_active = (
+            bool(getattr(self, "corridor_constraint_enabled", False))
+            and len(corridor_row_list) > 0
+        )
         index = QPIndex(
             nx=self.nx,
             nu=self.nu,
@@ -2748,6 +2792,9 @@ class MPC:
             speed_slack_count=(int(self.horizon_steps) if speed_soft_term_active else 0),
             road_envelope_slack_count=(
                 int(self.horizon_steps) if road_envelope_term_active else 0
+            ),
+            corridor_slack_count=(
+                int(self.horizon_steps) if corridor_term_active else 0
             ),
         )
         n_var = index.total_variables
@@ -3175,6 +3222,42 @@ class MPC:
         if road_envelope_term_active:
             for k in range(1, self.horizon_steps + 1):
                 add_quadratic(index.road_envelope_slack_index(k), tiny_reg)
+        if corridor_term_active:
+            for k in range(1, self.horizon_steps + 1):
+                add_quadratic(index.corridor_slack_index(k), tiny_reg)
+
+        # --- Objective + constraints: Stage-D spatiotemporal corridor ---
+        # Per stage k a soft longitudinal band on the ego position in the
+        # ego-origin frame:  lower - s <= a_x x_k + a_y y_k <= upper + s,
+        # s >= 0, cost w * s^2. Rows come from
+        # pipeline.mpc_corridor_constraints.corridor_rows (t_k = reference
+        # tangent, band already shifted by the ego's own station).
+        if corridor_term_active:
+            w_corr = float(self.corridor_slack_weight)
+            corr_slack_upper = (
+                float(self.corridor_max_slack_m)
+                if self.corridor_max_slack_m > 0.0 else np.inf
+            )
+            for row in corridor_row_list:
+                k = int(_row_attr(row, "stage"))
+                s_idx = index.corridor_slack_index(k)
+                a_x = _row_attr(row, "a_x")
+                a_y = _row_attr(row, "a_y")
+                lower = _row_attr(row, "lower", -np.inf)
+                upper = _row_attr(row, "upper", np.inf)
+                x_idx = index.state_index(k, 0)
+                y_idx = index.state_index(k, 1)
+                if w_corr > 0.0:
+                    add_quadratic(s_idx, w_corr)
+                if math.isfinite(upper):
+                    add_constraint(
+                        {x_idx: a_x, y_idx: a_y, s_idx: -1.0}, -np.inf, float(upper)
+                    )
+                if math.isfinite(lower):
+                    add_constraint(
+                        {x_idx: a_x, y_idx: a_y, s_idx: 1.0}, float(lower), np.inf
+                    )
+                add_constraint({s_idx: 1.0}, 0.0, corr_slack_upper)
 
         # --- Constraints ---
         # Initial state equality X_0 = current state.
@@ -3616,6 +3699,7 @@ class MPC:
         lane_center_reference_samples: Sequence[Mapping[str, object]] | None = None,
         stop_goal_active: bool = False,
         road_envelope_payload_world: Mapping[str, object] | None = None,
+        corridor_rows: Sequence[Any] | None = None,
     ) -> List[List[float]]:
         """
         Intent:
@@ -3844,6 +3928,7 @@ class MPC:
                     temporal_consistency_reference_u=(
                         shifted_seed[1] if shifted_seed is not None else None
                     ),
+                    corridor_rows=corridor_rows,
                 )
                 solution, status, solve_time_ms = self._solve_qp(P=P, q=q, A=A, l=l, u=u)
                 solve_time_total_ms += float(solve_time_ms)

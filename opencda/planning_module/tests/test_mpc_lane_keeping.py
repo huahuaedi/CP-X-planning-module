@@ -813,6 +813,85 @@ class MPCLaneKeepingIntegrationTests(unittest.TestCase):
         jump_on = self._two_tick_input_jump(50.0)
         self.assertLess(jump_on, jump_off)
 
+    # ---------------------- Stage-D spatiotemporal corridor -----------------
+    def _corridor_build_qp(self, mpc, corridor_rows):
+        return mpc._build_qp(
+            x0=np.zeros(4, dtype=float),
+            x_ref_target=np.zeros(4, dtype=float),
+            object_snapshots=[],
+            current_acceleration_mps2=0.0,
+            current_steering_rad=0.0,
+            x_ref_rollout=np.zeros((mpc.horizon_steps + 1, 4), dtype=float),
+            u_ref_rollout=np.zeros((mpc.horizon_steps, 2), dtype=float),
+            lane_center_reference=None,
+            speed_upper_bound_mps=None,
+            reachable_speed_floor_profile_mps=None,
+            corridor_rows=corridor_rows,
+        )
+
+    def test_corridor_slack_vars_added_only_when_enabled_and_rows_present(self):
+        cfg = self._minimal_mpc_config(speed_soft_enabled=False)
+        cfg[0]["cost"]["corridor"] = {"enabled": True, "w_slack": 1000.0}
+        mpc = MPC(*cfg)
+        rows = [
+            {"stage": k, "a_x": 1.0, "a_y": 0.0, "lower": -1e9, "upper": 50.0}
+            for k in range(1, mpc.horizon_steps + 1)
+        ]
+        *_, idx_on = self._corridor_build_qp(mpc, rows)
+        *_, idx_off = self._corridor_build_qp(mpc, None)
+        self.assertEqual(idx_on.corridor_slack_count, mpc.horizon_steps)
+        self.assertEqual(idx_off.corridor_slack_count, 0)
+        self.assertEqual(
+            idx_on.total_variables,
+            idx_off.total_variables + mpc.horizon_steps,
+        )
+
+    def test_corridor_disabled_in_config_ignores_rows(self):
+        mpc = MPC(*self._minimal_mpc_config(speed_soft_enabled=False))
+        rows = [{"stage": 1, "a_x": 1.0, "a_y": 0.0, "lower": -1e9, "upper": 5.0}]
+        *_, idx = self._corridor_build_qp(mpc, rows)
+        self.assertEqual(idx.corridor_slack_count, 0)
+
+    @staticmethod
+    def _yaml_mpc_corridor(enabled, *, w_slack=5000.0, max_slack_m=0.5):
+        config_path = Path(__file__).resolve().parents[1] / "MPC" / "mpc.yaml"
+        payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        payload["mpc"].setdefault("cost", {})["corridor"] = {
+            "enabled": bool(enabled),
+            "w_slack": float(w_slack),
+            "max_slack_m": float(max_slack_m),
+        }
+        return MPC(payload["mpc"], payload.get("road", {}))
+
+    def _final_progress(self, *, cap_m):
+        mpc = self._yaml_mpc_corridor(cap_m is not None)
+        rows = None
+        if cap_m is not None:
+            rows = [
+                {"stage": k, "a_x": 0.0, "a_y": 1.0, "lower": -1e9,
+                 "upper": float(cap_m)}
+                for k in range(1, mpc.horizon_steps + 1)
+            ]
+        out = mpc.plan_trajectory(
+            current_state=[0.05, 0.0, 3.0, np.deg2rad(89.87)],
+            destination_state=[0.0, 7.35, 3.0, np.pi / 2.0, 1],
+            object_snapshots=[],
+            current_acceleration_mps2=0.0,
+            current_steering_rad=0.0,
+            lane_center_reference_samples=self._straight_reference(
+                mpc, y0=0.0, speed_ref_mps=3.0
+            ),
+            corridor_rows=rows,
+        )
+        return float(out[-1][1])   # final y == arc-length along the +y reference
+
+    def test_corridor_cap_limits_forward_progress(self):
+        free = self._final_progress(cap_m=None)
+        capped = self._final_progress(cap_m=2.0)
+        self.assertGreater(free, 4.0)
+        self.assertLess(capped, 2.0 + 0.6)       # cap + max_slack tolerance
+        self.assertLess(capped, free - 1.0)
+
     def test_temporal_consistency_term_pulls_inputs_toward_previous_solution(self):
         w_tc = 3.0
         cfg_off = self._minimal_mpc_config(speed_soft_enabled=False)
