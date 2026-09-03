@@ -13,6 +13,7 @@ from pipeline.reference_line_provider import (
     ReferenceLineRequest,
     TurnReferenceRequest,
 )
+from pipeline.stable_reference_line_provider import StableReferenceLineProvider
 
 
 def _line(y_m=0.0):
@@ -20,6 +21,102 @@ def _line(y_m=0.0):
         {"x_ref_m": float(index), "y_ref_m": float(y_m)}
         for index in range(30)
     ]
+
+
+def _local_geometry(lane_id, points):
+    centerline = tuple(
+        SimpleNamespace(
+            x_m=float(x_m), y_m=float(y_m), heading_rad=0.0,
+            curvature_1pm=0.0, lane_width_m=3.5,
+            left_boundary_x_m=float(x_m), left_boundary_y_m=float(y_m + 1.75),
+            right_boundary_x_m=float(x_m), right_boundary_y_m=float(y_m - 1.75),
+            boundary_source="admap_border",
+        )
+        for x_m, y_m in points
+    )
+    return SimpleNamespace(lane_id=int(lane_id), centerline=centerline)
+
+
+def test_local_route_reference_prefixes_matched_lane_before_connector():
+    geometries = {
+        10: _local_geometry(10, [(0.0, 0.0), (1.0, 0.0)]),
+        20: _local_geometry(20, [(1.0, 0.0), (2.0, 1.0)]),
+        30: _local_geometry(30, [(2.0, 1.0), (2.0, 2.0)]),
+    }
+    snapshot = SimpleNamespace(
+        valid=True,
+        # RouteCursor has entered the connector while the continuous matcher
+        # still owns the incoming lane beneath ego.
+        route_lane_sequence=(20, 30),
+        geometry_for_lane=lambda lane_id: geometries.get(int(lane_id)),
+    )
+
+    samples, reason = StableReferenceLineProvider().reference_from_local_map(
+        snapshot,
+        start_lane_id=10,
+        target_speed_mps=2.0,
+        maximum_join_distance_m=2.0,
+    )
+
+    assert [10, 20, 30] == list(dict.fromkeys(
+        int(sample["lane_id"]) for sample in samples
+    ))
+    assert reason == "local_map_snapshot_route:10>20>30"
+
+
+def test_turn_reference_keeps_valid_master_until_local_map_revision_catches_up():
+    provider = ReferenceLineProvider()
+    provider.attach_builder(SimpleNamespace(
+        curvature_feasible_turn_samples=lambda reference_samples, **_kwargs: (
+            list(reference_samples), ""
+        )
+    ))
+    provider.install(
+        TURN,
+        [
+            {
+                "x_ref_m": float(index), "y_ref_m": 0.0,
+                "heading_rad": 0.0, "lane_id": 10,
+            }
+            for index in range(20)
+        ],
+        route_revision="route-1",
+        map_epoch="admap",
+        event="maneuver_started",
+        source_lane_id=10,
+        target_lane_id=20,
+        maneuver_direction="left",
+    )
+    stale_local_map = SimpleNamespace(
+        valid=True,
+        route_revision="route-1",
+        route_lane_sequence=(20,),
+        geometry_for_lane=lambda _lane_id: None,
+    )
+
+    samples, _destination, reason = provider.turn_reference(
+        TurnReferenceRequest(
+            local_map=stale_local_map,
+            config={},
+            horizon_steps=8,
+            dt_s=0.1,
+            ego_location=SimpleNamespace(x=2.0, y=0.0),
+            ego_yaw_rad=0.0,
+            current_state=[2.0, 0.0, 2.0, 0.0],
+            current_lane_id=10,
+            target_lane_id=20,
+            target_speed_mps=2.0,
+            lock_master=True,
+            turn_direction="left",
+            route_revision="route-2",
+            map_epoch="admap",
+        )
+    )
+
+    assert samples
+    assert provider.snapshot(TURN).route_revision == "route-1"
+    assert "turn_local_map_route_revision_mismatch:route-1!=route-2" in reason
+    assert "turn_master_window" in reason
 
 
 @pytest.mark.parametrize(

@@ -593,27 +593,63 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             float(dt_s) * max(0.8, float(turn_speed_mps)),
         )
         reason = ""
-        master = self.snapshot(TURN).mutable_samples()
-        if not master:
+        turn_snapshot = self.snapshot(TURN)
+        master = turn_snapshot.mutable_samples()
+        lifecycle_changed = bool(
+            turn_snapshot.active
+            and (
+                str(turn_snapshot.route_revision) != str(route_revision)
+                or str(turn_snapshot.map_epoch) != str(map_epoch or "admap")
+                or (
+                    str(turn_direction or "").strip().lower()
+                    and str(turn_snapshot.maneuver_direction).strip().lower()
+                    != str(turn_direction).strip().lower()
+                )
+            )
+        )
+        local_map_route_revision = str(
+            getattr(local_map, "route_revision", "") or ""
+        )
+        local_map_matches_route = bool(
+            not local_map_route_revision
+            or local_map_route_revision == str(route_revision)
+        )
+        if not master or (bool(lock_master) and lifecycle_changed):
             # GlobalRoute owns topology only. TURN geometry comes from the
             # topology-ordered AD-map lane and connector centre lines in the
             # local snapshot. The former route-polyline path was a second
             # geometry owner and exposed junction node discontinuities as a
             # lateral jump at PREPARE->TURN.
-            master, reason = self.reference_from_local_map(
-                local_map,
-                start_lane_id=int(current_lane_id),
-                target_speed_mps=float(turn_speed_mps),
-                maximum_join_distance_m=float(
-                    config.get("local_map_maximum_join_distance_m", 5.0)
-                ),
-            )
-            if bool(lock_master) and master:
+            if local_map_matches_route:
+                candidate_master, reason = self.reference_from_local_map(
+                    local_map,
+                    start_lane_id=int(current_lane_id),
+                    target_speed_mps=float(turn_speed_mps),
+                    maximum_join_distance_m=float(
+                        config.get("local_map_maximum_join_distance_m", 5.0)
+                    ),
+                )
+            else:
+                candidate_master = []
+                reason = (
+                    "turn_local_map_route_revision_mismatch:"
+                    + local_map_route_revision + "!=" + str(route_revision)
+                )
+            if bool(lock_master) and candidate_master:
+                install_event = "maneuver_started"
+                if turn_snapshot.active:
+                    install_event = (
+                        "route_changed"
+                        if str(turn_snapshot.route_revision) != str(route_revision)
+                        else "map_epoch_changed"
+                        if str(turn_snapshot.map_epoch) != str(map_epoch or "admap")
+                        else "phase_transition"
+                    )
                 installed, install_reason = self.install(
-                    TURN, master,
+                    TURN, candidate_master,
                     route_revision=str(route_revision),
                     map_epoch=str(map_epoch or "admap"),
-                    event="maneuver_started",
+                    event=str(install_event),
                     source_lane_id=int(current_lane_id),
                     target_lane_id=int(target_lane_id),
                     maneuver_direction=str(turn_direction or "").strip().lower(),
@@ -625,6 +661,12 @@ class ReferenceLineProvider(StableReferenceLineProvider):
                 reason = ";".join(
                     item for item in (str(reason), suffix) if item
                 )
+                # Installation is atomic. If a route-revision replacement is
+                # rejected, retain the last valid master instead of exposing
+                # a half-built rolling-window candidate.
+                master = self.snapshot(TURN).mutable_samples()
+            elif not turn_snapshot.active:
+                master = [dict(sample) for sample in candidate_master]
         if not master:
             return [], list(destination_state or []), str(reason)
         if self.snapshot(TURN).active:
@@ -1063,6 +1105,9 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             target_lane_id=target_lane_id,
             target_speed_mps=target_speed_mps,
             destination_state=destination,
+            lock_master=decision in {
+                "intersection_turn_left", "intersection_turn_right"
+            },
             turn_direction=(
                 "left" if decision.endswith("_left")
                 else "right" if decision.endswith("_right")

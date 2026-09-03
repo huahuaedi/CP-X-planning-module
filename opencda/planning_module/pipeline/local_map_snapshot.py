@@ -58,6 +58,7 @@ class LocalLaneCorridor:
 class LocalMapSnapshot:
     frame_id: int = 0
     timestamp_s: float = 0.0
+    route_revision: str = ""
     valid: bool = False
     ego_lane_id: int = 0
     road_id: int = 0
@@ -181,6 +182,7 @@ class LocalMapSnapshot:
             "architecture_map_owner": "local_map_snapshot",
             "local_map_frame_id": int(self.frame_id),
             "local_map_timestamp_s": float(self.timestamp_s),
+            "local_map_route_revision": str(self.route_revision),
             "local_map_valid": bool(self.valid),
             "local_map_ego_lane_id": int(self.ego_lane_id),
             "local_map_route_target_lane_id": int(self.route_target_lane_id),
@@ -349,6 +351,7 @@ def build_local_map_snapshot(
     *,
     frame_id: int,
     timestamp_s: float,
+    route_revision: str = "",
     match: Mapping[str, object] | None,
     local_graph: Mapping[str, object] | None,
     route_target_lane_id: int = 0,
@@ -443,6 +446,7 @@ def build_local_map_snapshot(
     return LocalMapSnapshot(
         frame_id=max(0, int(frame_id)),
         timestamp_s=float(timestamp_s),
+        route_revision=str(route_revision or ""),
         valid=bool(valid),
         ego_lane_id=ego_lane_id,
         road_id=int(matched.get("road_id", 0) or 0),

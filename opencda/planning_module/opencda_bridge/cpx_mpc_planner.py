@@ -5125,7 +5125,9 @@ class CPXMPCPlannerBridge:
             self._local_map_snapshot = build_local_map_snapshot(
                 frame_id=int(self._local_map_frame_id),
                 timestamp_s=float(self._sim_time_s()),
-                route_revision=str(self.route_manager.route_revision),
+                route_revision=str(
+                    getattr(self.route_manager, "route_revision", "") or ""
+                ),
                 match=self._diagnostic_map_matching,
                 local_graph=self._diagnostic_local_lane_frame,
                 route_target_lane_id=int(ad_target_lane_id),

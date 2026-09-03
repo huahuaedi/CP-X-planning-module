@@ -209,7 +209,14 @@ class StableReferenceLineProvider:
         if start_lane_id in route_sequence:
             route_sequence = route_sequence[route_sequence.index(start_lane_id):]
         else:
-            route_sequence = [start_lane_id]
+            # At a junction boundary RouteCursor can advance to the connector
+            # one tick before the continuous matcher leaves the incoming
+            # lane.  The local route sequence then starts with the connector,
+            # while ``start_lane_id`` still correctly names the lane beneath
+            # ego.  Preserve both sides of that handoff: replacing the route
+            # sequence with only the incoming lane produced a straight turn
+            # reference whose first point was tens of metres behind ego.
+            route_sequence = [start_lane_id] + route_sequence
         samples = []
         accepted_lanes = []
         for lane_id in route_sequence:
