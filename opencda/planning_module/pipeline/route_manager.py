@@ -221,13 +221,6 @@ class CPXRouteManager:
         )
         old_options = [node[4] for node in old_nodes[old_progress_index:]]
         old_next_macro = _next_macro_from_route_options(old_options)
-        old_lane_ids = {
-            int(_canonical_lane_id(node[3], 0))
-            for node in old_nodes[
-                max(0, old_progress_index - 2) : old_progress_index + 6
-            ]
-            if int(_canonical_lane_id(node[3], 0)) != 0
-        }
         normalized_start = _point_dict(start_point)
         try:
             summary = self.global_planner.plan_route_from_locations(
@@ -253,11 +246,18 @@ class CPXRouteManager:
                 new_next_macro = _next_macro_from_route_options(
                     [node[4] for node in new_nodes]
                 )
-                new_lane_ids = {
-                    int(_canonical_lane_id(node[3], 0))
+                # Lane identifiers are segment labels, not a continuity
+                # metric. At a valid junction handoff the incoming lane and
+                # selected connector normally have disjoint AD-map IDs. Test
+                # continuity in world geometry at the requested replan anchor
+                # instead of requiring an arbitrary ID overlap.
+                new_start_distance_m = min(
+                    math.hypot(
+                        float(node[0]) - float(normalized_start["x"]),
+                        float(node[1]) - float(normalized_start["y"]),
+                    )
                     for node in new_nodes[:8]
-                    if int(_canonical_lane_id(node[3], 0)) != 0
-                }
+                )
                 length_limit_m = max(
                     float(old_remaining_m) * float(self.turn_replan_max_length_ratio),
                     float(old_remaining_m)
@@ -283,10 +283,11 @@ class CPXRouteManager:
                         "turn_replan_rejected:macro_changed:"
                         f"old={normalized_old_macro}:new={normalized_new_macro}"
                     )
-                if old_lane_ids and new_lane_ids and old_lane_ids.isdisjoint(new_lane_ids):
+                if float(new_start_distance_m) > float(self.route_rejoin_distance_m):
                     raise RuntimeError(
-                        "turn_replan_rejected:topology_disconnected:"
-                        f"old={sorted(old_lane_ids)}:new={sorted(new_lane_ids)}"
+                        "turn_replan_rejected:start_geometry_disconnected:"
+                        f"distance={float(new_start_distance_m):.1f}:"
+                        f"limit={float(self.route_rejoin_distance_m):.1f}"
                     )
             self._active_route_summary = summary
             self._start_point = normalized_start

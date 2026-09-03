@@ -294,6 +294,35 @@ class RouteManagerADMapReferenceTest(unittest.TestCase):
             [(node[0], node[1], node[3].ad_lane_id) for node in old_nodes],
         )
 
+    def test_turn_replan_accepts_connected_junction_with_new_lane_ids(self):
+        planner = _planner([
+            (0.0, 0.0, 10, "LANEFOLLOW"),
+            (8.0, 0.0, 10, "LEFT"),
+            (8.0, 8.0, 20, "LEFT"),
+            (8.0, 16.0, 20, "LANEFOLLOW"),
+        ])
+        manager = CPXRouteManager(global_planner=planner)
+        manager.set_destination(
+            start_point={"x": 0.0, "y": 0.0},
+            goal_point={"x": 8.0, "y": 16.0},
+        )
+        # Ego has reached the junction boundary. AD-map legitimately assigns
+        # the connector and outgoing road fresh segment IDs.
+        planner.entries = [
+            {"waypoint": _ADMapWaypoint(7.5, 0.0, 101), "road_option": "LEFT"},
+            {"waypoint": _ADMapWaypoint(8.0, 4.0, 101), "road_option": "LEFT"},
+            {"waypoint": _ADMapWaypoint(8.0, 12.0, 102), "road_option": "LANEFOLLOW"},
+        ]
+
+        result = manager.replan_from(
+            start_point={"x": 7.5, "y": 0.0},
+            trigger_reason="turn_missed_lane_change_route_unreachable",
+        )
+
+        self.assertTrue(result.success, result.reason)
+        self.assertEqual(manager.route_revision, "route-2")
+        self.assertEqual(manager._route_nodes()[0][3].ad_lane_id, 101)
+
     def test_alignment_uses_admap_route_geometry(self):
         planner = _planner([
             (0.0, 0.0, 1, "LANEFOLLOW"),
