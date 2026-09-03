@@ -45,7 +45,6 @@ from .nominal_trajectory import (
     NominalTrajectoryGenerator,
 )
 from .prediction import PredictionFrame, build_prediction_frame
-from .planner_pipeline import CPXPlanningPipeline
 from .output import BehaviorCommand, PlannerDiagnostics, PlannerOutput
 from .reference_contract import (
     ReferenceContract,
@@ -127,7 +126,6 @@ __all__ = [
     "CPXRouteManager",
     "RouteCursorSnapshot",
     "CPXObstacleTracker",
-    "CPXPlanningPipeline",
     "CPXScenarioDecision",
     "CPXScenarioManager",
     "DecisionRecord",

@@ -951,7 +951,6 @@ class CPXMPCPlannerBridge:
         from opencda.planning_module.pipeline.mpc_command_extractor import (
             MPCCommandExtractor,
         )
-        from opencda.planning_module.pipeline.planner_pipeline import CPXPlanningPipeline
         from opencda.planning_module.pipeline.route_manager import CPXRouteManager
         from opencda.planning_module.pipeline.reference_gate import FinalReferenceGate
         from opencda.planning_module.pipeline.reference_generator import ReferenceGenerator
@@ -1018,7 +1017,6 @@ class CPXMPCPlannerBridge:
             ),
             max_position_jump_m=float(self.config.get("tracker_max_position_jump_m", 12.0)),
         )
-        self.planning_pipeline = CPXPlanningPipeline(self)
         self.final_reference_gate = FinalReferenceGate(self.config)
         self.reference_pipeline = ReferencePipeline(
             config=self.config,
@@ -1396,7 +1394,7 @@ class CPXMPCPlannerBridge:
         """Plan and return a low-level CARLA control command."""
 
         try:
-            planner_output = self.planning_pipeline.run_step()
+            planner_output = self.execute_planning_pipeline()
         except Exception as exc:
             if self.fallback_policy == "raise":
                 raise

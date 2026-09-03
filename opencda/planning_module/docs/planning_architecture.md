@@ -150,7 +150,8 @@ therefore use one algorithm for OpenCDA, CARLA, and imported MDrive scenarios.
 
 ## Remaining migration boundary
 
-`CPXMPCPlannerBridge.execute_planning_pipeline()` is the public lifecycle port.
+`CPXMPCPlannerBridge.execute_planning_pipeline()` is the temporary public
+lifecycle port while the executable stages are migrated out of the bridge.
 The large legacy stage body remains behind that method while individual stages
 are moved into pipeline services. `OpenCDARuntimePort` is the only class allowed
 to call legacy bridge-private input helpers.
