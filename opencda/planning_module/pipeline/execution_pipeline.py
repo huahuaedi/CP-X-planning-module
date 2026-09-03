@@ -58,3 +58,28 @@ class PlanningPipeline:
 
     def front_gap(self, **kwargs):
         return self._perception.front_gap(**kwargs)
+
+    def evaluate_destination(self, **kwargs):
+        return self.destination_speed.evaluate(**kwargs)
+
+    def resolve_speed(
+        self, *, behavior, speed_plan, additional_constraints,
+        destination_state, reference_samples,
+    ):
+        target = self.speed.resolve(
+            behavior=behavior,
+            speed_plan=speed_plan,
+            additional_constraints=additional_constraints,
+        )
+        ceiling = self.speed.apply(
+            target,
+            destination_state=destination_state,
+            reference_samples=reference_samples,
+        )
+        return target, ceiling
+
+    def publish_reference(self, **kwargs):
+        return self.reference_publication.run(**kwargs)
+
+    def evaluate_mpc_entry(self, **kwargs):
+        return self.mpc_entry.evaluate(**kwargs)

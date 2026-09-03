@@ -43,3 +43,31 @@ def test_pipeline_sequences_runtime_and_perception_without_bridge():
     assert perception.front_actor_id == "front"
     assert len(perception.fused_objects) == 1
     assert not hasattr(pipeline, "bridge")
+
+
+def test_pipeline_owns_speed_resolution_sequence():
+    calls = []
+
+    class Speed:
+        def resolve(self, **kwargs):
+            calls.append(("resolve", kwargs))
+            return "target"
+
+        def apply(self, target, **kwargs):
+            calls.append(("apply", target, kwargs))
+            return "ceiling"
+
+    pipeline = PlanningPipeline(
+        runtime_input=RuntimeInputStage(_Mapper()),
+        perception=PerceptionStage(),
+        behavior=object(), speed=Speed(), destination_speed=object(),
+        reference_publication=object(), mpc_entry=object(),
+    )
+
+    result = pipeline.resolve_speed(
+        behavior="behavior", speed_plan="plan", additional_constraints=(),
+        destination_state=[1.0], reference_samples=[{"x": 1.0}],
+    )
+
+    assert result == ("target", "ceiling")
+    assert [call[0] for call in calls] == ["resolve", "apply"]

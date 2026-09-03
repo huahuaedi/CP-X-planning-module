@@ -1697,7 +1697,7 @@ class CPXMPCPlannerBridge:
         route_status = getattr(
             getattr(self, "route_manager", None), "last_status", None
         )
-        destination_stage = self.destination_speed_stage.evaluate(
+        destination_stage = self.pipeline.evaluate_destination(
             route_status=route_status,
             route_revision=str(getattr(self.route_manager, "route_revision", "")),
             ego_speed_mps=float(ego_speed_mps),
@@ -1794,7 +1794,7 @@ class CPXMPCPlannerBridge:
         # front-gap threshold is only an input proposal and must not re-latch
         # stop after candidate evaluation has selected a safe route maneuver.
         selected_stop_goal_active = bool(behavior_decision.stop_required)
-        speed_target = self.speed_target_planner.resolve(
+        speed_target, ceiling_result = self.pipeline.resolve_speed(
             behavior=behavior_decision,
             speed_plan=typed_speed_plan,
             additional_constraints=(
@@ -1802,9 +1802,6 @@ class CPXMPCPlannerBridge:
                 if destination_speed_constraint is None
                 else (destination_speed_constraint,)
             ),
-        )
-        ceiling_result = self.speed_target_planner.apply(
-            speed_target,
             destination_state=destination_state,
             reference_samples=lane_center_reference,
         )
@@ -1858,7 +1855,7 @@ class CPXMPCPlannerBridge:
             except Exception:
                 stop_target_forward_m_debug = ""
 
-        publication_result = self.reference_publication_stage.run(
+        publication_result = self.pipeline.publish_reference(
             destination_state=destination_state,
             reference_samples=lane_center_reference,
             current_state=current_state,
@@ -1916,7 +1913,7 @@ class CPXMPCPlannerBridge:
             target_lane_id=int(behavior_decision.target_lane_id),
             stop_goal_active=bool(mpc_stop_goal_active),
         )
-        mpc_entry = self.mpc_entry_stage.evaluate(
+        mpc_entry = self.pipeline.evaluate_mpc_entry(
             candidate_status=reference_debug.get(
                 "candidate_pipeline_selected_status", ""
             ),
