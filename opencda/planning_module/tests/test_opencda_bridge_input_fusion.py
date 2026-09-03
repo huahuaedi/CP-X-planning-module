@@ -30,8 +30,10 @@ from opencda_bridge.cpx_mpc_planner import (
     _destination_approach_speed_cap,
     _lane_change_execution_active,
     _route_destination_stop_gate,
-    _select_static_obstacle_local_avoidance_lane,
-    _static_obstacle_cooldown_policy,
+)
+from pipeline.static_obstacle_stage import (
+    cooldown_policy as _static_obstacle_cooldown_policy,
+    select_local_avoidance_lane as _select_static_obstacle_local_avoidance_lane,
 )
 from opencda_bridge.cp_provider import OpenCDACPProvider
 from pipeline.traffic_light_memory import TrafficLightMemory

@@ -69,6 +69,7 @@ from opencda.planning_module.pipeline.reference_publication_stage import (
 from opencda.planning_module.pipeline.mpc_entry_stage import MPCEntryStage
 from opencda.planning_module.pipeline.perception_stage import PerceptionStage
 from opencda.planning_module.pipeline.execution_pipeline import PlanningPipeline
+from opencda.planning_module.pipeline.static_obstacle_stage import StaticObstacleStage
 from opencda.planning_module.pipeline.candidate_evaluation import (
     CandidateTrajectoryEvaluator,
     mpc_cost_profile_for_behavior,
@@ -116,20 +117,6 @@ class _WaypointMapAdapter:
             return None
 
 
-def _static_obstacle_cooldown_policy(
-    *,
-    failed_latched: bool,
-    route_transition_pending: bool,
-) -> tuple[str, bool]:
-    """Return debug status and stop ownership during a replan cooldown."""
-
-    if bool(failed_latched):
-        return "cooldown_stop", True
-    if bool(route_transition_pending):
-        return "cooldown_route_transition", False
-    return "cooldown_stop", True
-
-
 def _lane_change_execution_active(
         *, reference_locked: bool, phase: object) -> bool:
     """Return whether a committed lane change still owns route execution.
@@ -145,53 +132,6 @@ def _lane_change_execution_active(
         "executing",
         "target_lane_stabilization",
     }
-
-
-def _select_static_obstacle_local_avoidance_lane(
-    *,
-    current_lane_id: int,
-    available_lane_ids: Sequence[int],
-    lane_safety_scores: Mapping[int, float],
-    lane_prediction_risks: Mapping[int, Mapping[str, object]],
-    minimum_safety_score: float,
-) -> int | None:
-    """Select one adjacent, prediction-safe lane for local obstacle bypass.
-
-    This helper deliberately does not alter the global route or the map.  It
-    only authorizes the existing behavior/reference candidate pipeline to
-    evaluate a local lane-borrow trajectory.  The downstream FSM, reference
-    contract, MPC probe and safety supervisor retain veto authority.
-    """
-
-    current = int(current_lane_id)
-    alternatives = sorted(
-        {
-            int(lane_id)
-            for lane_id in list(available_lane_ids or [])
-            if int(lane_id) != 0 and int(lane_id) != current
-        },
-        key=lambda lane_id: abs(int(lane_id) - current),
-    )
-    if not alternatives:
-        return None
-
-    nearest_delta = abs(int(alternatives[0]) - current)
-    adjacent = [
-        int(lane_id)
-        for lane_id in alternatives
-        if abs(int(lane_id) - current) == int(nearest_delta)
-    ]
-    safe = []
-    for lane_id in adjacent:
-        score = float(lane_safety_scores.get(int(lane_id), 0.0))
-        risk = dict(lane_prediction_risks.get(int(lane_id), {}) or {})
-        if score <= float(minimum_safety_score) or bool(risk.get("risk", False)):
-            continue
-        safe.append((float(score), int(lane_id)))
-    if not safe:
-        return None
-    safe.sort(key=lambda row: (-float(row[0]), abs(int(row[1]) - current), -int(row[1])))
-    return int(safe[0][1])
 
 
 class CPXMPCPlannerBridge:
@@ -333,15 +273,7 @@ class CPXMPCPlannerBridge:
         self._route_replan_last_attempt_s = -float("inf")
         self._route_replan_attempt_count = 0
         self._route_replan_last_reason = "route_replan_not_requested"
-        self._static_obstacle_replan_last_attempt_s = -float("inf")
-        self._static_obstacle_replan_failed_latched = False
-        self._static_obstacle_replan_status = "idle"
-        self._static_obstacle_candidate_id = ""
-        self._static_obstacle_candidate_since_s = -float("inf")
-        self._static_obstacle_route_transition_pending = False
         self._static_obstacle_blocked_lane_id: object = ""
-        self._static_obstacle_replan_reason = "not_requested"
-        self._static_obstacle_local_target_lane_id: Optional[int] = None
         self.draw_world_debug = bool(self.config.get("draw_world_debug", False))
         self.draw_world_debug_destination = bool(
             self.config.get("draw_world_debug_destination", False)
@@ -1085,11 +1017,16 @@ class CPXMPCPlannerBridge:
             reference_provider=self._stable_reference_line_provider,
         )
         mpc_entry_stage = MPCEntryStage(self.config)
+        static_obstacle_stage = StaticObstacleStage({
+            **self.behavior_runtime_cfg,
+            **self.config,
+        })
         self.pipeline = PlanningPipeline(
             runtime_input=runtime_input_stage,
             perception=perception_stage,
             behavior=behavior_stage,
             scenario=scenario_manager,
+            static_obstacle=static_obstacle_stage,
             speed=speed_target_planner,
             destination_speed=destination_speed_stage,
             reference_publication=reference_publication_stage,
@@ -2570,26 +2507,22 @@ class CPXMPCPlannerBridge:
             ),
             "behavior_decision": str(behavior_decision.maneuver),
             "static_obstacle_stop_active_input": bool(
-                getattr(self, "_last_static_obstacle_stop_active_input", False)
+                self.pipeline.static_obstacle.stop_active
             ),
             "static_obstacle_replan_status": str(
-                getattr(self, "_static_obstacle_replan_status", "idle")
+                self.pipeline.static_obstacle.status
             ),
             "static_obstacle_replan_reason": str(
-                getattr(self, "_static_obstacle_replan_reason", "not_requested")
+                self.pipeline.static_obstacle.reason
             ),
             "static_obstacle_candidate_id": str(
-                getattr(self, "_static_obstacle_candidate_id", "")
+                self.pipeline.static_obstacle.candidate_id
             ),
             "static_obstacle_blocked_lane_id": getattr(
                 self, "_static_obstacle_blocked_lane_id", ""
             ),
             "static_obstacle_route_transition_pending": bool(
-                getattr(
-                    self,
-                    "_static_obstacle_route_transition_pending",
-                    False,
-                )
+                self.pipeline.static_obstacle.route_transition_pending
             ),
             "behavior_fsm_state": str(behavior_decision.phase),
             "current_lane_id": int(behavior_decision.source_lane_id),
@@ -4539,211 +4472,56 @@ class CPXMPCPlannerBridge:
         static_replan_requested = bool(
             self.config.get(
                 "static_obstacle_replan_enabled",
-                self.behavior_runtime_cfg.get(
-                    "static_obstacle_replan_enabled",
-                    True,
-                ),
+                self.behavior_runtime_cfg.get("static_obstacle_replan_enabled", True),
             )
-            and static_obstacle_response.get(
-                "request_static_obstacle_replan", False
-            )
-            and not bool(traffic_control_stop_active)
+            and static_obstacle_response.get("request_static_obstacle_replan", False)
+            and not traffic_control_stop_active
         )
-        static_obstacle_transition_hold = False
-        static_obstacle_cooldown_hold = False
-        latched_local_target_lane_id = getattr(
-            self, "_static_obstacle_local_target_lane_id", None
-        )
-        if (
-            latched_local_target_lane_id is not None
-            and int(current_lane_id) == int(latched_local_target_lane_id)
-            and not bool(self._stable_reference_line_provider.snapshot(LANE_CHANGE).mutable_samples())
-        ):
-            # The local lane-borrow maneuver has geometrically converged.
-            self._static_obstacle_local_target_lane_id = None
-            latched_local_target_lane_id = None
-        static_obstacle_local_avoidance_active = bool(
-            latched_local_target_lane_id is not None
-        )
-        static_obstacle_local_target_lane_id: int | None = (
-            None
-            if latched_local_target_lane_id is None
-            else int(latched_local_target_lane_id)
-        )
-        static_obstacle_id = (
-            ""
-            if static_front_obstacle is None
-            else self._object_track_id(static_front_obstacle)
-        )
-        if not bool(static_replan_requested):
-            self._static_obstacle_candidate_id = ""
-            self._static_obstacle_candidate_since_s = -float("inf")
-            # Seeing a clear frame closes the previous encounter. If the same
-            # object blocks the route again during cooldown, it is a new
-            # encounter and must hold stop until a retry is allowed.
-            self._static_obstacle_route_transition_pending = False
-            self._static_obstacle_replan_failed_latched = False
-            self._static_obstacle_replan_status = (
-                "local_avoidance_executing"
-                if bool(static_obstacle_local_avoidance_active)
-                else "traffic_control_excluded"
-                if bool(traffic_control_stop_active)
-                and bool(
-                    static_obstacle_response.get(
-                        "request_static_obstacle_replan", False
-                    )
-                )
-                else "idle"
-            )
-        else:
-            if str(static_obstacle_id) != str(self._static_obstacle_candidate_id):
-                self._static_obstacle_candidate_id = str(static_obstacle_id)
-                self._static_obstacle_candidate_since_s = float(sim_time_s)
-            blocked_confirm_s = max(
-                0.0,
-                float(
-                    self.config.get(
-                        "static_obstacle_blocked_confirm_s",
-                        self.behavior_runtime_cfg.get(
-                            "static_obstacle_blocked_confirm_s",
-                            1.0,
-                        ),
-                    )
-                ),
-            )
-            blocked_elapsed_s = max(
-                0.0,
-                float(sim_time_s)
-                - float(self._static_obstacle_candidate_since_s),
-            )
-            if blocked_elapsed_s < blocked_confirm_s:
-                self._static_obstacle_replan_status = "confirming"
-            else:
-                local_avoidance_enabled = bool(
-                    self.config.get(
-                        "static_obstacle_local_avoidance_enabled",
-                        self.behavior_runtime_cfg.get(
-                            "static_obstacle_local_avoidance_enabled", True
-                        ),
-                    )
-                )
-                local_target_lane_id = (
-                    _select_static_obstacle_local_avoidance_lane(
-                        current_lane_id=int(current_lane_id),
-                        available_lane_ids=list(
-                            planner_input_frame.map_lane.allowed_lane_ids
-                        ),
-                        lane_safety_scores=lane_safety_scores,
-                        lane_prediction_risks=dict(
-                            planner_input_frame.prediction.lane_prediction_risks
-                        ),
-                        minimum_safety_score=float(
-                            self.config.get(
-                                "static_obstacle_local_lane_min_safety_score",
-                                self.behavior_runtime_cfg.get(
-                                    "static_obstacle_local_lane_min_safety_score",
-                                    0.55,
-                                ),
-                            )
-                        ),
-                    )
-                    if bool(local_avoidance_enabled)
-                    and str(actual_obstacle_mode) == "NORMAL"
-                    else None
-                )
-                avoidance_lane_yield_reason = ""
-                if local_target_lane_id is not None:
-                    avoidance_lane_yield_reason = (
-                        self._cooperative_avoidance_lane_yield_reason(
-                            target_lane_id=int(local_target_lane_id),
-                            ego_location=ego_location,
-                            ego_yaw_rad=float(ego_yaw_rad),
-                        )
-                    )
-                    if avoidance_lane_yield_reason:
-                        local_target_lane_id = None
-                if local_target_lane_id is not None:
-                    static_obstacle_local_avoidance_active = True
-                    static_obstacle_local_target_lane_id = int(local_target_lane_id)
-                    self._static_obstacle_local_target_lane_id = int(
-                        local_target_lane_id
-                    )
-                    self._static_obstacle_replan_failed_latched = False
-                    self._static_obstacle_route_transition_pending = False
-                    self._static_obstacle_replan_status = "local_avoidance_ready"
-                    self._static_obstacle_replan_reason = (
-                        "static_obstacle_local_lane_borrow:"
-                        f"target_lane={int(local_target_lane_id)}"
-                    )
-                elif bool(
-                    self.config.get(
-                        "static_obstacle_global_replan_enabled",
-                        self.behavior_runtime_cfg.get(
-                            "static_obstacle_global_replan_enabled", False
-                        ),
-                    )
-                ):
-                    attempted, succeeded, replan_reason = (
-                        self._attempt_static_obstacle_route_replan(
-                            ego_location=ego_location,
-                            obstacle=dict(static_front_obstacle or {}),
-                        )
-                    )
-                    self._static_obstacle_replan_reason = str(replan_reason)
-                    if bool(succeeded):
-                        self._static_obstacle_replan_failed_latched = False
-                        self._static_obstacle_replan_status = "succeeded"
-                        self._static_obstacle_route_transition_pending = True
-                        static_obstacle_transition_hold = True
-                    elif bool(attempted):
-                        self._static_obstacle_replan_failed_latched = True
-                        self._static_obstacle_replan_status = "failed_stop"
-                    else:
-                        (
-                            self._static_obstacle_replan_status,
-                            static_obstacle_cooldown_hold,
-                        ) = _static_obstacle_cooldown_policy(
-                            failed_latched=bool(
-                                self._static_obstacle_replan_failed_latched
-                            ),
-                            route_transition_pending=bool(
-                                self._static_obstacle_route_transition_pending
-                            ),
-                        )
-                else:
-                    # Local avoidance is unavailable or unsafe.  Preserve the
-                    # active global route and stop behind the obstacle; a
-                    # cooperative road-closure event may request rerouting via
-                    # the separate BehaviorPlanner reroute-message path. Retry
-                    # continues every tick (this whole branch re-runs
-                    # unconditionally next step), so a cooperative-yield hold
-                    # self-clears as soon as the peer's claim does.
-                    self._static_obstacle_replan_failed_latched = True
-                    self._static_obstacle_route_transition_pending = False
-                    self._static_obstacle_replan_status = (
-                        "local_avoidance_yield_to_peer_cav"
-                        if avoidance_lane_yield_reason
-                        else "local_avoidance_unavailable_stop"
-                    )
-                    self._static_obstacle_replan_reason = (
-                        avoidance_lane_yield_reason
-                        or "static_obstacle_local_avoidance_unavailable"
-                    )
 
-        if bool(static_obstacle_local_avoidance_active):
-            # A confirmed blocker is an explicit behavior-level reason to
-            # consider an adjacent lane.  It bypasses only the route-demand
-            # gate; prediction, lane-safety, reference and MPC safety gates
-            # remain unchanged.
+        def cooperative_static_yield(target: int) -> str:
+            return self._cooperative_avoidance_lane_yield_reason(
+                target_lane_id=int(target),
+                ego_location=ego_location,
+                ego_yaw_rad=float(ego_yaw_rad),
+            )
+
+        def attempt_static_replan():
+            return self._attempt_static_obstacle_route_replan(
+                ego_location=ego_location,
+                obstacle=dict(static_front_obstacle or {}),
+            )
+
+        static_obstacle_result = self.pipeline.resolve_static_obstacle(
+            requested=bool(static_replan_requested),
+            traffic_control_stop_active=bool(traffic_control_stop_active),
+            obstacle_id=(
+                "" if static_front_obstacle is None
+                else self._object_track_id(static_front_obstacle)
+            ),
+            current_lane_id=int(current_lane_id),
+            lane_change_reference_active=bool(
+                self._stable_reference_line_provider.snapshot(LANE_CHANGE).active
+            ),
+            sim_time_s=float(sim_time_s),
+            normal_mode=str(actual_obstacle_mode) == "NORMAL",
+            available_lane_ids=tuple(planner_input_frame.map_lane.allowed_lane_ids),
+            lane_safety_scores=lane_safety_scores,
+            lane_prediction_risks=dict(
+                planner_input_frame.prediction.lane_prediction_risks
+            ),
+            cooperative_yield=cooperative_static_yield,
+            attempt_replan=attempt_static_replan,
+        )
+        static_obstacle_local_avoidance_active = bool(
+            static_obstacle_result.local_avoidance_active
+        )
+        static_obstacle_local_target_lane_id = (
+            static_obstacle_result.target_lane_id
+        )
+        static_obstacle_stop_active = bool(static_obstacle_result.stop_active)
+        if static_obstacle_local_avoidance_active:
             opportunistic_lane_change_allowed = True
             preferred_target_lane_id = int(static_obstacle_local_target_lane_id)
-        static_obstacle_stop_active = bool(
-            self._static_obstacle_replan_failed_latched
-            or static_obstacle_transition_hold
-            or static_obstacle_cooldown_hold
-        )
-        self._last_static_obstacle_stop_active_input = bool(static_obstacle_stop_active)
-
         command = self.behavior_planner.update(
             static_obstacle_stop_active=bool(static_obstacle_stop_active),
             lane_safety_scores=lane_safety_scores,
@@ -4785,16 +4563,10 @@ class CPXMPCPlannerBridge:
         decision = str(command.get("decision", "lane_follow"))
         target_lane_id = int(command.get("target_lane_id", current_lane_id) or current_lane_id)
         lc_state = str(command.get("lc_state", "LANE_KEEP"))
-        if bool(static_obstacle_local_avoidance_active):
-            if str(decision) in {"lane_change_left", "lane_change_right"}:
-                self._static_obstacle_replan_status = "local_avoidance_executing"
-            elif bool(traffic_control_stop_active) and str(decision) in {
-                "stop_at_intersection",
-                "stop_sign",
-            }:
-                self._static_obstacle_replan_status = (
-                    "local_avoidance_preempted_by_traffic_control"
-                )
+        self.pipeline.static_obstacle.observe_behavior(
+            decision=str(decision),
+            traffic_control_stop_active=bool(traffic_control_stop_active),
+        )
         lane_change_commitment_pending_stabilization = bool(
             self._stable_reference_line_provider.snapshot(LANE_CHANGE).mutable_samples()
         )
@@ -5019,7 +4791,7 @@ class CPXMPCPlannerBridge:
                 else int(static_obstacle_local_target_lane_id)
             ),
             "static_obstacle_candidate_since_s": float(
-                self._static_obstacle_candidate_since_s
+                static_obstacle_result.candidate_since_s
             ),
             "static_obstacle_global_replan_enabled": bool(
                 self.config.get(
@@ -6009,7 +5781,9 @@ class CPXMPCPlannerBridge:
         my_claim = ResourceClaim(
             kind="avoidance_lane",
             resource_id=resource_id,
-            committed_at_s=float(self._static_obstacle_candidate_since_s),
+            committed_at_s=float(
+                self.pipeline.static_obstacle.candidate_since_s
+            ),
             active=True,
             require_ahead=False,
         )
@@ -6449,7 +6223,7 @@ class CPXMPCPlannerBridge:
                 required_lane_change_target_lane_id
             ),
             static_obstacle_target_lane_id=(
-                self._static_obstacle_local_target_lane_id
+                self.pipeline.static_obstacle.target_lane_id
             ),
             normal_min_object_distance_m=float(
                 self.full_candidate_reference_min_object_distance_m
@@ -6465,9 +6239,9 @@ class CPXMPCPlannerBridge:
         # variants may be evaluated, but cannot replace this continuation.
         if self._stable_reference_line_provider.snapshot(LANE_CHANGE).active:
             committed_is_static_obstacle_local_avoidance = bool(
-                self._static_obstacle_local_target_lane_id is not None
+                self.pipeline.static_obstacle.target_lane_id is not None
                 and int(self.maneuver_manager.lane_change.target_lane_id)
-                == int(self._static_obstacle_local_target_lane_id)
+                == int(self.pipeline.static_obstacle.target_lane_id)
                 and int(self.maneuver_manager.lane_change.target_lane_id)
                 != int(current_lane_id)
             )
@@ -7544,32 +7318,9 @@ class CPXMPCPlannerBridge:
     ) -> tuple[bool, bool, str]:
         """Block the obstacle lane and atomically rebuild the active route."""
 
-        now_s = float(self._sim_time_s())
-        cooldown_s = max(
-            0.1,
-            float(
-                self.config.get(
-                    "static_obstacle_replan_cooldown_s",
-                    self.behavior_runtime_cfg.get(
-                        "static_obstacle_replan_cooldown_s",
-                        2.0,
-                    ),
-                )
-            ),
-        )
-        elapsed_s = now_s - float(self._static_obstacle_replan_last_attempt_s)
-        if elapsed_s < cooldown_s:
-            reason = "static_obstacle_replan_cooldown:remaining={:.2f}".format(
-                cooldown_s - elapsed_s
-            )
-            self._static_obstacle_replan_reason = str(reason)
-            return False, False, str(reason)
-
-        self._static_obstacle_replan_last_attempt_s = float(now_s)
         block_fn = getattr(self.global_planner, "block_lane_at_position", None)
         if not callable(block_fn):
             reason = "static_obstacle_block_lane_unsupported"
-            self._static_obstacle_replan_reason = str(reason)
             return True, False, str(reason)
         blocked_lane_id = block_fn({
             "x": float(obstacle.get("x", obstacle.get("x_m", 0.0))),
@@ -7578,7 +7329,6 @@ class CPXMPCPlannerBridge:
         })
         if blocked_lane_id is None:
             reason = "static_obstacle_lane_mapping_failed"
-            self._static_obstacle_replan_reason = str(reason)
             return True, False, str(reason)
         self._static_obstacle_blocked_lane_id = blocked_lane_id
 
@@ -7590,7 +7340,6 @@ class CPXMPCPlannerBridge:
             },
             trigger_reason="static_obstacle",
         )
-        self._static_obstacle_replan_reason = str(result.reason)
         if not bool(result.success):
             return True, False, str(result.reason)
 

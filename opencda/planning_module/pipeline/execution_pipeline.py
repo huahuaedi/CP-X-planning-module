@@ -18,6 +18,7 @@ class PlanningPipeline:
         perception: PerceptionStage,
         behavior: Any,
         scenario: Any,
+        static_obstacle: Any,
         speed: Any,
         destination_speed: Any,
         reference_publication: Any,
@@ -28,6 +29,7 @@ class PlanningPipeline:
         self._perception = perception
         self.behavior = behavior
         self.scenario = scenario
+        self.static_obstacle = static_obstacle
         self.speed = speed
         self.destination_speed = destination_speed
         self.reference_publication = reference_publication
@@ -91,6 +93,9 @@ class PlanningPipeline:
 
     def resolve_scenario(self, **kwargs):
         return self.scenario.update_planning_context(**kwargs)
+
+    def resolve_static_obstacle(self, **kwargs):
+        return self.static_obstacle.evaluate(**kwargs)
 
     def reset_route_lane_change_authorization(self):
         self.behavior.reset_route_lane_change_authorization()
