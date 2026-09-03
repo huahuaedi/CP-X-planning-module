@@ -264,6 +264,160 @@ class CandidateTrajectoryEvaluator:
         )
         return evaluated, destination, reference
 
+    def build_committed_continuation(
+        self,
+        *,
+        provider,
+        maneuver_manager,
+        config,
+        mpc,
+        ego_location,
+        ego_yaw_rad,
+        current_state,
+        current_lane_id,
+        baseline_speed_mps,
+        planner_target_speed_mps,
+        validate_contract,
+        object_snapshots,
+        prediction_trajectories,
+        min_object_distance_m,
+        risk_hysteresis_margin_m,
+    ):
+        """Build and evaluate the sole immutable committed continuation."""
+
+        from .candidate_pipeline import (
+            CandidateBehaviorIntent,
+            CandidateReferenceResult,
+        )
+        from .reference_contract import contract_from_config
+        from .reference_line_provider import LANE_CHANGE
+
+        if not provider.snapshot(LANE_CHANGE).active:
+            return None
+        lifecycle = maneuver_manager.lane_change
+        phase = str(lifecycle.phase)
+        stabilizing = phase == "target_lane_stabilization"
+        decision = (
+            _DECISION_CHANGE_LEFT
+            if str(lifecycle.option) == "CHANGELANELEFT"
+            else _DECISION_CHANGE_RIGHT
+        )
+        speed_mps = max(
+            0.5, float(lifecycle.target_speed_mps or baseline_speed_mps)
+        )
+        spacing_m = max(0.1, float(mpc.dt_s) * speed_mps)
+        reference, window_reason = maneuver_manager.locked_lane_change_window(
+            provider=provider,
+            ego_x_m=float(ego_location.x),
+            ego_y_m=float(ego_location.y),
+            ego_heading_rad=float(ego_yaw_rad),
+            target_speed_mps=speed_mps,
+            spacing_m=spacing_m,
+            horizon_steps=int(mpc.horizon_steps),
+        )
+        if reference:
+            contract = contract_from_config(
+                mode="lane_change",
+                expected_lane_id=int(lifecycle.target_lane_id),
+                horizon_steps=int(mpc.horizon_steps),
+                config=dict(config),
+                default_speed_mps=max(
+                    float(planner_target_speed_mps), speed_mps, 0.1
+                ),
+            )
+            reference, curvature_reason = provider.condition_lane_change_reference(
+                reference,
+                ego_location=ego_location,
+                ego_heading_rad=float(ego_yaw_rad),
+                max_curvature_1pm=float(contract.max_curvature_1pm),
+                mode="committed_lane_change",
+            )
+            if curvature_reason:
+                window_reason = "%s;%s" % (
+                    str(window_reason), str(curvature_reason)
+                )
+        destination = []
+        if reference:
+            terminal = dict(reference[-1])
+            destination = [
+                float(terminal.get("x_ref_m", terminal.get("x", current_state[0]))),
+                float(terminal.get("y_ref_m", terminal.get("y", current_state[1]))),
+                speed_mps,
+                float(terminal.get("heading_rad", current_state[3])),
+                int(lifecycle.target_lane_id),
+            ]
+        fsm_state = (
+            "TARGET_LANE_STABILIZATION"
+            if stabilizing
+            else "EXECUTE_LANE_CHANGE_LEFT"
+            if decision == _DECISION_CHANGE_LEFT
+            else "EXECUTE_LANE_CHANGE_RIGHT"
+        )
+        contract_result = validate_contract(
+            decision=decision,
+            lc_state=fsm_state,
+            current_lane_id=int(current_lane_id),
+            speed_ref_mps=speed_mps,
+            stop_goal_active=False,
+            current_state=current_state,
+            destination_state=destination,
+            lane_center_reference=reference,
+        )
+        intent = CandidateBehaviorIntent(
+            name="committed_lane_change_continuation",
+            decision=decision,
+            target_lane_id=int(lifecycle.target_lane_id),
+            target_speed_mps=speed_mps,
+            base_cost=-100.0,
+            reason=(
+                "target_lane_stabilization"
+                if stabilizing else "locked_maneuver_execution"
+            ),
+            trajectory_variant=(
+                "target_lane_stabilization" if stabilizing else "locked"
+            ),
+        )
+        candidate = CandidateReferenceResult(
+            intent=intent,
+            destination_state=destination,
+            lane_center_reference=[dict(sample) for sample in reference],
+            reference_debug={
+                "reference_source": (
+                    "target_lane_stabilization_reference"
+                    if stabilizing else "locked_quintic_lane_change_reference"
+                ),
+                "candidate_lane_change_window_reason": str(window_reason),
+                "lane_change_phase": phase,
+                "lane_change_stabilization_frames": int(
+                    lifecycle.stabilization_frames
+                ),
+                "route_tracking_lane_change_locked": True,
+                "route_tracking_lane_change_progress_index": int(
+                    lifecycle.progress_index
+                ),
+                "route_tracking_lane_change_source_lane_id": int(
+                    lifecycle.source_lane_id
+                ),
+                "route_tracking_lane_change_target_lane_id": int(
+                    lifecycle.target_lane_id
+                ),
+                "lane_change_duration_s": float(lifecycle.resolved_duration_s),
+                "lane_change_duration_comfort_reason": str(
+                    lifecycle.duration_comfort_reason
+                ),
+            },
+            contract_result=contract_result,
+        )
+        return self.evaluate(
+            candidate=candidate,
+            ego_state=current_state,
+            object_snapshots=object_snapshots,
+            prediction_trajectories=prediction_trajectories,
+            current_lane_id=int(current_lane_id),
+            min_object_distance_m=float(min_object_distance_m),
+            risk_hysteresis_margin_m=float(risk_hysteresis_margin_m),
+        )
+
     @staticmethod
     def lane_change_state(
         *, decision: str, baseline_decision: str, baseline_lane_change_state: str

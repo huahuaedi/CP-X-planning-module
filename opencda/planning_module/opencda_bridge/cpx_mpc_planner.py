@@ -6636,8 +6636,6 @@ class CPXMPCPlannerBridge:
         required_lane_change_target_lane_id: int = 0,
     ) -> tuple[str, int, float, list[dict[str, object]], list[float], dict[str, object]]:
         from opencda.planning_module.pipeline.candidate_pipeline import (
-            CandidateBehaviorIntent,
-            CandidateReferenceResult,
             predicted_lane_change_average_speed_mps,
             summarize_candidate_results,
         )
@@ -6973,182 +6971,9 @@ class CPXMPCPlannerBridge:
                     dict(sample) for sample in list(reference or [])
                 ]
 
-        # A committed maneuver owns one immutable master trajectory. Replanned
-        # lane-change variants remain useful before commitment, but they must
-        # not replace the executing trajectory after commitment has started.
-        if bool(self._stable_reference_line_provider.snapshot(LANE_CHANGE).mutable_samples()):
-            commitment_phase = str(self.maneuver_manager.lane_change.phase)
-            stabilization_active = bool(
-                commitment_phase == "target_lane_stabilization"
-            )
-            committed_decision = (
-                "lane_change_left"
-                if str(self.maneuver_manager.lane_change.option)
-                == "CHANGELANELEFT"
-                else "lane_change_right"
-            )
-            committed_speed_mps = max(
-                0.5,
-                float(
-                    self.maneuver_manager.lane_change.target_speed_mps
-                    or baseline_speed_ref_mps
-                ),
-            )
-            committed_step_m = max(
-                0.1,
-                float(self.mpc.dt_s) * float(committed_speed_mps),
-            )
-            committed_reference, committed_window_reason = (
-                self.maneuver_manager.locked_lane_change_window(
-                    provider=self._stable_reference_line_provider,
-                    ego_x_m=float(ego_location.x),
-                    ego_y_m=float(ego_location.y),
-                    ego_heading_rad=float(ego_yaw_rad),
-                    target_speed_mps=float(committed_speed_mps),
-                    spacing_m=float(committed_step_m),
-                    horizon_steps=int(self.mpc.horizon_steps),
-                )
-            )
-            # Windowing the locked master path (nearest-point search plus
-            # low-speed tail padding) can transiently read a higher raw
-            # curvature than the master path was built for, even though the
-            # locked path itself was shaped to satisfy the contract at lock
-            # time. reference_pipeline.py already repairs exactly this case
-            # for mode="lane_change" via curvature_feasible_samples before
-            # validating; _validate_candidate_reference_contract below had no
-            # equivalent repair, so a one-tick windowing spike hard-rejected
-            # the committed candidate outright and forced an emergency-brake
-            # fallback mid-maneuver. Apply the same repair here so the
-            # candidate is judged on the same shaped geometry the final
-            # reference pipeline would have produced anyway.
-            if committed_reference:
-                from opencda.planning_module.pipeline.reference_contract import (
-                    contract_from_config,
-                )
-
-                committed_lane_change_contract = contract_from_config(
-                    mode="lane_change",
-                    expected_lane_id=int(
-                        self.maneuver_manager.lane_change.target_lane_id
-                    ),
-                    horizon_steps=int(self.mpc.horizon_steps),
-                    config=dict(self.config),
-                    default_speed_mps=max(
-                        float(self.target_speed_mps),
-                        float(committed_speed_mps),
-                        0.1,
-                    ),
-                )
-                committed_reference, committed_curvature_reason = (
-                    self._stable_reference_line_provider.condition_lane_change_reference(
-                        committed_reference,
-                        ego_location=ego_location,
-                        ego_heading_rad=float(ego_yaw_rad),
-                        max_curvature_1pm=float(
-                            committed_lane_change_contract.max_curvature_1pm
-                        ),
-                        mode="committed_lane_change",
-                    )
-                )
-                if committed_curvature_reason:
-                    committed_window_reason = (
-                        str(committed_window_reason)
-                        + ";"
-                        + str(committed_curvature_reason)
-                    )
-            committed_destination: list[float] = []
-            if committed_reference:
-                terminal = dict(committed_reference[-1])
-                committed_destination = [
-                    float(
-                        terminal.get(
-                            "x_ref_m",
-                            terminal.get("x", current_state[0]),
-                        )
-                    ),
-                    float(
-                        terminal.get(
-                            "y_ref_m",
-                            terminal.get("y", current_state[1]),
-                        )
-                    ),
-                    float(committed_speed_mps),
-                    float(terminal.get("heading_rad", current_state[3])),
-                    int(self.maneuver_manager.lane_change.target_lane_id),
-                ]
-            committed_contract = self._validate_candidate_reference_contract(
-                decision=str(committed_decision),
-                lc_state=(
-                    "TARGET_LANE_STABILIZATION"
-                    if bool(stabilization_active)
-                    else "EXECUTE_LANE_CHANGE_LEFT"
-                    if committed_decision == "lane_change_left"
-                    else "EXECUTE_LANE_CHANGE_RIGHT"
-                ),
-                current_lane_id=int(current_lane_id),
-                speed_ref_mps=float(committed_speed_mps),
-                stop_goal_active=False,
-                current_state=current_state,
-                destination_state=committed_destination,
-                lane_center_reference=committed_reference,
-            )
-            committed_intent = CandidateBehaviorIntent(
-                name="committed_lane_change_continuation",
-                decision=str(committed_decision),
-                target_lane_id=int(
-                    self.maneuver_manager.lane_change.target_lane_id
-                ),
-                target_speed_mps=float(committed_speed_mps),
-                base_cost=-100.0,
-                reason=(
-                    "target_lane_stabilization"
-                    if bool(stabilization_active)
-                    else "locked_maneuver_execution"
-                ),
-                trajectory_variant=(
-                    "target_lane_stabilization"
-                    if bool(stabilization_active)
-                    else "locked"
-                ),
-            )
-            committed_result = CandidateReferenceResult(
-                intent=committed_intent,
-                destination_state=list(committed_destination),
-                lane_center_reference=[
-                    dict(sample) for sample in committed_reference
-                ],
-                reference_debug={
-                    "reference_source": (
-                        "target_lane_stabilization_reference"
-                        if bool(stabilization_active)
-                        else "locked_quintic_lane_change_reference"
-                    ),
-                    "candidate_lane_change_window_reason": str(
-                        committed_window_reason
-                    ),
-                    "lane_change_phase": str(commitment_phase),
-                    "lane_change_stabilization_frames": int(
-                        self.maneuver_manager.lane_change.stabilization_frames
-                    ),
-                    "route_tracking_lane_change_locked": True,
-                    "route_tracking_lane_change_progress_index": int(
-                        self.maneuver_manager.lane_change.progress_index
-                    ),
-                    "route_tracking_lane_change_source_lane_id": int(
-                        self.maneuver_manager.lane_change.source_lane_id
-                    ),
-                    "route_tracking_lane_change_target_lane_id": int(
-                        self.maneuver_manager.lane_change.target_lane_id
-                    ),
-                    "lane_change_duration_s": float(
-                        self.maneuver_manager.lane_change.resolved_duration_s
-                    ),
-                    "lane_change_duration_comfort_reason": str(
-                        self.maneuver_manager.lane_change.duration_comfort_reason
-                    ),
-                },
-                contract_result=committed_contract,
-            )
+        # A committed maneuver owns one immutable master trajectory. New
+        # variants may be evaluated, but cannot replace this continuation.
+        if self._stable_reference_line_provider.snapshot(LANE_CHANGE).active:
             committed_is_static_obstacle_local_avoidance = bool(
                 self._static_obstacle_local_target_lane_id is not None
                 and int(self.maneuver_manager.lane_change.target_lane_id)
@@ -7156,12 +6981,21 @@ class CPXMPCPlannerBridge:
                 and int(self.maneuver_manager.lane_change.target_lane_id)
                 != int(current_lane_id)
             )
-            evaluated_committed_result = self._candidate_trajectory_evaluator.evaluate(
-                candidate=committed_result,
-                ego_state=current_state,
+            evaluated_committed_result = (
+                self._candidate_trajectory_evaluator.build_committed_continuation(
+                provider=self._stable_reference_line_provider,
+                maneuver_manager=self.maneuver_manager,
+                config=self.config,
+                mpc=self.mpc,
+                ego_location=ego_location,
+                ego_yaw_rad=float(ego_yaw_rad),
+                current_state=current_state,
+                current_lane_id=int(current_lane_id),
+                baseline_speed_mps=float(baseline_speed_ref_mps),
+                planner_target_speed_mps=float(self.target_speed_mps),
+                validate_contract=self._validate_candidate_reference_contract,
                 object_snapshots=object_snapshots,
                 prediction_trajectories=prediction_trajectories,
-                current_lane_id=int(current_lane_id),
                 min_object_distance_m=float(
                     self.static_obstacle_local_avoidance_min_object_distance_m
                     if committed_is_static_obstacle_local_avoidance
@@ -7170,10 +7004,9 @@ class CPXMPCPlannerBridge:
                 risk_hysteresis_margin_m=float(
                     self.candidate_risk_hysteresis_margin_m
                 ),
-            )
-            candidate_results.append(
-                evaluated_committed_result
-            )
+            ))
+            if evaluated_committed_result is not None:
+                candidate_results.append(evaluated_committed_result)
 
         probe_summary = self._candidate_trajectory_evaluator.probe_mpc(
             candidate_results=candidate_results,
