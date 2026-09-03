@@ -339,3 +339,8 @@ class PlanningPipeline:
         if self.candidate_selection is None:
             raise RuntimeError("candidate selection stage is not configured")
         return self.candidate_selection.build_intents(**kwargs)
+
+    def finalize_selected_candidate(self, **kwargs):
+        if self.candidate_selection is None:
+            raise RuntimeError("candidate selection stage is not configured")
+        return self.candidate_selection.finalize_selected_frame(**kwargs)

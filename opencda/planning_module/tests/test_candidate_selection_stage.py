@@ -4,6 +4,56 @@ from pipeline.candidate_selection_stage import (
     CandidateSelectionRequest,
     CandidateSelectionStage,
 )
+from pipeline.speed_planner import SpeedPlan
+
+
+def _post_selection_stage(config=None):
+    provider = SimpleNamespace(
+        builder=SimpleNamespace(discrete_curvature_1pm=lambda _rows: 0.1)
+    )
+    return CandidateSelectionStage(
+        evaluator=object(), provider=provider,
+        maneuver_manager=object(), reference_pipeline=object(),
+        fallback_manager=object(),
+        static_obstacle_stage=SimpleNamespace(target_lane_id=None),
+        mpc=object(), config=dict(config or {}), map_epoch="admap",
+        normal_clearance_m=2.0, static_clearance_m=1.0,
+        risk_hysteresis_margin_m=0.2, strict_ownership=True,
+        target_speed_mps=8.0,
+    )
+
+
+def test_post_selection_normalizes_lane_change_without_speed_override():
+    stage = _post_selection_stage()
+    speed = SpeedPlan(target_speed_mps=6.0, speed_cap_mps=6.0,
+                      stop_goal_active=False)
+    result = stage.finalize_selected_frame(
+        decision="lane_change_left", lane_change_state="LANE_KEEP",
+        reference=({}, {}),
+        selected_diagnostics={"lane_change_phase": "executing"},
+        reference_diagnostics={}, ego_speed_mps=5.0,
+        scenario_stop_required=False, speed_plan=speed,
+        turn_prepare_speed_suppressed=False,
+    )
+    assert result.lane_change_state == "EXECUTE_LANE_CHANGE_LEFT"
+    assert result.speed_plan is speed
+    assert result.speed_constraints == ()
+    assert result.diagnostics["lane_change_longitudinal_authority"] == "SpeedPlanner"
+
+
+def test_post_selection_turn_submits_named_speed_constraint():
+    stage = _post_selection_stage({"full_intersection_turn_speed_cap_mps": 2.2})
+    speed = SpeedPlan(target_speed_mps=6.0, speed_cap_mps=6.0,
+                      stop_goal_active=False)
+    result = stage.finalize_selected_frame(
+        decision="intersection_turn_right", lane_change_state="LANE_KEEP",
+        reference=({}, {}), selected_diagnostics={}, reference_diagnostics={},
+        ego_speed_mps=5.0, scenario_stop_required=False, speed_plan=speed,
+        turn_prepare_speed_suppressed=False,
+    )
+    assert result.speed_plan.target_speed_mps == 2.2
+    assert result.speed_plan.limiting_owner == "selected_turn_cap"
+    assert result.speed_constraints[0].owner == "selected_turn_cap"
 
 
 def test_no_candidates_returns_typed_baseline_and_runs_completion_release():

@@ -83,9 +83,6 @@ from opencda.planning_module.pipeline.behavior_stage import (
     BehaviorStage,
     OpportunisticLaneChangeRequest,
 )
-from opencda.planning_module.utility.speed_profile import (
-    curvature_speed_cap_mps,
-)
 
 
 class _WaypointMapAdapter:
@@ -3615,170 +3612,23 @@ class CPXMPCPlannerBridge:
                     else 0
                 ),
             )
-            # Candidate selection owns maneuver geometry, never longitudinal
-            # authority.  In particular, do not re-cap a lane-change speed
-            # here after SpeedPlanner has selected it.  The curvature-derived
-            # value remains diagnostic so a future unified SpeedPlanner can
-            # consume it explicitly, but it must not silently rewrite the MPC
-            # entry target.  Turns retain their safety cap below because the
-            # final turn decision is not known when the earlier speed plan is
-            # built; moving that input upstream is a separate change.
-            #
-            # For turns this is the only place the configured
-            # full_intersection_turn_speed_cap_mps actually reaches the
-            # winning candidate at all -- confirmed via debug CSV at 35mph:
-            # speed climbed past 4 m/s through an entire intersection_turn_left
-            # with the cap doing nothing, because only build_speed_plan's
-            # (bypassed) turn_cap_mps was ever computed against it.
-            if str(decision) in {"lane_change_left", "lane_change_right"}:
-                lane_change_curvature_1pm = float(
-                    self.reference_generator.discrete_curvature_1pm(
-                        local_lane_center_reference
-                    )
-                )
-                lane_change_curvature_cap_mps = curvature_speed_cap_mps(
-                    curve_curvature_abs=float(lane_change_curvature_1pm),
-                    curve_min_curvature=max(
-                        0.0,
-                        float(
-                            self.config.get(
-                                "full_lane_change_curvature_min_curvature_1pm",
-                                0.002,
-                            )
-                        ),
-                    ),
-                    current_speed_mps=float(ego_speed_mps),
-                    curve_lateral_accel_limit_mps2=max(
-                        0.1,
-                        float(
-                            self.config.get(
-                                "route_tracking_lane_change_lateral_accel_limit_mps2",
-                                1.3,
-                            )
-                        ),
-                    ),
-                    speed_enable_threshold_mps=0.0,
-                )
-                reference_debug.update({
-                    "lane_change_reference_curvature_1pm": float(
-                        lane_change_curvature_1pm
-                    ),
-                    "lane_change_curvature_speed_advisory_mps": (
-                        ""
-                        if lane_change_curvature_cap_mps is None
-                        else float(lane_change_curvature_cap_mps)
-                    ),
-                    "lane_change_longitudinal_authority": "SpeedPlanner",
-                })
-            elif str(decision) in {"intersection_turn_left", "intersection_turn_right"}:
-                # full_intersection_turn_speed_cap_mps is a per-fleet ceiling,
-                # not a per-turn comfort speed: two turns at different
-                # intersections can have very different connector curvature
-                # (confirmed via debug CSV -- this route's right turn measured
-                # ~0.145 1/m vs. the left turn's ~0.091 1/m), so a single
-                # static cap that is comfortable for a gentle turn can still
-                # be too fast for a tighter one, causing the turn's swept
-                # vehicle envelope to exceed the drivable corridor and the
-                # candidate to be permanently rejected with no fallback.
-                # Derive this turn's own cap from its actual winning-candidate
-                # curvature and take the tighter of that and the static
-                # ceiling.
-                turn_ceiling_mps = max(
-                    0.1,
-                    float(
-                        self.config.get("full_intersection_turn_speed_cap_mps", 2.2)
-                    ),
-                )
-                turn_curvature_1pm = float(
-                    self.reference_generator.discrete_curvature_1pm(
-                        local_lane_center_reference
-                    )
-                )
-                turn_curvature_cap_mps = curvature_speed_cap_mps(
-                    curve_curvature_abs=float(turn_curvature_1pm),
-                    curve_min_curvature=max(
-                        0.0,
-                        float(
-                            self.config.get(
-                                "full_intersection_turn_curvature_min_curvature_1pm",
-                                0.01,
-                            )
-                        ),
-                    ),
-                    current_speed_mps=float(ego_speed_mps),
-                    curve_lateral_accel_limit_mps2=max(
-                        0.1,
-                        float(
-                            self.config.get(
-                                "full_intersection_turn_lateral_accel_comfort_mps2",
-                                2.5,
-                            )
-                        ),
-                    ),
-                    speed_enable_threshold_mps=0.0,
-                )
-                turn_cap_mps = float(turn_ceiling_mps)
-                reference_debug.update({
-                    "turn_reference_curvature_1pm": float(turn_curvature_1pm),
-                    "turn_curvature_speed_advisory_mps": (
-                        "" if turn_curvature_cap_mps is None
-                        else float(turn_curvature_cap_mps)
-                    ),
-                    "turn_longitudinal_authority": "SpeedPlanner",
-                })
-                selected_turn_constraint = SpeedConstraint(
-                    owner="selected_turn_cap",
-                    maximum_mps=float(turn_cap_mps),
-                    reason="selected_candidate_turn_speed_cap",
-                )
-                additional_speed_constraints.append(selected_turn_constraint)
-                if float(turn_cap_mps) < float(speed_plan.target_speed_mps):
-                    speed_plan = dataclasses.replace(
-                        speed_plan,
-                        target_speed_mps=float(turn_cap_mps),
-                        speed_cap_mps=float(turn_cap_mps),
-                        turn_cap_mps=float(turn_cap_mps),
-                        limiting_owner="selected_turn_cap",
-                        active_constraints=tuple(speed_plan.active_constraints)
-                        + ("selected_turn_cap",),
-                        external_constraints=tuple(speed_plan.external_constraints)
-                        + (selected_turn_constraint,),
-                    )
-            # The upstream front-gap flag proposes an obstacle-stop candidate;
-            # it must not remain a global stop latch after a safe lane-change
-            # candidate wins. Traffic-control stops remain hard and exclusive.
-            stop_goal_active = bool(
-                scenario_decision.stop_goal_active
-                or selected_candidate_debug.get(
-                    "candidate_selected_stop_goal_active",
-                    False,
-                )
-                or str(decision)
-                in {"stop_at_intersection", "stop_sign", "emergency_brake"}
+            candidate_final = self.pipeline.finalize_selected_candidate(
+                decision=str(decision), lane_change_state=str(lc_state),
+                reference=local_lane_center_reference,
+                selected_diagnostics=selected_candidate_debug,
+                reference_diagnostics=reference_debug,
+                ego_speed_mps=float(ego_speed_mps),
+                scenario_stop_required=bool(scenario_decision.stop_goal_active),
+                speed_plan=speed_plan,
+                turn_prepare_speed_suppressed=bool(
+                    turn_prepare_speed_suppressed_by_lane_change
+                ),
             )
-            if str(decision) == "lane_follow":
-                lc_state = "LANE_KEEP"
-            if str(decision) in {"stop_at_intersection", "stop_sign", "emergency_brake"}:
-                lc_state = "LANE_KEEP"
-            reference_debug.update(selected_candidate_debug)
-            # Candidate commitment can restore a lane-change decision after
-            # an upstream authorization gate temporarily set the baseline
-            # back to lane-follow.  Normalize the FSM from the FINAL decision
-            # and locked maneuver phase; otherwise diagnostics and downstream
-            # control context can become lane_change_right + LANE_KEEP.
-            if str(decision) in {"lane_change_left", "lane_change_right"}:
-                selected_phase = str(
-                    selected_candidate_debug.get("lane_change_phase", "")
-                ).strip().lower()
-                lc_state = self._normalized_final_lc_state(
-                    decision=str(decision),
-                    lc_state=str(lc_state),
-                    lane_change_phase=str(selected_phase),
-                )
-            reference_debug["candidate_pipeline_enabled"] = True
-            reference_debug["turn_prepare_speed_suppressed_by_lane_change"] = bool(
-                turn_prepare_speed_suppressed_by_lane_change
-            )
+            lc_state = str(candidate_final.lane_change_state)
+            stop_goal_active = bool(candidate_final.stop_goal_active)
+            speed_plan = candidate_final.speed_plan
+            additional_speed_constraints.extend(candidate_final.speed_constraints)
+            reference_debug = dict(candidate_final.diagnostics)
         else:
             reference_debug["candidate_pipeline_enabled"] = False
 
@@ -4656,19 +4506,18 @@ class CPXMPCPlannerBridge:
     def _normalized_final_lc_state(
         *, decision: str, lc_state: str, lane_change_phase: str = ""
     ) -> str:
-        """Keep the public FSM consistent with the final selected action."""
+        """Compatibility wrapper; CandidateSelectionStage owns normalization."""
 
-        normalized_decision = str(decision or "").strip().lower()
-        normalized_phase = str(lane_change_phase or "").strip().lower()
-        if normalized_decision in {"lane_change_left", "lane_change_right"}:
-            if normalized_phase == "target_lane_stabilization":
-                return "TARGET_LANE_STABILIZATION"
-            return (
-                "EXECUTE_LANE_CHANGE_LEFT"
-                if normalized_decision == "lane_change_left"
-                else "EXECUTE_LANE_CHANGE_RIGHT"
-            )
-        return str(lc_state or "LANE_KEEP")
+        if str(decision or "").strip().lower() not in {
+            "lane_change_left", "lane_change_right",
+        }:
+            return str(lc_state or "LANE_KEEP")
+        from opencda.planning_module.pipeline.candidate_selection_stage import (
+            CandidateSelectionStage,
+        )
+        return CandidateSelectionStage.normalized_lane_change_state(
+            decision=str(decision), lane_change_phase=str(lane_change_phase),
+        )
 
     @staticmethod
     def _route_option_turn_decision(*, current_road_option: str, next_macro_maneuver: str) -> str:

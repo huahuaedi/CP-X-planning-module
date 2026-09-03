@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Mapping, Sequence
 
 from .candidate_evaluation import CandidateSelectionResult
 from .candidate_pipeline import build_candidate_intents, summarize_candidate_results
 from .reference_line_provider import LANE_CHANGE
+from .speed_planner import SpeedConstraint
+from opencda.planning_module.utility.speed_profile import curvature_speed_cap_mps
 
 
 @dataclass(frozen=True)
@@ -31,6 +33,16 @@ class CandidateSelectionRequest:
     current_steering_rad: float = 0.0
     required_decision: str = ""
     required_target_lane_id: int = 0
+
+
+@dataclass(frozen=True)
+class CandidatePostSelectionResult:
+    decision: str
+    lane_change_state: str
+    stop_goal_active: bool
+    speed_plan: Any
+    speed_constraints: tuple
+    diagnostics: Mapping[str, Any]
 
 
 class CandidateSelectionStage:
@@ -129,6 +141,113 @@ class CandidateSelectionStage:
             human_lane_change_max_duration_s=float(
                 cfg.get("human_lane_change_max_duration_s", 6.5)
             ),
+        )
+
+    def finalize_selected_frame(
+        self, *, decision: str, lane_change_state: str,
+        reference: Sequence[Mapping[str, Any]], selected_diagnostics: Mapping[str, Any],
+        reference_diagnostics: Mapping[str, Any], ego_speed_mps: float,
+        scenario_stop_required: bool, speed_plan: Any,
+        turn_prepare_speed_suppressed: bool,
+    ) -> CandidatePostSelectionResult:
+        """Interpret the winning candidate exactly once for downstream stages."""
+
+        cfg = self._config
+        debug = dict(reference_diagnostics or {})
+        selected_debug = dict(selected_diagnostics or {})
+        constraints = []
+        if str(decision) in {"lane_change_left", "lane_change_right"}:
+            curvature = float(self._provider.builder.discrete_curvature_1pm(reference))
+            advisory = curvature_speed_cap_mps(
+                curve_curvature_abs=curvature,
+                curve_min_curvature=max(0.0, float(cfg.get(
+                    "full_lane_change_curvature_min_curvature_1pm", 0.002
+                ))),
+                current_speed_mps=float(ego_speed_mps),
+                curve_lateral_accel_limit_mps2=max(0.1, float(cfg.get(
+                    "route_tracking_lane_change_lateral_accel_limit_mps2", 1.3
+                ))),
+                speed_enable_threshold_mps=0.0,
+            )
+            debug.update({
+                "lane_change_reference_curvature_1pm": curvature,
+                "lane_change_curvature_speed_advisory_mps": (
+                    "" if advisory is None else float(advisory)
+                ),
+                "lane_change_longitudinal_authority": "SpeedPlanner",
+            })
+        elif str(decision) in {"intersection_turn_left", "intersection_turn_right"}:
+            curvature = float(self._provider.builder.discrete_curvature_1pm(reference))
+            advisory = curvature_speed_cap_mps(
+                curve_curvature_abs=curvature,
+                curve_min_curvature=max(0.0, float(cfg.get(
+                    "full_intersection_turn_curvature_min_curvature_1pm", 0.01
+                ))),
+                current_speed_mps=float(ego_speed_mps),
+                curve_lateral_accel_limit_mps2=max(0.1, float(cfg.get(
+                    "full_intersection_turn_lateral_accel_comfort_mps2", 2.5
+                ))),
+                speed_enable_threshold_mps=0.0,
+            )
+            turn_cap_mps = max(0.1, float(cfg.get(
+                "full_intersection_turn_speed_cap_mps", 2.2
+            )))
+            debug.update({
+                "turn_reference_curvature_1pm": curvature,
+                "turn_curvature_speed_advisory_mps": (
+                    "" if advisory is None else float(advisory)
+                ),
+                "turn_longitudinal_authority": "SpeedPlanner",
+            })
+            constraint = SpeedConstraint(
+                owner="selected_turn_cap", maximum_mps=turn_cap_mps,
+                reason="selected_candidate_turn_speed_cap",
+            )
+            constraints.append(constraint)
+            if turn_cap_mps < float(speed_plan.target_speed_mps):
+                speed_plan = replace(
+                    speed_plan, target_speed_mps=turn_cap_mps,
+                    speed_cap_mps=turn_cap_mps, turn_cap_mps=turn_cap_mps,
+                    limiting_owner="selected_turn_cap",
+                    active_constraints=tuple(speed_plan.active_constraints)
+                    + ("selected_turn_cap",),
+                    external_constraints=tuple(speed_plan.external_constraints)
+                    + (constraint,),
+                )
+
+        stop_goal = bool(
+            scenario_stop_required
+            or selected_debug.get("candidate_selected_stop_goal_active", False)
+            or str(decision) in {"stop_at_intersection", "stop_sign", "emergency_brake"}
+        )
+        phase = str(lane_change_state or "LANE_KEEP")
+        if str(decision) in {"lane_follow", "stop_at_intersection", "stop_sign", "emergency_brake"}:
+            phase = "LANE_KEEP"
+        elif str(decision) in {"lane_change_left", "lane_change_right"}:
+            phase = self.normalized_lane_change_state(
+                decision=str(decision), lane_change_phase=str(
+                    selected_debug.get("lane_change_phase", "")
+                ),
+            )
+        debug.update(selected_debug)
+        debug["candidate_pipeline_enabled"] = True
+        debug["turn_prepare_speed_suppressed_by_lane_change"] = bool(
+            turn_prepare_speed_suppressed
+        )
+        return CandidatePostSelectionResult(
+            decision=str(decision), lane_change_state=phase,
+            stop_goal_active=stop_goal, speed_plan=speed_plan,
+            speed_constraints=tuple(constraints), diagnostics=debug,
+        )
+
+    @staticmethod
+    def normalized_lane_change_state(*, decision: str, lane_change_phase: str) -> str:
+        if str(lane_change_phase).strip().lower() == "target_lane_stabilization":
+            return "TARGET_LANE_STABILIZATION"
+        return (
+            "EXECUTE_LANE_CHANGE_LEFT"
+            if str(decision).strip().lower() == "lane_change_left"
+            else "EXECUTE_LANE_CHANGE_RIGHT"
         )
 
     def set_lane_change_lifecycle(self, lifecycle: Any) -> None:
