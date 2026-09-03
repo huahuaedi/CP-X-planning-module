@@ -65,6 +65,7 @@ from opencda.planning_module.pipeline.reference_publication_stage import (
     ReferencePublicationStage,
 )
 from opencda.planning_module.pipeline.mpc_entry_stage import MPCEntryStage
+from opencda.planning_module.pipeline.perception_stage import PerceptionStage
 from opencda.planning_module.pipeline.behavior_stage import (
     BehaviorCandidateRequest,
     BehaviorOverrideRequest,
@@ -959,7 +960,6 @@ class CPXMPCPlannerBridge:
         )
         from opencda.planning_module.pipeline.safety_supervisor import SafetySupervisor
         from opencda.planning_module.pipeline.runtime_input_stage import RuntimeInputStage
-        from opencda.planning_module.pipeline.perception_stage import PerceptionStage
         from opencda.planning_module.pipeline.velocity_steering_adapter import (
             OpenCDAVelocitySteeringAdapter,
         )
@@ -1023,9 +1023,9 @@ class CPXMPCPlannerBridge:
         self.perception_stage = PerceptionStage(
             collect_local=self._collect_object_snapshots,
             fuse=self._fused_planning_object_snapshots,
-            limit_for_mpc=self._limit_obstacles_for_mpc,
             front_gap=self._front_gap_m,
             object_track_id=self._object_track_id,
+            max_mpc_obstacles=int(self.max_mpc_obstacles),
         )
         self.final_reference_gate = FinalReferenceGate(self.config)
         self.reference_pipeline = ReferencePipeline(
@@ -10066,7 +10066,7 @@ class CPXMPCPlannerBridge:
         snapshots: list[dict[str, Any]] = []
         for index, obj in enumerate(vehicles):
             if isinstance(obj, Mapping):
-                normalized = self._normalize_local_object_snapshot(obj)
+                normalized = PerceptionStage.normalize_local(obj)
                 if normalized is not None:
                     snapshots.append(dict(normalized))
                 continue
@@ -10175,7 +10175,7 @@ class CPXMPCPlannerBridge:
         priorities_by_key: dict[str, int] = {}
 
         for snapshot in list(local_object_snapshots or []):
-            normalized = self._normalize_local_object_snapshot(snapshot)
+            normalized = PerceptionStage.normalize_local(snapshot)
             if normalized is not None:
                 self._upsert_fused_obstacle(
                     fused_by_key=fused_by_key,
@@ -10189,7 +10189,7 @@ class CPXMPCPlannerBridge:
                 continue
             if not self._cp_message_is_fresh(obstacle, sim_time_s=float(sim_time_s)):
                 continue
-            normalized = self._normalize_cp_obstacle_snapshot(obstacle)
+            normalized = PerceptionStage.normalize_cp(obstacle)
             if normalized is not None:
                 if self._is_duplicate_native_perception_cp_obstacle(
                     cp_snapshot=normalized,
@@ -10234,25 +10234,6 @@ class CPXMPCPlannerBridge:
             if math.hypot(dx, dy) <= float(max_position_delta_m):
                 return True
         return False
-
-    def _limit_obstacles_for_mpc(
-        self,
-        *,
-        object_snapshots: Sequence[Mapping[str, Any]],
-        ego_location: carla.Location,
-    ) -> list[dict[str, Any]]:
-        fused = [dict(item) for item in list(object_snapshots or []) if isinstance(item, Mapping)]
-        if self.max_mpc_obstacles > 0 and len(fused) > self.max_mpc_obstacles:
-            fused.sort(
-                key=lambda item: (
-                    float(item.get("x", 0.0)) - float(ego_location.x)
-                ) ** 2
-                + (
-                    float(item.get("y", 0.0)) - float(ego_location.y)
-                ) ** 2
-            )
-            fused = fused[: self.max_mpc_obstacles]
-        return fused
 
     def _mpc_object_snapshots_with_prediction(
         self,
@@ -10301,78 +10282,6 @@ class CPXMPCPlannerBridge:
             annotated.append(updated)
         return annotated
 
-    @staticmethod
-    def _normalize_local_object_snapshot(snapshot: Mapping[str, Any]) -> dict[str, Any] | None:
-        try:
-            obstacle_id = str(snapshot.get("vehicle_id", snapshot.get("id", ""))).strip()
-            if not obstacle_id:
-                return None
-            return {
-                "vehicle_id": obstacle_id,
-                "id": obstacle_id,
-                "x": float(snapshot.get("x", 0.0)),
-                "y": float(snapshot.get("y", 0.0)),
-                "v": float(snapshot.get("v", 0.0)),
-                "psi": float(snapshot.get("psi", 0.0)),
-                "length_m": float(snapshot.get("length_m", 4.5)),
-                "width_m": float(snapshot.get("width_m", 2.0)),
-                "source": str(snapshot.get("source", "opencda_perception")),
-                "provider_source": str(snapshot.get("provider_source", "native_opencda_perception")),
-                "confidence": float(snapshot.get("confidence", 1.0)),
-            }
-        except Exception:
-            return None
-
-    @staticmethod
-    def _normalize_cp_obstacle_snapshot(obstacle: Mapping[str, Any]) -> dict[str, Any] | None:
-        try:
-            raw_id = str(obstacle.get("id", obstacle.get("vehicle_id", ""))).strip()
-            if not raw_id:
-                return None
-            state = obstacle.get("state", [])
-            if isinstance(state, Sequence) and not isinstance(state, (str, bytes, bytearray)):
-                state_values = list(state)
-            else:
-                state_values = []
-            x_m = obstacle.get("x", obstacle.get("x_m", state_values[0] if len(state_values) >= 1 else None))
-            y_m = obstacle.get("y", obstacle.get("y_m", state_values[1] if len(state_values) >= 2 else None))
-            speed_mps = obstacle.get("v", obstacle.get("speed_mps", state_values[2] if len(state_values) >= 3 else 0.0))
-            heading_rad = obstacle.get("psi", obstacle.get("heading_rad", state_values[3] if len(state_values) >= 4 else 0.0))
-            if x_m is None or y_m is None:
-                return None
-            shape = obstacle.get("shape", {})
-            shape = dict(shape) if isinstance(shape, Mapping) else {}
-            obstacle_id = raw_id.rsplit(":", 1)[-1] if ":" in raw_id else raw_id
-            provider_source = str(obstacle.get("provider_source", "opencda_cp"))
-            source = str(obstacle.get("source", "opencda_cp"))
-            return {
-                "vehicle_id": obstacle_id,
-                "id": obstacle_id,
-                "cp_message_id": raw_id,
-                "x": float(x_m),
-                "y": float(y_m),
-                "v": float(speed_mps),
-                "psi": float(heading_rad),
-                "length_m": float(shape.get("length_m", obstacle.get("length_m", 4.5))),
-                "width_m": float(shape.get("width_m", obstacle.get("width_m", 2.0))),
-                "source": source,
-                "provider_source": provider_source,
-                "confidence": float(obstacle.get("confidence", 0.5)),
-                "lane_id": int(float(obstacle.get("lane_id", 0) or 0)),
-                "road_id": int(float(obstacle.get("road_id", 0) or 0)),
-                "object_type": str(obstacle.get("type", "unknown")),
-                "observed_by_cav_ids": list(
-                    obstacle.get("observed_by_cav_ids", []) or []
-                ),
-                "not_observed_by_cav_ids": list(
-                    obstacle.get("not_observed_by_cav_ids", []) or []
-                ),
-                "blind_spot_shared": bool(
-                    obstacle.get("blind_spot_shared", False)
-                ),
-            }
-        except Exception:
-            return None
 
     @staticmethod
     def _cooperative_actor_evidence(

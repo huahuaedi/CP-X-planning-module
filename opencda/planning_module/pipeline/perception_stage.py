@@ -29,15 +29,15 @@ class PerceptionStage:
         *,
         collect_local: Callable[..., Sequence[Mapping[str, Any]]],
         fuse: Callable[..., Sequence[Mapping[str, Any]]],
-        limit_for_mpc: Callable[..., Sequence[Mapping[str, Any]]],
         front_gap: Callable[..., Any],
         object_track_id: Callable[[Mapping[str, Any]], str],
+        max_mpc_obstacles: int,
     ) -> None:
         self._collect_local = collect_local
         self._fuse = fuse
-        self._limit_for_mpc = limit_for_mpc
         self._front_gap = front_gap
         self._object_track_id = object_track_id
+        self._max_mpc_obstacles = max(0, int(max_mpc_obstacles))
 
     def build(
         self,
@@ -58,10 +58,7 @@ class PerceptionStage:
         ))
         if bool(ignore_dynamic_objects):
             fused = []
-        mpc_objects = list(self._limit_for_mpc(
-            object_snapshots=fused,
-            ego_location=ego_location,
-        ))
+        mpc_objects = self.limit_for_mpc(fused, ego_location=ego_location)
         gap_m, actor_id = self._front_gap(
             ego_location=ego_location,
             ego_yaw_rad=float(ego_yaw_rad),
@@ -92,3 +89,92 @@ class PerceptionStage:
             front_actor_id=actor_id,
             front_actor_speed_mps=actor_speed_mps,
         )
+
+    def limit_for_mpc(self, objects, *, ego_location):
+        result = [
+            dict(item) for item in list(objects or ())
+            if isinstance(item, Mapping)
+        ]
+        if self._max_mpc_obstacles and len(result) > self._max_mpc_obstacles:
+            result.sort(key=lambda item: (
+                float(item.get("x", 0.0)) - float(ego_location.x)
+            ) ** 2 + (
+                float(item.get("y", 0.0)) - float(ego_location.y)
+            ) ** 2)
+            result = result[:self._max_mpc_obstacles]
+        return result
+
+    @staticmethod
+    def normalize_local(snapshot):
+        try:
+            obstacle_id = str(
+                snapshot.get("vehicle_id", snapshot.get("id", ""))
+            ).strip()
+            if not obstacle_id:
+                return None
+            return {
+                "vehicle_id": obstacle_id, "id": obstacle_id,
+                "x": float(snapshot.get("x", 0.0)),
+                "y": float(snapshot.get("y", 0.0)),
+                "v": float(snapshot.get("v", 0.0)),
+                "psi": float(snapshot.get("psi", 0.0)),
+                "length_m": float(snapshot.get("length_m", 4.5)),
+                "width_m": float(snapshot.get("width_m", 2.0)),
+                "source": str(snapshot.get("source", "opencda_perception")),
+                "provider_source": str(snapshot.get(
+                    "provider_source", "native_opencda_perception"
+                )),
+                "confidence": float(snapshot.get("confidence", 1.0)),
+            }
+        except Exception:
+            return None
+
+    @staticmethod
+    def normalize_cp(obstacle):
+        try:
+            raw_id = str(
+                obstacle.get("id", obstacle.get("vehicle_id", ""))
+            ).strip()
+            if not raw_id:
+                return None
+            state = obstacle.get("state", ())
+            state_values = list(state) if (
+                isinstance(state, Sequence)
+                and not isinstance(state, (str, bytes, bytearray))
+            ) else []
+            x_m = obstacle.get(
+                "x", obstacle.get("x_m", state_values[0] if state_values else None)
+            )
+            y_m = obstacle.get(
+                "y", obstacle.get("y_m", state_values[1] if len(state_values) >= 2 else None)
+            )
+            if x_m is None or y_m is None:
+                return None
+            speed_mps = obstacle.get(
+                "v", obstacle.get("speed_mps", state_values[2] if len(state_values) >= 3 else 0.0)
+            )
+            heading_rad = obstacle.get(
+                "psi", obstacle.get("heading_rad", state_values[3] if len(state_values) >= 4 else 0.0)
+            )
+            shape = obstacle.get("shape", {})
+            shape = dict(shape) if isinstance(shape, Mapping) else {}
+            obstacle_id = raw_id.rsplit(":", 1)[-1]
+            return {
+                "vehicle_id": obstacle_id, "id": obstacle_id,
+                "cp_message_id": raw_id,
+                "x": float(x_m), "y": float(y_m),
+                "v": float(speed_mps), "psi": float(heading_rad),
+                "length_m": float(shape.get("length_m", obstacle.get("length_m", 4.5))),
+                "width_m": float(shape.get("width_m", obstacle.get("width_m", 2.0))),
+                "source": str(obstacle.get("source", "opencda_cp")),
+                "provider_source": str(obstacle.get("provider_source", "opencda_cp")),
+                "confidence": float(obstacle.get("confidence", 0.5)),
+                "lane_id": int(float(obstacle.get("lane_id", 0) or 0)),
+                "road_id": int(float(obstacle.get("road_id", 0) or 0)),
+                "object_type": str(obstacle.get("type", "unknown")),
+                "observed_by_cav_ids": list(obstacle.get("observed_by_cav_ids", ()) or ()),
+                "not_observed_by_cav_ids": list(obstacle.get("not_observed_by_cav_ids", ()) or ()),
+                "blind_spot_shared": bool(obstacle.get("blind_spot_shared", False)),
+            }
+        except Exception:
+            return None

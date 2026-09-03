@@ -25,9 +25,9 @@ def test_perception_stage_builds_one_fused_obstacle_view():
     stage = PerceptionStage(
         collect_local=collect_local,
         fuse=fuse,
-        limit_for_mpc=limit_for_mpc,
         front_gap=front_gap,
         object_track_id=lambda item: str(item["vehicle_id"]),
+        max_mpc_obstacles=1,
     )
     location = SimpleNamespace(x=1.0, y=2.0)
 
@@ -46,7 +46,7 @@ def test_perception_stage_builds_one_fused_obstacle_view():
     assert result.front_gap_m == 8.0
     assert result.front_actor_id == "remote"
     assert result.front_actor_speed_mps == 4.5
-    assert [name for name, _ in calls] == ["collect", "fuse", "limit", "gap"]
+    assert [name for name, _ in calls] == ["collect", "fuse", "gap"]
 
 
 def test_ignore_dynamic_objects_is_applied_before_mpc_and_gap():
@@ -59,11 +59,9 @@ def test_ignore_dynamic_objects_is_applied_before_mpc_and_gap():
     stage = PerceptionStage(
         collect_local=lambda **_kwargs: [{"vehicle_id": "local"}],
         fuse=lambda **_kwargs: [{"vehicle_id": "local"}],
-        limit_for_mpc=lambda **kwargs: observed.setdefault(
-            "limited", list(kwargs["object_snapshots"])
-        ),
         front_gap=empty_gap,
         object_track_id=lambda item: str(item["vehicle_id"]),
+        max_mpc_obstacles=8,
     )
 
     result = stage.build(
@@ -77,4 +75,4 @@ def test_ignore_dynamic_objects_is_applied_before_mpc_and_gap():
 
     assert result.fused_objects == ()
     assert result.mpc_objects == ()
-    assert observed == {"limited": [], "gap": []}
+    assert observed == {"gap": []}

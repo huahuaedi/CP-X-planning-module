@@ -44,6 +44,7 @@ from pipeline.maneuver_manager import ManeuverManager
 from pipeline.fallback_manager import TrajectoryFallbackManager
 from pipeline.nominal_trajectory import NominalTrajectoryGenerator
 from pipeline.reference_line_provider import LANE_FOLLOW, TURN, ReferenceLineProvider
+from pipeline.perception_stage import PerceptionStage
 
 
 class OpenCDABridgeInputFusionTests(unittest.TestCase):
@@ -339,7 +340,7 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         ))
 
     def test_cp_normalization_preserves_cooperative_provenance(self):
-        snapshot = CPXMPCPlannerBridge._normalize_cp_obstacle_snapshot({
+        snapshot = PerceptionStage.normalize_cp({
             "id": "native_opencda_multi_vantage:42",
             "type": "pedestrian",
             "state": [5.0, 1.0, 1.2, 0.0],
@@ -1216,8 +1217,15 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         self.assertEqual(by_id["99"]["source"], "opencda_v2x")
 
         bridge.max_mpc_obstacles = 1
-        limited = bridge._limit_obstacles_for_mpc(
-            object_snapshots=fused,
+        bridge.perception_stage = PerceptionStage(
+            collect_local=lambda **_kwargs: (),
+            fuse=lambda **_kwargs: (),
+            front_gap=lambda **_kwargs: (None, None),
+            object_track_id=lambda item: str(item.get("vehicle_id", "")),
+            max_mpc_obstacles=1,
+        )
+        limited = bridge.perception_stage.limit_for_mpc(
+            fused,
             ego_location=sys.modules["carla"].Location(0.0, 0.0, 0.0),
         )
 
