@@ -1,36 +1,48 @@
 base_config: cpx_lane_change_2lanefree.yaml
 
 description: |-
-  Two CP-X CAVs on the 2lane_freeway_simplified straight freeway, both in the
-  outer lane (y = 4.8) and both route-required to merge into the inner lane
-  (y = 8.3). cav1 spawns ~10 m ahead of cav2; it triggers and commits its
-  merge first, so:
-    Stage A  -> cav2 tags cav1 as a MERGE / CUT_IN conflict in the target lane
-    Stage B  -> cav1 role = proceed, cav2 role = make_gap
-    Stage C  -> cav2's corridor s_hi is capped an RSS gap behind cav1's
-                projected station in the inner lane
-    Stage D  -> that corridor becomes a linear QP row; cav2 holds the slot
-                behind cav1 instead of both aiming for the same longitudinal
-                spot in the inner lane.
+  ============================================================================
+  Two-CAV overtake-into-moving-traffic conflict, on 2lane_freeway_simplified.
+  Purpose: validate that consuming the OTHER CAV's predicted trajectory
+  (its broadcast MPC plan) produces a safer merge than treating it as a
+  bare current-position obstacle.
+  ============================================================================
 
-  ~20 m/s, empty road (carla_traffic_manager.vehicle_list: []), ground-truth
-  perception + no localization noise (inherited from cpx_lane_change_2lanefree).
-  Interaction is CAV-to-CAV through v2x_manager.cav_nearby -- each peer's
-  cpx_planner.last_cav_intent (its real MPC-planned path + ResourceClaim) is
-  read directly; no cav_intents broadcast bus is needed.
+  Layout (straight freeway, travel +x):
+    main lane      y = 8.3
+    passing lane   y = 4.8
 
-  Watch the two debug CSVs (debug_two_cav_merge_cav1/ , _cav2/):
-    cav_conflict_summary   e.g. "<peer_id>=make_gap;corridor_feasible"
-    cav_corridor_binding   the peer id capping each stage
-  Baseline with the interaction pipeline OFF: cpx_two_cav_merge_conflict_baseline.
-  Diff the two runs with opencda/scenario_testing/compare_cav_interaction.py.
+    cav2  spawn (-340, 8.3)  dest (350, 8.3)  target 14 m/s   -- the merging car
+    cav1  spawn (-300, 8.3)  ... no: cav1 is in the PASSING lane:
+    cav1  spawn (-300, 4.8)  dest (350, 4.8)  target 10 m/s   -- cruises straight, never maneuvers
+    blocker  (-180, 8.3)  ~1 m/s  -- forces cav2 to detour into the passing lane
+
+  Only cav1 sits in the passing lane. cav2, cruising the main lane at 14 m/s,
+  catches the crawling blocker near x = -190 and must do the behavior-planner
+  safety-score detour into the passing lane to get around it -- exactly where
+  cav1 is cruising ~20 m ahead at 10 m/s. cav2 is closing at ~4 m/s, so it
+  cannot simply pull out level with cav1; it has to size the gap against where
+  cav1 WILL be.
+
+  cav_conflict_enabled = true  (this file):
+    Stage A tags cav1 as FOLLOW / CUT_IN in cav2's target lane.
+    Stage C caps cav2's corridor s_hi one RSS gap behind cav1's *projected*
+      station (from cav1's broadcast plan), so cav2 bleeds to ~10 m/s BEFORE
+      it crosses the lane line and slots in cleanly behind cav1.
+  cpx_two_cav_merge_conflict_baseline (cav_conflict_enabled = false):
+    cav1 is only an exponential-potential obstacle at its current pose, so cav2
+    merges at 14 m/s, closes on cav1 in-lane, then hard-brakes / triggers
+    fallback. Diff the two with compare_cav_interaction.py.
+
+  Single maneuvering vehicle, 14 m/s (cpx_lane_change_speed_15 proves the LC
+  MPC is stable at 15) -- deliberately NOT the earlier "both CAVs change lanes
+  around the same blocker at 20 m/s", which over-constrained the QP (blocker
+  keep-out + road boundary + peer corridor) and deadlocked both cars straddling
+  the lane line.
 
 cpx_mature:
-  max_ticks: 2200
-  destination_tolerance_m: 12.0
-
-carla_traffic_manager:
-  vehicle_list: []
+  max_ticks: 1500
+  destination_tolerance_m: 6.0
 
 vehicle_base:
   behavior:
@@ -38,19 +50,26 @@ vehicle_base:
     ignore_traffic_light: true
     overtake_allowed: true
   planner:
-    target_speed_mps: 20.0
     full_lane_change_dynamic_speed_cap_enabled: true
-    full_lane_change_speed_ceiling_mps: 20.0
+    full_lane_change_speed_ceiling_mps: 14.0
     full_allow_opportunistic_lane_change: true
     # master switch: peer intents -> classify -> assign -> corridor -> QP row.
     # Also flips MPC.corridor_constraint_enabled on at bridge construction.
     cav_conflict_enabled: true
 
+# One crawling blocker in the MAIN lane; only cav2 (main lane) must detour.
+carla_traffic_manager:
+  vehicle_list:
+    - spawn_position: [-180.0, 8.3, 0.3, 0, 0, 0]
+      vehicle_speed_perc: 95
+
 scenario:
   single_cav_list:
+    # cav1: cruises the passing lane at 10 m/s. Never changes lane. It is the
+    # moving obstacle cav2 must merge behind.
     - name: cav1
-      spawn_position: [-320.0, 4.8, 0.3, 0, 0, 0]
-      destination: [650.0, 8.3, 0.3]
+      spawn_position: [-300.0, 4.8, 0.3, 0, 0, 0]
+      destination: [350.0, 4.8, 0.3]
       v2x:
         enabled: true
         communication_range: 80
@@ -59,11 +78,14 @@ scenario:
           debug_trajectory: true
           debug: true
       planner:
+        target_speed_mps: 10.0
         debug_output_dir: opencda/planning_module/opencda_bridge/debug_two_cav_merge_cav1
 
+    # cav2: main lane at 14 m/s, catches the blocker, detours into the passing
+    # lane where cav1 is. This is the car whose merge quality we measure.
     - name: cav2
-      spawn_position: [-330.0, 4.8, 0.3, 0, 0, 0]
-      destination: [650.0, 8.3, 0.3]
+      spawn_position: [-340.0, 8.3, 0.3, 0, 0, 0]
+      destination: [350.0, 8.3, 0.3]
       v2x:
         enabled: true
         communication_range: 80
@@ -72,4 +94,5 @@ scenario:
           debug_trajectory: true
           debug: true
       planner:
+        target_speed_mps: 14.0
         debug_output_dir: opencda/planning_module/opencda_bridge/debug_two_cav_merge_cav2
