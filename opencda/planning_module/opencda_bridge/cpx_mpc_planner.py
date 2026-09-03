@@ -4151,7 +4151,6 @@ class CPXMPCPlannerBridge:
         # AD-map owns geometry even when route_reference_allowed is false.
         route_lane_change_allowed = bool(route_context.route_found)
         from opencda.planning_module.pipeline.route_authorization import (
-            lane_change_target_reached,
             suppress_lane_change_for_lateral_owner,
         )
 
@@ -4206,45 +4205,30 @@ class CPXMPCPlannerBridge:
         route_geometry_lane_change_reason = str(
             lane_change_context.geometry_reason
         )
-        self.maneuver_manager.observe_route_lane_change_edge(
-            lane_change_context.edge_id
-        )
-        lane_change_authorization = self.pipeline.authorize_route_lane_change(
-            lane_change_context.request,
-            maneuver_manager=self.maneuver_manager,
-        )
-        # RouteCursor alone owns progress.  If odometry has carried ego past
-        # the remaining arc of the active lane-change topology while route s
-        # is stationary, the latched authorization describes a connector
-        # behind the vehicle.  Cancel it and rebuild topology from ego pose.
         route_cursor = self.route_manager.route_cursor
-        missed_route_maneuver = bool(route_cursor.missed_maneuver) and not (
-            _lane_change_execution_active(
-                reference_locked=bool(
-                    self._stable_reference_line_provider.snapshot(
-                        LANE_CHANGE
-                    ).mutable_samples()
-                ),
-                phase=self.maneuver_manager.lane_change.phase,
-            )
+        lane_change_execution_active = _lane_change_execution_active(
+            reference_locked=bool(
+                self._stable_reference_line_provider.snapshot(
+                    LANE_CHANGE
+                ).mutable_samples()
+            ),
+            phase=self.maneuver_manager.lane_change.phase,
         )
-        if missed_route_maneuver:
-            missed_reason = (
-                "route_cursor_missed_lane_change:"
-                f"s={float(route_cursor.route_s_m):.2f}:"
-                f"untracked_motion={float(route_cursor.stalled_motion_m):.2f}"
-            )
-            self.pipeline.reset_route_lane_change_authorization()
-            self.maneuver_manager.clear_required_lane_change()
+        lane_change_stage_result = self.pipeline.resolve_route_lane_change(
+            lane_change_context,
+            maneuver_manager=self.maneuver_manager,
+            route_cursor=route_cursor,
+            current_lane_id=int(current_lane_id),
+            execution_active=bool(lane_change_execution_active),
+            replan_missed_lane_change=bool(
+                self.config.get("missed_lane_change_route_replan_enabled", True)
+            ),
+        )
+        lane_change_authorization = lane_change_stage_result.authorization
+        if str(lane_change_stage_result.replan_reason):
             self._attempt_turn_route_replan(
                 ego_location=ego_location,
-                trigger_reason="turn_missed_lane_change_route_unreachable",
-            )
-            lane_change_authorization = dataclasses.replace(
-                lane_change_authorization,
-                allowed=False,
-                required_by_route=False,
-                reason=str(missed_reason),
+                trigger_reason=str(lane_change_stage_result.replan_reason),
             )
         cooperative_lane_change_yield_reason = (
             self._cooperative_lane_change_yield_reason(
@@ -4276,66 +4260,6 @@ class CPXMPCPlannerBridge:
                     )
                 )
         route_lane_change_required = bool(lane_change_authorization.required_by_route)
-        # If the route ever genuinely required a specific lane, remember it.
-        # The route's own next-macro-maneuver progression advances on
-        # arc-length along the original polyline regardless of which lane
-        # ego actually occupies, so once the requirement lapses (denied as
-        # "too close", or the route just quietly stops asking for it --
-        # "already_in_required_lane"/"route_maneuver_does_not_require_lane_
-        # change" can appear even though ego's own lane never changed,
-        # because route_optimal_lane_id drifted to match current_lane_id
-        # instead of the other way around) while ego is STILL in the lane it
-        # started in, the lane change was missed, not completed. Left alone,
-        # ego just keeps lane_follow-ing straight through and past the
-        # junction the plan needed it to turn at, off the swept/tested route
-        # corridor entirely (confirmed via debug CSV on a deterministic
-        # lane-blocking-vehicle test: ego sailed ~85m past its own
-        # destination with no lane change ever attempted and no replan, and
-        # the actor was later destroyed off-route). Treat a lapsed
-        # requirement the same as turn_reference_unavailable: request a
-        # fresh route from wherever ego actually is instead of continuing to
-        # chase a plan that assumed a lane change that never happened.
-        if bool(lane_change_authorization.required_by_route):
-            self.maneuver_manager.remember_required_lane_change(
-                int(lane_change_authorization.target_lane_id),
-                (
-                    int(topology_route_target_lane_id)
-                    if int(topology_route_target_lane_id or 0) != 0
-                    else None
-                ),
-            )
-        elif self.maneuver_manager.lane_change.required_target_lane_id is not None:
-            if lane_change_target_reached(
-                current_lane_id=int(current_lane_id),
-                remembered_target_lane_id=int(
-                    self.maneuver_manager.lane_change.required_target_lane_id
-                ),
-                current_ad_lane_id=int(topology_current_lane_id or 0),
-                remembered_target_ad_lane_id=int(
-                    self.maneuver_manager.lane_change.required_target_ad_lane_id or 0
-                ),
-                target_in_local_frame=bool(topology_target_in_local_frame),
-                target_lane_offset=int(topology_lane_offset),
-            ):
-                self.maneuver_manager.clear_required_lane_change()
-            elif _lane_change_execution_active(
-                reference_locked=bool(
-                    self._stable_reference_line_provider.snapshot(LANE_CHANGE).mutable_samples()
-                ),
-                phase=self.maneuver_manager.lane_change.phase,
-            ):
-                # The route instruction can advance before the locked
-                # trajectory has physically reached its target lane.  Keep
-                # the remembered requirement and let the committed geometry
-                # finish; otherwise a mid-maneuver route replan resets the
-                # reference and produces a one-frame lane-follow interruption.
-                pass
-            elif bool(self.config.get("missed_lane_change_route_replan_enabled", True)):
-                self._attempt_turn_route_replan(
-                    ego_location=ego_location,
-                    trigger_reason="lane_change_missed_route_unreachable",
-                )
-                self.maneuver_manager.clear_required_lane_change()
         lane_change_authorized = bool(lane_change_authorization.allowed)
         opportunistic_authorization = (
             self.pipeline.authorize_opportunistic_lane_change(

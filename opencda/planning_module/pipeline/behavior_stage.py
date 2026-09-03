@@ -62,6 +62,15 @@ class RouteLaneChangeContext:
 
 
 @dataclass(frozen=True)
+class RouteLaneChangeStageResult:
+    """Resolved route authorization and its lifecycle side effect request."""
+
+    context: RouteLaneChangeContext
+    authorization: Any
+    replan_reason: str = ""
+
+
+@dataclass(frozen=True)
 class OpportunisticLaneChangeRequest:
     enabled: bool
     sim_time_s: float
@@ -500,6 +509,81 @@ class BehaviorStage:
                 ),
             )
         return authorization
+
+    def resolve_route_lane_change(
+        self,
+        context: RouteLaneChangeContext,
+        *,
+        maneuver_manager: Any,
+        route_cursor: Any,
+        current_lane_id: int,
+        execution_active: bool,
+        replan_missed_lane_change: bool,
+    ) -> RouteLaneChangeStageResult:
+        """Own route-lane-change authorization and remembered requirement.
+
+        Geometry execution remains in the reference stage.  This method owns
+        only the behavior lifecycle: edge observation, authorization latching,
+        missed-maneuver invalidation, and required-target memory.
+        """
+
+        maneuver_manager.observe_route_lane_change_edge(context.edge_id)
+        authorization = self.authorize_route_lane_change(
+            context.request,
+            maneuver_manager=maneuver_manager,
+        )
+        replan_reason = ""
+        if bool(getattr(route_cursor, "missed_maneuver", False)) and not bool(
+            execution_active
+        ):
+            missed_reason = (
+                "route_cursor_missed_lane_change:"
+                f"s={float(getattr(route_cursor, 'route_s_m', 0.0)):.2f}:"
+                "untracked_motion="
+                f"{float(getattr(route_cursor, 'stalled_motion_m', 0.0)):.2f}"
+            )
+            self.reset_route_lane_change_authorization()
+            maneuver_manager.clear_required_lane_change()
+            authorization = replace(
+                authorization,
+                allowed=False,
+                required_by_route=False,
+                reason=missed_reason,
+            )
+            replan_reason = "turn_missed_lane_change_route_unreachable"
+
+        if bool(authorization.required_by_route):
+            raw_target = int(context.topology_target_lane_id or 0)
+            maneuver_manager.remember_required_lane_change(
+                int(authorization.target_lane_id),
+                raw_target if raw_target != 0 else None,
+            )
+        elif maneuver_manager.lane_change.required_target_lane_id is not None:
+            reached = lane_change_target_reached(
+                current_lane_id=int(current_lane_id),
+                remembered_target_lane_id=int(
+                    maneuver_manager.lane_change.required_target_lane_id
+                ),
+                current_ad_lane_id=int(context.topology_current_lane_id or 0),
+                remembered_target_ad_lane_id=int(
+                    maneuver_manager.lane_change.required_target_ad_lane_id or 0
+                ),
+                target_in_local_frame=bool(
+                    context.topology_target_in_local_frame
+                ),
+                target_lane_offset=int(context.topology_lane_offset),
+            )
+            if reached:
+                maneuver_manager.clear_required_lane_change()
+            elif not execution_active and bool(replan_missed_lane_change):
+                maneuver_manager.clear_required_lane_change()
+                replan_reason = "lane_change_missed_route_unreachable"
+
+        return RouteLaneChangeStageResult(
+            context=context,
+            authorization=authorization,
+            replan_reason=replan_reason,
+        )
 
     @staticmethod
     def finalize(

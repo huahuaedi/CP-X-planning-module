@@ -75,6 +75,9 @@ class PlanningPipeline:
             request, maneuver_manager=maneuver_manager
         )
 
+    def resolve_route_lane_change(self, context, **kwargs):
+        return self.behavior.resolve_route_lane_change(context, **kwargs)
+
     def prepare_route_lane_change(self, **kwargs):
         return self.behavior.prepare_route_lane_change(**kwargs)
 

@@ -1,4 +1,5 @@
 import math
+from types import SimpleNamespace
 
 from pipeline.behavior_stage import (
     BehaviorCandidateRequest,
@@ -206,6 +207,70 @@ def test_completed_route_edge_is_rejected_by_behavior_stage():
 
     assert not result.allowed
     assert "edge_already_completed" in result.reason
+
+
+def test_route_lane_change_stage_owns_required_target_memory():
+    stage = BehaviorStage()
+    manager = ManeuverManager()
+
+    result = stage.resolve_route_lane_change(
+        _prepare(),
+        maneuver_manager=manager,
+        route_cursor=SimpleNamespace(
+            missed_maneuver=False, route_s_m=4.0, stalled_motion_m=0.0
+        ),
+        current_lane_id=100,
+        execution_active=False,
+        replan_missed_lane_change=True,
+    )
+
+    assert result.authorization.allowed
+    assert manager.lane_change.required_target_lane_id == 340155
+    assert manager.lane_change.required_target_ad_lane_id == 340154
+    assert result.replan_reason == ""
+
+
+def test_route_lane_change_stage_invalidates_missed_cursor_once():
+    stage = BehaviorStage()
+    manager = ManeuverManager()
+
+    result = stage.resolve_route_lane_change(
+        _prepare(),
+        maneuver_manager=manager,
+        route_cursor=SimpleNamespace(
+            missed_maneuver=True, route_s_m=31.5, stalled_motion_m=9.0
+        ),
+        current_lane_id=100,
+        execution_active=False,
+        replan_missed_lane_change=True,
+    )
+
+    assert not result.authorization.allowed
+    assert not result.authorization.required_by_route
+    assert result.authorization.reason.startswith(
+        "route_cursor_missed_lane_change:"
+    )
+    assert result.replan_reason == "turn_missed_lane_change_route_unreachable"
+    assert manager.lane_change.required_target_lane_id is None
+
+
+def test_active_lane_change_is_not_invalidated_by_missed_cursor():
+    stage = BehaviorStage()
+    manager = ManeuverManager()
+
+    result = stage.resolve_route_lane_change(
+        _prepare(),
+        maneuver_manager=manager,
+        route_cursor=SimpleNamespace(
+            missed_maneuver=True, route_s_m=31.5, stalled_motion_m=9.0
+        ),
+        current_lane_id=100,
+        execution_active=True,
+        replan_missed_lane_change=True,
+    )
+
+    assert result.authorization.allowed
+    assert result.replan_reason == ""
 
 
 def test_opportunistic_authorization_is_owned_by_behavior_stage():
