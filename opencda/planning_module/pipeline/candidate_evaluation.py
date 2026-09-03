@@ -590,6 +590,111 @@ class CandidateTrajectoryEvaluator:
         })
         return [dict(sample) for sample in reference], destination, diagnostics
 
+    def build_candidate_set(
+        self,
+        *,
+        intents,
+        provider,
+        reference_context,
+        baseline_lane_change_state,
+        reference_pipeline,
+        object_snapshots,
+        prediction_trajectories,
+        required_lane_change_decision,
+        required_lane_change_target_lane_id,
+        static_obstacle_target_lane_id,
+        normal_min_object_distance_m,
+        static_min_object_distance_m,
+        risk_hysteresis_margin_m,
+    ):
+        """Build, condition and evaluate all ordinary behavior candidates."""
+
+        rows = []
+        keep_lane_reference = []
+        for intent in list(intents or []):
+            decision = str(
+                getattr(intent, "decision", reference_context.baseline_decision)
+            )
+            target_lane_id = int(
+                getattr(intent, "target_lane_id", reference_context.current_lane_id)
+                or reference_context.current_lane_id
+            )
+            target_speed_mps = float(
+                getattr(intent, "target_speed_mps", reference_context.baseline_speed_mps)
+            )
+            stop_goal_active = bool(
+                getattr(intent, "stop_goal_active", False)
+            ) or decision in {
+                "stop_at_intersection", "stop_sign", "emergency_brake"
+            }
+            lane_change_state = self.lane_change_state(
+                decision=decision,
+                baseline_decision=str(reference_context.baseline_decision),
+                baseline_lane_change_state=str(baseline_lane_change_state),
+            )
+            geometry = self.geometry_plan(
+                decision=decision,
+                ego_speed_mps=float(reference_context.ego_speed_mps),
+                target_speed_mps=target_speed_mps,
+                lane_change_duration_s=float(
+                    getattr(intent, "lane_change_duration_s", 4.0) or 4.0
+                ),
+                dt_s=float(reference_context.dt_s),
+                lane_width_m=float(reference_context.lane_width_m),
+                config=reference_context.planner_config,
+            )
+            built = provider.candidate_intent_reference(
+                intent=intent,
+                context=reference_context,
+                lane_change_state=lane_change_state,
+                geometry_plan=geometry,
+                keep_lane_reference=keep_lane_reference,
+                required_lane_change_decision=str(required_lane_change_decision),
+                required_lane_change_target_lane_id=int(
+                    required_lane_change_target_lane_id
+                ),
+            )
+            static_avoidance = bool(
+                static_obstacle_target_lane_id is not None
+                and target_lane_id == int(static_obstacle_target_lane_id)
+                and target_lane_id != int(reference_context.current_lane_id)
+            )
+            evaluated, _destination, reference = self.condition_and_evaluate(
+                intent=intent,
+                destination_state=built.mutable_destination_state(),
+                reference_samples=built.mutable_samples(),
+                reference_debug=dict(built.diagnostics),
+                reference_pipeline=reference_pipeline,
+                current_state=reference_context.current_state,
+                ego_location=reference_context.ego_location,
+                ego_yaw_rad=float(reference_context.ego_yaw_rad),
+                ego_speed_mps=float(reference_context.ego_speed_mps),
+                target_speed_mps=target_speed_mps,
+                behavior_decision=decision,
+                behavior_fsm_state=lane_change_state,
+                current_lane_id=int(reference_context.current_lane_id),
+                target_lane_id=target_lane_id,
+                stop_goal_active=stop_goal_active,
+                stop_target=getattr(intent, "stop_target", None),
+                route_points=reference_context.route_points,
+                object_snapshots=object_snapshots,
+                prediction_trajectories=prediction_trajectories,
+                min_object_distance_m=float(
+                    static_min_object_distance_m
+                    if static_avoidance else normal_min_object_distance_m
+                ),
+                risk_hysteresis_margin_m=float(risk_hysteresis_margin_m),
+            )
+            rows.append(evaluated)
+            if (
+                decision == "lane_follow"
+                and target_lane_id == int(reference_context.current_lane_id)
+                and not keep_lane_reference
+                and reference
+            ):
+                keep_lane_reference = [dict(sample) for sample in reference]
+        return rows
+
     @staticmethod
     def lane_change_state(
         *, decision: str, baseline_decision: str, baseline_lane_change_state: str

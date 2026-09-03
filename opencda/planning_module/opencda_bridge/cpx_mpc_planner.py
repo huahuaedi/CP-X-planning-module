@@ -43,6 +43,7 @@ from opencda.planning_module.pipeline.reference_line_provider import (
     LANE_FOLLOW,
     POST_TURN,
     TURN,
+    CandidateReferenceBuildContext,
     ReferenceLineProvider,
     ReferenceLineRequest,
     TurnReferenceRequest,
@@ -6677,299 +6678,80 @@ class CPXMPCPlannerBridge:
                 },
             )
 
-        candidate_results = []
-        keep_lane_reference: list[dict[str, object]] = []
-        for intent in intents:
-            candidate_decision = str(getattr(intent, "decision", baseline_decision))
-            candidate_target_lane_id = int(getattr(intent, "target_lane_id", current_lane_id) or current_lane_id)
-            candidate_speed_ref_mps = float(getattr(intent, "target_speed_mps", baseline_speed_ref_mps))
-            route_required_candidate = bool(
-                str(required_lane_change_decision)
-                and str(candidate_decision) == str(required_lane_change_decision)
-                and int(candidate_target_lane_id)
-                == int(required_lane_change_target_lane_id)
-            )
-            candidate_stop_goal_active = bool(getattr(intent, "stop_goal_active", False)) or candidate_decision in {
-                "stop_at_intersection",
-                "stop_sign",
-                "emergency_brake",
-            }
-            candidate_lc_state = self._candidate_trajectory_evaluator.lane_change_state(
-                decision=str(candidate_decision),
-                baseline_decision=str(baseline_decision),
-                baseline_lane_change_state=str(baseline_lc_state),
-            )
-            geometry_plan = self._candidate_trajectory_evaluator.geometry_plan(
-                decision=str(candidate_decision),
-                ego_speed_mps=float(ego_speed_mps),
-                target_speed_mps=float(candidate_speed_ref_mps),
-                lane_change_duration_s=float(
-                    getattr(intent, "lane_change_duration_s", 4.0) or 4.0
-                ),
-                dt_s=float(self.mpc.dt_s),
-                lane_width_m=float(getattr(self.mpc, "lane_width_m", 3.5)),
-                config=self.config,
-            )
-            candidate_lane_reference_step_m = float(geometry_plan.step_m)
-            candidate_geometry_speed_mps = float(
-                geometry_plan.geometry_speed_mps
-            )
-            candidate_geometry_length_m = float(
-                geometry_plan.geometry_length_m
-            )
-            operational_curvature_limit_1pm = float(
-                geometry_plan.operational_curvature_limit_1pm
-            )
-            same_as_baseline = (
-                str(candidate_decision) == str(baseline_decision)
-                and int(candidate_target_lane_id) == int(baseline_target_lane_id)
-                and abs(float(candidate_speed_ref_mps) - float(baseline_speed_ref_mps)) < 1.0e-3
-                # Lane-change candidates require the geometry floor computed
-                # below. The generic baseline may have been sampled from the
-                # near-zero controller speed and is therefore not an
-                # equivalent reference even when decision/target/speed match.
-                and str(candidate_decision)
-                not in {"lane_change_left", "lane_change_right"}
-            )
-            if bool(same_as_baseline) and baseline_destination_state is not None:
-                destination_state = list(baseline_destination_state)
-                reference = [dict(sample) for sample in list(baseline_reference or [])]
-                candidate_reference_debug = dict(baseline_reference_debug or {})
-            else:
-                previous_temp = list(base_temporary_destination_state or [])
-                built_candidate_reference = (
-                    self._stable_reference_line_provider.build_behavior_reference(
-                    map_planner=self.reference_map,
-                    ego_pose=ego_pose,
-                    ego_state=current_state,
-                    route_points=route_points,
-                    previous_reference=previous_nominal_reference,
-                    previous_target_state=previous_temp,
-                    behavior_runtime_config=self.behavior_runtime_cfg,
-                    decision=str(candidate_decision),
-                    lane_change_state=str(candidate_lc_state),
-                    target_lane_id=int(candidate_target_lane_id),
-                    current_lane_id=int(current_lane_id),
-                    route_optimal_lane_id=int(route_optimal_lane_id),
-                    route_reference_allowed=bool(route_reference_allowed),
-                    route_reference_gate_reason=str(route_reference_gate_reason),
-                    in_junction=bool(planner_input_frame.map_lane.in_junction),
-                    next_macro_maneuver=str(
-                        planner_input_frame.planning.route.next_macro_maneuver
-                    ),
-                    planner_mode=str(planner_mode),
-                    lookahead_m=float(self.lookahead_m),
-                    target_speed_mps=float(candidate_speed_ref_mps),
-                    ego_speed_mps=float(ego_speed_mps),
-                    horizon_steps=int(self.mpc.horizon_steps),
-                    dt_s=float(self.mpc.dt_s),
-                    reference_freeze_count=int(nominal_reference_freeze_count),
-                    sim_time_s=float(self._sim_time_s()),
-                    stop_release_smooth_until_s=float(
-                        self._stop_release_temp_smooth_until_sim_time_s
-                    ),
-                    authoritative_ego_waypoint=self._authoritative_ego_waypoint,
-                    lane_reference_step_distance_m=max(
-                        0.05, float(candidate_lane_reference_step_m)
-                    ),
-                    )
-                )
-                destination_state = (
-                    built_candidate_reference.mutable_destination_state()
-                )
-                reference = built_candidate_reference.mutable_samples()
-                candidate_reference_debug = dict(
-                    built_candidate_reference.diagnostics
-                )
-                candidate_reference_debug["fallback_reason"] = str(
-                    built_candidate_reference.fallback_reason
-                )
-
-            if bool(route_required_candidate) and len(route_points) >= 2:
-                target_candidate = (
-                    self._stable_reference_line_provider.route_lane_change_target_candidate(
-                    local_map=getattr(self, "_local_map_snapshot", None),
-                    target_lane_id=int(candidate_target_lane_id),
-                    target_speed_mps=float(candidate_speed_ref_mps),
-                    ego_x_m=float(ego_location.x),
-                    ego_y_m=float(ego_location.y),
-                    spacing_m=float(candidate_lane_reference_step_m),
-                    geometry_length_m=float(candidate_geometry_length_m),
-                    horizon_steps=int(self.mpc.horizon_steps),
-                    destination_state=destination_state,
-                ))
-                if target_candidate.samples:
-                    reference = target_candidate.mutable_samples()
-                candidate_reference_debug.update(
-                    dict(target_candidate.diagnostics)
-                )
-
-            if candidate_decision in {"intersection_turn_left", "intersection_turn_right"}:
-                turn_candidate = (
-                    self._stable_reference_line_provider.intersection_turn_candidate(
-                        TurnReferenceRequest(
-                        local_map=getattr(self, "_local_map_snapshot", None),
-                        config=self.config,
-                        horizon_steps=int(self.mpc.horizon_steps),
-                        dt_s=float(self.mpc.dt_s),
-                        ego_location=ego_location,
-                        ego_yaw_rad=float(ego_yaw_rad),
-                        current_state=current_state,
-                        current_lane_id=int(current_lane_id),
-                        target_lane_id=int(candidate_target_lane_id),
-                        target_speed_mps=float(candidate_speed_ref_mps),
-                        destination_state=destination_state,
-                        turn_direction=(
-                            "left" if candidate_decision.endswith("_left") else "right"
-                        ),
-                        route_revision=str(self.route_manager.route_revision),
-                        map_epoch=str(self.waypoint_backend or "admap"),
-                    ), decision=str(candidate_decision))
-                )
-                if turn_candidate.samples:
-                    reference = turn_candidate.mutable_samples()
-                    destination_state = (
-                        turn_candidate.mutable_destination_state()
-                    )
-                candidate_reference_debug.update(
-                    dict(turn_candidate.diagnostics)
-                )
-
-            if (
-                candidate_decision == "lane_follow"
-                and str(upcoming_turn_direction) in {"left", "right"}
-                and math.isfinite(float(upcoming_turn_distance_m))
-            ):
-                preturn_candidate = (
-                    self._stable_reference_line_provider.preturn_candidate(
-                        TurnReferenceRequest(
-                            local_map=getattr(self, "_local_map_snapshot", None),
-                            config=self.config,
-                            horizon_steps=int(self.mpc.horizon_steps),
-                            dt_s=float(self.mpc.dt_s),
-                            ego_location=ego_location,
-                            ego_yaw_rad=float(ego_yaw_rad),
-                            current_state=current_state,
-                            current_lane_id=int(current_lane_id),
-                            target_lane_id=int(candidate_target_lane_id),
-                            target_speed_mps=float(candidate_speed_ref_mps),
-                            destination_state=destination_state,
-                            turn_direction=str(upcoming_turn_direction),
-                            route_revision=str(self.route_manager.route_revision),
-                            map_epoch=str(self.waypoint_backend or "admap"),
-                        ),
-                        upcoming_turn_distance_m=float(
-                            upcoming_turn_distance_m
-                        ),
-                        first_forward_m=float(candidate_lane_reference_step_m),
-                    )
-                )
-                if preturn_candidate.samples:
-                    reference = preturn_candidate.mutable_samples()
-                candidate_reference_debug.update(
-                    dict(preturn_candidate.diagnostics)
-                )
-            if (
-                candidate_decision in {"lane_change_left", "lane_change_right"}
-                and keep_lane_reference
-            ):
-                lane_change_duration_s = max(
-                    float(self.mpc.dt_s),
-                    float(getattr(intent, "lane_change_duration_s", 4.0) or 4.0),
-                )
-                lane_change_candidate = (
-                    self._stable_reference_line_provider.lane_change_candidate(
-                    local_map=getattr(self, "_local_map_snapshot", None),
-                    current_state=current_state,
-                    current_lane_id=int(current_lane_id),
-                    target_lane_id=int(candidate_target_lane_id),
-                    target_reference=reference,
-                    source_reference=keep_lane_reference,
-                    target_speed_mps=float(candidate_speed_ref_mps),
-                    geometry_speed_mps=float(candidate_geometry_speed_mps),
-                    geometry_length_m=float(candidate_geometry_length_m),
-                    transition_duration_s=float(lane_change_duration_s),
-                    spacing_m=float(candidate_lane_reference_step_m),
-                    horizon_steps=int(self.mpc.horizon_steps),
-                    lane_width_m=float(getattr(self.mpc, "lane_width_m", 3.5)),
-                    destination_state=destination_state,
-                    trajectory_variant=str(
-                        getattr(intent, "trajectory_variant", "normal")
-                    ),
-                    duration_s=float(
-                        self.maneuver_manager.lane_change.resolved_duration_s
-                        or lane_change_duration_s
-                    ),
-                    duration_reason=str(
-                        self.maneuver_manager.lane_change.duration_comfort_reason
-                    ),
-                    operational_curvature_limit_1pm=float(
-                        operational_curvature_limit_1pm
-                    ),
-                    authorization_source=(
-                        "opportunistic"
-                        if str(getattr(intent, "reason", "")).startswith("opportunistic_")
-                        else "route"
-                    ),
-                ))
-                reference = lane_change_candidate.mutable_samples()
-                destination_state = (
-                    lane_change_candidate.mutable_destination_state()
-                )
-                candidate_reference_debug.update(
-                    dict(lane_change_candidate.diagnostics)
-                )
-
-            candidate_is_static_obstacle_local_avoidance = bool(
-                self._static_obstacle_local_target_lane_id is not None
-                and int(candidate_target_lane_id)
-                == int(self._static_obstacle_local_target_lane_id)
-                and int(candidate_target_lane_id) != int(current_lane_id)
-            )
-            (
-                evaluated_candidate_result,
-                destination_state,
-                reference,
-            ) = self._candidate_trajectory_evaluator.condition_and_evaluate(
-                intent=intent,
-                destination_state=destination_state,
-                reference_samples=reference,
-                reference_debug=candidate_reference_debug,
-                reference_pipeline=self.reference_pipeline,
-                current_state=current_state,
-                ego_location=ego_location,
-                ego_yaw_rad=float(ego_yaw_rad),
-                ego_speed_mps=float(ego_speed_mps),
-                target_speed_mps=float(candidate_speed_ref_mps),
-                behavior_decision=str(candidate_decision),
-                behavior_fsm_state=str(candidate_lc_state),
-                current_lane_id=int(current_lane_id),
-                target_lane_id=int(candidate_target_lane_id),
-                stop_goal_active=bool(candidate_stop_goal_active),
-                stop_target=getattr(intent, "stop_target", None),
-                route_points=route_points,
-                object_snapshots=object_snapshots,
-                prediction_trajectories=prediction_trajectories,
-                min_object_distance_m=float(
-                    self.static_obstacle_local_avoidance_min_object_distance_m
-                    if candidate_is_static_obstacle_local_avoidance
-                    else self.full_candidate_reference_min_object_distance_m
-                ),
-                risk_hysteresis_margin_m=float(
-                    self.candidate_risk_hysteresis_margin_m
-                ),
-            )
-            candidate_results.append(evaluated_candidate_result)
-            if (
-                str(candidate_decision) == "lane_follow"
-                and int(candidate_target_lane_id) == int(current_lane_id)
-                and not keep_lane_reference
-                and reference
-            ):
-                keep_lane_reference = [
-                    dict(sample) for sample in list(reference or [])
-                ]
-
+        reference_context = CandidateReferenceBuildContext(
+            map_planner=self.reference_map,
+            local_map=getattr(self, "_local_map_snapshot", None),
+            planner_config=self.config,
+            ego_pose=ego_pose,
+            current_state=current_state,
+            ego_location=ego_location,
+            ego_yaw_rad=float(ego_yaw_rad),
+            ego_speed_mps=float(ego_speed_mps),
+            route_points=route_points,
+            previous_reference=previous_nominal_reference,
+            previous_target_state=list(base_temporary_destination_state or []),
+            behavior_runtime_config=self.behavior_runtime_cfg,
+            baseline_decision=str(baseline_decision),
+            baseline_target_lane_id=int(baseline_target_lane_id),
+            baseline_speed_mps=float(baseline_speed_ref_mps),
+            baseline_destination_state=baseline_destination_state,
+            baseline_reference=baseline_reference,
+            baseline_debug=baseline_reference_debug,
+            current_lane_id=int(current_lane_id),
+            route_optimal_lane_id=int(route_optimal_lane_id),
+            route_reference_allowed=bool(route_reference_allowed),
+            route_reference_gate_reason=str(route_reference_gate_reason),
+            in_junction=bool(planner_input_frame.map_lane.in_junction),
+            next_macro_maneuver=str(
+                planner_input_frame.planning.route.next_macro_maneuver
+            ),
+            planner_mode=str(planner_mode),
+            lookahead_m=float(self.lookahead_m),
+            horizon_steps=int(self.mpc.horizon_steps),
+            dt_s=float(self.mpc.dt_s),
+            reference_freeze_count=int(nominal_reference_freeze_count),
+            sim_time_s=float(self._sim_time_s()),
+            stop_release_smooth_until_s=float(
+                self._stop_release_temp_smooth_until_sim_time_s
+            ),
+            authoritative_ego_waypoint=self._authoritative_ego_waypoint,
+            route_revision=str(self.route_manager.route_revision),
+            map_epoch=str(self.waypoint_backend or "admap"),
+            upcoming_turn_direction=str(upcoming_turn_direction),
+            upcoming_turn_distance_m=float(upcoming_turn_distance_m),
+            lane_change_duration_s=float(
+                self.maneuver_manager.lane_change.resolved_duration_s
+            ),
+            lane_change_duration_reason=str(
+                self.maneuver_manager.lane_change.duration_comfort_reason
+            ),
+            lane_width_m=float(getattr(self.mpc, "lane_width_m", 3.5)),
+        )
+        candidate_results = self._candidate_trajectory_evaluator.build_candidate_set(
+            intents=intents,
+            provider=self._stable_reference_line_provider,
+            reference_context=reference_context,
+            baseline_lane_change_state=str(baseline_lc_state),
+            reference_pipeline=self.reference_pipeline,
+            object_snapshots=object_snapshots,
+            prediction_trajectories=prediction_trajectories,
+            required_lane_change_decision=str(required_lane_change_decision),
+            required_lane_change_target_lane_id=int(
+                required_lane_change_target_lane_id
+            ),
+            static_obstacle_target_lane_id=(
+                self._static_obstacle_local_target_lane_id
+            ),
+            normal_min_object_distance_m=float(
+                self.full_candidate_reference_min_object_distance_m
+            ),
+            static_min_object_distance_m=float(
+                self.static_obstacle_local_avoidance_min_object_distance_m
+            ),
+            risk_hysteresis_margin_m=float(
+                self.candidate_risk_hysteresis_margin_m
+            ),
+        )
         # A committed maneuver owns one immutable master trajectory. New
         # variants may be evaluated, but cannot replace this continuation.
         if self._stable_reference_line_provider.snapshot(LANE_CHANGE).active:

@@ -182,6 +182,49 @@ class CandidateReferenceOverrideResult:
         return list(self.destination_state)
 
 
+@dataclass(frozen=True)
+class CandidateReferenceBuildContext:
+    map_planner: Any
+    local_map: Any
+    planner_config: Mapping[str, object]
+    ego_pose: Mapping[str, object]
+    current_state: Sequence[float]
+    ego_location: Any
+    ego_yaw_rad: float
+    ego_speed_mps: float
+    route_points: Sequence[Sequence[float]]
+    previous_reference: Sequence[Mapping[str, object]]
+    previous_target_state: Sequence[float]
+    behavior_runtime_config: Mapping[str, object]
+    baseline_decision: str
+    baseline_target_lane_id: int
+    baseline_speed_mps: float
+    baseline_destination_state: Optional[Sequence[float]]
+    baseline_reference: Sequence[Mapping[str, object]]
+    baseline_debug: Mapping[str, object]
+    current_lane_id: int
+    route_optimal_lane_id: int
+    route_reference_allowed: bool
+    route_reference_gate_reason: str
+    in_junction: bool
+    next_macro_maneuver: str
+    planner_mode: str
+    lookahead_m: float
+    horizon_steps: int
+    dt_s: float
+    reference_freeze_count: int
+    sim_time_s: float
+    stop_release_smooth_until_s: float
+    authoritative_ego_waypoint: Any
+    route_revision: str
+    map_epoch: str
+    upcoming_turn_direction: str
+    upcoming_turn_distance_m: float
+    lane_change_duration_s: float
+    lane_change_duration_reason: str
+    lane_width_m: float
+
+
 class ReferenceLineProvider(StableReferenceLineProvider):
     """Own immutable masters and monotonic windows for every planning mode.
 
@@ -893,6 +936,190 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             samples=tuple(
                 MappingProxyType(dict(sample)) for sample in reference
             ),
+            destination_state=tuple(destination),
+            diagnostics=MappingProxyType(diagnostics),
+        )
+
+    def candidate_intent_reference(
+        self,
+        *,
+        intent,
+        context: CandidateReferenceBuildContext,
+        lane_change_state: str,
+        geometry_plan,
+        keep_lane_reference,
+        required_lane_change_decision: str = "",
+        required_lane_change_target_lane_id: int = 0,
+    ) -> CandidateReferenceOverrideResult:
+        """Resolve every geometric override for one behavior intent."""
+
+        decision = str(getattr(intent, "decision", context.baseline_decision))
+        target_lane_id = int(
+            getattr(intent, "target_lane_id", context.current_lane_id)
+            or context.current_lane_id
+        )
+        target_speed_mps = float(
+            getattr(intent, "target_speed_mps", context.baseline_speed_mps)
+        )
+        same_as_baseline = bool(
+            decision == str(context.baseline_decision)
+            and target_lane_id == int(context.baseline_target_lane_id)
+            and abs(target_speed_mps - float(context.baseline_speed_mps)) < 1e-3
+            and decision not in {"lane_change_left", "lane_change_right"}
+            and context.baseline_destination_state is not None
+        )
+        if same_as_baseline:
+            destination = list(context.baseline_destination_state or [])
+            reference = [dict(x) for x in context.baseline_reference]
+            diagnostics = dict(context.baseline_debug)
+        else:
+            built = self.build_behavior_reference(
+                map_planner=context.map_planner,
+                ego_pose=context.ego_pose,
+                ego_state=context.current_state,
+                route_points=context.route_points,
+                previous_reference=context.previous_reference,
+                previous_target_state=context.previous_target_state,
+                behavior_runtime_config=context.behavior_runtime_config,
+                decision=decision,
+                lane_change_state=str(lane_change_state),
+                target_lane_id=target_lane_id,
+                current_lane_id=int(context.current_lane_id),
+                route_optimal_lane_id=int(context.route_optimal_lane_id),
+                route_reference_allowed=bool(context.route_reference_allowed),
+                route_reference_gate_reason=str(
+                    context.route_reference_gate_reason
+                ),
+                in_junction=bool(context.in_junction),
+                next_macro_maneuver=str(context.next_macro_maneuver),
+                planner_mode=str(context.planner_mode),
+                lookahead_m=float(context.lookahead_m),
+                target_speed_mps=target_speed_mps,
+                ego_speed_mps=float(context.ego_speed_mps),
+                horizon_steps=int(context.horizon_steps),
+                dt_s=float(context.dt_s),
+                reference_freeze_count=int(context.reference_freeze_count),
+                sim_time_s=float(context.sim_time_s),
+                stop_release_smooth_until_s=float(
+                    context.stop_release_smooth_until_s
+                ),
+                authoritative_ego_waypoint=context.authoritative_ego_waypoint,
+                lane_reference_step_distance_m=max(
+                    0.05, float(geometry_plan.step_m)
+                ),
+            )
+            destination = built.mutable_destination_state()
+            reference = built.mutable_samples()
+            diagnostics = dict(built.diagnostics)
+            diagnostics["fallback_reason"] = str(built.fallback_reason)
+
+        route_required = bool(
+            str(required_lane_change_decision)
+            and decision == str(required_lane_change_decision)
+            and target_lane_id == int(required_lane_change_target_lane_id)
+            and len(context.route_points) >= 2
+        )
+        if route_required:
+            override = self.route_lane_change_target_candidate(
+                local_map=context.local_map,
+                target_lane_id=target_lane_id,
+                target_speed_mps=target_speed_mps,
+                ego_x_m=float(context.ego_location.x),
+                ego_y_m=float(context.ego_location.y),
+                spacing_m=float(geometry_plan.step_m),
+                geometry_length_m=float(geometry_plan.geometry_length_m),
+                horizon_steps=int(context.horizon_steps),
+                destination_state=destination,
+            )
+            if override.samples:
+                reference = override.mutable_samples()
+            diagnostics.update(dict(override.diagnostics))
+
+        turn_request = TurnReferenceRequest(
+            local_map=context.local_map,
+            config=context.planner_config,
+            horizon_steps=int(context.horizon_steps),
+            dt_s=float(context.dt_s),
+            ego_location=context.ego_location,
+            ego_yaw_rad=float(context.ego_yaw_rad),
+            current_state=context.current_state,
+            current_lane_id=int(context.current_lane_id),
+            target_lane_id=target_lane_id,
+            target_speed_mps=target_speed_mps,
+            destination_state=destination,
+            turn_direction=(
+                "left" if decision.endswith("_left")
+                else "right" if decision.endswith("_right")
+                else str(context.upcoming_turn_direction)
+            ),
+            route_revision=str(context.route_revision),
+            map_epoch=str(context.map_epoch),
+        )
+        if decision in {"intersection_turn_left", "intersection_turn_right"}:
+            override = self.intersection_turn_candidate(
+                turn_request, decision=decision
+            )
+            if override.samples:
+                reference = override.mutable_samples()
+                destination = override.mutable_destination_state()
+            diagnostics.update(dict(override.diagnostics))
+        elif (
+            decision == "lane_follow"
+            and str(context.upcoming_turn_direction) in {"left", "right"}
+            and math.isfinite(float(context.upcoming_turn_distance_m))
+        ):
+            override = self.preturn_candidate(
+                turn_request,
+                upcoming_turn_distance_m=float(
+                    context.upcoming_turn_distance_m
+                ),
+                first_forward_m=float(geometry_plan.step_m),
+            )
+            if override.samples:
+                reference = override.mutable_samples()
+            diagnostics.update(dict(override.diagnostics))
+
+        if decision in {"lane_change_left", "lane_change_right"} and keep_lane_reference:
+            duration_s = max(
+                float(context.dt_s),
+                float(getattr(intent, "lane_change_duration_s", 4.0) or 4.0),
+            )
+            override = self.lane_change_candidate(
+                local_map=context.local_map,
+                current_state=context.current_state,
+                current_lane_id=int(context.current_lane_id),
+                target_lane_id=target_lane_id,
+                target_reference=reference,
+                source_reference=keep_lane_reference,
+                target_speed_mps=target_speed_mps,
+                geometry_speed_mps=float(geometry_plan.geometry_speed_mps),
+                geometry_length_m=float(geometry_plan.geometry_length_m),
+                transition_duration_s=duration_s,
+                spacing_m=float(geometry_plan.step_m),
+                horizon_steps=int(context.horizon_steps),
+                lane_width_m=float(context.lane_width_m),
+                destination_state=destination,
+                trajectory_variant=str(
+                    getattr(intent, "trajectory_variant", "normal")
+                ),
+                duration_s=float(context.lane_change_duration_s or duration_s),
+                duration_reason=str(context.lane_change_duration_reason),
+                authorization_source=(
+                    "opportunistic"
+                    if str(getattr(intent, "reason", "")).startswith(
+                        "opportunistic_"
+                    )
+                    else "route"
+                ),
+                operational_curvature_limit_1pm=float(
+                    geometry_plan.operational_curvature_limit_1pm
+                ),
+            )
+            reference = override.mutable_samples()
+            destination = override.mutable_destination_state()
+            diagnostics.update(dict(override.diagnostics))
+        return CandidateReferenceOverrideResult(
+            samples=tuple(MappingProxyType(dict(x)) for x in reference),
             destination_state=tuple(destination),
             diagnostics=MappingProxyType(diagnostics),
         )
