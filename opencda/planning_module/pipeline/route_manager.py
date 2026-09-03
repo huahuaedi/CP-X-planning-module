@@ -37,6 +37,32 @@ class RouteReplanResult:
     route_point_count: int = 0
 
 
+@dataclass(frozen=True)
+class RouteCursorSnapshot:
+    """The single per-tick progress result consumed by downstream stages."""
+
+    route_revision: str
+    segment_index: int
+    route_s_m: float
+    lane_index: int
+    current_lane_id: int
+    projection_x_m: float
+    projection_y_m: float
+    projection_ratio: float
+    lateral_distance_m: float
+    valid: bool
+    reason: str
+    segment_kind: str = ""
+    off_route: bool = True
+    optimal_lane_id: int = 0
+    current_road_option: str = ""
+    next_macro_maneuver: str = "Continue Straight"
+    next_macro_distance_m: float = float("inf")
+    remaining_distance_m: float = 0.0
+    stalled_motion_m: float = 0.0
+    missed_maneuver: bool = False
+
+
 class CPXRouteManager:
     """Own destination, active global route, progress, and query diagnostics."""
 
@@ -113,7 +139,7 @@ class CPXRouteManager:
         self._route_nodes_cache: Tuple[Tuple[float, float, float, Any, str], ...] = ()
         self._geometry_route_points_cache_key: Optional[Tuple[int, int, int, int]] = None
         self._geometry_route_points_cache: Tuple[Tuple[float, float, float, float], ...] = ()
-        self._route_progress_index = 0
+        self._cursor_segment_index = 0
         self._route_progress_initialized = False
         self._route_projection: Optional[Tuple[int, float, float, float, float]] = None
         self._route_sync_reason = "route_progress_not_initialized"
@@ -121,8 +147,12 @@ class CPXRouteManager:
         # Arc-length route model (W1): typed segments + float progress. Built
         # alongside `_route_entries`; queried by upcoming_turn / _lane_change.
         self._route_geometry: Optional[RouteGeometry] = None
+        self._route_revision = 0
         self._route_s_m: float = 0.0
         self._route_lane_index: int = 0
+        self._route_current_lane_id: int = 0
+        self._last_progress_sync_pose: Optional[Tuple[float, float, float]] = None
+        self._route_stalled_motion_m: float = 0.0
         self._last_status = RouteManagerStatus(debug_reason="route_not_initialized")
 
     def set_destination(
@@ -148,6 +178,7 @@ class CPXRouteManager:
                 goal_point=self._goal_point,
             )
         self._last_status = self._status_from_summary(self._active_route_summary)
+        self._route_revision += 1
         return self._active_route_summary
 
     def replan_from(
@@ -168,11 +199,13 @@ class CPXRouteManager:
             "_route_geometry": self._route_geometry,
             "_route_s_m": self._route_s_m,
             "_route_lane_index": self._route_lane_index,
-            "_route_progress_index": self._route_progress_index,
+            "_route_current_lane_id": self._route_current_lane_id,
+            "_cursor_segment_index": self._cursor_segment_index,
             "_route_progress_initialized": self._route_progress_initialized,
             "_route_projection": self._route_projection,
             "_route_sync_reason": self._route_sync_reason,
             "_route_debug_reason": self._route_debug_reason,
+            "_route_stalled_motion_m": self._route_stalled_motion_m,
             "_last_status": self._last_status,
         }
         planner_snapshot_fn = getattr(
@@ -182,7 +215,7 @@ class CPXRouteManager:
             planner_snapshot_fn() if callable(planner_snapshot_fn) else None
         )
         old_nodes = self._route_nodes()
-        old_progress_index = int(self._route_progress_index)
+        old_progress_index = int(self._cursor_segment_index)
         old_remaining_m = self._remaining_distance_on_route(
             start_index=old_progress_index
         )
@@ -264,6 +297,7 @@ class CPXRouteManager:
                 if str(trigger_reason).strip().lower().startswith("static_obstacle")
                 else f"admap_route_replanned:{str(trigger_reason)}"
             )
+            self._route_revision += 1
             return RouteReplanResult(
                 True,
                 str(self._route_debug_reason),
@@ -298,78 +332,20 @@ class CPXRouteManager:
                 fallback_lane_id=int(fallback_lane_id),
                 ego_waypoint=ego_waypoint,
             )
-        try:
-            summary = self.global_planner.get_current_route_info(
-                x_m=float(x_m),
-                y_m=float(y_m),
-                query_key=str(query_key),
-            )
-        except Exception as exc:
-            self._last_status = RouteManagerStatus(
-                route_found=False,
-                route_point_count=0,
-                remaining_distance_m=0.0,
-                reached_destination=False,
-                debug_reason=f"route_query_failed:{exc}",
-            )
-            return self._fallback_summary(
-                fallback_lane_id=int(fallback_lane_id),
-                debug_reason=str(self._last_status.debug_reason),
-            )
-
-        if summary is None:
-            summary = self._active_route_summary
-        if summary is None:
-            self._last_status = RouteManagerStatus(debug_reason="route_missing")
-            return self._fallback_summary(
-                fallback_lane_id=int(fallback_lane_id),
-                debug_reason="route_missing",
-            )
-
-        self._active_route_summary = summary
-        self._last_status = self._status_from_summary(summary)
-        if (
-            not bool(getattr(summary, "route_found", False))
-            and len(self._fallback_route_points) >= 2
-        ):
-            remaining = self._remaining_distance_on_fallback_route(
-                x_m=float(x_m),
-                y_m=float(y_m),
-            )
-            self._last_status = RouteManagerStatus(
-                route_found=True,
-                route_point_count=len(self._fallback_route_points),
-                remaining_distance_m=float(remaining),
-                reached_destination=bool(remaining <= self.reached_distance_m),
-                debug_reason=self._fallback_debug_reason(summary),
-            )
-            return {
-                "route_found": True,
-                "optimal_lane_id": int(fallback_lane_id),
-                "current_road_option": "FALLBACK_DIRECT",
-                "next_macro_maneuver": "Continue Straight",
-                "debug_reason": str(self._last_status.debug_reason),
-                "remaining_distance_m": float(remaining),
-                "reached_destination": bool(self._last_status.reached_destination),
-            }
-        lane_id = _to_int(getattr(summary, "optimal_lane_id", fallback_lane_id), fallback_lane_id)
-        if int(lane_id) == 0:
-            lane_id = int(fallback_lane_id)
-        return {
-            "route_found": bool(getattr(summary, "route_found", False)),
-            "optimal_lane_id": int(lane_id),
-            "current_road_option": str(getattr(summary, "current_road_option", "")),
-            "next_macro_maneuver": str(
-                getattr(summary, "next_macro_maneuver", "Continue Straight")
-            ),
-            "debug_reason": str(
-                getattr(summary, "debug_reason", "planning_module_global_route")
-            ),
-            "remaining_distance_m": float(
-                getattr(summary, "distance_to_destination_m", 0.0) or 0.0
-            ),
-            "reached_destination": bool(self._last_status.reached_destination),
-        }
+        # GlobalPlanner is topology construction only. Runtime position must
+        # never be sent back through its nearest-node query, otherwise route
+        # progress and lane intent acquire a second owner beside RouteCursor.
+        self._last_status = RouteManagerStatus(
+            route_found=False,
+            route_point_count=0,
+            remaining_distance_m=0.0,
+            reached_destination=False,
+            debug_reason="route_topology_unavailable",
+        )
+        return self._fallback_summary(
+            fallback_lane_id=int(fallback_lane_id),
+            debug_reason=str(self._last_status.debug_reason),
+        )
 
     def _route_info(
         self,
@@ -395,22 +371,13 @@ class CPXRouteManager:
                 ego_y_m=float(y_m),
                 ego_heading_rad=float(initial_heading_rad),
             )
-        index = min(max(0, int(self._route_progress_index)), len(nodes) - 2)
-        options = [str(node[4]) for node in nodes[index + 1 : index + 81]]
-        current_option = str(nodes[min(index + 1, len(nodes) - 1)][4])
-        next_macro = _next_macro_from_route_options(options)
-        next_macro_distance_m = _distance_to_next_route_macro(
-            nodes=nodes,
-            start_index=int(index),
-            projection=self._route_projection,
-        )
-        optimal_lane_id = _route_required_lane_id(
-            nodes=nodes,
-            start_index=int(index),
-            fallback_lane_id=int(fallback_lane_id),
-            ego_waypoint=ego_waypoint,
-        )
-        remaining = self._remaining_distance_on_route(start_index=int(index))
+        del ego_waypoint
+        cursor = self.route_cursor
+        optimal_lane_id = int(cursor.optimal_lane_id or fallback_lane_id)
+        current_option = str(cursor.current_road_option)
+        next_macro = str(cursor.next_macro_maneuver)
+        next_macro_distance_m = float(cursor.next_macro_distance_m)
+        remaining = float(cursor.remaining_distance_m)
         reached = bool(remaining <= self.reached_distance_m)
         self._last_status = RouteManagerStatus(
             route_found=True,
@@ -453,18 +420,9 @@ class CPXRouteManager:
         return float(remaining_m)
 
     def route_points(self, *, x_m: Optional[float] = None, y_m: Optional[float] = None, query_key: str = "") -> List[List[float]]:
-        summary = None
-        if x_m is not None and y_m is not None:
-            try:
-                summary = self.global_planner.get_current_route_info(
-                    x_m=float(x_m),
-                    y_m=float(y_m),
-                    query_key=str(query_key or "route_points"),
-                )
-            except Exception:
-                summary = None
-        if summary is None:
-            summary = self._active_route_summary
+        # Route points are immutable topology geometry. Progress/windowing is
+        # owned by RouteCursor and must not mutate this query.
+        summary = self._active_route_summary
         route_waypoints = list(getattr(summary, "route_waypoints", []) or [])
         route_points = _route_points_from_waypoints(route_waypoints)
         if len(route_points) >= 2:
@@ -641,6 +599,24 @@ class CPXRouteManager:
             str(direction or ""),
             float(distance_m),
             "route_geometry_lane_change_ahead",
+        )
+
+    def upcoming_lane_change_edge_id(self, *, lookahead_m: float) -> str:
+        """Stable identity of the next executable topology lane-change edge."""
+
+        geometry = self._route_geometry
+        if geometry is None or not geometry.valid:
+            return ""
+        segment = geometry.next_lane_change_segment(
+            float(self._route_s_m), float(lookahead_m)
+        )
+        if segment is None:
+            return ""
+        return (
+            f"{self.route_revision}:lane_change:"
+            f"{int(segment.node_start)}-{int(segment.node_end)}:"
+            f"{str(segment.direction)}:"
+            f"{int(segment.source_lane_id)}-{int(segment.target_lane_id)}"
         )
 
     def route_alignment(
@@ -915,6 +891,7 @@ class CPXRouteManager:
         ego_x_m: float,
         ego_y_m: float,
         ego_heading_rad: float,
+        current_lane_id: int = 0,
     ) -> str:
         """Synchronize ego progress against the active waypoint route.
 
@@ -930,17 +907,57 @@ class CPXRouteManager:
             )
             return str(self._route_sync_reason)
 
+        sync_pose = (
+            round(float(ego_x_m), 6),
+            round(float(ego_y_m), 6),
+            round(float(ego_heading_rad), 6),
+        )
+        if (
+            bool(self._route_progress_initialized)
+            and sync_pose == self._last_progress_sync_pose
+        ):
+            if int(current_lane_id) != 0:
+                self._route_current_lane_id = int(current_lane_id)
+            return str(self._route_sync_reason)
+
+        previous_sync_pose = self._last_progress_sync_pose
+        physical_tick_distance_m = (
+            math.hypot(
+                float(sync_pose[0]) - float(previous_sync_pose[0]),
+                float(sync_pose[1]) - float(previous_sync_pose[1]),
+            )
+            if previous_sync_pose is not None
+            else None
+        )
+
         if not bool(self._route_progress_initialized):
             lower = 0
             upper = len(nodes) - 1
             search_mode = "global_init"
         else:
-            lower = max(0, int(self._route_progress_index) - 5)
+            lower = max(0, int(self._cursor_segment_index) - 5)
             upper = min(
                 len(nodes) - 1,
-                max(lower + 1, int(self._route_progress_index) + 80),
+                max(lower + 1, int(self._cursor_segment_index) + 80),
             )
             search_mode = "local_update"
+
+        lane_id = int(current_lane_id)
+        allowed_indices = None
+        if lane_id != 0:
+            lane_matched_indices = {
+                index
+                for index in range(int(lower), int(upper))
+                if lane_id in {
+                    int(_canonical_lane_id(nodes[index][3], 0)),
+                    int(_canonical_lane_id(nodes[index + 1][3], 0)),
+                }
+            }
+            # Connectors may temporarily have a different opaque lane id.  A
+            # missing match therefore relaxes to the local topology window;
+            # it never starts a second global-nearest cursor.
+            if lane_matched_indices:
+                allowed_indices = lane_matched_indices
 
         best = _best_route_projection(
             nodes=nodes,
@@ -949,6 +966,7 @@ class CPXRouteManager:
             ego_heading_rad=float(ego_heading_rad),
             lower_index=int(lower),
             upper_index=int(upper),
+            allowed_indices=allowed_indices,
         )
         if best is None:
             self._route_sync_reason = f"route_progress_{search_mode}_failed"
@@ -958,7 +976,7 @@ class CPXRouteManager:
         segment_index = (
             int(best_index)
             if not bool(self._route_progress_initialized)
-            else max(int(self._route_progress_index), int(best_index))
+            else max(int(self._cursor_segment_index), int(best_index))
         )
         first = nodes[segment_index]
         second = nodes[min(segment_index + 1, len(nodes) - 1)]
@@ -970,7 +988,8 @@ class CPXRouteManager:
                 second_xy=(second[0], second[1]),
             )
         )
-        self._route_progress_index = int(segment_index)
+        self._cursor_segment_index = int(segment_index)
+        self._route_current_lane_id = int(lane_id)
         self._route_progress_initialized = True
         self._route_projection = (
             int(segment_index),
@@ -981,11 +1000,50 @@ class CPXRouteManager:
         )
         # W2: track float arc-length progress in parallel with the node index.
         if self._route_geometry is not None and self._route_geometry.valid:
+            previous_route_s_m = float(self._route_s_m)
             prog = self._route_geometry.project(
-                float(ego_x_m), float(ego_y_m), s_lower_m=float(self._route_s_m)
+                float(ego_x_m),
+                float(ego_y_m),
+                s_lower_m=float(self._route_s_m),
+                s_upper_m=(
+                    float(self._route_s_m)
+                    + float(physical_tick_distance_m)
+                    + 0.5
+                    if physical_tick_distance_m is not None
+                    else None
+                ),
             )
             self._route_s_m = float(prog.s_m)
+            route_advance_m = max(
+                0.0, float(self._route_s_m) - float(previous_route_s_m)
+            )
+            if (
+                physical_tick_distance_m is not None
+                and float(physical_tick_distance_m) > 1.0e-3
+            ):
+                if float(route_advance_m) <= 1.0e-3:
+                    self._route_stalled_motion_m += float(
+                        physical_tick_distance_m
+                    )
+                else:
+                    self._route_stalled_motion_m = 0.0
             self._route_lane_index = int(prog.lane_index)
+            # RouteGeometry's continuous projection is the sole progress
+            # owner.  The legacy node projection may choose a spatially close
+            # later branch (the blocked scenario jumped 101 -> 132 in one
+            # tick); never let that secondary query seed the next tick.
+            route_pose = self._route_geometry.pose_at(float(prog.s_m))
+            self._cursor_segment_index = int(prog.node_index)
+            self._route_projection = (
+                int(prog.node_index),
+                float(route_pose.x_m),
+                float(route_pose.y_m),
+                0.0,
+                abs(float(prog.lateral_m)),
+            )
+            lateral_distance_m = abs(float(prog.lateral_m))
+            segment_index = int(prog.node_index)
+        self._last_progress_sync_pose = sync_pose
         if float(lateral_distance_m) > float(self.stale_route_lateral_m):
             self._route_sync_reason = (
                 f"route_stale:lateral={float(lateral_distance_m):.2f}"
@@ -1013,6 +1071,79 @@ class CPXRouteManager:
         return int(self._route_lane_index)
 
     @property
+    def route_cursor(self) -> RouteCursorSnapshot:
+        projection = self._route_projection
+        geometry = self._route_geometry
+        decision = None
+        if geometry is not None and geometry.valid:
+            decision = geometry.decision_at(
+                float(self._route_s_m),
+                current_lane_id=int(self._route_current_lane_id),
+            )
+        active_segment = (
+            geometry.segment_at(float(self._route_s_m))
+            if geometry is not None and geometry.valid
+            else None
+        )
+        missed_maneuver = bool(
+            active_segment is not None
+            and str(active_segment.kind) == "lane_change"
+            and float(self._route_stalled_motion_m)
+            > max(
+                0.0,
+                float(active_segment.s_end_m) - float(self._route_s_m),
+            )
+            + float(self.route_sampling_resolution_m)
+        )
+        if projection is None:
+            return RouteCursorSnapshot(
+                route_revision=self.route_revision,
+                segment_index=int(self._cursor_segment_index),
+                route_s_m=float(self._route_s_m),
+                lane_index=int(self._route_lane_index),
+                current_lane_id=int(self._route_current_lane_id),
+                projection_x_m=0.0,
+                projection_y_m=0.0,
+                projection_ratio=0.0,
+                lateral_distance_m=float("inf"),
+                valid=False,
+                reason=str(self._route_sync_reason),
+                segment_kind=(decision.segment_kind if decision else ""),
+                off_route=True,
+                optimal_lane_id=(decision.optimal_lane_id if decision else 0),
+                current_road_option=(decision.current_road_option if decision else ""),
+                next_macro_maneuver=(decision.next_macro_maneuver if decision else "Continue Straight"),
+                next_macro_distance_m=(decision.next_macro_distance_m if decision else float("inf")),
+                remaining_distance_m=(geometry.remaining_m(self._route_s_m) if geometry else 0.0),
+                stalled_motion_m=float(self._route_stalled_motion_m),
+                missed_maneuver=bool(missed_maneuver),
+            )
+        return RouteCursorSnapshot(
+            route_revision=self.route_revision,
+            segment_index=int(projection[0]),
+            route_s_m=float(self._route_s_m),
+            lane_index=int(self._route_lane_index),
+            current_lane_id=int(self._route_current_lane_id),
+            projection_x_m=float(projection[1]),
+            projection_y_m=float(projection[2]),
+            projection_ratio=float(projection[3]),
+            lateral_distance_m=float(projection[4]),
+            valid=True,
+            reason=str(self._route_sync_reason),
+            segment_kind=(decision.segment_kind if decision else ""),
+            off_route=(
+                abs(float(projection[4])) > float(self.stale_route_lateral_m)
+            ),
+            optimal_lane_id=(decision.optimal_lane_id if decision else 0),
+            current_road_option=(decision.current_road_option if decision else ""),
+            next_macro_maneuver=(decision.next_macro_maneuver if decision else "Continue Straight"),
+            next_macro_distance_m=(decision.next_macro_distance_m if decision else float("inf")),
+            remaining_distance_m=(geometry.remaining_m(self._route_s_m) if geometry else 0.0),
+            stalled_motion_m=float(self._route_stalled_motion_m),
+            missed_maneuver=bool(missed_maneuver),
+        )
+
+    @property
     def route_geometry_signature(self) -> str:
         rg = self._route_geometry
         if rg is None or not rg.valid:
@@ -1021,6 +1152,11 @@ class CPXRouteManager:
             seg.kind + (f":{seg.direction}" if seg.direction else "")
             for seg in rg.segments
         )
+
+    @property
+    def route_revision(self) -> str:
+        """Identity of an accepted route, independent of per-tick progress."""
+        return "route-" + str(int(self._route_revision))
 
     @property
     def route_geometry(self) -> Optional[RouteGeometry]:
@@ -1083,7 +1219,7 @@ class CPXRouteManager:
 
     @property
     def route_progress_index(self) -> int:
-        return int(self._route_progress_index)
+        return int(self._cursor_segment_index)
 
     # Deprecated public aliases. Internal storage and reason strings retain
     # their historical names so existing logs/tests remain readable.
@@ -1151,8 +1287,10 @@ class CPXRouteManager:
         rest of this class works unchanged.
         """
         self._route_entries = []
-        self._route_progress_index = 0
+        self._cursor_segment_index = 0
         self._route_progress_initialized = False
+        self._last_progress_sync_pose = None
+        self._route_stalled_motion_m = 0.0
         self._route_projection = None
         self._route_sync_reason = "admap_route_progress_not_initialized"
 
@@ -1199,6 +1337,7 @@ class CPXRouteManager:
         )
         self._route_s_m = 0.0
         self._route_lane_index = 0
+        self._route_current_lane_id = 0
 
     def _status_from_summary(self, summary: Any) -> RouteManagerStatus:
         route_points = list(getattr(summary, "route_waypoints", []) or [])
@@ -1470,11 +1609,14 @@ def _best_route_projection(
     ego_heading_rad: float,
     lower_index: int,
     upper_index: int,
+    allowed_indices: Optional[set] = None,
 ) -> Optional[Tuple[float, float, int, float, float, float]]:
     best = None
     lower = max(0, int(lower_index))
     upper = min(len(nodes) - 1, int(upper_index))
     for index in range(lower, upper):
+        if allowed_indices is not None and index not in allowed_indices:
+            continue
         first = nodes[index]
         second = nodes[index + 1]
         px_m, py_m, ratio, distance_m = _project_to_segment(

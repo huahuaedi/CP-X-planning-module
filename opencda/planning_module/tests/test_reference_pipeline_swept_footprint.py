@@ -105,6 +105,47 @@ class ReferencePipelineSweptFootprintTests(unittest.TestCase):
         self.assertFalse(result.accepted)
         self.assertIn("turn_swept_footprint", result.gate.reason)
 
+    def test_invalid_turn_never_rebuilds_from_global_route(self):
+        pipeline = self._pipeline(lane_width_m=3.5)
+        request = self._request()
+        invalid_reference = [
+            dict(sample, y_ref_m=7.0)
+            for sample in request.reference_samples
+        ]
+        request = ReferencePipelineRequest(
+            **{
+                **request.__dict__,
+                "reference_samples": invalid_reference,
+                "destination_state": [4.0, 7.0, 1.0, 0.0, 1],
+                "route_points": ((0.0, 0.0), (20.0, -7.0)),
+            }
+        )
+        pipeline.generator.ensure_turn_swept_footprint = (
+            lambda **kwargs: (
+                [dict(sample) for sample in kwargs["reference_samples"]],
+                types.SimpleNamespace(
+                    valid=True,
+                    checked_pose_count=4,
+                    violation_count=0,
+                    reason="turn_swept_footprint:valid",
+                ),
+                "turn_swept_footprint:valid",
+            )
+        )
+        pipeline.generator.route_aligned_samples = lambda **_kwargs: self.fail(
+            "turn contract failure must not invoke global-route geometry"
+        )
+
+        result = pipeline.finalize(request)
+
+        self.assertFalse(result.accepted)
+        self.assertIn("first_lateral_out_of_contract", result.gate.reason)
+        self.assertEqual(
+            [float(sample["y_ref_m"]) for sample in result.reference_samples],
+            [7.0] * len(result.reference_samples),
+        )
+        self.assertNotIn("route_aligned_turn_recovery", result.conditioning_reason)
+
     def test_direct_target_tracking_widens_lane_change_first_lateral_limit(self):
         # condition()'s own _validate() call builds conditioned.validation,
         # which finalize() uses to *override* self.final_gate.validate()'s

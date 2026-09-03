@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Mapping, Sequence
+from typing import Mapping, Optional, Sequence
 LANE_CHANGE_DECISIONS = {"lane_change_left", "lane_change_right"}
 
 
@@ -67,6 +67,104 @@ class LaneChangeCompletion:
     reason: str
 
 
+@dataclass(frozen=True)
+class LaneChangeContract:
+    """Single convergence contract for lane-change lifecycle transitions."""
+
+    min_progress: float = 0.92
+    max_lateral_error_m: float = 0.35
+    max_heading_error_rad: float = math.radians(8.0)
+    required_stable_frames: int = 5
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, object]) -> "LaneChangeContract":
+        return cls(
+            min_progress=max(
+                0.0,
+                min(
+                    1.0,
+                    float(config.get("lane_change_completion_min_progress", 0.92)),
+                ),
+            ),
+            max_lateral_error_m=max(
+                0.05,
+                float(
+                    config.get(
+                        "lane_change_completion_max_lateral_error_m", 0.35
+                    )
+                ),
+            ),
+            max_heading_error_rad=math.radians(
+                max(
+                    0.1,
+                    float(
+                        config.get(
+                            "lane_change_completion_max_heading_error_deg", 8.0
+                        )
+                    ),
+                )
+            ),
+            required_stable_frames=max(
+                1,
+                int(config.get("lane_change_completion_stable_frames", 5)),
+            ),
+        )
+
+    def convergence_ready(
+        self,
+        *,
+        progress: float,
+        lateral_error_m: float,
+        heading_error_rad: float,
+    ) -> bool:
+        return bool(
+            float(progress) >= float(self.min_progress)
+            and abs(float(lateral_error_m)) <= float(self.max_lateral_error_m)
+            and abs(float(heading_error_rad)) <= float(self.max_heading_error_rad)
+        )
+
+    def stabilization_handoff_ready(
+        self,
+        *,
+        progress: float,
+        lateral_error_m: float,
+        heading_error_rad: float,
+        lane_width_m: float,
+    ) -> bool:
+        """Whether crossing may hand off to target-corridor stabilization."""
+
+        # Handoff must be broader than final convergence: stabilization owns
+        # the remaining centerline and heading error.  Requiring the final
+        # tolerances here makes the phases circular and can exhaust the finite
+        # lane-change master before stabilization is ever allowed to start.
+        handoff_lateral_m = max(
+            float(self.max_lateral_error_m),
+            0.35 * max(0.1, float(lane_width_m)),
+        )
+        handoff_heading_rad = max(
+            float(self.max_heading_error_rad), math.radians(12.0)
+        )
+        return bool(
+            float(progress) >= float(self.min_progress)
+            and abs(float(lateral_error_m)) <= float(handoff_lateral_m)
+            and abs(float(heading_error_rad)) <= float(handoff_heading_rad)
+        )
+
+    def as_debug_fields(self) -> dict[str, object]:
+        return {
+            "lane_change_contract_min_progress": float(self.min_progress),
+            "lane_change_contract_max_lateral_error_m": float(
+                self.max_lateral_error_m
+            ),
+            "lane_change_contract_max_heading_error_deg": math.degrees(
+                float(self.max_heading_error_rad)
+            ),
+            "lane_change_contract_required_stable_frames": int(
+                self.required_stable_frames
+            ),
+        }
+
+
 def evaluate_lane_change_completion(
     *,
     reference_samples: Sequence[Mapping[str, object]],
@@ -82,6 +180,7 @@ def evaluate_lane_change_completion(
     max_lateral_error_m: float = 0.35,
     max_heading_error_rad: float = math.radians(8.0),
     required_stable_frames: int = 5,
+    contract: Optional[LaneChangeContract] = None,
 ) -> LaneChangeCompletion:
     """Require convergence to the locked target geometry.
 
@@ -91,6 +190,12 @@ def evaluate_lane_change_completion(
     reference, progress, footprint clearance, lateral error and heading are
     the authoritative execution/completion signals.
     """
+
+    if contract is not None:
+        min_progress = float(contract.min_progress)
+        max_lateral_error_m = float(contract.max_lateral_error_m)
+        max_heading_error_rad = float(contract.max_heading_error_rad)
+        required_stable_frames = int(contract.required_stable_frames)
 
     terminal_samples = [
         sample
@@ -213,6 +318,19 @@ def authorize_mpc_entry(
             allowed=False,
             status="reference_rejected",
             reason=f"{selected_name}:final_reference_gate:{reason}",
+        )
+    if (
+        selected_status == "mpc_probe_infeasible"
+        and selected_name == "committed_lane_change_continuation"
+    ):
+        # A side-effect-free ranking probe cannot veto the immutable
+        # reference already retained by the maneuver owner.  The real solve
+        # below remains authoritative and may reuse its bounded control cache
+        # or submit a failure to the centralized fallback manager.
+        return MPCEntryAuthorization(
+            allowed=True,
+            status="authorized_committed_after_probe_failure",
+            reason="committed_reference_contract_accepted",
         )
     if selected_status in {
         "infeasible",

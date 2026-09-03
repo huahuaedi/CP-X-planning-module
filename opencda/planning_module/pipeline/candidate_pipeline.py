@@ -16,6 +16,7 @@ from typing import Callable, Dict, Mapping, Optional, Sequence
 
 from MPC.lane_keep import RoadEnvelopeBlock, normalize_lane_reference_sample
 from .reference_contract import ReferenceValidationResult
+from .reference_geometry import align_parallel_reference
 from .stage_contracts import ManeuverCommitment
 
 
@@ -48,7 +49,16 @@ class CandidateReferenceResult:
 
     @property
     def feasible(self) -> bool:
-        return str(self.feasibility_status) in {"feasible", "mpc_probe_solved"}
+        # A skipped probe means the deterministic contract/prediction gate
+        # passed but this candidate was outside the expensive probe top-k. It
+        # remains a valid defer/keep-lane choice; treating "not probed" as
+        # infeasible incorrectly routed normal deferral into emergency
+        # fallback.
+        return str(self.feasibility_status) in {
+            "feasible",
+            "mpc_probe_solved",
+            "mpc_probe_skipped",
+        }
 
     def summary_row(self) -> Dict[str, object]:
         contract_reason = ""
@@ -69,6 +79,12 @@ class CandidateReferenceResult:
             "reference_point_count": len(list(self.lane_center_reference or [])),
         }
         if self.contract_result is not None:
+            row["debug_first_forward_m"] = float(
+                getattr(self.contract_result, "first_forward_m", 0.0)
+            )
+            row["debug_first_lateral_m"] = float(
+                getattr(self.contract_result, "first_lateral_m", 0.0)
+            )
             row["debug_max_curvature_1pm"] = float(
                 getattr(self.contract_result, "max_curvature_1pm", -1.0)
             )
@@ -408,14 +424,27 @@ def build_candidate_intents(
             if authorization_source not in {"route", "opportunistic"}:
                 authorization_source = "route"
             decision = (
-                str(selected_decision)
-                if str(selected_decision) in {"lane_change_left", "lane_change_right"}
-                else (
+                (
                     "lane_change_left"
                     if authorized_direction == "left"
                     else "lane_change_right"
                     if authorized_direction == "right"
                     else ""
+                )
+                if (
+                    authorization_source == "route"
+                    and authorized_direction in {"left", "right"}
+                )
+                else (
+                    str(selected_decision)
+                    if str(selected_decision) in {"lane_change_left", "lane_change_right"}
+                    else (
+                        "lane_change_left"
+                        if authorized_direction == "left"
+                        else "lane_change_right"
+                        if authorized_direction == "right"
+                        else ""
+                    )
                 )
             )
             if decision not in {"lane_change_left", "lane_change_right"}:
@@ -821,74 +850,7 @@ def lane_change_operational_curvature_limit_1pm(
     )
 
 
-def _align_target_reference_to_source(
-    *,
-    source_reference: Sequence[Mapping[str, object]],
-    target_reference: Sequence[Mapping[str, object]],
-) -> list[Dict[str, object]]:
-    """Match parallel-lane samples by a monotonic longitudinal station.
-
-    CARLA lane-center queries may start the adjacent lane one or more samples
-    ahead of the current lane. Blending equal array indices then adds an
-    unintended longitudinal motion to the lateral lane-change polynomial and
-    creates artificial curvature spikes.
-    """
-
-    source = [dict(sample) for sample in list(source_reference or [])]
-    target = [dict(sample) for sample in list(target_reference or [])]
-    if not source or not target:
-        return target
-    aligned: list[Dict[str, object]] = []
-    target_index = 0
-    for source_index, source_sample in enumerate(source):
-        sx = float(source_sample.get("x_ref_m", source_sample.get("x", 0.0)))
-        sy = float(source_sample.get("y_ref_m", source_sample.get("y", 0.0)))
-        search_end = min(len(target), target_index + 8)
-        best_index = min(
-            range(target_index, search_end),
-            key=lambda index: _sample_distance_sq_xy(
-                x_m=sx,
-                y_m=sy,
-                sample=target[index],
-            ),
-        )
-        target_index = max(target_index, int(best_index))
-        matched = dict(target[target_index])
-        tx = float(matched.get("x_ref_m", matched.get("x", sx)))
-        ty = float(matched.get("y_ref_m", matched.get("y", sy)))
-        previous_source = source[max(0, source_index - 1)]
-        next_source = source[min(len(source) - 1, source_index + 1)]
-        tangent_x = float(
-            next_source.get("x_ref_m", next_source.get("x", sx))
-        ) - float(
-            previous_source.get("x_ref_m", previous_source.get("x", sx))
-        )
-        tangent_y = float(
-            next_source.get("y_ref_m", next_source.get("y", sy))
-        ) - float(
-            previous_source.get("y_ref_m", previous_source.get("y", sy))
-        )
-        tangent_norm = max(1.0e-6, math.hypot(tangent_x, tangent_y))
-        normal_x = -tangent_y / tangent_norm
-        normal_y = tangent_x / tangent_norm
-        lateral_offset = (tx - sx) * normal_x + (ty - sy) * normal_y
-        matched["x_ref_m"] = sx + float(lateral_offset) * normal_x
-        matched["y_ref_m"] = sy + float(lateral_offset) * normal_y
-        matched["x"] = float(matched["x_ref_m"])
-        matched["y"] = float(matched["y_ref_m"])
-        aligned.append(matched)
-    return aligned
-
-
-def _sample_distance_sq_xy(
-    *,
-    x_m: float,
-    y_m: float,
-    sample: Mapping[str, object],
-) -> float:
-    tx = float(sample.get("x_ref_m", sample.get("x", 0.0)))
-    ty = float(sample.get("y_ref_m", sample.get("y", 0.0)))
-    return float((tx - float(x_m)) ** 2 + (ty - float(y_m)) ** 2)
+_align_target_reference_to_source = align_parallel_reference
 
 
 def _sample_separation_sq(
@@ -1446,11 +1408,32 @@ def select_candidate_with_commitment(
     feasible_locked_continuations = [
         candidate for candidate in locked_continuations if candidate.feasible
     ]
+    # The probe is a candidate-ranking aid, not the lifecycle or safety owner.
+    # Once a lane change is committed, one transient probe failure must not
+    # discard its contract-valid immutable reference and switch the whole
+    # pipeline to fallback.  The real MPC solve still validates execution and
+    # the centralized fallback manager remains responsible if that solve
+    # cannot produce or reuse a bounded command.
+    contract_valid_locked_continuations = [
+        candidate
+        for candidate in locked_continuations
+        if (
+            candidate.contract_result is not None
+            and bool(candidate.contract_result.valid)
+            and str(candidate.feasibility_status) == "mpc_probe_infeasible"
+        )
+    ]
     if feasible_locked_continuations:
         return CandidateSelectionOutcome(
             selected=select_best_candidate(feasible_locked_continuations),
             status="selected_committed",
             reason="locked_maneuver_reference_preserved",
+        )
+    if contract_valid_locked_continuations:
+        return CandidateSelectionOutcome(
+            selected=select_best_candidate(contract_valid_locked_continuations),
+            status="selected_committed",
+            reason="locked_maneuver_reference_preserved_after_probe_failure",
         )
     # Once execution starts, newly generated lane-change variants are not
     # substitutes for the locked trajectory. Switching between them resets
@@ -1473,44 +1456,16 @@ def _trajectory_comfort_cost(
     reference_samples: Sequence[Mapping[str, object]],
     target_speed_mps: float,
 ) -> float:
-    points = []
-    for sample in list(reference_samples or []):
-        try:
-            points.append((
-                float(sample.get("x_ref_m", sample.get("x", ""))),
-                float(sample.get("y_ref_m", sample.get("y", ""))),
-            ))
-        except Exception:
-            continue
-    if len(points) < 3:
-        return 0.0
-    headings = []
-    segment_lengths = []
-    for first, second in zip(points[:-1], points[1:]):
-        dx = second[0] - first[0]
-        dy = second[1] - first[1]
-        ds = math.hypot(dx, dy)
-        if ds <= 1.0e-6:
-            continue
-        headings.append(math.atan2(dy, dx))
-        segment_lengths.append(ds)
     # Curvature over a >= 1.5 m arc window so this candidate score does not
     # depend on reference-sample spacing (matches the reference contract /
-    # generator estimators).
-    curvature_eval_arc_m = 1.5
-    curvatures = []
-    for end_index in range(1, len(headings)):
-        arc_m = float(segment_lengths[end_index])
-        start_index = end_index - 1
-        while start_index > 0 and arc_m < curvature_eval_arc_m:
-            arc_m += float(segment_lengths[start_index])
-            start_index -= 1
-        span_m = max(0.5 * curvature_eval_arc_m, arc_m)
-        delta = math.atan2(
-            math.sin(headings[end_index] - headings[start_index]),
-            math.cos(headings[end_index] - headings[start_index]),
-        )
-        curvatures.append(abs(float(delta)) / float(span_m))
+    # generator estimators) -- single implementation in reference_geometry.py.
+    from .reference_geometry import backward_window_curvature_profile_1pm, to_points
+
+    if len(to_points(reference_samples)) < 3:
+        return 0.0
+    curvatures = backward_window_curvature_profile_1pm(
+        reference_samples, eval_arc_m=1.5
+    )
     if not curvatures:
         return 0.0
     max_curvature = max(curvatures)

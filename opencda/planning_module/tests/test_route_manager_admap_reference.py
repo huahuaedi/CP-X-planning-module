@@ -126,6 +126,58 @@ class RouteManagerADMapReferenceTest(unittest.TestCase):
 
         self.assertGreaterEqual(manager.route_progress_index, progressed)
 
+    def test_cursor_marks_lane_change_missed_when_odometry_passes_segment(self):
+        points = []
+        for index in range(20):
+            option = (
+                "CHANGELANERIGHT"
+                if 5 <= index <= 8
+                else "LANEFOLLOW"
+            )
+            lane_id = 2 if index >= 9 else 1
+            points.append((float(index), 0.0, lane_id, option))
+        manager = CPXRouteManager(global_planner=_planner(points))
+        manager.set_destination(
+            start_point={"x": 0.0, "y": 0.0},
+            goal_point={"x": 19.0, "y": 0.0},
+        )
+
+        manager.sync_route_progress(
+            ego_x_m=6.0, ego_y_m=0.0, ego_heading_rad=0.0
+        )
+        self.assertEqual(manager.route_cursor.segment_kind, "lane_change")
+        for ego_y_m in (2.0, 4.0, 6.0, 8.0, 10.0):
+            manager.sync_route_progress(
+                ego_x_m=6.0,
+                ego_y_m=ego_y_m,
+                ego_heading_rad=math.pi / 2.0,
+            )
+
+        self.assertAlmostEqual(manager.route_progress_s_m, 6.0, delta=0.1)
+        self.assertGreater(manager.route_cursor.stalled_motion_m, 0.0)
+        self.assertTrue(manager.route_cursor.missed_maneuver)
+
+    def test_installing_new_route_resets_cursor_stall_contract(self):
+        planner = _planner([
+            (0.0, 0.0, 1, "CHANGELANERIGHT"),
+            (5.0, 0.0, 2, "CHANGELANERIGHT"),
+            (10.0, 0.0, 2, "LANEFOLLOW"),
+        ])
+        manager = CPXRouteManager(global_planner=planner)
+        manager.set_destination(
+            start_point={"x": 0.0, "y": 0.0},
+            goal_point={"x": 10.0, "y": 0.0},
+        )
+        manager._route_stalled_motion_m = 12.0
+
+        manager.set_destination(
+            start_point={"x": 1.0, "y": 0.0},
+            goal_point={"x": 10.0, "y": 0.0},
+        )
+
+        self.assertEqual(manager.route_cursor.stalled_motion_m, 0.0)
+        self.assertFalse(manager.route_cursor.missed_maneuver)
+
     def test_route_arc_progress_and_lane_change_distance_are_monotonic(self):
         points = []
         for index in range(24):

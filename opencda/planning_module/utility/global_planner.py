@@ -357,7 +357,6 @@ class CustomGlobalPlannerAdapter:
         self._stored_route_options: List[str] = []
         self._stored_route_lane_ids: List[int] = []
         self._stored_route_waypoints: List[Waypoint | None] = []
-        self._query_indices: Dict[str, int] = {}
         self._lane_context_lock = threading.Lock()
         self._lane_context_cache: Tuple[float, float, float, Dict[str, object]] | None = None
         self._local_lane_graph_cache: Tuple[float, float, float, int, Dict[str, object]] | None = None
@@ -394,6 +393,11 @@ class CustomGlobalPlannerAdapter:
             _point_dict(position),
             search_radius_m=search_radius_m,
         ))
+
+    def get_lane_centerline(self, lane_id: int) -> List[Waypoint]:
+        """Expose AD-map lane-center samples to the local-map snapshot."""
+
+        return list(self.core.get_lane_centerline(int(lane_id)))
 
     def get_drivable_waypoint(
         self,
@@ -515,7 +519,6 @@ class CustomGlobalPlannerAdapter:
             "options": list(self._stored_route_options),
             "lane_ids": list(self._stored_route_lane_ids),
             "waypoints": list(self._stored_route_waypoints),
-            "query_indices": dict(self._query_indices),
         }
 
     def restore_stored_route(self, snapshot: Mapping[str, object]) -> None:
@@ -531,7 +534,6 @@ class CustomGlobalPlannerAdapter:
         self._stored_route_options = list(snapshot.get("options", []) or [])
         self._stored_route_lane_ids = list(snapshot.get("lane_ids", []) or [])
         self._stored_route_waypoints = list(snapshot.get("waypoints", []) or [])
-        self._query_indices = dict(snapshot.get("query_indices", {}) or {})
         self._local_lane_graph_cache = None
 
     def get_dense_route_entries(self) -> List[Dict[str, object]]:
@@ -746,6 +748,52 @@ class CustomGlobalPlannerAdapter:
         )
         return result
 
+    def get_local_route_lane_sequence(
+        self,
+        x_m: float,
+        y_m: float,
+        *,
+        forward_distance_m: float = 100.0,
+        backward_distance_m: float = 100.0,
+    ) -> List[int]:
+        """Return topology-ordered route lane IDs in the rolling window."""
+
+        if (
+            self._stored_route_cum_dists is None
+            or not self._stored_route_waypoints
+        ):
+            return []
+        count = min(
+            len(self._stored_route_cum_dists),
+            len(self._stored_route_waypoints),
+        )
+        if count <= 0:
+            return []
+        anchor = min(
+            max(
+                0,
+                int(
+                    self._nearest_stored_route_index(
+                        float(x_m), float(y_m), "local_route_lane_sequence"
+                    )
+                ),
+            ),
+            count - 1,
+        )
+        anchor_s_m = float(self._stored_route_cum_dists[anchor])
+        minimum_s_m = anchor_s_m - max(0.0, float(backward_distance_m))
+        maximum_s_m = anchor_s_m + max(0.0, float(forward_distance_m))
+        sequence: List[int] = []
+        for index in range(count):
+            station_m = float(self._stored_route_cum_dists[index])
+            if station_m < minimum_s_m or station_m > maximum_s_m:
+                continue
+            waypoint = self._stored_route_waypoints[index]
+            lane_id = int(getattr(waypoint, "ad_lane_id", 0) or 0)
+            if lane_id != 0 and (not sequence or sequence[-1] != lane_id):
+                sequence.append(lane_id)
+        return sequence
+
     def _merge_stored_route_into_local_lane_graph(
         self,
         *,
@@ -855,6 +903,7 @@ class CustomGlobalPlannerAdapter:
         x_m: float,
         y_m: float,
         query_key: str = "default",
+        current_lane_id: int = 0,
     ) -> RoutePlanSummary:
         if self._stored_route_summary is None or self._stored_route_xy is None:
             return self._failure_summary(
@@ -862,7 +911,12 @@ class CustomGlobalPlannerAdapter:
                 {"x": x_m, "y": y_m, "z": 0.0},
                 "No route has been stored.",
             )
-        index = self._nearest_stored_route_index(x_m, y_m, query_key)
+        index = self._topology_stored_route_index(
+            x_m=float(x_m),
+            y_m=float(y_m),
+            query_key=str(query_key),
+            current_lane_id=int(current_lane_id),
+        )
         remaining = float(self._stored_route_cum_dists[-1] - self._stored_route_cum_dists[index])
         current_option = self._stored_route_options[index] if self._stored_route_options else "LANEFOLLOW"
         next_maneuver = self._next_macro_maneuver(self._stored_route_options, index)
@@ -876,6 +930,45 @@ class CustomGlobalPlannerAdapter:
             current_road_option=current_option,
             next_macro_distance_m=float(next_macro_distance),
         )
+
+    def _topology_stored_route_index(
+        self,
+        *,
+        x_m: float,
+        y_m: float,
+        query_key: str,
+        current_lane_id: int,
+    ) -> int:
+        """Advance only among route nodes owned by the matched AD lane.
+
+        XY selects longitudinal progress inside that lane. It cannot select a
+        spatially close node from another lane, connector, or route branch.
+        A global nearest-route lookup is retained only for initialization or
+        explicit matcher loss.
+        """
+
+        lane_id = int(current_lane_id)
+        if lane_id == 0 or self._stored_route_xy is None:
+            return self._nearest_stored_route_index(x_m, y_m, query_key)
+        del query_key
+        lower = 0
+        matching_indices = [
+            index
+            for index in range(lower, len(self._stored_route_lane_ids))
+            if int(self._stored_route_lane_ids[index]) == lane_id
+        ]
+        if not matching_indices:
+            return self._nearest_stored_route_index(x_m, y_m, "")
+        index = min(
+            matching_indices,
+            key=lambda candidate: (
+                float(self._stored_route_xy[candidate, 0]) - float(x_m)
+            ) ** 2
+            + (
+                float(self._stored_route_xy[candidate, 1]) - float(y_m)
+            ) ** 2,
+        )
+        return int(index)
 
     def _summary_from_route(self, route: Route) -> RoutePlanSummary:
         points = [
@@ -936,62 +1029,19 @@ class CustomGlobalPlannerAdapter:
             lane_ids
             or [canonical_lane_id_for_waypoint(wp) for wp in self._stored_route_waypoints]
         )
-        self._query_indices.clear()
         # The graph cache contains lane identities from the stored route, so a
         # route replacement/replan invalidates it even if ego moved <2 m.
         self._local_lane_graph_cache = None
 
     def _nearest_stored_route_index(self, x_m: float, y_m: float, query_key: str) -> int:
         assert self._stored_route_xy is not None
-        key = str(query_key)
-        previous_index = self._query_indices.get(key)
-        if previous_index is None:
-            # A new consumer may first query after spawn/replan, so its first
-            # projection must be allowed to initialize anywhere on the route.
-            start_index = 0
-            end_index = len(self._stored_route_xy)
-        else:
-            previous_index = min(
-                max(0, int(previous_index)),
-                len(self._stored_route_xy) - 1,
-            )
-            start_index = max(0, previous_index - 5)
-            # Do not search the entire future polyline on every tick.  Loops
-            # and close parallel segments can be spatially nearer while being
-            # hundreds of route metres ahead, which previously skipped
-            # required turns/lane changes.  Route replacement clears query
-            # state, so a 50 m forward reacquisition window is ample for
-            # normal motion without permitting a topological teleport.
-            if self._stored_route_cum_dists is not None:
-                forward_limit_m = (
-                    float(self._stored_route_cum_dists[previous_index]) + 50.0
-                )
-                end_index = int(
-                    np.searchsorted(
-                        self._stored_route_cum_dists,
-                        forward_limit_m,
-                        side="right",
-                    )
-                )
-                end_index = min(
-                    len(self._stored_route_xy),
-                    max(previous_index + 1, end_index),
-                )
-            else:
-                end_index = min(
-                    len(self._stored_route_xy),
-                    previous_index + 51,
-                )
-        candidate_xy = self._stored_route_xy[start_index:end_index]
+        del query_key
+        candidate_xy = self._stored_route_xy
         distances_sq = (
             (candidate_xy[:, 0] - float(x_m)) ** 2
             + (candidate_xy[:, 1] - float(y_m)) ** 2
         )
-        index = start_index + int(np.argmin(distances_sq))
-        if previous_index is not None:
-            index = max(int(previous_index), int(index))
-        self._query_indices[key] = index
-        return index
+        return int(np.argmin(distances_sq))
 
     def _optimal_lane_from_index(self, index: int) -> int:
         start = max(0, int(index))
@@ -1120,8 +1170,61 @@ class CustomGlobalPlannerAdapter:
         waypoints: Sequence[Waypoint | None],
     ) -> List[str]:
         options = cls._geometric_road_options(points)
+        # Geometry is only a direction classifier inside a connector whose
+        # topology is explicitly marked by AD-map. Ordinary curved roads must
+        # remain lane-follow regardless of accumulated heading change.
+        for index, waypoint in enumerate(waypoints):
+            if waypoint is None or not bool(
+                getattr(
+                    waypoint,
+                    "is_intersection",
+                    getattr(waypoint, "is_junction", False),
+                )
+            ):
+                options[index] = "LANEFOLLOW"
+        # A junction turn may be spread over many short AD-map samples.  No
+        # individual 3/5-point window then contains enough heading change to
+        # classify the maneuver, even though the complete connector turns by
+        # roughly 90 degrees.  The intersection run is the topology unit, so
+        # classify it once from its entry and exit tangents and stamp the
+        # result over the complete run.
+        for start, end in cls._intersection_runs(waypoints):
+            # Keep a resolved local turn profile (including its straight
+            # entry/exit portions).  Whole-arc classification is the fallback
+            # only when every local window missed the turn.
+            if any(options[index] in {"LEFT", "RIGHT"} for index in range(start, end + 1)):
+                continue
+            entry_start = max(0, start - 1)
+            entry_end = min(len(points) - 1, start + 1)
+            exit_start = max(0, end - 1)
+            exit_end = min(len(points) - 1, end + 1)
+            entry_heading = math.atan2(
+                float(points[entry_end][1]) - float(points[entry_start][1]),
+                float(points[entry_end][0]) - float(points[entry_start][0]),
+            )
+            exit_heading = math.atan2(
+                float(points[exit_end][1]) - float(points[exit_start][1]),
+                float(points[exit_end][0]) - float(points[exit_start][0]),
+            )
+            connector_delta = _wrap_angle(exit_heading - entry_heading)
+            if abs(connector_delta) >= math.radians(28.0):
+                connector_option = "RIGHT" if connector_delta > 0.0 else "LEFT"
+            else:
+                connector_option = "STRAIGHT"
+            for index in range(start, end + 1):
+                options[index] = connector_option
         for index, (current, following) in enumerate(zip(waypoints, waypoints[1:])):
             if current is None or following is None:
+                continue
+            # Intersection connectivity is longitudinal route topology, even
+            # when AD-map also exposes the successor through a lateral-neighbor
+            # query at the connector seam.  Do not let that local adjacency
+            # overwrite the LEFT/RIGHT/STRAIGHT classification produced for
+            # the connector above.  True lane changes occur between parallel,
+            # non-intersection corridors.
+            if cls._waypoint_is_intersection(current) or cls._waypoint_is_intersection(
+                following
+            ):
                 continue
             if int(current.ad_lane_id) == int(following.ad_lane_id):
                 continue
@@ -1141,6 +1244,36 @@ class CustomGlobalPlannerAdapter:
             for nearby in range(max(0, index - 6), min(len(options), index + 7)):
                 options[nearby] = option
         return options
+
+    @classmethod
+    def _intersection_runs(
+        cls, waypoints: Sequence[Waypoint | None]
+    ) -> List[Tuple[int, int]]:
+        runs: List[Tuple[int, int]] = []
+        start: int | None = None
+        for index, waypoint in enumerate(waypoints):
+            if cls._waypoint_is_intersection(waypoint):
+                if start is None:
+                    start = index
+                continue
+            if start is not None:
+                runs.append((start, index - 1))
+                start = None
+        if start is not None:
+            runs.append((start, len(waypoints) - 1))
+        return runs
+
+    @staticmethod
+    def _waypoint_is_intersection(waypoint: Waypoint | None) -> bool:
+        if waypoint is None:
+            return False
+        return bool(
+            getattr(
+                waypoint,
+                "is_intersection",
+                getattr(waypoint, "is_junction", False),
+            )
+        )
 
     @staticmethod
     def _next_macro_maneuver(options: Sequence[str], start_index: int) -> str:

@@ -25,6 +25,51 @@ class PredictionFrameTest(unittest.TestCase):
         )
         self.assertIn("veh-1", frame.obstacle_future_trajectories)
         self.assertGreater(len(frame.obstacle_future_trajectories["veh-1"]), 0)
+        self.assertEqual(frame.predicted_objects["veh-1"].primary.probability, 1.0)
+
+    def test_v2x_multimodal_probabilities_are_normalized_and_primary_is_compatible(self):
+        frame = build_prediction_frame(
+            ego_snapshot={"x": 0.0, "y": 0.0, "v": 0.0, "psi": 0.0},
+            obstacle_snapshots=[{
+                "track_id": "cav-2", "x": 5.0, "y": 0.0, "v": 3.0,
+                "prediction_source": "v2x_plan", "plan_revision": "plan-4",
+                "trajectory_hypotheses": [
+                    {"maneuver": "lane_keep", "probability": 3.0,
+                     "points": [{"x": 6.0, "y": 0.0, "t": 0.2, "v": 3.0}]},
+                    {"maneuver": "yield", "probability": 1.0,
+                     "points": [{"x": 5.5, "y": 0.0, "t": 0.2, "v": 2.0}]},
+                ],
+            }],
+            lane_assignments={"cav-2": 1}, available_lane_ids=[1],
+            horizon_s=1.0, dt_s=0.2, min_front_gap_m=2.0,
+            min_rear_gap_m=2.0, min_ttc_s=1.0, timestamp_s=10.0,
+        )
+        predicted = frame.predicted_objects["cav-2"]
+        self.assertEqual(predicted.plan_revision, "plan-4")
+        self.assertAlmostEqual(sum(x.probability for x in predicted.hypotheses), 1.0)
+        self.assertEqual(predicted.primary.maneuver, "lane_keep")
+        self.assertEqual(frame.obstacle_future_trajectories["cav-2"][0]["x"], 6.0)
+
+    def test_multimodal_conflict_probability_is_exposed_to_behavior(self):
+        frame = build_prediction_frame(
+            ego_snapshot={"x": 0.0, "y": 0.0, "v": 5.0, "psi": 0.0},
+            obstacle_snapshots=[{
+                "track_id": "cav-2", "prediction_source": "v2x_plan",
+                "trajectory_hypotheses": [
+                    {"maneuver": "yield", "probability": 0.8,
+                     "points": [{"x": 30.0, "y": 0.0, "t": 1.0, "v": 2.0}]},
+                    {"maneuver": "merge", "probability": 0.2,
+                     "points": [{"x": 3.0, "y": 0.0, "t": 1.0, "v": 2.0}]},
+                ],
+            }],
+            lane_assignments={"cav-2": 1}, available_lane_ids=[1],
+            horizon_s=1.0, dt_s=1.0, min_front_gap_m=5.0,
+            min_rear_gap_m=5.0, min_ttc_s=2.0,
+        )
+        risk = frame.lane_prediction_risks[1]
+        self.assertAlmostEqual(risk["collision_probability"], 0.2)
+        self.assertTrue(risk["risk"])
+        self.assertEqual(risk["hypothesis_count"], 2)
 
 
 class ObstacleTrackIdTest(unittest.TestCase):

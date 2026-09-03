@@ -22,8 +22,6 @@ _HUD_ALERT_COLOR = (255, 120, 60)
 # the planning pipeline compares against these). Picked to flag a jump a
 # human would find visually surprising on the topdown/chase view, not to
 # match any contract/safety limit.
-_HUD_ALERT_POINT_JUMP_M = 0.5
-_HUD_ALERT_HEADING_JUMP_DEG = 5.0
 
 
 def _csv_count(value: object) -> int:
@@ -39,21 +37,12 @@ def _safe_float(value: object) -> float | None:
 
 
 def _ref_source_kind(cpx_debug: dict) -> str:
-    """Name which of the three reference-producing paths is live this tick.
-
-    ``ref=`` below shows whatever value happens to be in
-    ``final_reference_geometry_source`` (only set while ManeuverManager's
-    unified geometry is active) or, failing that, the plain
-    ``reference_source`` -- the same field slot silently carries a
-    different underlying source depending on which path ran, which is
-    exactly what made a past HUD snapshot ambiguous to read without the
-    full debug payload. This names the path explicitly instead.
-    """
+    """Name the single reference pipeline outcome for this tick."""
 
     if str(cpx_debug.get("reference_pipeline_stage", "")) == "explicit_fallback":
         return "explicit_fallback"
     if str(cpx_debug.get("final_reference_geometry_source", "")):
-        return "maneuver"
+        return "provider"
     return "default"
 
 
@@ -430,17 +419,6 @@ class OpenCDADebugViewer:
         objects = getattr(ego_vm.perception_manager, "objects", {}) or {}
         cpx_debug = getattr(getattr(ego_vm, "cpx_planner", None), "last_debug", {}) or {}
 
-        point_jump_m = _safe_float(cpx_debug.get("maneuver_first_point_jump_m", ""))
-        heading_jump_deg = _safe_float(
-            cpx_debug.get("maneuver_first_heading_jump_deg", "")
-        )
-        maneuver_jump_alert = bool(
-            (point_jump_m is not None and point_jump_m > _HUD_ALERT_POINT_JUMP_M)
-            or (
-                heading_jump_deg is not None
-                and abs(heading_jump_deg) > _HUD_ALERT_HEADING_JUMP_DEG
-            )
-        )
         mpc_status = str(cpx_debug.get("mpc_status", ""))
         mpc_status_alert = bool(mpc_status) and "solved" not in mpc_status.lower()
         ref_fallback_alert = bool(str(cpx_debug.get("reference_pipeline_fallback", "")))
@@ -454,7 +432,6 @@ class OpenCDADebugViewer:
             (f"cp_shared observers={cpx_debug.get('cp_observer_cav_count', '')} ids={cpx_debug.get('cp_observer_cav_ids', '')} multi_seen={cpx_debug.get('cp_multi_observer_obstacle_count', '')}", False),
             (f"cp_visibility enabled={cpx_debug.get('cp_visibility_filter_enabled', '')} backend={cpx_debug.get('cp_visibility_backend', '')} blind_shared={cpx_debug.get('cp_blind_spot_shared_count', '')} actors={cpx_debug.get('cp_blind_spot_shared_actor_ids', '')}", False),
             (f"cp_vru pedestrians={cpx_debug.get('cp_pedestrian_count', '')} blind={cpx_debug.get('cp_blind_spot_pedestrian_count', '')} predicted={_csv_count(cpx_debug.get('cp_prediction_used_pedestrian_ids', ''))} candidate_relevant={_csv_count(cpx_debug.get('cp_candidate_relevant_pedestrian_ids', ''))}", False),
-            (f"maneuver owner={cpx_debug.get('maneuver_geometry_owner', '')} id={cpx_debug.get('maneuver_geometry_id', '')} phase={cpx_debug.get('maneuver_geometry_phase', '')} jump={cpx_debug.get('maneuver_first_point_jump_m', '')}m heading_jump={cpx_debug.get('maneuver_first_heading_jump_deg', '')}deg", maneuver_jump_alert),
             (f"behavior={cpx_debug.get('behavior_decision', '')}  fsm={cpx_debug.get('behavior_fsm_state', '')}  target_lane={cpx_debug.get('behavior_target_lane_id', '')}", False),
             (f"scenario={cpx_debug.get('scenario_fsm_state', '')}  turn_ahead={cpx_debug.get('carla_upcoming_turn_direction', '')} dist={cpx_debug.get('carla_upcoming_turn_distance_m', '')}", False),
             (f"lane current={cpx_debug.get('current_lane_id', '')}  dest_lane={cpx_debug.get('destination_lane_id', '')}", False),

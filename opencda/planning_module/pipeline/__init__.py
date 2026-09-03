@@ -22,10 +22,28 @@ from .candidate_pipeline import (
     summarize_candidate_results,
 )
 from .control_buffer import MPCControlBuffer
+from .behavior_decision import BehaviorConstraint, BehaviorDecision
+from .behavior_stage import BehaviorStage, BehaviorStageResult
+from .fallback_manager import (
+    FailureReason,
+    FallbackRequest,
+    FallbackResult,
+    TrajectoryFallbackManager,
+)
 from .decision_record import DecisionRecord, DecisionVeto, build_decision_record
+from .destination_speed_stage import (
+    DestinationSpeedStage,
+    DestinationSpeedStageResult,
+)
 from .mpc_feedback import BehaviorMPCFeedback
 from .mpc_command_extractor import MPCCommandExtractor, MPCTrackingCommand
-from .maneuver_manager import ManeuverManager, ManeuverPlan, ManeuverReferenceResult
+from .mpc_entry_stage import MPCEntryStage, MPCEntryStageResult
+from .maneuver_manager import LaneChangeLifecycle, ManeuverManager, TurnLifecycle
+from .nominal_trajectory import (
+    NominalTarget,
+    NominalTrajectory,
+    NominalTrajectoryGenerator,
+)
 from .prediction import PredictionFrame, build_prediction_frame
 from .planner_pipeline import CPXPlanningPipeline
 from .output import BehaviorCommand, PlannerDiagnostics, PlannerOutput
@@ -36,6 +54,11 @@ from .reference_contract import (
     validate_reference_contract,
 )
 from .reference_gate import FinalReferenceGate, FinalReferenceGateResult
+from .reference_line_provider import (
+    ReferenceLineProvider,
+    ReferenceLineRequest,
+    ReferenceLineResult,
+)
 from .reference_generator import (
     BoundaryRecoveryValidation,
     DrivableFootprintOccupancy,
@@ -50,6 +73,10 @@ from .reference_pipeline import (
     ReferencePipelineRequest,
     ReferencePipelineResult,
 )
+from .reference_publication_stage import (
+    ReferencePublicationStage,
+    ReferencePublicationStageResult,
+)
 from .traffic_light_memory import TrafficLightMemory
 from .stage_contracts import ManeuverCommitment
 from .route_authorization import (
@@ -58,14 +85,20 @@ from .route_authorization import (
     authorize_route_lane_change,
     normalize_route_maneuver,
 )
-from .route_manager import CPXRouteManager, RouteManagerStatus
+from .route_manager import CPXRouteManager, RouteCursorSnapshot, RouteManagerStatus
 from .safety_supervisor import SafetySupervisor
 from .scenario_manager import (
     BoundaryRecoveryRequest,
     CPXScenarioDecision,
     CPXScenarioManager,
 )
-from .speed_planner import SpeedPlan, build_speed_plan
+from .speed_planner import (
+    SpeedConstraint,
+    SpeedPlan,
+    SpeedTarget,
+    SpeedTargetPlanner,
+    build_speed_plan,
+)
 from .velocity_steering_adapter import (
     CarlaVelocitySteeringAdapter,
     OpenCDAVelocitySteeringAdapter,
@@ -78,6 +111,8 @@ __all__ = [
     "BehaviorMPCFeedback",
     "MPCCommandExtractor",
     "MPCTrackingCommand",
+    "MPCEntryStage",
+    "MPCEntryStageResult",
     "CarlaActuatorMapper",
     "BoundaryRecoveryRequest",
     "BoundaryRecoveryValidation",
@@ -90,16 +125,30 @@ __all__ = [
     "CandidateReferenceResult",
     "CandidateSelectionOutcome",
     "CPXRouteManager",
+    "RouteCursorSnapshot",
     "CPXObstacleTracker",
     "CPXPlanningPipeline",
     "CPXScenarioDecision",
     "CPXScenarioManager",
     "DecisionRecord",
     "DecisionVeto",
+    "DestinationSpeedStage",
+    "DestinationSpeedStageResult",
     "MPCControlBuffer",
+    "BehaviorConstraint",
+    "BehaviorDecision",
+    "BehaviorStage",
+    "BehaviorStageResult",
     "ManeuverManager",
-    "ManeuverPlan",
-    "ManeuverReferenceResult",
+    "LaneChangeLifecycle",
+    "TurnLifecycle",
+    "NominalTarget",
+    "NominalTrajectory",
+    "NominalTrajectoryGenerator",
+    "FallbackResult",
+    "FailureReason",
+    "FallbackRequest",
+    "TrajectoryFallbackManager",
     "PlannerDiagnostics",
     "PlannerOutput",
     "PredictionFrame",
@@ -107,12 +156,17 @@ __all__ = [
     "FinalReferenceGate",
     "FinalReferenceGateResult",
     "ReferenceGenerator",
+    "ReferenceLineProvider",
+    "ReferenceLineRequest",
+    "ReferenceLineResult",
     "GeneratedReference",
     "LaneCorridorOccupancy",
     "ReferenceCorridorProjection",
     "ReferencePipeline",
     "ReferencePipelineRequest",
     "ReferencePipelineResult",
+    "ReferencePublicationStage",
+    "ReferencePublicationStageResult",
     "ConditionedReference",
     "TrafficLightMemory",
     "ManeuverCommitment",
@@ -122,6 +176,9 @@ __all__ = [
     "RouteManeuver",
     "SafetySupervisor",
     "SpeedPlan",
+    "SpeedConstraint",
+    "SpeedTarget",
+    "SpeedTargetPlanner",
     "CarlaVelocitySteeringAdapter",
     "OpenCDAVelocitySteeringAdapter",
     "VelocitySteeringCommand",

@@ -81,6 +81,40 @@ class VelocitySteeringAdapterTest(unittest.TestCase):
         self.assertEqual(control.throttle, 0.0)
         self.assertGreater(control.brake, 0.0)
 
+    def test_pid_derivative_cannot_brake_while_ego_is_below_target(self):
+        self.manager.controller.lon_run_step = lambda _target_speed_kmh: -0.38
+        control, reason = self.adapter.run_step(
+            command=VelocitySteeringCommand(
+                target_speed_mps=6.57,
+                target_steering_rad=0.0,
+            ),
+            actual_speed_mps=6.46,
+            sim_time_s=1.0,
+            max_steering_rad=0.6,
+            carla_module=_Carla,
+        )
+
+        self.assertEqual(reason, "opencda_pid_underspeed_coast")
+        self.assertEqual(control.throttle, 0.0)
+        self.assertEqual(control.brake, 0.0)
+
+    def test_pid_derivative_cannot_accelerate_while_ego_is_above_target(self):
+        self.manager.controller.lon_run_step = lambda _target_speed_kmh: 0.38
+        control, reason = self.adapter.run_step(
+            command=VelocitySteeringCommand(
+                target_speed_mps=6.46,
+                target_steering_rad=0.0,
+            ),
+            actual_speed_mps=6.57,
+            sim_time_s=1.0,
+            max_steering_rad=0.6,
+            carla_module=_Carla,
+        )
+
+        self.assertEqual(reason, "opencda_pid_overspeed_coast")
+        self.assertEqual(control.throttle, 0.0)
+        self.assertEqual(control.brake, 0.0)
+
     def test_stop_hold_uses_opencda_brake_limit(self):
         control, reason = self._run(
             VelocitySteeringCommand(0.0, 0.0, stop_goal_active=True),

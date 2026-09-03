@@ -11,18 +11,18 @@ class RefSourceKindTests(unittest.TestCase):
     def test_explicit_fallback_stage_wins_even_if_maneuver_source_is_stale(self):
         kind = _ref_source_kind({
             "reference_pipeline_stage": "explicit_fallback",
-            "final_reference_geometry_source": "unified_maneuver_geometry",
+            "final_reference_geometry_source": "reference_line_provider:turn",
         })
 
         self.assertEqual(kind, "explicit_fallback")
 
-    def test_maneuver_geometry_source_present_without_fallback_stage(self):
+    def test_provider_source_present_without_fallback_stage(self):
         kind = _ref_source_kind({
             "reference_pipeline_stage": "",
-            "final_reference_geometry_source": "unified_maneuver_geometry",
+            "final_reference_geometry_source": "reference_line_provider:turn",
         })
 
-        self.assertEqual(kind, "maneuver")
+        self.assertEqual(kind, "provider")
 
     def test_neither_signal_present_is_default(self):
         kind = _ref_source_kind({

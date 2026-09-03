@@ -37,19 +37,27 @@ GOLDEN_ENTRY_COUNT = 294
 GOLDEN_TOTAL_M = 289.36
 GOLDEN_SIGNATURE = (
     "lane_follow",
+    "junction_connector:straight",
+    "lane_follow",
     "lane_change:right",
     "lane_follow",
+    "junction_connector:straight",
     "junction_turn:right",
+    "junction_connector:straight",
     "lane_follow",
 )
 # (kind, direction, s_start_m, s_end_m) -- arc positions checked with a
 # tolerance; the point is drift detection, not sub-metre exactness.
 GOLDEN_SEGMENTS = [
-    ("lane_follow", "", 0.0, 128.0),
+    ("lane_follow", "", 0.0, 70.7),
+    ("junction_connector", "straight", 71.7, 99.9),
+    ("lane_follow", "", 100.9, 127.9),
     ("lane_change", "right", 129.0, 140.0),
-    ("lane_follow", "", 141.0, 213.0),
+    ("lane_follow", "", 141.0, 203.5),
+    ("junction_connector", "straight", 204.5, 213.5),
     ("junction_turn", "right", 214.0, 218.0),
-    ("lane_follow", "", 219.0, 289.36),
+    ("junction_connector", "straight", 219.5, 227.3),
+    ("lane_follow", "", 228.3, 289.36),
 ]
 ARC_TOL_M = 6.0
 

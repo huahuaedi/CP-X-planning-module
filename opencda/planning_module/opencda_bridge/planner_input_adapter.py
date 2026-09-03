@@ -138,15 +138,6 @@ class OpenCDAPlanningAdapter:
         # ordering has no lateral meaning.
         current_lane_id = int(canonical_lane_id_for_waypoint(ego_waypoint) or 0)
 
-        # Keep active-route progress synchronized throughout lane follow, so
-        # intersection reference generation never performs a late first
-        # lookup hundreds of metres into the route.
-        bridge.route_manager.sync_route_progress(
-            ego_x_m=float(ego_location.x),
-            ego_y_m=float(ego_location.y),
-            ego_heading_rad=float(ego_yaw_rad),
-        )
-
         ego_snapshot = {
             "x": float(ego_location.x),
             "y": float(ego_location.y),
@@ -391,6 +382,9 @@ class OpenCDAPlanningAdapter:
                 obstacle_future_trajectories=dict(
                     prediction_frame.obstacle_future_trajectories
                 ),
+                predicted_objects=dict(prediction_frame.predicted_objects),
+                revision=str(prediction_frame.revision),
+                timestamp_s=float(prediction_frame.timestamp_s),
                 model="constant_acceleration",
                 horizon_s=float(bridge.mpc.horizon_s),
                 dt_s=float(bridge.mpc.dt_s),

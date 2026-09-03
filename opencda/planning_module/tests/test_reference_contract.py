@@ -40,6 +40,36 @@ class ReferenceContractTest(unittest.TestCase):
         )
         self.assertTrue(result.valid, result.reason())
 
+    def test_first_forward_boundary_ignores_coordinate_roundoff_only(self):
+        contract = contract_from_config(
+            mode="lane_change",
+            expected_lane_id=1,
+            horizon_steps=3,
+            config={"reference_contract_lane_change_min_first_forward_m": 0.2},
+            default_speed_mps=3.0,
+        )
+
+        def validate(first_x_m):
+            reference = [
+                {"x_ref_m": first_x_m, "y_ref_m": 0.0, "lane_id": 1, "speed_ref_mps": 2.0},
+                {"x_ref_m": 1.2, "y_ref_m": 0.0, "lane_id": 1, "speed_ref_mps": 2.0},
+                {"x_ref_m": 2.2, "y_ref_m": 0.0, "lane_id": 1, "speed_ref_mps": 2.0},
+            ]
+            return validate_reference_contract(
+                reference_samples=reference,
+                destination_state=[2.2, 0.0, 2.0, 0.0, 1],
+                ego_state=[0.0, 0.0, 2.0, 0.0],
+                contract=contract,
+                check_destination_body_lateral=True,
+            )
+
+        coordinate_discretization = validate(0.2 - 0.8e-3)
+        genuinely_short = validate(0.2 - 2.0e-3)
+        self.assertNotIn(
+            "first_forward_before_contract", coordinate_discretization.violations
+        )
+        self.assertIn("first_forward_before_contract", genuinely_short.violations)
+
     def test_lane_follow_curve_does_not_use_ego_body_projection_as_progress(self):
         contract = contract_from_config(
             mode="lane_follow",

@@ -11,6 +11,13 @@ from typing import Mapping, Optional, Sequence
 # ReferenceGenerator.CURVATURE_EVAL_ARC_M.
 CURVATURE_EVAL_ARC_M = 1.5
 
+# Reference windows are positioned in arc length and then validated by an ego
+# body-frame chord projection.  On a curved path the chord is systematically
+# shorter than the requested arc, in addition to floating-point round-off.
+# One millimetre is the coordinate/discretization tolerance between those two
+# representations; it is far below any vehicle-level planning clearance.
+_POSITION_COMPARISON_EPS_M = 1.0e-3
+
 
 @dataclass(frozen=True)
 class ReferenceContract:
@@ -164,7 +171,10 @@ def validate_reference_contract(
     if not points:
         return ReferenceValidationResult(valid=False, violations=["no_valid_points"])
 
-    if result.first_forward_m < float(contract.min_first_forward_m):
+    if (
+        result.first_forward_m + _POSITION_COMPARISON_EPS_M
+        < float(contract.min_first_forward_m)
+    ):
         violations.append("first_forward_before_contract")
     if abs(result.first_lateral_m) > float(contract.max_first_lateral_abs_m):
         violations.append("first_lateral_out_of_contract")
@@ -241,10 +251,9 @@ def validate_reference_contract(
         headings.append(math.atan2(second[1] - first[1], second[0] - first[0]))
         heading_seg_lengths.append(float(distance_m))
 
-    # Curvature over a >= CURVATURE_EVAL_ARC_M arc window, so the estimate does
-    # not depend on reference-sample spacing (adjacent-sample d(theta)/ds
-    # inflated ~3x when route sampling went 3 m -> 1 m and blew up further as
-    # the ego slowed). The per-step heading jump above stays adjacent-sample.
+    # The per-step heading jump stays adjacent-sample -- it is a discontinuity
+    # detector (a splice/seam), not a curvature estimate, so it must not be
+    # smoothed over an arc window.
     for end_index in range(1, len(headings)):
         delta_adjacent = abs(
             _wrap_angle(headings[end_index] - headings[end_index - 1])
@@ -255,16 +264,18 @@ def validate_reference_contract(
         if delta_adjacent > float(contract.max_heading_jump_rad):
             violations.append("heading_jump_out_of_contract")
 
-        arc_m = float(heading_seg_lengths[end_index])
-        start_index = end_index - 1
-        while start_index > 0 and arc_m < CURVATURE_EVAL_ARC_M:
-            arc_m += float(heading_seg_lengths[start_index])
-            start_index -= 1
-        span_m = max(0.5 * CURVATURE_EVAL_ARC_M, arc_m)
-        delta_windowed = abs(
-            _wrap_angle(headings[end_index] - headings[start_index])
-        )
-        curvature = float(delta_windowed) / float(span_m)
+    # Curvature over a >= CURVATURE_EVAL_ARC_M arc window, so the estimate does
+    # not depend on reference-sample spacing (adjacent-sample d(theta)/ds
+    # inflated ~3x when route sampling went 3 m -> 1 m and blew up further as
+    # the ego slowed). Single implementation in reference_geometry.py -- this
+    # was the same backward-window loop written out three times.
+    from opencda.planning_module.pipeline.reference_geometry import (
+        backward_window_curvature_profile_1pm,
+    )
+
+    for curvature in backward_window_curvature_profile_1pm(
+        points, eval_arc_m=CURVATURE_EVAL_ARC_M
+    ):
         result.max_curvature_1pm = max(result.max_curvature_1pm, float(curvature))
         if curvature > float(contract.max_curvature_1pm):
             violations.append("curvature_out_of_contract")

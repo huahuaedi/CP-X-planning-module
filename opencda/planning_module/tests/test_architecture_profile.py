@@ -21,7 +21,8 @@ class ArchitectureProfileTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(profile.name, "unified_full_v2")
+        self.assertEqual(profile.name, "unified_velocity_steering_v1")
+        self.assertTrue(config["velocity_steering_interface_enabled"])
         self.assertTrue(config["full_mpc_reference_stabilizer_enabled"])
         self.assertTrue(config["control_buffer_enabled"])
         self.assertTrue(config["safety_supervisor_enabled"])

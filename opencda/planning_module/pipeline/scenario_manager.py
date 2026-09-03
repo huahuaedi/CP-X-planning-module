@@ -542,11 +542,24 @@ class CPXScenarioManager:
             and 0.0 <= float(upcoming_turn_distance_m)
             <= float(self.turn_prepare_lookahead_m)
         )
+        # RouteCursor is the topology/progress authority.  next_turn() clamps
+        # distance to exactly zero once cursor s reaches the connector start.
+        # Do not wait several metres more for a CARLA junction polygon or for
+        # the sampled road option to change to LEFT/RIGHT: that kept the FSM
+        # in PREPARE_TURN while turn geometry was already being tracked.
+        topology_connector_entry = bool(
+            self._state in {PREPARE_TURN, INTERSECTION_TURN}
+            and not bool(self._turn_connector_seen)
+            and prepare_direction
+            and prepare_distance_valid
+            and float(upcoming_turn_distance_m) <= 1.0e-6
+        )
         if (
             not direction
             and prepare_direction
             and prepare_distance_valid
             and not bool(ego_in_junction)
+            and not bool(topology_connector_entry)
         ):
             self._state = PREPARE_TURN
             self._turn_direction = str(prepare_direction)
@@ -574,7 +587,14 @@ class CPXScenarioManager:
                 turn_latched=False,
             )
         connector_direction = str(direction)
-        if not direction and bool(ego_in_junction):
+        if not direction and bool(topology_connector_entry):
+            # This is a topology-owned transition, not a geometric guess.
+            # Keep connector_seen false until the route option itself reaches
+            # LEFT/RIGHT so exit stabilization cannot fire on the aligned
+            # incoming lane.  The zero-distance route signal refreshes turn
+            # ownership on every intervening tick.
+            direction = str(prepare_direction)
+        elif not direction and bool(ego_in_junction):
             # CARLA's junction polygon begins before the actual connector.
             # It is nevertheless the correct point to activate a turn
             # reference with a straight lead-in. Do not mark the connector as

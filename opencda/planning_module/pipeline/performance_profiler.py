@@ -122,7 +122,6 @@ class PlannerStageProfiler:
             ("_current_lane_center_reference_samples", "profile.reference.lane_center_generation"),
             ("_ego_anchored_lane_recovery_reference_samples", "profile.reference.lane_recovery_generation"),
             ("_ego_anchored_turn_reference_samples", "profile.reference.turn_generation"),
-            ("_route_aligned_reference_samples", "profile.reference.route_aligned_generation"),
             ("_smooth_reference_polyline_samples", "profile.reference.polyline_smoothing"),
             ("_interpolate_dense_pose_at_arc", "profile.reference.dense_pose_interpolation"),
             ("_interpolate_corridor_geometry", "profile.reference.corridor_interpolation"),
@@ -144,7 +143,6 @@ class PlannerStageProfiler:
         self.instrument_reference_generator(getattr(bridge, "reference_generator", None))
         self.instrument_reference_pipeline(getattr(bridge, "reference_pipeline", None))
         self.wrap_method(bridge, "_active_global_route_points", "profile.route_manager.active_route_geometry")
-        self.wrap_method(bridge, "_lock_route_tracking_lane_change_reference", "profile.reference.lane_change_lock_generation")
         generator = getattr(bridge, "reference_generator", None)
         generator_module = str(getattr(getattr(generator, "__class__", None), "__module__", ""))
         package_prefix = generator_module.split(".pipeline.reference_generator", 1)[0]

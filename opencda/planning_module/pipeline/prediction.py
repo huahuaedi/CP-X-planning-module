@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Mapping, Sequence
+from typing import Any, Callable, Dict, List, Mapping, Sequence, Tuple
 
 from behavior_planner.trajectory_risk import (
     lane_prediction_risk,
@@ -86,6 +86,35 @@ def _obstacle_id(snapshot: Mapping[str, object]) -> str:
         return ""
 
 
+@dataclass(frozen=True)
+class PredictionHypothesis:
+    """One possible future motion mode and its calibrated uncertainty."""
+
+    probability: float
+    maneuver: str
+    points: Tuple[Mapping[str, object], ...]
+    position_sigma_m: float
+    source: str
+
+    def mutable_points(self) -> List[dict]:
+        return [dict(point) for point in self.points]
+
+
+@dataclass(frozen=True)
+class PredictedObject:
+    """Versioned probabilistic prediction for one tracked road user."""
+
+    track_id: str
+    source: str
+    timestamp_s: float
+    plan_revision: str
+    hypotheses: Tuple[PredictionHypothesis, ...]
+
+    @property
+    def primary(self) -> PredictionHypothesis:
+        return max(self.hypotheses, key=lambda item: float(item.probability))
+
+
 @dataclass
 class PredictionFrame:
     """Prediction output consumed by behavior decision and trajectory planning."""
@@ -93,7 +122,10 @@ class PredictionFrame:
     ego_snapshot: Dict[str, float]
     obstacle_snapshots: List[dict]
     obstacle_future_trajectories: Dict[str, List[dict]] = field(default_factory=dict)
+    predicted_objects: Dict[str, PredictedObject] = field(default_factory=dict)
     lane_prediction_risks: Dict[int, Dict[str, object]] = field(default_factory=dict)
+    timestamp_s: float = 0.0
+    revision: str = ""
 
     def risk_for_lane(self, lane_id: int) -> Dict[str, object]:
         return dict(self.lane_prediction_risks.get(int(lane_id), {}))
@@ -113,6 +145,9 @@ def build_prediction_frame(
     prediction_model: str = "constant_acceleration",
     max_abs_acceleration_mps2: float = 4.0,
     lane_step_fn: Callable[[float, float, float], Any] | None = None,
+    timestamp_s: float = 0.0,
+    revision: str = "",
+    risk_probability_threshold: float = 0.05,
 ) -> PredictionFrame:
     """Build an Apollo-style prediction frame for one planning tick.
 
@@ -139,19 +174,26 @@ def build_prediction_frame(
         for snapshot in list(obstacle_snapshots or [])
         if isinstance(snapshot, Mapping)
     ]
-    obstacle_future_trajectories = {
-        obstacle_id: obstacle_future_trajectory(
-            snapshot,
+    predicted_objects: Dict[str, PredictedObject] = {}
+    obstacle_future_trajectories: Dict[str, List[dict]] = {}
+    for snapshot in normalized_obstacles:
+        obstacle_id = _obstacle_id(snapshot)
+        if not obstacle_id:
+            continue
+        predicted = _predicted_object(
+            obstacle_id=str(obstacle_id),
+            snapshot=snapshot,
+            timestamp_s=float(timestamp_s),
             horizon_s=float(horizon_s),
             dt_s=float(dt_s),
-            model=str(prediction_model),
+            prediction_model=str(prediction_model),
             max_abs_acceleration_mps2=float(max_abs_acceleration_mps2),
             lane_step_fn=lane_step_fn,
         )
-        for snapshot in normalized_obstacles
-        for obstacle_id in [_obstacle_id(snapshot)]
-        if obstacle_id
-    }
+        predicted_objects[str(obstacle_id)] = predicted
+        obstacle_future_trajectories[str(obstacle_id)] = (
+            predicted.primary.mutable_points()
+        )
     lane_prediction_risks = {
         int(lane_id): lane_prediction_risk(
             ego_snapshot=normalized_ego,
@@ -169,9 +211,141 @@ def build_prediction_frame(
         )
         for lane_id in list(available_lane_ids or [])
     }
+    for lane_id in list(available_lane_ids or []):
+        probabilistic = _probabilistic_lane_risk(
+            ego_snapshot=normalized_ego,
+            predicted_objects=predicted_objects,
+            lane_assignments=lane_assignments,
+            target_lane_id=int(lane_id),
+            horizon_s=float(horizon_s), dt_s=float(dt_s),
+            min_front_gap_m=float(min_front_gap_m),
+            min_rear_gap_m=float(min_rear_gap_m), min_ttc_s=float(min_ttc_s),
+            risk_probability_threshold=float(risk_probability_threshold),
+        )
+        if probabilistic["hypothesis_count"]:
+            lane_prediction_risks[int(lane_id)] = probabilistic
     return PredictionFrame(
         ego_snapshot=normalized_ego,
         obstacle_snapshots=normalized_obstacles,
         obstacle_future_trajectories=obstacle_future_trajectories,
+        predicted_objects=predicted_objects,
         lane_prediction_risks=lane_prediction_risks,
+        timestamp_s=float(timestamp_s),
+        revision=str(revision or f"prediction:{float(timestamp_s):.3f}"),
+    )
+
+
+def _probabilistic_lane_risk(
+    *, ego_snapshot, predicted_objects, lane_assignments, target_lane_id,
+    horizon_s, dt_s, min_front_gap_m, min_rear_gap_m, min_ttc_s,
+    risk_probability_threshold,
+):
+    probability = 0.0
+    hypothesis_count = 0
+    risky_ids = []
+    front_gaps, rear_gaps, ttcs = [], [], []
+    for track_id, predicted in dict(predicted_objects or {}).items():
+        if int(lane_assignments.get(str(track_id), 0) or 0) != int(target_lane_id):
+            continue
+        for hypothesis in predicted.hypotheses:
+            hypothesis_count += 1
+            snapshot = {
+                "vehicle_id": str(track_id),
+                "x": predicted.primary.points[0].get("x", 0.0) if predicted.primary.points else 0.0,
+                "y": predicted.primary.points[0].get("y", 0.0) if predicted.primary.points else 0.0,
+                "v": hypothesis.points[0].get("v", 0.0) if hypothesis.points else 0.0,
+                "predicted_trajectory": hypothesis.mutable_points(),
+            }
+            result = lane_prediction_risk(
+                ego_snapshot=ego_snapshot, obstacle_snapshots=[snapshot],
+                lane_assignments={str(track_id): int(target_lane_id)},
+                target_lane_id=int(target_lane_id), horizon_s=float(horizon_s),
+                dt_s=float(dt_s), min_front_gap_m=float(min_front_gap_m),
+                min_rear_gap_m=float(min_rear_gap_m), min_ttc_s=float(min_ttc_s),
+            )
+            if bool(result.get("risk", False)):
+                probability += float(hypothesis.probability)
+                risky_ids.append(str(track_id))
+            for key, target in (("min_front_gap_m", front_gaps),
+                                ("min_rear_gap_m", rear_gaps),
+                                ("min_ttc_s", ttcs)):
+                value = result.get(key)
+                if value is not None:
+                    target.append(float(value))
+    probability = min(1.0, max(0.0, probability))
+    return {
+        "risk": bool(probability >= max(0.0, float(risk_probability_threshold))),
+        "collision_probability": float(probability),
+        "risk_probability_threshold": float(risk_probability_threshold),
+        "hypothesis_count": int(hypothesis_count),
+        "target_lane_id": int(target_lane_id),
+        "min_front_gap_m": min(front_gaps) if front_gaps else None,
+        "min_rear_gap_m": min(rear_gaps) if rear_gaps else None,
+        "min_ttc_s": min(ttcs) if ttcs else None,
+        "risky_obstacle_id": ";".join(sorted(set(risky_ids))),
+        "reason": "probabilistic_conflict" if probability else "",
+    }
+
+
+def _predicted_object(
+    *, obstacle_id: str, snapshot: Mapping[str, object], timestamp_s: float,
+    horizon_s: float, dt_s: float, prediction_model: str,
+    max_abs_acceleration_mps2: float, lane_step_fn,
+) -> PredictedObject:
+    raw_modes = snapshot.get(
+        "trajectory_hypotheses", snapshot.get("predicted_trajectories", ())
+    )
+    modes = list(raw_modes or ()) if isinstance(raw_modes, Sequence) and not isinstance(raw_modes, (str, bytes)) else []
+    hypotheses = []
+    for mode in modes:
+        if not isinstance(mode, Mapping):
+            continue
+        points = mode.get("points", mode.get("trajectory", ()))
+        if not isinstance(points, Sequence) or isinstance(points, (str, bytes)):
+            continue
+        normalized_points = tuple(dict(point) for point in points if isinstance(point, Mapping))
+        if not normalized_points:
+            continue
+        hypotheses.append(PredictionHypothesis(
+            probability=max(0.0, float(mode.get("probability", 0.0) or 0.0)),
+            maneuver=str(mode.get("maneuver", "unknown") or "unknown"),
+            points=normalized_points,
+            position_sigma_m=max(0.0, float(mode.get("position_sigma_m", 0.5) or 0.0)),
+            source=str(snapshot.get("prediction_source", "v2x_plan") or "v2x_plan"),
+        ))
+    if not hypotheses:
+        points = obstacle_future_trajectory(
+            snapshot, horizon_s=float(horizon_s), dt_s=float(dt_s),
+            model=str(prediction_model),
+            max_abs_acceleration_mps2=float(max_abs_acceleration_mps2),
+            lane_step_fn=lane_step_fn,
+        )
+        source = str(snapshot.get("prediction_source", "perception_model") or "perception_model")
+        hypotheses = [PredictionHypothesis(
+            probability=1.0,
+            maneuver=str(snapshot.get("predicted_maneuver", "lane_keep") or "lane_keep"),
+            points=tuple(dict(point) for point in points),
+            position_sigma_m=max(0.0, float(snapshot.get("position_sigma_m", 1.0) or 0.0)),
+            source=source,
+        )]
+    probability_sum = sum(float(item.probability) for item in hypotheses)
+    if probability_sum <= 1.0e-9:
+        probability_sum = float(len(hypotheses))
+        probabilities = [1.0 / probability_sum for _ in hypotheses]
+    else:
+        probabilities = [float(item.probability) / probability_sum for item in hypotheses]
+    normalized = tuple(
+        PredictionHypothesis(
+            probability=float(probability), maneuver=item.maneuver,
+            points=item.points, position_sigma_m=item.position_sigma_m,
+            source=item.source,
+        )
+        for item, probability in zip(hypotheses, probabilities)
+    )
+    return PredictedObject(
+        track_id=str(obstacle_id),
+        source=str(snapshot.get("prediction_source", normalized[0].source)),
+        timestamp_s=float(snapshot.get("prediction_timestamp_s", timestamp_s) or timestamp_s),
+        plan_revision=str(snapshot.get("plan_revision", "") or ""),
+        hypotheses=normalized,
     )

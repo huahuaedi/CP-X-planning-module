@@ -11,6 +11,9 @@ sys.modules["route_authorization"] = route_authorization
 _SPEC.loader.exec_module(route_authorization)
 
 authorize_route_lane_change = route_authorization.authorize_route_lane_change
+authorize_opportunistic_lane_change = (
+    route_authorization.authorize_opportunistic_lane_change
+)
 suppress_lane_change_for_lateral_owner = route_authorization.suppress_lane_change_for_lateral_owner
 lane_change_target_reached = route_authorization.lane_change_target_reached
 normalize_route_maneuver = route_authorization.normalize_route_maneuver
@@ -22,6 +25,43 @@ RouteLaneChangeAuthorizationLatch = (
 
 
 class RouteAuthorizationTest(unittest.TestCase):
+    def test_opportunistic_authorization_does_not_require_route_geometry(self):
+        authorization = authorize_opportunistic_lane_change(
+            enabled=True,
+            start_lock_active=False,
+            dense_traffic_lock_active=False,
+        )
+
+        self.assertTrue(authorization.allowed)
+        self.assertEqual(
+            authorization.reason, "opportunistic_lane_change_authorized"
+        )
+
+    def test_opportunistic_authorization_respects_start_lock(self):
+        authorization = authorize_opportunistic_lane_change(
+            enabled=True,
+            start_lock_active=True,
+            dense_traffic_lock_active=False,
+        )
+
+        self.assertFalse(authorization.allowed)
+        self.assertEqual(
+            authorization.reason, "opportunistic_lane_change_start_lock"
+        )
+
+    def test_opportunistic_authorization_respects_dense_traffic_lock(self):
+        authorization = authorize_opportunistic_lane_change(
+            enabled=True,
+            start_lock_active=False,
+            dense_traffic_lock_active=True,
+        )
+
+        self.assertFalse(authorization.allowed)
+        self.assertEqual(
+            authorization.reason,
+            "opportunistic_lane_change_dense_traffic_lock",
+        )
+
     def test_route_authorization_stays_latched_after_dynamic_gate_lapses(self):
         latch = RouteLaneChangeAuthorizationLatch()
         ready = LaneChangeAuthorization(

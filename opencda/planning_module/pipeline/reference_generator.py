@@ -1421,9 +1421,6 @@ class ReferenceGenerator:
             ),
         )
 
-    def route_aligned_samples(self, **kwargs: Any) -> list[dict[str, float]]:
-        return self._route_aligned_reference_samples(**kwargs)
-
     def discrete_curvature_1pm(
         self, reference_samples: Sequence[Mapping[str, object]]
     ) -> float:
@@ -1689,51 +1686,20 @@ class ReferenceGenerator:
         samples: Sequence[Mapping[str, object]],
         eval_arc_m: float | None = None,
     ) -> float:
+        # Single implementation in reference_geometry.py -- see
+        # backward_window_max_curvature_1pm's docstring for why this window
+        # is causal (backward-only) rather than the centred one route
+        # diagnostics use.
+        from opencda.planning_module.pipeline.reference_geometry import (
+            backward_window_max_curvature_1pm,
+        )
+
         window_m = float(
             ReferenceGenerator.CURVATURE_EVAL_ARC_M
             if eval_arc_m is None
             else eval_arc_m
         )
-        points = []
-        for sample in list(samples or []):
-            try:
-                points.append((
-                    float(sample.get("x_ref_m", sample.get("x", ""))),
-                    float(sample.get("y_ref_m", sample.get("y", ""))),
-                ))
-            except Exception:
-                continue
-        seg_headings: list[float] = []
-        seg_lengths: list[float] = []
-        for first, second in zip(points[:-1], points[1:]):
-            dx_m = float(second[0]) - float(first[0])
-            dy_m = float(second[1]) - float(first[1])
-            distance_m = math.hypot(dx_m, dy_m)
-            if distance_m <= 1.0e-6:
-                continue
-            seg_headings.append(math.atan2(dy_m, dx_m))
-            seg_lengths.append(float(distance_m))
-        if len(seg_headings) < 2:
-            return 0.0
-        maximum = 0.0
-        for end_index in range(1, len(seg_headings)):
-            # Widen the window backward until it spans at least `window_m` of
-            # real arc (or the polyline runs out), then measure the heading
-            # change across that span.
-            arc_m = float(seg_lengths[end_index])
-            start_index = end_index - 1
-            while start_index > 0 and arc_m < window_m:
-                arc_m += float(seg_lengths[start_index])
-                start_index -= 1
-            span_m = max(0.5 * window_m, arc_m)
-            delta_rad = abs(
-                ReferenceGenerator._wrap_angle_static(
-                    float(seg_headings[end_index])
-                    - float(seg_headings[start_index])
-                )
-            )
-            maximum = max(float(maximum), float(delta_rad) / float(span_m))
-        return float(maximum)
+        return backward_window_max_curvature_1pm(samples, eval_arc_m=window_m)
 
     def _build_route_reference(
         self,
@@ -2378,88 +2344,6 @@ class ReferenceGenerator:
                 )
             ),
         )
-
-    def _route_aligned_reference_samples(
-        self,
-        *,
-        ego_location: carla.Location,
-        ego_heading_rad: float,
-        current_lane_id: int,
-        horizon_steps: int,
-        step_distance_m: float,
-        route_points: Sequence[Sequence[float]] | None,
-    ) -> list[dict[str, float]]:
-        route_xy = [
-            (float(point[0]), float(point[1]))
-            for point in list(route_points or [])
-            if len(point) >= 2
-        ]
-        if len(route_xy) < 2:
-            return []
-        ego_xy = (float(ego_location.x), float(ego_location.y))
-        route_progress = [0.0]
-        for first, second in zip(route_xy[:-1], route_xy[1:]):
-            route_progress.append(
-                float(route_progress[-1])
-                + math.hypot(float(second[0]) - float(first[0]), float(second[1]) - float(first[1]))
-            )
-        base_s = self._project_point_to_polyline_s(
-            route_xy=route_xy,
-            route_progress=route_progress,
-            point_xy=ego_xy,
-        )
-        preview_m = max(
-            0.5,
-            float(self.config.get("route_aligned_reference_first_forward_m", 1.0)),
-        )
-        base_s = float(base_s) + float(preview_m)
-        samples: list[dict[str, float]] = []
-        lane_width_m = self._waypoint_lane_width(self._map_waypoint_from_location(ego_location))
-        step_m = max(0.5, float(step_distance_m))
-        oversample_step_m = max(
-            0.25,
-            min(float(step_m), float(self.config.get("route_aligned_reference_oversample_step_m", 0.5))),
-        )
-        raw_samples: list[dict[str, float]] = []
-        raw_count = max(4, (max(1, int(horizon_steps)) + 1) * 2)
-        for step_index in range(raw_count):
-            target_s = float(base_s) + float(step_index) * float(oversample_step_m)
-            x_m, y_m, heading_rad = self._sample_polyline_at_s(
-                route_xy=route_xy,
-                route_progress=route_progress,
-                target_s=target_s,
-                fallback_heading_rad=float(ego_heading_rad),
-            )
-            forward_m, _ = self._body_frame_xy(
-                origin_x_m=float(ego_location.x),
-                origin_y_m=float(ego_location.y),
-                heading_rad=float(ego_heading_rad),
-                target_x_m=float(x_m),
-                target_y_m=float(y_m),
-            )
-            if float(forward_m) < float(self.config.get("route_aligned_reference_min_forward_m", 0.25)):
-                continue
-            raw_samples.append({
-                "x_ref_m": float(x_m),
-                "y_ref_m": float(y_m),
-                "x": float(x_m),
-                "y": float(y_m),
-                "heading_rad": float(heading_rad),
-                "lane_id": int(current_lane_id),
-                "lane_width_m": float(lane_width_m),
-                "road_center_offset_m": 0.0,
-                "road_left_width_m": 0.5 * float(lane_width_m),
-                "road_right_width_m": 0.5 * float(lane_width_m),
-            })
-        if not raw_samples:
-            return []
-        samples = self._smooth_reference_polyline_samples(
-            raw_samples=raw_samples,
-            horizon_steps=int(horizon_steps),
-            step_distance_m=float(step_m),
-            fallback_heading_rad=float(ego_heading_rad),
-        )
-        return samples
 
     def _smooth_reference_polyline_samples(
         self,

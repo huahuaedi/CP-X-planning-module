@@ -24,10 +24,15 @@ class MPCCommandExtractor:
         self,
         *,
         preview_time_s: float = 0.6,
+        velocity_source: str = "preview",
         min_acceleration_mps2: float = -6.0,
         max_acceleration_mps2: float = 3.0,
     ) -> None:
         self.preview_time_s = max(0.0, float(preview_time_s))
+        normalized_source = str(velocity_source or "preview").strip().lower()
+        if normalized_source not in {"horizon", "preview"}:
+            raise ValueError("velocity_source must be 'horizon' or 'preview'")
+        self.velocity_source = normalized_source
         self.min_acceleration_mps2 = min(0.0, float(min_acceleration_mps2))
         self.max_acceleration_mps2 = max(0.0, float(max_acceleration_mps2))
         self._last_command: Optional[MPCTrackingCommand] = None
@@ -54,9 +59,13 @@ class MPCCommandExtractor:
                 reason="mpc_velocity_solution_missing",
             )
 
-        source_index = min(
-            float(len(velocities) - 1),
-            max(0.0, float(self.preview_time_s) / dt_s),
+        source_index = (
+            float(len(velocities) - 1)
+            if self.velocity_source == "horizon"
+            else min(
+                float(len(velocities) - 1),
+                max(0.0, float(self.preview_time_s) / dt_s),
+            )
         )
         lower_index = int(math.floor(source_index))
         upper_index = min(lower_index + 1, len(velocities) - 1)
@@ -75,10 +84,14 @@ class MPCCommandExtractor:
         command = MPCTrackingCommand(
             target_velocity_mps=float(target_velocity_mps),
             target_steering_rad=float(steering_rad),
-            velocity_preview_time_s=float(self.preview_time_s),
+            velocity_preview_time_s=float(source_index * dt_s),
             velocity_source_index=float(source_index),
             valid=True,
-            reason="mpc_optimized_velocity_preview",
+            reason=(
+                "mpc_optimized_horizon_velocity"
+                if self.velocity_source == "horizon"
+                else "mpc_optimized_velocity_preview"
+            ),
         )
         self._last_command = command
         self._last_timestamp_s = float(timestamp_s)
@@ -107,6 +120,32 @@ class MPCCommandExtractor:
     def reset(self) -> None:
         self._last_command = None
         self._last_timestamp_s = None
+
+    @staticmethod
+    def platform_target_velocity(
+        *,
+        nominal_velocity_mps: float,
+        stop_goal_active: bool,
+        emergency_stop: bool,
+        mpc_safety_cap_mps: Optional[float] = None,
+    ) -> float:
+        """Resolve the one velocity command sent to the platform PID.
+
+        ``SpeedTargetPlanner`` owns nominal longitudinal intent.  The MPC
+        state preview is deliberately not used as a second target: it already
+        contains the plant's acceleration dynamics, and feeding that small
+        near-term state to another longitudinal PID applies those dynamics a
+        second time.  MPC may lower the command only through an explicit
+        safety cap (for example a future prediction/ST constraint).
+        """
+
+        if bool(stop_goal_active) or bool(emergency_stop):
+            return 0.0
+        target_mps = max(0.0, float(nominal_velocity_mps))
+        if mpc_safety_cap_mps is not None:
+            cap_mps = max(0.0, float(mpc_safety_cap_mps))
+            target_mps = min(float(target_mps), float(cap_mps))
+        return float(target_mps)
 
     def _continuity_limited_velocity(
         self, *, raw_velocity_mps: float, timestamp_s: float

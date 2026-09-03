@@ -17,9 +17,128 @@ SPEC.loader.exec_module(speed_planner)
 build_speed_plan = speed_planner.build_speed_plan
 enforce_speed_ceiling = speed_planner.enforce_speed_ceiling
 turn_approach_lookahead_m = speed_planner.turn_approach_lookahead_m
+SpeedTargetPlanner = speed_planner.SpeedTargetPlanner
+SpeedConstraint = speed_planner.SpeedConstraint
+SpeedPlan = speed_planner.SpeedPlan
 
 
 class SpeedPlannerTest(unittest.TestCase):
+    def test_speed_target_planner_is_single_final_ceiling_owner(self):
+        behavior = SimpleNamespace(requested_speed_mps=12.0, stop_required=False)
+        target = SpeedTargetPlanner().resolve(
+            behavior=behavior,
+            speed_plan=SpeedPlan(
+                target_speed_mps=5.0,
+                speed_cap_mps=5.0,
+                stop_goal_active=False,
+                requested_speed_mps=12.0,
+                scenario_cap_mps=9.0,
+                turn_cap_mps=5.0,
+                limiting_owner="turn_cap",
+            ),
+        )
+        self.assertEqual(target.target_mps, 5.0)
+        self.assertEqual(target.limiting_owner, "turn_cap")
+
+    def test_behavior_stop_is_final_zero_constraint(self):
+        behavior = SimpleNamespace(requested_speed_mps=12.0, stop_required=True)
+        target = SpeedTargetPlanner().resolve(
+            behavior=behavior,
+            speed_plan=SpeedPlan(
+                target_speed_mps=8.0,
+                speed_cap_mps=8.0,
+                stop_goal_active=False,
+            ),
+        )
+        self.assertEqual(target.target_mps, 0.0)
+        self.assertEqual(target.limiting_owner, "behavior_stop")
+
+    def test_destination_approach_is_a_named_speed_constraint(self):
+        behavior = SimpleNamespace(requested_speed_mps=12.0, stop_required=False)
+        target = SpeedTargetPlanner().resolve(
+            behavior=behavior,
+            speed_plan=SpeedPlan(
+                target_speed_mps=12.0,
+                speed_cap_mps=12.0,
+                stop_goal_active=False,
+            ),
+            additional_constraints=(
+                SpeedConstraint(
+                    owner="destination_approach",
+                    maximum_mps=6.3,
+                    reason="route_destination_approach_speed_profile",
+                ),
+            ),
+        )
+
+        self.assertEqual(target.target_mps, 6.3)
+        self.assertEqual(target.limiting_owner, "destination_approach")
+
+    def test_candidate_behavior_speed_can_only_lower_typed_speed_plan(self):
+        behavior = SimpleNamespace(requested_speed_mps=4.0, stop_required=False)
+        target = SpeedTargetPlanner().resolve(
+            behavior=behavior,
+            speed_plan=SpeedPlan(
+                target_speed_mps=8.0,
+                speed_cap_mps=8.0,
+                stop_goal_active=False,
+                requested_speed_mps=12.0,
+            ),
+        )
+
+        self.assertEqual(target.target_mps, 4.0)
+        self.assertEqual(target.limiting_owner, "behavior_request")
+
+    def test_destination_approach_does_not_release_after_vehicle_slows(self):
+        planner = SpeedTargetPlanner()
+        first, active, _ = planner.destination_approach_constraint(
+            route_revision="route-4",
+            route_found=True,
+            route_reached_destination=False,
+            remaining_distance_m=20.0,
+            ego_speed_mps=10.0,
+            deceleration_mps2=2.5,
+            buffer_m=1.5,
+        )
+        self.assertTrue(active)
+        self.assertIsNotNone(first)
+
+        slowed, active, _ = planner.destination_approach_constraint(
+            route_revision="route-4",
+            route_found=True,
+            route_reached_destination=False,
+            remaining_distance_m=18.0,
+            ego_speed_mps=2.0,
+            deceleration_mps2=2.5,
+            buffer_m=1.5,
+        )
+        self.assertTrue(active)
+        self.assertIsNotNone(slowed)
+        self.assertLessEqual(slowed.maximum_mps, first.maximum_mps)
+
+    def test_destination_approach_resets_on_route_revision(self):
+        planner = SpeedTargetPlanner()
+        planner.destination_approach_constraint(
+            route_revision="route-4",
+            route_found=True,
+            route_reached_destination=False,
+            remaining_distance_m=20.0,
+            ego_speed_mps=10.0,
+            deceleration_mps2=2.5,
+            buffer_m=1.5,
+        )
+        constraint, active, _ = planner.destination_approach_constraint(
+            route_revision="route-5",
+            route_found=True,
+            route_reached_destination=False,
+            remaining_distance_m=100.0,
+            ego_speed_mps=2.0,
+            deceleration_mps2=2.5,
+            buffer_m=1.5,
+        )
+        self.assertFalse(active)
+        self.assertIsNone(constraint)
+
     def test_turn_preview_scales_with_cruise_speed(self):
         config = {
             "full_intersection_turn_speed_cap_mps": 5.0,
@@ -472,6 +591,51 @@ class SpeedPlannerTest(unittest.TestCase):
         self.assertEqual(plan.target_speed_mps, 12.0)
         self.assertIsNone(plan.scenario_cap_mps)
         self.assertIsNone(plan.turn_approach_cap_mps)
+
+    def test_lane_change_drops_normal_source_lane_idm_constraint(self):
+        plan = build_speed_plan(
+            scenario_decision=SimpleNamespace(
+                state="LANE_FOLLOW",
+                speed_cap_mps=None,
+                stop_goal_active=False,
+                reason="",
+            ),
+            behavior_decision="lane_change_left",
+            requested_speed_mps=12.0,
+            ego_speed_mps=10.0,
+            config={},
+            front_gap_m=35.0,
+            front_obstacle_speed_mps=4.0,
+            lane_change_commitment_active=True,
+            front_obstacle_is_source_lane=True,
+        )
+
+        self.assertEqual(plan.target_speed_mps, 12.0)
+        self.assertFalse(plan.continuous_following_active)
+        self.assertIn(
+            "source_lane_following_suppressed", plan.active_constraints
+        )
+
+    def test_lane_change_keeps_target_lane_idm_constraint(self):
+        plan = build_speed_plan(
+            scenario_decision=SimpleNamespace(
+                state="LANE_FOLLOW",
+                speed_cap_mps=None,
+                stop_goal_active=False,
+                reason="",
+            ),
+            behavior_decision="lane_change_left",
+            requested_speed_mps=12.0,
+            ego_speed_mps=10.0,
+            config={},
+            front_gap_m=18.0,
+            front_obstacle_speed_mps=4.0,
+            lane_change_commitment_active=True,
+            front_obstacle_is_source_lane=False,
+        )
+
+        self.assertLess(plan.target_speed_mps, 12.0)
+        self.assertTrue(plan.continuous_following_active)
 
     def test_committed_lane_change_does_not_suppress_real_stop(self):
         plan = build_speed_plan(

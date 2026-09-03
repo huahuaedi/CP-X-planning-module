@@ -472,6 +472,39 @@ def get_lane_width_m(lane_id: int, parametric_offset: float) -> float | None:
     return distance_to_float(width)
 
 
+def get_lane_boundaries_enu(
+    lane_id: int, parametric_offset: float
+) -> tuple[tuple[float, float, float], tuple[float, float, float]] | None:
+    """Return semantic (left, right) AD-map borders when the binding exposes them."""
+
+    getter = getattr(ad.map.lane, "getLaneENUBorder", None)
+    if not callable(getter):
+        return None
+    try:
+        border = getter(create_para_point(lane_id, parametric_offset))
+    except Exception:
+        return None
+
+    def field(value, names):
+        for name in names:
+            candidate = getattr(value, name, None)
+            if candidate is not None:
+                return candidate
+        return None
+
+    left = field(border, ("left", "mLeft", "leftBorder", "mLeftBorder"))
+    right = field(border, ("right", "mRight", "rightBorder", "mRightBorder"))
+    if left is None or right is None:
+        try:
+            left, right = border[0], border[1]
+        except Exception:
+            return None
+    try:
+        return enu_point_to_tuple(left), enu_point_to_tuple(right)
+    except Exception:
+        return None
+
+
 def get_contact_lane_ids(
     lane_id: int,
     location,

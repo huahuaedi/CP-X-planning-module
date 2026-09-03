@@ -16,6 +16,7 @@ Segment kinds:
   * ``lane_follow``   -- ordinary in-lane travel
   * ``lane_change``   -- a CHANGELANELEFT / CHANGELANERIGHT span (lateral maneuver)
   * ``junction_turn`` -- an explicit AD-map LEFT / RIGHT span
+  * ``junction_connector`` -- AD-map intersection lane without a turn action
 """
 from __future__ import annotations
 
@@ -33,6 +34,7 @@ from opencda.planning_module.pipeline.reference_geometry import (
 LANE_FOLLOW = "lane_follow"
 LANE_CHANGE = "lane_change"
 JUNCTION_TURN = "junction_turn"
+JUNCTION_CONNECTOR = "junction_connector"
 
 _CHANGE_OPTIONS = {"CHANGELANELEFT", "CHANGELANERIGHT"}
 _TURN_OPTIONS = {"LEFT", "RIGHT"}
@@ -40,7 +42,7 @@ _TURN_OPTIONS = {"LEFT", "RIGHT"}
 
 @dataclass(frozen=True)
 class RouteSegment:
-    kind: str                    # lane_follow | lane_change | junction_turn
+    kind: str                    # lane_follow | lane_change | junction_turn | connector
     s_start_m: float
     s_end_m: float
     node_start: int              # inclusive index into the node list
@@ -78,6 +80,18 @@ class RoutePose:
     lane_id: int
     road_option: str
     segment_kind: str
+
+
+@dataclass(frozen=True)
+class RouteDecision:
+    """Pure topology decision at one route station."""
+
+    optimal_lane_id: int
+    current_road_option: str
+    next_macro_maneuver: str
+    next_macro_distance_m: float
+    segment_kind: str
+    lane_index: int
 
 
 @dataclass(frozen=True)
@@ -173,7 +187,22 @@ class RouteGeometry:
             return LANE_CHANGE, "left" if option == "CHANGELANELEFT" else "right"
         if option in _TURN_OPTIONS:
             return JUNCTION_TURN, option.lower()
+        waypoint = self._waypoints[index]
+        if self._waypoint_is_intersection(waypoint):
+            # A straight intersection traversal is still connector topology,
+            # but it is not a turn and must not trigger turn behavior.
+            return JUNCTION_CONNECTOR, "straight"
         return LANE_FOLLOW, ""
+
+    @staticmethod
+    def _waypoint_is_intersection(waypoint: Any) -> bool:
+        return bool(
+            getattr(
+                waypoint,
+                "is_intersection",
+                getattr(waypoint, "is_junction", False),
+            )
+        )
 
     def _lane_id(self, index: int) -> int:
         wp = self._waypoints[min(max(0, index), len(self._waypoints) - 1)]
@@ -248,6 +277,11 @@ class RouteGeometry:
                 return seg
         return self._segments[-1] if self._segments else None
 
+    def segment_at(self, s_m: float) -> Optional[RouteSegment]:
+        """Return the typed topology segment containing route arc length."""
+
+        return self._segment_at(float(s_m))
+
     def _node_index_at(self, s_m: float) -> int:
         lo, hi = 0, len(self._cum_m) - 1
         while lo < hi:
@@ -258,10 +292,23 @@ class RouteGeometry:
                 hi = mid - 1
         return lo
 
-    def project(self, x_m: float, y_m: float, *, s_lower_m: float = 0.0) -> RouteProgress:
+    def project(
+        self,
+        x_m: float,
+        y_m: float,
+        *,
+        s_lower_m: float = 0.0,
+        s_upper_m: float | None = None,
+    ) -> RouteProgress:
         if not self.valid:
             return RouteProgress(0.0, 0.0, None, 0, True)
-        s_m, lateral_m = project_to_polyline(self._xy, x_m, y_m, s_lower_m=max(0.0, s_lower_m))
+        s_m, lateral_m = project_to_polyline(
+            self._xy,
+            x_m,
+            y_m,
+            s_lower_m=max(0.0, s_lower_m),
+            s_upper_m=s_upper_m,
+        )
         seg = self._segment_at(s_m)
         return RouteProgress(
             s_m=s_m,
@@ -307,12 +354,73 @@ class RouteGeometry:
                 return None
         return None
 
+    def _turn_zone_onset_s(self, turn_index: int) -> float:
+        """Arc length where the turn *zone* begins, given the turn segment index.
+
+        The sharp ``junction_turn`` run is usually only a few metres of a much
+        longer physical intersection connector; ``_build_segments`` types the
+        approach/exit of that connector as ``junction_connector``. Turn
+        behaviour (speed taper, PREPARE_TURN) needs to engage at the connector
+        entry, not at the sharp middle, so the zone onset is the start of any
+        ``junction_connector`` run that sits directly before this turn.
+        """
+        onset_s = float(self._segments[turn_index].s_start_m)
+        cursor = turn_index - 1
+        while cursor >= 0 and self._segments[cursor].kind == JUNCTION_CONNECTOR:
+            onset_s = float(self._segments[cursor].s_start_m)
+            cursor -= 1
+        return onset_s
+
+    def turn_zone(
+        self, s_m: float, lookahead_m: float
+    ) -> Optional[Tuple[str, float, float, float]]:
+        """``(direction, dist_to_onset_m, onset_s_m, zone_end_s_m)`` or ``None``.
+
+        The zone spans the connector approach + the sharp turn + the connector
+        exit -- the whole stretch over which the vehicle is inside the
+        intersection for this maneuver. A turn is reported when its *zone
+        onset* (connector entry) is within ``lookahead_m``, even if the sharp
+        span itself is a little further.
+        """
+        limit = float(s_m) + max(0.0, float(lookahead_m))
+        for index, seg in enumerate(self._segments):
+            if seg.kind != JUNCTION_TURN:
+                continue
+            if seg.s_end_m < float(s_m) - 1.0e-6:
+                continue
+            onset_s = self._turn_zone_onset_s(index)
+            if onset_s > limit:
+                break
+            zone_end_s = float(seg.s_end_m)
+            cursor = index + 1
+            while (
+                cursor < len(self._segments)
+                and self._segments[cursor].kind == JUNCTION_CONNECTOR
+            ):
+                zone_end_s = float(self._segments[cursor].s_end_m)
+                cursor += 1
+            return (
+                seg.direction or "",
+                max(0.0, onset_s - float(s_m)),
+                onset_s,
+                zone_end_s,
+            )
+        return None
+
     def next_turn(self, s_m: float, lookahead_m: float) -> Optional[Tuple[str, float]]:
-        hit = self.next_segment_of(JUNCTION_TURN, s_m, lookahead_m)
-        if hit is None:
+        """``(direction, distance_m)`` to the next turn *zone* onset.
+
+        Distance is measured to where the vehicle enters the intersection for
+        the turn (the connector approach), not to the sharp middle -- see
+        ``turn_zone``. A turn whose sharp span sits within ``lookahead_m`` is
+        reported even when its connector onset is already behind ``s_m``
+        (distance clamps to 0).
+        """
+        zone = self.turn_zone(s_m, lookahead_m)
+        if zone is None:
             return None
-        seg, dist_m = hit
-        return (seg.direction or "", dist_m)
+        direction, dist_to_onset_m, _onset_s, _zone_end_s = zone
+        return (direction, dist_to_onset_m)
 
     def next_lane_change(self, s_m: float, lookahead_m: float) -> Optional[Tuple[str, float]]:
         hit = self.next_segment_of(
@@ -328,13 +436,84 @@ class RouteGeometry:
     ) -> Optional[RouteSegment]:
         """Explicit AD-map topology transition, including opaque lane IDs.
 
-        A lane change beyond an intervening junction turn is not returned --
-        the turn is the next maneuver in that case.
+        A lane change beyond an intervening junction *turn* is not returned --
+        the turn is the next maneuver in that case. A straight intersection
+        traversal (``junction_connector`` with no turn) is not a maneuver and
+        does not hide a lane change that follows it.
         """
         hit = self.next_segment_of(
             LANE_CHANGE, s_m, lookahead_m, not_past=(JUNCTION_TURN,)
         )
         return hit[0] if hit is not None else None
+
+    def decision_at(
+        self, s_m: float, *, current_lane_id: int = 0
+    ) -> RouteDecision:
+        """Derive lane/macro intent only from immutable route topology."""
+
+        station_m = min(max(0.0, float(s_m)), float(self.total_m))
+        segment = self._segment_at(station_m)
+        pose = self.pose_at(station_m)
+        current_option = str(pose.road_option or "LANEFOLLOW")
+        if segment is not None:
+            if segment.kind == LANE_CHANGE:
+                current_option = (
+                    "CHANGELANELEFT"
+                    if segment.direction == "left"
+                    else "CHANGELANERIGHT"
+                )
+            elif segment.kind == JUNCTION_TURN:
+                current_option = str(segment.direction or "").upper()
+            elif segment.kind == JUNCTION_CONNECTOR:
+                current_option = "LANEFOLLOW"
+
+        next_change = self.next_segment_of(
+            LANE_CHANGE,
+            station_m,
+            max(0.0, self.total_m - station_m),
+            not_past=(JUNCTION_TURN,),
+        )
+        turn = self.turn_zone(
+            station_m, max(0.0, self.total_m - station_m)
+        )
+        candidates = []
+        if next_change is not None:
+            change_segment, distance_m = next_change
+            candidates.append((
+                float(distance_m),
+                "Lane Change Left"
+                if change_segment.direction == "left"
+                else "Lane Change Right",
+                int(change_segment.target_lane_id),
+            ))
+        if turn is not None:
+            direction, distance_m, _onset_s, _end_s = turn
+            candidates.append((
+                float(distance_m),
+                "Turn Left" if direction == "left" else "Turn Right",
+                0,
+            ))
+        candidates.sort(key=lambda item: item[0])
+        if candidates:
+            next_distance_m, next_macro, macro_target_lane_id = candidates[0]
+        else:
+            next_distance_m = float("inf")
+            next_macro = "Continue Straight"
+            macro_target_lane_id = 0
+
+        optimal_lane_id = int(current_lane_id or pose.lane_id or 0)
+        if segment is not None and segment.kind == LANE_CHANGE:
+            optimal_lane_id = int(segment.target_lane_id or optimal_lane_id)
+        elif macro_target_lane_id:
+            optimal_lane_id = int(macro_target_lane_id)
+        return RouteDecision(
+            optimal_lane_id=int(optimal_lane_id),
+            current_road_option=str(current_option),
+            next_macro_maneuver=str(next_macro),
+            next_macro_distance_m=float(next_distance_m),
+            segment_kind=(segment.kind if segment is not None else LANE_FOLLOW),
+            lane_index=(int(segment.lane_index) if segment is not None else 0),
+        )
 
     def waypoint_for_lane_id(self, lane_id: int, *, node_start: int = 0) -> Any:
         """First route waypoint carrying an exact AD lane ID; no XY inference."""
@@ -342,17 +521,6 @@ class RouteGeometry:
             if self._lane_id(index) == int(lane_id):
                 return self._waypoints[index]
         return None
-
-    def waypoint_for_lane_id_near(
-        self, lane_id: int, x_m: float, y_m: float, *, node_start: int = 0
-    ) -> Any:
-        """Nearest route node on an exact AD lane; distance does not define topology."""
-        matches = [
-            (math.hypot(self._xy[i][0] - float(x_m), self._xy[i][1] - float(y_m)), self._waypoints[i])
-            for i in range(max(0, int(node_start)), len(self._waypoints))
-            if self._lane_id(i) == int(lane_id)
-        ]
-        return min(matches, key=lambda item: item[0])[1] if matches else None
 
     def remaining_m(self, s_m: float) -> float:
         return max(0.0, self.total_m - float(s_m))
@@ -449,10 +617,12 @@ class RouteGeometry:
                 errors.append(f"segment_{index}_negative_arc_span")
             if segment.s_start_m + 1.0e-6 < previous_end_m:
                 errors.append(f"segment_{index}_overlaps_previous")
-            if segment.kind in {LANE_CHANGE, JUNCTION_TURN} and segment.direction not in {
-                "left",
-                "right",
-            }:
+            allowed_directions = (
+                {"left", "right", "straight"}
+                if segment.kind in {JUNCTION_TURN, JUNCTION_CONNECTOR}
+                else {"left", "right"}
+            )
+            if segment.kind in {LANE_CHANGE, JUNCTION_TURN, JUNCTION_CONNECTOR} and segment.direction not in allowed_directions:
                 errors.append(f"segment_{index}_{segment.kind}_direction_missing")
             if segment.kind == LANE_CHANGE:
                 if int(segment.source_lane_id) == 0 or int(segment.target_lane_id) == 0:

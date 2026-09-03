@@ -1,445 +1,195 @@
 import unittest
-import sys
-import types
-
-
-if "carla" not in sys.modules:
-    fake_carla = types.ModuleType("carla")
-
-    class _Location:
-        def __init__(self, x=0.0, y=0.0, z=0.0):
-            self.x = x
-            self.y = y
-            self.z = z
-
-    class _VehicleControl:
-        def __init__(self, throttle=0.0, brake=0.0, steer=0.0):
-            self.throttle = throttle
-            self.brake = brake
-            self.steer = steer
-
-    fake_carla.Location = _Location
-    fake_carla.VehicleControl = _VehicleControl
-    sys.modules["carla"] = fake_carla
 
 from pipeline.maneuver_manager import ManeuverManager
 
 
-def _reference(y_offset=0.0, speed=2.0):
-    return [
-        {
-            "x_ref_m": float(index),
-            "y_ref_m": float(y_offset),
-            "heading_rad": 0.0,
-            "speed_ref_mps": float(speed),
-        }
-        for index in range(1, 21)
-    ]
-
-
 class ManeuverManagerTests(unittest.TestCase):
-    def test_plain_route_lane_change_is_not_classified_as_turn_chained(self):
+    def test_lane_change_identity_is_installed_atomically(self):
         manager = ManeuverManager()
-
-        result = manager.update(
-            reference_samples=_reference(0.0, 2.0),
-            destination_state=[20.0, 0.0, 2.0, 0.0, 2],
-            decision="lane_change_right",
-            behavior_fsm_state="EXECUTE_LANE_CHANGE_RIGHT",
-            current_lane_id=1,
-            target_lane_id=2,
-            ego_x_m=0.0,
-            ego_y_m=0.0,
-            reference_source="locked_quintic_lane_change_reference",
-            route_current_option="CHANGELANERIGHT",
-            route_next_maneuver="Lane Change Right",
+        state = manager.begin_lane_change(
+            option="lane_change_right", phase="executing",
+            source_lane_id=1, target_lane_id=2, target_speed_mps=8.0,
+            completion_reference=[{"x_ref_m": 1.0, "y_ref_m": 2.0}],
         )
+        self.assertTrue(state.active)
+        self.assertEqual((state.source_lane_id, state.target_lane_id), (1, 2))
 
-        self.assertEqual(result.debug["maneuver_geometry_type"], "lane_change")
-
-    def test_lane_change_geometry_is_committed_once_across_source_and_lane_switch(self):
+    def test_progress_is_monotonic(self):
         manager = ManeuverManager()
-        initial = manager.update(
-            reference_samples=_reference(0.0, 2.0),
-            destination_state=[20.0, 0.0, 2.0, 0.0, 2],
-            decision="lane_change_right",
-            behavior_fsm_state="EXECUTE_LANE_CHANGE_RIGHT",
-            current_lane_id=1,
-            target_lane_id=2,
-            ego_x_m=0.0,
-            ego_y_m=0.0,
-            reference_source="lane_change_intent",
-            route_next_maneuver="Lane Change Right",
-        )
-        # The matcher has crossed onto the target lane and the upstream
-        # source label/geometry has changed.  Neither event may recommit XY.
-        shifted = manager.update(
-            reference_samples=_reference(3.0, 7.0),
-            destination_state=[20.0, 3.0, 7.0, 0.0, 2],
-            decision="lane_change",
-            behavior_fsm_state="TARGET_LANE_STABILIZATION",
-            current_lane_id=2,
-            target_lane_id=2,
-            ego_x_m=1.0,
-            ego_y_m=0.0,
-            reference_source="locked_target_lane_reference",
-            route_next_maneuver="Lane Change Right",
-            lane_change_commitment_active=True,
-        )
+        manager.begin_lane_change("lane_change_right", "executing", 1, 2, 8.0, [])
+        manager.advance_lane_change(progress=0.7, progress_index=12, progress_s_m=18.0)
+        state = manager.advance_lane_change(progress=0.4, progress_index=8, progress_s_m=10.0)
+        self.assertEqual((state.progress, state.progress_index, state.progress_s_m),
+                         (0.7, 12, 18.0))
 
+    def test_completion_and_abandonment_are_explicit(self):
+        manager = ManeuverManager()
+        manager.begin_lane_change("lane_change_left", "executing", 2, 1, 7.0, [])
+        self.assertTrue(manager.complete_lane_change("contract_satisfied"))
+        self.assertFalse(manager.lane_change.active)
+        self.assertEqual(manager.lane_change.completed_option, "lane_change_left")
+
+        manager.begin_lane_change("lane_change_right", "executing", 1, 2, 7.0, [])
+        self.assertTrue(manager.abandon_lane_change("route_changed"))
+        self.assertFalse(manager.lane_change.active)
+        self.assertNotEqual(manager.lane_change.completed_option, "lane_change_right")
+
+    def test_geometric_completion_is_latched_during_handoff(self):
+        manager = ManeuverManager()
+        manager.begin_lane_change(
+            "lane_change_right", "executing", 1, 2, 7.0, []
+        )
+        manager.begin_lane_change_stabilization()
+        manager.record_lane_change_completion_evidence(
+            5, {"reason": "converged"}, geometrically_complete=True
+        )
+        manager.record_lane_change_completion_evidence(
+            0, {"reason": "temporary_error"}, geometrically_complete=False
+        )
+        self.assertTrue(manager.lane_change.geometry_completion_latched)
+
+    def test_manager_is_lane_change_transition_owner(self):
+        manager = ManeuverManager()
+        manager.begin_lane_change(
+            "lane_change_left", "executing", 1, 2, 7.0, []
+        )
         self.assertEqual(
-            shifted.debug["maneuver_geometry_id"],
-            initial.debug["maneuver_geometry_id"],
+            manager.lane_change_handoff_transition(
+                geometry_ready=False
+            ).action,
+            "hold",
         )
-        self.assertEqual(shifted.debug["maneuver_geometry_revision"], 1)
-        self.assertFalse(shifted.debug["maneuver_geometry_source_changed"])
-        self.assertLess(abs(float(shifted.reference_samples[0]["y_ref_m"])), 0.1)
-        self.assertEqual(manager.active_plan.source_lane_id, 1)
-        self.assertEqual(manager.active_plan.target_lane_id, 2)
-
-    def test_extend_geometry_does_not_append_the_same_path_back_to_its_start(self):
-        geometry = ManeuverManager._extend_geometry(_reference(), _reference())
-
-        xs = [float(sample["x_ref_m"]) for sample in geometry]
-        self.assertEqual(len(xs), 20)
-        self.assertTrue(all(second > first for first, second in zip(xs, xs[1:])))
-
-    def test_keeps_one_owner_across_lane_change_stabilization_and_turn(self):
-        manager = ManeuverManager()
-        lane_change = manager.update(
-            reference_samples=_reference(0.0, 2.1),
-            destination_state=[20.0, 0.0, 2.1, 0.0, 2],
-            decision="lane_change_right",
-            behavior_fsm_state="EXECUTE_LANE_CHANGE_RIGHT",
-            current_lane_id=1,
-            target_lane_id=2,
-            ego_x_m=0.0,
-            ego_y_m=0.0,
-            reference_source="locked_quintic_lane_change_reference",
-            route_next_maneuver="RIGHT",
-        )
-        maneuver_id = lane_change.debug["maneuver_geometry_id"]
-
-        stabilization = manager.update(
-            reference_samples=_reference(1.0, 2.1),
-            destination_state=[20.0, 1.0, 2.1, 0.0, 2],
-            decision="lane_change_right",
-            behavior_fsm_state="TARGET_LANE_STABILIZATION",
-            current_lane_id=2,
-            target_lane_id=2,
-            ego_x_m=1.0,
-            ego_y_m=0.2,
-            reference_source="target_lane_stabilization_reference",
-            route_next_maneuver="RIGHT",
-        )
-        turn = manager.update(
-            reference_samples=_reference(2.0, 1.8),
-            destination_state=[20.0, 2.0, 1.8, 0.0, 2],
-            decision="intersection_turn_right",
-            behavior_fsm_state="INTERSECTION_TURN_RIGHT",
-            current_lane_id=2,
-            target_lane_id=2,
-            ego_x_m=2.0,
-            ego_y_m=0.5,
-            reference_source="carla_grp_waypoint_turn",
-            route_current_option="RIGHT",
-        )
-
-        self.assertEqual(stabilization.debug["maneuver_geometry_id"], maneuver_id)
-        self.assertEqual(turn.debug["maneuver_geometry_id"], maneuver_id)
-        self.assertEqual(turn.debug["maneuver_geometry_owner"], "ManeuverManager")
-        self.assertLess(
-            abs(stabilization.reference_samples[0]["y_ref_m"]),
-            0.5,
-        )
-
-    def test_stop_changes_velocity_without_replacing_geometry(self):
-        manager = ManeuverManager()
-        active = manager.update(
-            reference_samples=_reference(0.0, 2.0),
-            destination_state=[20.0, 0.0, 2.0, 0.0, 2],
-            decision="lane_change_right",
-            behavior_fsm_state="EXECUTE_LANE_CHANGE_RIGHT",
-            current_lane_id=1,
-            target_lane_id=2,
-            ego_x_m=0.0,
-            ego_y_m=0.0,
-            reference_source="lane_change",
-            route_next_maneuver="RIGHT",
-        )
-        stopped = manager.update(
-            reference_samples=_reference(3.0, 0.0),
-            destination_state=[5.0, 3.0, 0.0, 0.0, 2],
-            decision="stop_at_intersection",
-            behavior_fsm_state="LANE_KEEP",
-            current_lane_id=2,
-            target_lane_id=2,
-            ego_x_m=1.0,
-            ego_y_m=0.0,
-            reference_source="independent_stop_reference",
-            route_next_maneuver="RIGHT",
-            stop_goal_active=True,
-        )
-
         self.assertEqual(
-            stopped.debug["maneuver_geometry_id"],
-            active.debug["maneuver_geometry_id"],
+            manager.lane_change_handoff_transition(
+                geometry_ready=True
+            ).action,
+            "start_stabilization",
         )
-        self.assertTrue(all(
-            sample["speed_ref_mps"] == 0.0
-            for sample in stopped.reference_samples
-        ))
-        self.assertLess(abs(stopped.reference_samples[0]["y_ref_m"]), 0.1)
-
-    def test_releases_after_route_maneuver_is_complete(self):
-        manager = ManeuverManager()
-        manager.update(
-            reference_samples=_reference(),
-            destination_state=[20.0, 0.0, 2.0, 0.0, 2],
-            decision="intersection_turn_right",
-            behavior_fsm_state="INTERSECTION_TURN_RIGHT",
-            current_lane_id=2,
-            target_lane_id=2,
-            ego_x_m=0.0,
-            ego_y_m=0.0,
-            reference_source="turn",
-            route_current_option="RIGHT",
-        )
-        released = manager.update(
-            reference_samples=_reference(),
-            destination_state=[20.0, 0.0, 2.0, 0.0, 2],
-            decision="lane_follow",
-            behavior_fsm_state="LANE_KEEP",
-            current_lane_id=2,
-            target_lane_id=2,
-            ego_x_m=10.0,
-            ego_y_m=0.0,
-            reference_source="lane_follow",
-            route_current_option="LANEFOLLOW",
-            route_next_maneuver="",
-        )
-
-        self.assertFalse(released.debug["maneuver_geometry_active"])
-        self.assertEqual(manager.active_plan, None)
-
-    def test_lane_change_macro_releases_stale_intersection_geometry(self):
-        manager = ManeuverManager()
-        turn = manager.update(
-            reference_samples=_reference(),
-            destination_state=[20.0, 0.0, 2.0, 0.0, 1],
-            decision="intersection_turn_left",
-            behavior_fsm_state="INTERSECTION_TURN_LEFT",
-            current_lane_id=1,
-            target_lane_id=1,
-            ego_x_m=0.0,
-            ego_y_m=0.0,
-            reference_source="turn",
-            route_current_option="LEFT",
-            route_next_maneuver="Turn Left",
-        )
-        released = manager.update(
-            reference_samples=_reference(1.0),
-            destination_state=[20.0, 1.0, 2.0, 0.0, 1],
-            decision="lane_follow",
-            behavior_fsm_state="LANE_KEEP",
-            current_lane_id=1,
-            target_lane_id=1,
-            ego_x_m=5.0,
-            ego_y_m=0.0,
-            reference_source="lane_follow",
-            # CARLA can still report LEFT while AD-map has advanced.
-            route_current_option="LEFT",
-            route_next_maneuver="Lane Change Right",
-        )
-
-        self.assertTrue(turn.debug["maneuver_geometry_active"])
-        self.assertFalse(released.debug["maneuver_geometry_active"])
+        manager.begin_lane_change_stabilization()
         self.assertEqual(
-            released.debug["maneuver_geometry_release_reason"],
-            "route_advanced_to_lane_change",
+            manager.tick_lane_change_stabilization(timeout_frames=2).action,
+            "hold",
         )
-        self.assertIsNone(manager.active_plan)
 
-    def test_exit_stabilization_keeps_turn_geometry_after_route_advances(self):
+    def test_completion_waits_for_transition_arc(self):
         manager = ManeuverManager()
-        turn = manager.update(
-            reference_samples=_reference(),
-            destination_state=[20.0, 0.0, 2.0, 0.0, 1],
-            decision="intersection_turn_left",
-            behavior_fsm_state="INTERSECTION_TURN_LEFT",
-            current_lane_id=1,
-            target_lane_id=1,
-            ego_x_m=0.0,
-            ego_y_m=0.0,
-            reference_source="turn",
-            route_current_option="LEFT",
-            route_next_maneuver="Turn Left",
+        manager.begin_lane_change(
+            "lane_change_left", "executing", 1, 2, 7.0, []
         )
-        held = manager.update(
-            reference_samples=_reference(0.2),
-            destination_state=[20.0, 0.2, 2.0, 0.0, 1],
-            decision="intersection_turn_left",
-            behavior_fsm_state="INTERSECTION_TURN_LEFT",
-            current_lane_id=1,
-            target_lane_id=1,
-            ego_x_m=5.0,
-            ego_y_m=0.0,
-            reference_source="turn_exit_stabilization",
-            route_current_option="LaneFollow",
-            route_next_maneuver="Lane Change Right",
+        manager.begin_lane_change_stabilization()
+        waiting = manager.accept_lane_change_completion(
+            stable_frames=5,
+            debug={},
+            geometrically_complete=True,
+            completion_reason="converged",
+            transition_progress_m=4.0,
+            transition_arc_m=10.0,
+        )
+        complete = manager.accept_lane_change_completion(
+            stable_frames=6,
+            debug={},
+            geometrically_complete=True,
+            completion_reason="converged",
+            transition_progress_m=10.0,
+            transition_arc_m=10.0,
         )
 
-        self.assertTrue(turn.debug["maneuver_geometry_active"])
-        self.assertTrue(held.debug["maneuver_geometry_active"])
-        self.assertEqual(
-            held.debug["maneuver_geometry_id"],
-            turn.debug["maneuver_geometry_id"],
-        )
-        self.assertIsNotNone(manager.active_plan)
+        self.assertEqual(waiting.action, "hold")
+        self.assertEqual(waiting.reason, "transition_arc_incomplete")
+        self.assertEqual(complete.action, "complete")
+        self.assertTrue(manager.lane_change.active)
 
-    def test_retained_turn_continuation_uses_owned_geometry_and_new_speed(self):
+    def test_post_turn_phase_has_no_geometry_interface(self):
         manager = ManeuverManager()
-        manager.update(
-            reference_samples=_reference(0.5, 2.0),
-            destination_state=[20.0, 0.5, 2.0, 0.0, 1],
-            decision="intersection_turn_left",
-            behavior_fsm_state="INTERSECTION_TURN_LEFT",
-            current_lane_id=1,
-            target_lane_id=1,
-            ego_x_m=0.0,
-            ego_y_m=0.0,
-            reference_source="turn",
-            route_current_option="LEFT",
-        )
+        manager.turn.decision = "intersection_turn_right"
+        manager.turn.phase = "turn"
+        action = manager.resolve_post_turn_phase(
+            "lane_follow", "LANE_FOLLOW", True, False, 0.0, 12.0, False)
+        self.assertEqual(action, "activate")
+        self.assertEqual(manager.turn.phase, "post_turn")
+        self.assertFalse(hasattr(manager, "update"))
+        self.assertFalse(hasattr(manager, "active_plan"))
 
-        continuation = manager.retained_turn_continuation(
-            ego_x_m=5.0,
-            ego_y_m=0.5,
-            target_speed_mps=5.0,
-            count=8,
-        )
-
-        self.assertTrue(continuation)
-        self.assertLessEqual(len(continuation), 8)
-        self.assertTrue(all(
-            float(sample["speed_ref_mps"]) == 5.0
-            for sample in continuation
-        ))
-        self.assertGreaterEqual(float(continuation[0]["x_ref_m"]), 5.0)
-
-    def test_retained_turn_continuation_rejects_non_turn_owner(self):
+    def test_post_turn_releases_only_after_distance_and_alignment(self):
         manager = ManeuverManager()
-        manager.update(
-            reference_samples=_reference(0.0, 2.0),
-            destination_state=[20.0, 0.0, 2.0, 0.0, 2],
-            decision="lane_change_right",
-            behavior_fsm_state="EXECUTE_LANE_CHANGE_RIGHT",
-            current_lane_id=1,
-            target_lane_id=2,
-            ego_x_m=0.0,
-            ego_y_m=0.0,
-            reference_source="lane_change",
-        )
+        manager.turn.decision = "intersection_turn_left"
+        manager.turn.phase = "post_turn"
+        self.assertEqual(manager.resolve_post_turn_phase(
+            "lane_follow", "LANE_FOLLOW", False, True, 6.0, 12.0, True), "hold")
+        self.assertEqual(manager.resolve_post_turn_phase(
+            "lane_follow", "LANE_FOLLOW", False, True, 12.0, 12.0, True), "complete")
+        self.assertFalse(manager.turn.active)
 
-        self.assertEqual(
-            manager.retained_turn_continuation(
-                ego_x_m=2.0,
-                ego_y_m=0.0,
-                target_speed_mps=3.0,
-                count=8,
-            ),
-            [],
-        )
-
-    def test_completed_commitment_releases_lane_change_even_if_macro_lags(self):
+    def test_new_lane_change_requires_geometry_and_handoff_before_turn(self):
         manager = ManeuverManager()
-        manager.update(
-            reference_samples=_reference(),
-            destination_state=[20.0, 0.0, 2.0, 0.0, 1],
-            decision="lane_change_right",
-            behavior_fsm_state="EXECUTE_LANE_CHANGE_RIGHT",
-            current_lane_id=1,
-            target_lane_id=1,
-            ego_x_m=0.0,
-            ego_y_m=0.0,
-            reference_source="locked_lane_change",
-            route_next_maneuver="Lane Change Right",
-            lane_change_commitment_active=True,
+
+        denied = manager.lane_change_start_feasibility(
+            authorization_allowed=True,
+            distance_to_turn_m=7.76,
+            geometry_arc_m=10.0,
+            handoff_arc_m=10.0,
         )
-        released = manager.update(
-            reference_samples=_reference(),
-            destination_state=[20.0, 0.0, 2.0, 0.0, 1],
-            decision="lane_follow",
-            behavior_fsm_state="LANE_KEEP",
-            current_lane_id=1,
-            target_lane_id=1,
-            ego_x_m=10.0,
-            ego_y_m=0.0,
-            reference_source="lane_follow",
-            route_next_maneuver="Lane Change Right",
-            lane_change_commitment_active=False,
+        allowed = manager.lane_change_start_feasibility(
+            authorization_allowed=True,
+            distance_to_turn_m=24.0,
+            geometry_arc_m=10.0,
+            handoff_arc_m=10.0,
         )
 
-        self.assertFalse(released.debug["maneuver_geometry_active"])
-        self.assertEqual(
-            released.debug["maneuver_geometry_release_reason"],
-            "lane_change_commitment_complete",
+        self.assertEqual(denied.action, "deny")
+        self.assertIn("required_lane_change_no_longer_feasible", denied.reason)
+        self.assertEqual(allowed.action, "allow")
+
+    def test_turn_ownership_atomically_releases_lane_change(self):
+        manager = ManeuverManager()
+        manager.begin_lane_change(
+            "lane_change_right", "target_lane_stabilization",
+            340155, 340154, 2.2, [],
         )
 
+        transition = manager.transfer_lateral_ownership_to_turn(
+            owner_state="INTERSECTION_TURN"
+        )
 
-class ApplyVelocityProfileTests(unittest.TestCase):
-    """`geometry` (the persisted maneuver window) and `incoming` (this
-    tick's freshly planned speed profile) are very often different
-    lengths. Speed must follow each geometry sample's own
-    lane_change_progress, not the array offset it happens to sit at."""
+        self.assertEqual(transition.action, "release")
+        self.assertFalse(manager.lane_change.active)
+        self.assertEqual(manager.last_release["outcome"], "abandoned")
+        self.assertIn("intersection_turn", manager.last_release["reason"])
 
-    @staticmethod
-    def _geometry(progress_values):
-        return [
-            {
-                "x_ref_m": float(index),
-                "y_ref_m": 0.0,
-                "lane_change_progress": float(progress),
-            }
-            for index, progress in enumerate(progress_values)
-        ]
+    def test_lane_follow_does_not_release_active_lane_change(self):
+        manager = ManeuverManager()
+        manager.begin_lane_change(
+            "lane_change_right", "executing", 1, 2, 3.0, []
+        )
 
-    @staticmethod
-    def _speed_source(progress_speed_pairs):
-        return [
-            {"lane_change_progress": float(progress), "speed_ref_mps": float(speed)}
-            for progress, speed in progress_speed_pairs
-        ]
+        transition = manager.transfer_lateral_ownership_to_turn(
+            owner_state="LANE_FOLLOW"
+        )
 
-    def test_matches_by_progress_when_incoming_is_shorter_than_geometry(self):
-        geometry = self._geometry([0.0, 0.25, 0.5, 0.75, 1.0])
-        incoming = self._speed_source([(0.0, 1.0), (1.0, 9.0)])
+        self.assertEqual(transition.action, "hold")
+        self.assertTrue(manager.lane_change.active)
 
-        result = ManeuverManager._apply_velocity_profile(geometry, incoming)
+    def test_completed_route_edge_cannot_be_recommitted_until_cursor_advances(self):
+        manager = ManeuverManager()
+        first_edge = "7:lane_change:10-11:right:500144-540156"
+        next_edge = "7:lane_change:30-31:right:540156-540155"
+        manager.observe_route_lane_change_edge(first_edge)
+        manager.begin_lane_change(
+            "lane_change_right", "executing", 500144, 540156, 7.0, []
+        )
 
-        speeds = [float(sample["speed_ref_mps"]) for sample in result]
-        # Early-maneuver points (progress 0.25, 0.5) must stay near the
-        # early speed (1.0) -- plain index alignment would instead clamp
-        # to incoming[-1] (9.0, the terminal speed) starting at index 1.
-        self.assertEqual(speeds, [1.0, 1.0, 1.0, 9.0, 9.0])
+        self.assertTrue(manager.complete_lane_change("contract_satisfied"))
+        self.assertTrue(manager.route_lane_change_edge_completed)
 
-    def test_falls_back_to_index_alignment_without_progress_tags(self):
-        geometry = [
-            {"x_ref_m": float(index), "y_ref_m": 0.0} for index in range(4)
-        ]
-        incoming = [{"speed_ref_mps": 3.0}, {"speed_ref_mps": 6.0}]
+        # Re-observing the same topology edge must not make it executable
+        # again merely because its direction is also "right".
+        manager.observe_route_lane_change_edge(first_edge)
+        self.assertTrue(manager.route_lane_change_edge_completed)
 
-        result = ManeuverManager._apply_velocity_profile(geometry, incoming)
-
-        speeds = [float(sample["speed_ref_mps"]) for sample in result]
-        self.assertEqual(speeds, [3.0, 6.0, 6.0, 6.0])
-
-    def test_empty_incoming_zeros_speed(self):
-        geometry = self._geometry([0.0, 0.5, 1.0])
-
-        result = ManeuverManager._apply_velocity_profile(geometry, [])
-
-        self.assertTrue(all(float(s["speed_ref_mps"]) == 0.0 for s in result))
+        # A later edge has a distinct identity and is therefore eligible.
+        manager.observe_route_lane_change_edge(next_edge)
+        self.assertFalse(manager.route_lane_change_edge_completed)
+        self.assertEqual(manager.lane_change.completed_option, "")
 
 
 if __name__ == "__main__":

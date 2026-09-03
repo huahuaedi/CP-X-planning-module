@@ -22,6 +22,61 @@ CURVATURE_EVAL_ARC_M = 1.5
 Point = Tuple[float, float]
 
 
+def align_parallel_reference(
+    source_reference: Sequence[Mapping[str, object]],
+    target_reference: Sequence[Mapping[str, object]],
+) -> List[dict]:
+    """Align an adjacent-lane centerline to monotonic source stations."""
+    source = [dict(sample) for sample in list(source_reference or [])]
+    target = [dict(sample) for sample in list(target_reference or [])]
+    if not source or not target:
+        return target
+    aligned = []
+    target_index = 0
+    for source_index, source_sample in enumerate(source):
+        sx = float(source_sample.get("x_ref_m", source_sample.get("x", 0.0)))
+        sy = float(source_sample.get("y_ref_m", source_sample.get("y", 0.0)))
+        search_end = min(len(target), target_index + 8)
+        target_index = max(
+            target_index,
+            min(
+                range(target_index, search_end),
+                key=lambda index: (
+                    (
+                        float(target[index].get(
+                            "x_ref_m", target[index].get("x", 0.0)
+                        )) - sx
+                    ) ** 2
+                    + (
+                        float(target[index].get(
+                            "y_ref_m", target[index].get("y", 0.0)
+                        )) - sy
+                    ) ** 2
+                ),
+            ),
+        )
+        matched = dict(target[target_index])
+        tx = float(matched.get("x_ref_m", matched.get("x", sx)))
+        ty = float(matched.get("y_ref_m", matched.get("y", sy)))
+        previous = source[max(0, source_index - 1)]
+        following = source[min(len(source) - 1, source_index + 1)]
+        tangent_x = float(
+            following.get("x_ref_m", following.get("x", sx))
+        ) - float(previous.get("x_ref_m", previous.get("x", sx)))
+        tangent_y = float(
+            following.get("y_ref_m", following.get("y", sy))
+        ) - float(previous.get("y_ref_m", previous.get("y", sy)))
+        tangent_norm = max(1.0e-6, math.hypot(tangent_x, tangent_y))
+        normal_x, normal_y = -tangent_y / tangent_norm, tangent_x / tangent_norm
+        lateral_offset = (tx - sx) * normal_x + (ty - sy) * normal_y
+        matched["x_ref_m"] = sx + lateral_offset * normal_x
+        matched["y_ref_m"] = sy + lateral_offset * normal_y
+        matched["x"] = float(matched["x_ref_m"])
+        matched["y"] = float(matched["y_ref_m"])
+        aligned.append(matched)
+    return aligned
+
+
 @dataclass(frozen=True)
 class ReferenceLinePoint:
     """One point on a metric, arc-length parameterized reference line."""
@@ -211,6 +266,16 @@ def frenet_lane_change_path(
             "progress_m": point.s_m,
             "frenet_d_m": offsets[min(i, len(offsets) - 1)],
             "lane_change_progress": p,
+            "lane_change_source_x_m": reference_line.points[i].x_m,
+            "lane_change_source_y_m": reference_line.points[i].y_m,
+            "lane_change_target_x_m": (
+                target_points[min(i, len(target_points) - 1)].x_m
+                if target_points else point.x_m
+            ),
+            "lane_change_target_y_m": (
+                target_points[min(i, len(target_points) - 1)].y_m
+                if target_points else point.y_m
+            ),
             "lane_transition_kind": "lateral_lane_change",
             "lane_id": int(target_lane_id if p >= 0.5 else reference_line.points[0].lane_id),
             "lane_width_m": point.lane_width_m,
@@ -221,6 +286,53 @@ def frenet_lane_change_path(
             "v_ref_mps": max(0.0, float(target_speed_mps)),
             "speed_mps": max(0.0, float(target_speed_mps)),
         })
+    # The source corridor can end at a longitudinal segment boundary before
+    # the target corridor does.  Once d(s) has reached one, geometry belongs
+    # to the target centerline; retain its remaining points as post-transition
+    # continuation so the immutable master cannot expire before completion is
+    # observed on the vehicle.
+    if target_points and out and progress[min(count - 1, len(progress) - 1)] >= 1.0 - 1e-6:
+        station = float(out[-1]["s_ref_m"])
+        # ``count`` is bounded by the shaped/source lines, not by the target
+        # line.  A target corridor can legitimately end first at an AD-map
+        # segment boundary.  Clamp the seed index to that independent line;
+        # using ``count - 1`` directly caused an IndexError throughout the
+        # blocked-lane maneuver preparation window.
+        previous = target_points[min(len(target_points) - 1, max(0, count - 1))]
+        for target_point in target_points[count:]:
+            station += math.hypot(
+                target_point.x_m - previous.x_m,
+                target_point.y_m - previous.y_m,
+            )
+            virtual_source_x = target_point.x_m + math.sin(
+                target_point.heading_rad
+            ) * float(lateral_offset_m)
+            virtual_source_y = target_point.y_m - math.cos(
+                target_point.heading_rad
+            ) * float(lateral_offset_m)
+            out.append({
+                "x_ref_m": target_point.x_m, "y_ref_m": target_point.y_m,
+                "x": target_point.x_m, "y": target_point.y_m,
+                "heading_rad": target_point.heading_rad,
+                "curvature_1pm": target_point.curvature_1pm,
+                "s_ref_m": station, "progress_m": station,
+                "frenet_d_m": float(lateral_offset_m),
+                "lane_change_progress": 1.0,
+                "lane_change_source_x_m": virtual_source_x,
+                "lane_change_source_y_m": virtual_source_y,
+                "lane_change_target_x_m": target_point.x_m,
+                "lane_change_target_y_m": target_point.y_m,
+                "lane_transition_kind": "lateral_lane_change",
+                "lane_id": int(target_lane_id),
+                "lane_width_m": target_point.lane_width_m,
+                "corridor_center_x_m": target_point.x_m,
+                "corridor_center_y_m": target_point.y_m,
+                "corridor_heading_rad": target_point.heading_rad,
+                "speed_ref_mps": max(0.0, float(target_speed_mps)),
+                "v_ref_mps": max(0.0, float(target_speed_mps)),
+                "speed_mps": max(0.0, float(target_speed_mps)),
+            })
+            previous = target_point
     return out
 
 
@@ -293,6 +405,52 @@ def _heading_at_arc(seg_headings: Sequence[float], seg_cum: Sequence[float], s: 
         else:
             hi = mid
     return seg_headings[lo]
+
+
+def backward_window_curvature_profile_1pm(
+    polyline: Sequence[object],
+    *,
+    eval_arc_m: float = CURVATURE_EVAL_ARC_M,
+) -> List[float]:
+    """Causal per-step curvature (1/m), one value per interior segment.
+
+    At each segment boundary, widen *backward* until >= ``eval_arc_m`` of
+    real arc has accumulated (or the polyline runs out), then measure the
+    heading change across that span. Unlike ``curvature_profile_1pm`` (a
+    centred, arc-resampled profile for offline route analysis, which can look
+    ahead of any given point), this never looks past the current sample --
+    the shape a per-tick safety contract or a candidate's own comfort-cost
+    walk needs, since both evaluate a reference forward, one sample at a
+    time. Output is aligned to the input: entry ``i`` is the curvature
+    arriving at the (i+1)-th polyline point. This was the same backward-
+    window loop written out three times (reference_contract.py,
+    reference_generator.py, candidate_pipeline.py) after the low-speed
+    curvature blow-up fix; this is the one implementation.
+    """
+    points = to_points(polyline)
+    seg_headings, seg_lengths = _segment_headings(points)
+    window_m = max(1.0e-3, float(eval_arc_m))
+    profile: List[float] = []
+    for end_index in range(1, len(seg_headings)):
+        arc_m = float(seg_lengths[end_index])
+        start_index = end_index - 1
+        while start_index > 0 and arc_m < window_m:
+            arc_m += float(seg_lengths[start_index])
+            start_index -= 1
+        span_m = max(0.5 * window_m, arc_m)
+        delta = abs(_wrap(seg_headings[end_index] - seg_headings[start_index]))
+        profile.append(delta / span_m)
+    return profile
+
+
+def backward_window_max_curvature_1pm(
+    polyline: Sequence[object],
+    *,
+    eval_arc_m: float = CURVATURE_EVAL_ARC_M,
+) -> float:
+    """Largest causal backward-window curvature on the polyline (0.0 if too short)."""
+    profile = backward_window_curvature_profile_1pm(polyline, eval_arc_m=eval_arc_m)
+    return max(profile) if profile else 0.0
 
 
 def curvature_profile_1pm(
@@ -404,12 +562,16 @@ def project_to_polyline(
     y_m: float,
     *,
     s_lower_m: float = 0.0,
+    s_upper_m: float | None = None,
 ) -> Tuple[float, float]:
     """Project ``(x, y)`` onto the polyline.
 
     Returns ``(s_m, lateral_m)`` -- arc length of the foot point and the signed
     perpendicular offset (left of travel positive). ``s_lower_m`` restricts the
     search to arc lengths >= that value so route progress stays monotonic.
+    ``s_upper_m`` optionally provides the matching window's forward boundary;
+    this prevents a spatially nearby later branch from teleporting a persistent
+    route cursor forward on self-near/overlapping topology.
     """
     points = to_points(polyline)
     if len(points) < 2:
@@ -418,9 +580,16 @@ def project_to_polyline(
     best_s = float(s_lower_m)
     best_lat = 0.0
     best_d2 = float("inf")
+    upper = (
+        max(float(s_lower_m), float(s_upper_m))
+        if s_upper_m is not None
+        else float("inf")
+    )
     for i in range(len(points) - 1):
         if cum[i + 1] <= s_lower_m:
             continue
+        if cum[i] >= upper:
+            break
         ax, ay = points[i]
         bx, by = points[i + 1]
         dx, dy = bx - ax, by - ay
@@ -431,7 +600,10 @@ def project_to_polyline(
         t = ((x_m - ax) * dx + (y_m - ay) * dy) / seg2
         # keep the foot point at arc length >= s_lower_m (monotonic progress)
         t_min = max(0.0, (s_lower_m - cum[i]) / seg_len) if seg_len > 1.0e-9 else 0.0
-        t = min(1.0, max(t_min, t))
+        t_max = min(1.0, (upper - cum[i]) / seg_len) if math.isfinite(upper) else 1.0
+        if t_min > t_max:
+            continue
+        t = min(t_max, max(t_min, t))
         fx, fy = ax + dx * t, ay + dy * t
         d2 = (x_m - fx) ** 2 + (y_m - fy) ** 2
         if d2 < best_d2:

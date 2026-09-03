@@ -285,12 +285,11 @@ def _route_adapter(*, waypoints, route_xy):
     deltas = np.diff(planner._stored_route_xy, axis=0)
     segment_lengths = np.linalg.norm(deltas, axis=1)
     planner._stored_route_cum_dists = np.concatenate(([0.0], np.cumsum(segment_lengths)))
-    planner._query_indices = {}
     return planner
 
 
 class ADMapRouteProgressTests(unittest.TestCase):
-    def test_progress_does_not_jump_to_spatially_close_distant_route_segment(self):
+    def test_global_planner_nearest_query_is_stateless_geometry_only(self):
         planner = object.__new__(CustomGlobalPlannerAdapter)
         first_leg = [[float(index), 0.0] for index in range(50)]
         distant_leg = [[10.1 + float(index), 0.0] for index in range(50)]
@@ -300,12 +299,10 @@ class ADMapRouteProgressTests(unittest.TestCase):
             np.asarray([0.0]),
             np.cumsum(np.linalg.norm(deltas, axis=1)),
         ))
-        planner._query_indices = {"ego": 10}
-
         index = planner._nearest_stored_route_index(10.1, 0.0, "ego")
 
-        self.assertLess(index, 20)
-        self.assertGreaterEqual(index, 10)
+        self.assertEqual(index, 50)
+        self.assertFalse(hasattr(planner, "_query_indices"))
 
 
 if __name__ == "__main__":

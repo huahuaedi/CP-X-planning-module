@@ -570,6 +570,7 @@ class GlobalPlanner:
         lane_id = int(lane_id)
         lane_data = self._lane_cache[lane_id]
         point_enu = enu_position or backend.sample_lane_center_at_offset(lane_id, parametric_offset)
+        boundaries = backend.get_lane_boundaries_enu(lane_id, parametric_offset)
         return Waypoint(
             position=to_carla_dict(point_enu),
             enu_position=point_enu,
@@ -583,6 +584,12 @@ class GlobalPlanner:
             lane_width_m=backend.get_lane_width_m(lane_id, parametric_offset),
             is_intersection=lane_data["is_intersection"],
             _planner=self,
+            left_boundary_position=(
+                to_carla_dict(boundaries[0]) if boundaries is not None else None
+            ),
+            right_boundary_position=(
+                to_carla_dict(boundaries[1]) if boundaries is not None else None
+            ),
         )
 
     def _find_shortest_route(

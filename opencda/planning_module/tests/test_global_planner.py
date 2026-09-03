@@ -13,7 +13,6 @@ from utility.global_planner import (
     WaypointNode,
 )
 from utility.carla_lane_graph import (
-    StableLaneIdTracker,
     canonical_lane_id_for_waypoint,
     canonical_lane_ids_for_waypoint,
     canonical_lane_waypoint_for_lane_id,
@@ -579,7 +578,7 @@ class LaneContextConsistencyTests(unittest.TestCase):
         self.assertIs(canonical_lane_waypoint_for_lane_id(right_wp, 2), left_wp)
 
     def test_canonical_lane_id_renumbers_the_same_physical_lane_when_lane_count_drops(self):
-        """Documents the bug lane_hop_offset/StableLaneIdTracker fix below:
+        """Documents why local CARLA lane recounting is not an AD-map identity:
         canonical_lane_id_for_waypoint() counts lanes locally, so the same
         physical lane (unchanged raw road_id/lane_id) gets a different
         number depending on how many lanes exist at the query point.
@@ -626,106 +625,6 @@ class LaneContextConsistencyTests(unittest.TestCase):
         other_road = _DummyWaypoint(road_id=2, section_id=0, lane_id=1, x_m=100.0, y_m=100.0)
 
         self.assertIsNone(lane_hop_offset(this_road, other_road))
-
-    def test_stable_lane_id_tracker_preserves_identity_across_local_renumbering(self):
-        wp_a_lane1 = _DummyWaypoint(road_id=1, section_id=0, lane_id=1, x_m=0.0, y_m=0.0)
-        wp_a_lane2 = _DummyWaypoint(road_id=1, section_id=0, lane_id=2, x_m=0.0, y_m=3.5)
-        wp_a_lane3 = _DummyWaypoint(road_id=1, section_id=0, lane_id=3, x_m=0.0, y_m=7.0)
-        wp_a_lane1.set_neighbors(left=wp_a_lane2)
-        wp_a_lane2.set_neighbors(left=wp_a_lane3, right=wp_a_lane1)
-        wp_a_lane3.set_neighbors(right=wp_a_lane2)
-
-        wp_b_lane2 = _DummyWaypoint(road_id=1, section_id=1, lane_id=2, x_m=50.0, y_m=3.5)
-        wp_b_lane3 = _DummyWaypoint(road_id=1, section_id=1, lane_id=3, x_m=50.0, y_m=7.0)
-        wp_b_lane2.set_neighbors(left=wp_b_lane3)
-        wp_b_lane3.set_neighbors(right=wp_b_lane2)
-
-        tracker = StableLaneIdTracker()
-        first = tracker.update(wp_a_lane2)
-        second = tracker.update(wp_b_lane2)
-
-        self.assertEqual(first, 2)
-        # Without the tracker, the raw recount at wp_b_lane2 would report 1
-        # (see test_canonical_lane_id_renumbers_...) even though the vehicle
-        # never changed lanes.
-        self.assertEqual(second, 2)
-
-    def test_stable_lane_id_tracker_starts_fresh_after_an_unconnected_jump(self):
-        old_road = _DummyWaypoint(road_id=1, section_id=0, lane_id=2, x_m=0.0, y_m=3.5)
-        new_road_lane1 = _DummyWaypoint(road_id=9, section_id=0, lane_id=1, x_m=200.0, y_m=200.0)
-        new_road_lane2 = _DummyWaypoint(road_id=9, section_id=0, lane_id=2, x_m=200.0, y_m=203.5)
-        new_road_lane1.set_neighbors(left=new_road_lane2)
-        new_road_lane2.set_neighbors(right=new_road_lane1)
-
-        tracker = StableLaneIdTracker()
-        tracker.update(old_road)
-        after_turn = tracker.update(new_road_lane2)
-
-        self.assertEqual(after_turn, 2)
-
-    def test_stable_lane_id_tracker_reports_discontinuity_on_unconnected_jump(self):
-        old_road_right = _DummyWaypoint(road_id=1, section_id=0, lane_id=1, x_m=0.0, y_m=0.0)
-        old_road = _DummyWaypoint(road_id=1, section_id=0, lane_id=2, x_m=0.0, y_m=3.5)
-        old_road_right.set_neighbors(left=old_road)
-        old_road.set_neighbors(right=old_road_right)
-        new_road = _DummyWaypoint(road_id=9, section_id=0, lane_id=1, x_m=200.0, y_m=200.0)
-
-        events = []
-        tracker = StableLaneIdTracker(discontinuity_confirm_frames=1)
-        tracker.update(old_road, on_discontinuity=lambda **kwargs: events.append(kwargs))
-        tracker.update(new_road, on_discontinuity=lambda **kwargs: events.append(kwargs))
-
-        self.assertEqual(len(events), 1)
-        self.assertIs(events[0]["previous_waypoint"], old_road)
-        self.assertEqual(events[0]["previous_lane_id"], 2)
-        self.assertIs(events[0]["new_waypoint"], new_road)
-
-    def test_stable_lane_id_tracker_debounces_transient_road_projection_flip(self):
-        road_a = _DummyWaypoint(road_id=1, section_id=0, lane_id=-5, x_m=0.0, y_m=0.0)
-        connector = _DummyWaypoint(road_id=9, section_id=0, lane_id=1, x_m=0.1, y_m=0.0)
-        tracker = StableLaneIdTracker(discontinuity_confirm_frames=3)
-
-        self.assertEqual(tracker.update(road_a), 1)
-        self.assertEqual(tracker.update(connector), 1)
-        # CARLA projects back to the original road on the next tick: no
-        # externally visible 1<->2-style identity flip and no re-anchor.
-        self.assertEqual(tracker.update(road_a), 1)
-        self.assertIs(tracker._waypoint, road_a)
-
-    def test_stable_lane_id_tracker_reanchors_persistent_road_transition(self):
-        old_right = _DummyWaypoint(road_id=1, section_id=0, lane_id=1, x_m=0.0, y_m=0.0)
-        old_lane = _DummyWaypoint(road_id=1, section_id=0, lane_id=2, x_m=0.0, y_m=3.5)
-        old_right.set_neighbors(left=old_lane)
-        old_lane.set_neighbors(right=old_right)
-        new_lane = _DummyWaypoint(road_id=9, section_id=0, lane_id=1, x_m=1.0, y_m=3.5)
-        tracker = StableLaneIdTracker(discontinuity_confirm_frames=3)
-
-        self.assertEqual(tracker.update(old_lane), 2)
-        self.assertEqual(tracker.update(new_lane), 2)
-        self.assertEqual(tracker.update(new_lane), 2)
-        self.assertEqual(tracker.update(new_lane), 1)
-
-    def test_stable_lane_id_tracker_does_not_report_discontinuity_on_first_update(self):
-        first_waypoint = _DummyWaypoint(road_id=1, section_id=0, lane_id=1, x_m=0.0, y_m=0.0)
-
-        events = []
-        tracker = StableLaneIdTracker()
-        tracker.update(first_waypoint, on_discontinuity=lambda **kwargs: events.append(kwargs))
-
-        self.assertEqual(events, [])
-
-    def test_stable_lane_id_tracker_does_not_report_discontinuity_on_normal_hop(self):
-        right_wp = _DummyWaypoint(road_id=1, section_id=0, lane_id=1, x_m=0.0, y_m=0.0)
-        left_wp = _DummyWaypoint(road_id=1, section_id=0, lane_id=2, x_m=3.5, y_m=0.0)
-        right_wp.set_neighbors(left=left_wp)
-        left_wp.set_neighbors(right=right_wp)
-
-        events = []
-        tracker = StableLaneIdTracker()
-        tracker.update(right_wp, on_discontinuity=lambda **kwargs: events.append(kwargs))
-        tracker.update(left_wp, on_discontinuity=lambda **kwargs: events.append(kwargs))
-
-        self.assertEqual(events, [])
 
     def test_local_lane_context_uses_heading_to_pick_same_direction_lane(self):
         planner = object.__new__(AStarGlobalPlanner)

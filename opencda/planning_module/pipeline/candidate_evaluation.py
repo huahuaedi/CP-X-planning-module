@@ -81,6 +81,7 @@ def _candidate_cost(
     route_deviation_weight: float,
     lane_change_weight: float,
     mpc_feedback_weight: float,
+    lane_progress_costs: Optional[Mapping[int, float]],
 ) -> Tuple[bool, Dict[str, float], str]:
     lane_score = max(0.0, min(1.0, float(lane_safety_scores.get(int(target_lane_id), 0.0))))
     prediction_risk = _risk_for_lane(lane_prediction_risks, int(target_lane_id))
@@ -93,12 +94,19 @@ def _candidate_cost(
     route_lane_id = int(route_optimal_lane_id or 0)
     route_distance = 0.0 if route_lane_id == 0 else abs(int(target_lane_id) - int(route_lane_id))
     lane_change_distance = 0.0 if int(target_lane_id) == int(source_lane_id) else abs(int(target_lane_id) - int(source_lane_id))
+    collision_probability = max(
+        0.0, min(1.0, float(prediction_risk.get("collision_probability", 1.0 if prediction_blocked else 0.0) or 0.0))
+    )
     cost_terms = {
         "safety_cost": float(safety_weight) * (1.0 - float(lane_score)),
-        "prediction_risk_cost": float(prediction_risk_weight) if prediction_blocked else 0.0,
+        "prediction_risk_cost": float(prediction_risk_weight) * float(collision_probability),
         "route_deviation_cost": float(route_deviation_weight) * float(route_distance),
         "lane_change_cost": float(lane_change_weight) * float(lane_change_distance),
         "mpc_feedback_cost": float(mpc_feedback_weight) if bool(mpc_feedback_blocked) else 0.0,
+        "progress_cost": max(
+            0.0,
+            float((lane_progress_costs or {}).get(int(target_lane_id), 0.0)),
+        ),
     }
     feasible = not bool(prediction_blocked or mpc_feedback_blocked)
     if prediction_blocked:
@@ -125,10 +133,39 @@ def evaluate_behavior_candidates(
     lane_change_weight: float = 1.0,
     mpc_feedback_blocked_lane_ids: Optional[Sequence[int]] = None,
     mpc_feedback_weight: float = 80.0,
+    nearest_front_obstacles_by_lane: Optional[
+        Mapping[int, Mapping[str, object]]
+    ] = None,
+    desired_speed_mps: float = 0.0,
+    progress_cost_weight: float = 4.0,
+    current_lane_unsafe_threshold: float = 0.5,
 ) -> CandidateEvaluationFrame:
     """Evaluate lane-level behavior candidates for one planning tick."""
 
     del mode
+    lane_progress_costs: Dict[int, float] = {}
+    normalized_desired_speed_mps = max(1.0, float(desired_speed_mps))
+    normalized_progress_weight = max(0.0, float(progress_cost_weight))
+    for lane_id, lead_obstacle in dict(
+        nearest_front_obstacles_by_lane or {}
+    ).items():
+        lead_speed_mps = max(
+            0.0, float(dict(lead_obstacle or {}).get("v", 0.0))
+        )
+        speed_deficit_ratio = max(
+            0.0,
+            min(
+                1.0,
+                (
+                    float(normalized_desired_speed_mps)
+                    - float(lead_speed_mps)
+                )
+                / float(normalized_desired_speed_mps),
+            ),
+        )
+        lane_progress_costs[int(lane_id)] = float(
+            normalized_progress_weight * speed_deficit_ratio
+        )
     lanes = [int(lane_id) for lane_id in list(available_lane_ids or []) if int(lane_id) != 0]
     if len(lanes) == 0:
         lanes = [int(ego_lane_id)] if int(ego_lane_id) != 0 else [int(selected_lane_id)]
@@ -137,14 +174,11 @@ def evaluate_behavior_candidates(
     if int(source_lane_id) not in lanes:
         source_lane_id = int(ego_lane_id) if int(ego_lane_id) in lanes else int(lanes[0])
 
-    candidate_lane_ids = {int(source_lane_id)}
-    if route_optimal_lane_id is not None and int(route_optimal_lane_id) in lanes:
-        candidate_lane_ids.add(int(route_optimal_lane_id))
+    # Record every visible lane so diagnostics can explain why a seemingly
+    # attractive non-adjacent lane was rejected.  Only the source and its
+    # immediate neighbours are executable in one maneuver.
+    candidate_lane_ids = set(lanes)
     source_index = lanes.index(int(source_lane_id)) if int(source_lane_id) in lanes else 0
-    if source_index > 0:
-        candidate_lane_ids.add(int(lanes[source_index - 1]))
-    if source_index < len(lanes) - 1:
-        candidate_lane_ids.add(int(lanes[source_index + 1]))
 
     candidates: List[BehaviorCandidate] = []
     for target_lane_id in sorted(candidate_lane_ids, key=lambda lane_id: (abs(int(lane_id) - int(source_lane_id)), int(lane_id))):
@@ -166,7 +200,19 @@ def evaluate_behavior_candidates(
             route_deviation_weight=float(route_deviation_weight),
             lane_change_weight=float(lane_change_weight),
             mpc_feedback_weight=float(mpc_feedback_weight),
+            lane_progress_costs=lane_progress_costs,
         )
+        target_index = (
+            lanes.index(int(target_lane_id))
+            if int(target_lane_id) in lanes
+            else int(source_index)
+        )
+        if (
+            int(target_lane_id) != int(source_lane_id)
+            and abs(int(target_index) - int(source_index)) != 1
+        ):
+            feasible = False
+            reason = "not_adjacent"
         total_cost = float(sum(float(value) for value in cost_terms.values()))
         candidates.append(
             BehaviorCandidate(
@@ -182,12 +228,47 @@ def evaluate_behavior_candidates(
 
     feasible_candidates = [candidate for candidate in candidates if candidate.feasible]
     selection_pool = feasible_candidates if len(feasible_candidates) > 0 else candidates
-    selected = min(
+    source_candidate = next(
+        (
+            candidate
+            for candidate in candidates
+            if int(candidate.target_lane_id) == int(source_lane_id)
+        ),
+        None,
+    )
+    source_safety = max(
+        0.0,
+        min(1.0, float(lane_safety_scores.get(int(source_lane_id), 0.0))),
+    )
+    source_progress_cost = max(
+        0.0, float(lane_progress_costs.get(int(source_lane_id), 0.0))
+    )
+    ranked_candidate = min(
         selection_pool,
         key=lambda candidate: (
             float(candidate.total_cost),
             0 if int(candidate.target_lane_id) == int(source_lane_id) else 1,
             abs(int(candidate.target_lane_id) - int(source_lane_id)),
         ),
+    )
+    # A safe current lane is the stable default.  Route-required changes are
+    # supplied explicitly by RouteAuthorization; this generic evaluator must
+    # not turn a small route-deviation cost into an unsolicited lane change.
+    # It may leave the source lane only for an actual safety deficit or when
+    # a slow lead creates enough progress loss for another feasible lane to
+    # have a lower total cost.
+    may_leave_source = bool(
+        float(source_safety) < float(current_lane_unsafe_threshold)
+        or (
+            float(source_progress_cost) > 0.0
+            and int(ranked_candidate.target_lane_id) != int(source_lane_id)
+            and float(ranked_candidate.total_cost)
+            < float(source_candidate.total_cost if source_candidate is not None else float("inf"))
+        )
+    )
+    selected = (
+        ranked_candidate
+        if bool(may_leave_source) or source_candidate is None
+        else source_candidate
     )
     return CandidateEvaluationFrame(candidates=list(candidates), selected=selected)

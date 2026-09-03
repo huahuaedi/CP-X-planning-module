@@ -30,9 +30,39 @@ from opencda_bridge.cpx_mpc_planner import (
     _adaptive_target_horizon_s,
 )
 from pipeline.reference_generator import ReferenceGenerator
+from pipeline.local_map_snapshot import build_local_map_snapshot
+from pipeline.maneuver_manager import ManeuverManager
+from pipeline.fallback_manager import TrajectoryFallbackManager
+from pipeline.reference_line_provider import (
+    LANE_CHANGE,
+    LANE_FOLLOW,
+    POST_TURN,
+    TURN,
+    ReferenceLineProvider,
+)
 
 
 class RouteTrackingLaneChangeTests(unittest.TestCase):
+    @staticmethod
+    def _install_lane_change_reference(bridge, samples):
+        installed, reason = bridge._stable_reference_line_provider.install(
+            LANE_CHANGE,
+            samples,
+            route_revision="route-test",
+            map_epoch="town06-test",
+            event="maneuver_started",
+            source_lane_id=1,
+            target_lane_id=2,
+        )
+        if not installed:
+            raise AssertionError(reason)
+
+    @staticmethod
+    def _lane_change_reference(bridge):
+        return bridge._stable_reference_line_provider.snapshot(
+            LANE_CHANGE
+        ).mutable_samples()
+
     @staticmethod
     def _bridge():
         bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
@@ -45,20 +75,21 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
             "route_tracking_lane_change_max_boundary_failures": 1,
         }
         bridge.mpc = types.SimpleNamespace(horizon_steps=20, dt_s=0.1)
-        bridge._route_tracking_lane_change_progress_index = 0
-        bridge._route_tracking_lane_change_progress = 0.0
-        bridge._route_tracking_lane_change_target_lane_id = 2
-        bridge._route_tracking_lane_change_source_lane_id = 1
-        bridge._route_tracking_lane_change_target_speed_mps = 2.0
-        bridge._route_tracking_lane_change_phase = "executing"
-        bridge._route_tracking_lane_change_stabilization_frames = 0
-        bridge._route_tracking_lane_change_option = "CHANGELANERIGHT"
-        bridge._route_tracking_lane_change_completed_option = ""
-        bridge._route_tracking_lane_change_completion_stable_frames = 0
-        bridge._route_tracking_lane_change_completion_debug = {}
-        bridge._lane_id_discontinuity_since_lock = False
-        bridge._lane_change_to_turn_transition_arc_m = 0.0
-        bridge._lane_change_to_turn_transition_step_m = 0.0
+        bridge.maneuver_manager = ManeuverManager(bridge.config)
+        bridge.maneuver_manager.lane_change.target_lane_id = 2
+        bridge.maneuver_manager.lane_change.source_lane_id = 1
+        bridge.maneuver_manager.lane_change.target_speed_mps = 2.0
+        bridge.maneuver_manager.lane_change.phase = "executing"
+        bridge.maneuver_manager.lane_change.stabilization_frames = 0
+        bridge.maneuver_manager.lane_change.option = "CHANGELANERIGHT"
+        bridge.maneuver_manager.lane_change.completed_option = ""
+        bridge.maneuver_manager.lane_change.completion_stable_frames = 0
+        bridge.maneuver_manager.lane_change.transition_to_turn_arc_m = 0.0
+        bridge.maneuver_manager.lane_change.transition_to_turn_step_m = 0.0
+        bridge._stable_reference_line_provider = ReferenceLineProvider()
+        bridge._trajectory_fallback_manager = TrajectoryFallbackManager()
+        bridge.route_manager = types.SimpleNamespace(route_revision="route-test")
+        bridge._sim_time_s = lambda: 1.0
         bridge.strict_explicit_fallback_speed_mps = 0.8
         bridge.carla = sys.modules["carla"]
         bridge.reference_generator = ReferenceGenerator(
@@ -79,11 +110,19 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
         )
         return bridge
 
-    def test_route_required_candidate_defer_preserves_speed_owner_target(self):
+    def test_explicit_failure_is_owned_by_fallback_manager(self):
         bridge = self._bridge()
-        bridge.config["route_lane_change_defer_speed_mps"] = 5.0
-        bridge._map_waypoint_from_location = lambda _location: None
-        bridge._active_global_route_points = lambda: []
+        bridge._stable_reference_line_provider.install(
+            LANE_FOLLOW,
+            [
+                {"x_ref_m": 0.5, "y_ref_m": 0.0, "speed_ref_mps": 1.0},
+                {"x_ref_m": 1.5, "y_ref_m": 0.0, "speed_ref_mps": 1.0},
+                {"x_ref_m": 2.5, "y_ref_m": 0.0, "speed_ref_mps": 1.0},
+            ],
+            route_revision="route-test",
+            map_epoch="town06-test",
+            event="initial_route",
+        )
 
         decision, lane_id, speed_mps, reference, destination, debug = (
             bridge._explicit_fallback_candidate_for_mpc(
@@ -94,21 +133,23 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
                 current_state=[0.0, 0.0, 1.0, 0.0],
                 ego_location=bridge.carla.Location(x=0.0, y=0.0),
                 ego_yaw_rad=0.0,
-                baseline_speed_ref_mps=12.0,
                 summarize_candidate_results=lambda _rows: "[]",
-                selection_reason="route_required_candidate_infeasible_defer",
+                selection_reason="all_candidates_infeasible",
             )
         )
 
+        # A recoverable geometry failure owns a bounded stop trajectory, not
+        # the emergency behavior state.  Keeping lane_follow here lets the
+        # candidate pipeline retry on the next tick instead of entering the
+        # direct-control emergency hard gate forever.
         self.assertEqual(decision, "lane_follow")
-        self.assertEqual(lane_id, 500145)
-        self.assertEqual(speed_mps, 12.0)
-        self.assertEqual(destination[2], 12.0)
+        self.assertEqual(lane_id, 500144)
+        self.assertEqual(speed_mps, 0.0)
+        self.assertEqual(destination[2], 0.0)
         self.assertTrue(reference)
-        self.assertTrue(all(sample["speed_ref_mps"] == 12.0 for sample in reference))
         self.assertEqual(
             debug["candidate_pipeline_selected"],
-            "explicit_fallback_route_lane_change_defer",
+            "bounded_safe_stop",
         )
 
     def test_display_route_smoothing_does_not_mutate_topology_route(self):
@@ -171,120 +212,18 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
         self.assertIn("transition_arc_m=10.00", reason)
         self.assertEqual(calls[0]["route_points"], route_points)
         self.assertGreaterEqual(calls[0]["horizon_steps"], 21)
-        self.assertEqual(bridge._lane_change_to_turn_transition_arc_m, 10.0)
+        self.assertEqual(bridge.maneuver_manager.lane_change.transition_to_turn_arc_m, 10.0)
 
-    def test_lane_follow_holds_turn_geometry_out_of_horizon(self):
-        bridge = self._bridge()
-        bridge.config["lane_follow_turn_geometry_guard_m"] = 12.0
-        straight_then_turn = [
-            {
-                "x_ref_m": float(index + 1),
-                "y_ref_m": 0.0 if index < 18 else -0.25 * float(index - 17) ** 2,
-                "heading_rad": 0.0,
-            }
-            for index in range(30)
-        ]
 
-        held, reason = bridge._hold_lane_follow_before_turn(
-            reference=straight_then_turn,
-            ego_x_m=0.0,
-            ego_y_m=0.0,
-            turn_distance_m=25.0,
-            horizon_steps=30,
-        )
 
-        self.assertIn("lane_follow_turn_geometry_held", reason)
-        self.assertEqual(len(held), 30)
-        self.assertTrue(all(abs(float(row["y_ref_m"])) < 1.0e-9 for row in held))
-        self.assertTrue(
-            any(
-                row.get("lane_transition_kind") == "lane_follow_preturn_tangent_hold"
-                for row in held
-            )
-        )
 
-    def test_lane_follow_exposes_connector_inside_fixed_arc_transition(self):
-        bridge = self._bridge()
-        bridge.config["lane_follow_to_turn_reference_transition_arc_m"] = 12.0
-        straight_then_turn = [
-            {
-                "x_ref_m": float(index + 1),
-                # Simulate the backward curvature contamination observed in
-                # the runtime route reference before the real connector.
-                "y_ref_m": -0.02 * float(index) ** 2,
-                "heading_rad": 0.0,
-            }
-            for index in range(20)
-        ]
-
-        transitioned, reason = (
-            bridge._transition_lane_follow_reference_before_turn(
-                reference=straight_then_turn,
-                transition_reference=[
-                    {
-                        "x_ref_m": float(index + 1),
-                        "y_ref_m": -0.1 * float(index) ** 2,
-                        "heading_rad": 0.0,
-                    }
-                    for index in range(20)
-                ],
-                ego_x_m=0.0,
-                ego_y_m=0.0,
-                turn_distance_m=10.0,
-                horizon_steps=20,
-            )
-        )
-
-        self.assertIn("lane_follow_to_turn_fixed_arc_transition", reason)
-        self.assertEqual(len(transitioned), 20)
-        self.assertTrue(any(float(row["y_ref_m"]) < 0.0 for row in transitioned))
-        # The connector source curves immediately from ego, but the topology
-        # says its real start is 10 m ahead. The splice must retain the
-        # physical straight lead-in instead of moving that curve to ego.
-        self.assertAlmostEqual(float(transitioned[5]["y_ref_m"]), 0.0)
-        self.assertLess(float(transitioned[9]["y_ref_m"]), 0.0)
-        self.assertTrue(
-            all(
-                row.get("lane_transition_kind")
-                == "lane_follow_to_turn_fixed_arc_transition"
-                for row in transitioned
-            )
-        )
-
-    def test_lane_follow_keeps_tangent_hold_outside_transition_arc(self):
-        bridge = self._bridge()
-        bridge.config["lane_follow_to_turn_reference_transition_arc_m"] = 12.0
-        bridge.config["lane_follow_turn_geometry_guard_m"] = 12.0
-        straight_then_turn = [
-            {
-                "x_ref_m": float(index + 1),
-                "y_ref_m": 0.0 if index < 18 else -0.25 * float(index - 17) ** 2,
-                "heading_rad": 0.0,
-            }
-            for index in range(30)
-        ]
-
-        held, reason = bridge._transition_lane_follow_reference_before_turn(
-            reference=straight_then_turn,
-            ego_x_m=0.0,
-            ego_y_m=0.0,
-            turn_distance_m=25.0,
-            horizon_steps=30,
-        )
-
-        self.assertIn("lane_follow_turn_geometry_held", reason)
-        self.assertTrue(all(abs(float(row["y_ref_m"])) < 1.0e-9 for row in held))
 
     def test_turn_master_reference_is_reused_across_handoff(self):
         bridge = self._bridge()
-        bridge.config["turn_master_reference_steps"] = 80
-        bridge._turn_master_reference = []
-        bridge._turn_master_progress_s_m = 0.0
-        bridge._turn_master_direction = "right"
-        route_calls = []
+        local_map_calls = []
 
-        def route_reference(**kwargs):
-            route_calls.append(kwargs)
+        def reference_from_local_map(snapshot, **kwargs):
+            local_map_calls.append((snapshot, kwargs))
             return ([
                 {
                     "x_ref_m": 0.35 * float(index + 1),
@@ -293,11 +232,12 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
                     "lane_id": 5960149,
                     "lane_width_m": 3.5,
                 }
-                for index in range(int(kwargs["horizon_steps"]))
+                for index in range(80)
             ], "master_source")
 
-        bridge.route_manager = types.SimpleNamespace(
-            route_reference=route_reference
+        bridge._local_map_snapshot = types.SimpleNamespace(valid=True)
+        bridge._stable_reference_line_provider.reference_from_local_map = (
+            reference_from_local_map
         )
         bridge.reference_generator.curvature_feasible_turn_samples = (
             lambda reference_samples, **_kwargs: (
@@ -315,6 +255,7 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
             target_speed_mps=5.0,
             destination_state=None,
             lock_master=True,
+            turn_direction="right",
         )
         second, _destination, second_reason = bridge._waypoint_turn_reference(
             ego_location=bridge.carla.Location(x=1.0, y=0.0),
@@ -326,15 +267,18 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
             destination_state=None,
         )
 
-        self.assertEqual(len(route_calls), 1)
-        self.assertEqual(route_calls[0]["horizon_steps"], 80)
-        self.assertEqual(len(bridge._turn_master_reference), 80)
+        self.assertEqual(len(local_map_calls), 1)
+        self.assertIs(local_map_calls[0][0], bridge._local_map_snapshot)
+        self.assertEqual(local_map_calls[0][1]["start_lane_id"], 500144)
+        turn_snapshot = bridge._stable_reference_line_provider.snapshot(TURN)
+        self.assertEqual(len(turn_snapshot.samples), 80)
+        self.assertEqual(turn_snapshot.maneuver_direction, "right")
         self.assertEqual(len(first), bridge.mpc.horizon_steps)
         self.assertEqual(len(second), bridge.mpc.horizon_steps)
         self.assertIn("turn_master_locked", first_reason)
         self.assertIn("turn_master_window", second_reason)
         self.assertGreaterEqual(
-            bridge._turn_master_progress_s_m,
+            turn_snapshot.progress_s_m,
             0.0,
         )
 
@@ -402,8 +346,8 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
 
     def test_target_lane_entry_replaces_quintic_with_stabilization_reference(self):
         bridge = self._bridge()
-        bridge._route_tracking_lane_change_progress = 0.60
-        bridge._route_tracking_lane_change_reference = [
+        bridge.maneuver_manager.lane_change.progress = 0.95
+        self._install_lane_change_reference(bridge, [
             {
                 "x_ref_m": float(index + 1),
                 "y_ref_m": 3.5,
@@ -411,7 +355,7 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
                 "lane_change_progress": 1.0,
             }
             for index in range(30)
-        ]
+        ])
         bridge.reference_generator.target_lane_stabilization_samples = (
             lambda **_kwargs: [
                 {
@@ -432,30 +376,29 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
 
         self.assertIn("target_lane_stabilization_started", reason)
         self.assertEqual(
-            bridge._route_tracking_lane_change_phase,
+            bridge.maneuver_manager.lane_change.phase,
             "target_lane_stabilization",
         )
         self.assertTrue(
             all(
                 row["lane_transition_kind"] == "target_lane_stabilization"
-                for row in bridge._route_tracking_lane_change_reference
+                for row in self._lane_change_reference(bridge)
             )
         )
         self.assertTrue(
             all(
                 float(row["lane_change_progress"]) == 1.0
-                for row in bridge._route_tracking_lane_change_reference
+                for row in self._lane_change_reference(bridge)
             )
         )
 
-    def test_id_mismatch_does_not_block_geometric_stabilization_entry(self):
-        # Lane IDs identify the locked target but do not control execution
-        # phase.  Geometry/progress can prove arrival even when map matching
-        # has re-anchored to another ID namespace without a discontinuity
-        # event being observable by this component.
+    def test_longitudinal_lane_id_change_does_not_block_stabilization_entry(self):
+        # AD-map may split one physical corridor into several longitudinal
+        # lane IDs.  The continuous geometry contract owns the motion phase;
+        # lane identity remains topology/diagnostic data only.
         bridge = self._bridge()
-        bridge._route_tracking_lane_change_progress = 0.60
-        bridge._route_tracking_lane_change_reference = [
+        bridge.maneuver_manager.lane_change.progress = 0.95
+        self._install_lane_change_reference(bridge, [
             {
                 "x_ref_m": float(index + 1),
                 "y_ref_m": 3.5,
@@ -463,7 +406,7 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
                 "lane_change_progress": 1.0,
             }
             for index in range(30)
-        ]
+        ])
         bridge.reference_generator.target_lane_stabilization_samples = (
             lambda **_kwargs: [
                 {
@@ -482,54 +425,11 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
             ego_yaw_rad=0.02,
         )
 
-        self.assertIn("target_lane_stabilization_started", reason)
+        self.assertTrue(reason.startswith("target_lane_stabilization_started"))
         self.assertEqual(
-            bridge._route_tracking_lane_change_phase,
+            bridge.maneuver_manager.lane_change.phase,
             "target_lane_stabilization",
         )
-
-    def test_discontinuity_since_lock_allows_stabilization_entry_despite_id_mismatch(self):
-        # Same mismatch as above, but a lane-id discontinuity was recorded
-        # since this commitment was locked (a road/section boundary the
-        # tracker could not bridge) -- current_lane_id and target_lane_id no
-        # longer share a numbering, so the id check must not keep blocking a
-        # vehicle that the geometry gate already confirms has arrived.
-        bridge = self._bridge()
-        bridge._route_tracking_lane_change_progress = 0.60
-        bridge._lane_id_discontinuity_since_lock = True
-        bridge._route_tracking_lane_change_reference = [
-            {
-                "x_ref_m": float(index + 1),
-                "y_ref_m": 3.5,
-                "heading_rad": 0.0,
-                "lane_change_progress": 1.0,
-            }
-            for index in range(30)
-        ]
-        bridge.reference_generator.target_lane_stabilization_samples = (
-            lambda **_kwargs: [
-                {
-                    "x_ref_m": 5.8 + 0.2 * float(index),
-                    "y_ref_m": 0.0,
-                    "heading_rad": 0.0,
-                    "lane_id": 2,
-                }
-                for index in range(25)
-            ]
-        )
-
-        reason = bridge._release_completed_lane_change_commitment(
-            current_lane_id=3,
-            ego_location=bridge.carla.Location(x=5.0, y=3.2),
-            ego_yaw_rad=0.02,
-        )
-
-        self.assertIn("target_lane_stabilization_started", reason)
-        self.assertEqual(
-            bridge._route_tracking_lane_change_phase,
-            "target_lane_stabilization",
-        )
-
     def test_committed_right_change_cannot_publish_lane_keep_fsm(self):
         state = CPXMPCPlannerBridge._normalized_final_lc_state(
             decision="lane_change_right",
@@ -541,8 +441,8 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
 
     def test_lane_id_change_does_not_stabilize_between_lane_centers(self):
         bridge = self._bridge()
-        bridge._route_tracking_lane_change_progress = 0.60
-        bridge._route_tracking_lane_change_reference = [
+        bridge.maneuver_manager.lane_change.progress = 0.95
+        self._install_lane_change_reference(bridge, [
             {
                 "x_ref_m": float(index + 1),
                 "y_ref_m": 3.5,
@@ -550,7 +450,7 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
                 "lane_change_progress": 1.0,
             }
             for index in range(30)
-        ]
+        ])
         stabilization_calls = []
         bridge.reference_generator.target_lane_stabilization_samples = (
             lambda **kwargs: stabilization_calls.append(kwargs) or []
@@ -564,9 +464,11 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
 
         self.assertEqual(reason, "")
         self.assertEqual(stabilization_calls, [])
-        self.assertEqual(bridge._route_tracking_lane_change_phase, "executing")
+        self.assertEqual(
+            bridge.maneuver_manager.lane_change.phase, "executing"
+        )
         self.assertFalse(
-            bridge._route_tracking_lane_change_completion_debug[
+            bridge.maneuver_manager.lane_change.completion_debug[
                 "lane_change_stabilization_geometry_ready"
             ]
         )
@@ -591,8 +493,8 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
         # the handoff is withheld -- not failed, just delayed -- when
         # heading is 30 degrees off a target lane reporting 0 degrees.
         bridge = self._bridge()
-        bridge._route_tracking_lane_change_progress = 0.60
-        bridge._route_tracking_lane_change_reference = [
+        bridge.maneuver_manager.lane_change.progress = 0.95
+        self._install_lane_change_reference(bridge, [
             {
                 "x_ref_m": float(index + 1),
                 "y_ref_m": 3.5,
@@ -600,7 +502,7 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
                 "lane_change_progress": 1.0,
             }
             for index in range(30)
-        ]
+        ])
         bridge.reference_generator._map_waypoint_callback = (
             lambda location: types.SimpleNamespace(
                 transform=types.SimpleNamespace(
@@ -625,13 +527,15 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
 
         self.assertEqual(reason, "")
         self.assertEqual(stabilization_calls, [])
-        self.assertEqual(bridge._route_tracking_lane_change_phase, "executing")
-        self.assertTrue(bridge._route_tracking_lane_change_reference)
+        self.assertEqual(
+            bridge.maneuver_manager.lane_change.phase, "executing"
+        )
+        self.assertTrue(self._lane_change_reference(bridge))
 
     def test_heading_alignment_within_threshold_allows_stabilization_handoff(self):
         bridge = self._bridge()
-        bridge._route_tracking_lane_change_progress = 0.60
-        bridge._route_tracking_lane_change_reference = [
+        bridge.maneuver_manager.lane_change.progress = 0.95
+        self._install_lane_change_reference(bridge, [
             {
                 "x_ref_m": float(index + 1),
                 "y_ref_m": 3.5,
@@ -639,7 +543,7 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
                 "lane_change_progress": 1.0,
             }
             for index in range(30)
-        ]
+        ])
         bridge.reference_generator._map_waypoint_callback = (
             lambda location: types.SimpleNamespace(
                 transform=types.SimpleNamespace(
@@ -671,14 +575,14 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
 
         self.assertIn("target_lane_stabilization_started", reason)
         self.assertEqual(
-            bridge._route_tracking_lane_change_phase,
+            bridge.maneuver_manager.lane_change.phase,
             "target_lane_stabilization",
         )
 
     def test_target_lane_entry_never_continues_old_quintic_when_handoff_fails(self):
         bridge = self._bridge()
-        bridge._route_tracking_lane_change_progress = 0.60
-        bridge._route_tracking_lane_change_reference = [
+        bridge.maneuver_manager.lane_change.progress = 0.95
+        self._install_lane_change_reference(bridge, [
             {
                 "x_ref_m": float(index + 1),
                 "y_ref_m": 3.5,
@@ -686,7 +590,7 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
                 "lane_change_progress": 1.0,
             }
             for index in range(30)
-        ]
+        ])
         bridge.reference_generator.target_lane_stabilization_samples = (
             lambda **_kwargs: []
         )
@@ -701,17 +605,17 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
             "lane_change_stabilization_unavailable_to_lane_follow_recovery",
             reason,
         )
-        self.assertEqual(bridge._route_tracking_lane_change_reference, [])
+        self.assertEqual(self._lane_change_reference(bridge), [])
         self.assertEqual(
-            bridge._route_tracking_lane_change_completed_option,
+            bridge.maneuver_manager.lane_change.completed_option,
             "CHANGELANERIGHT",
         )
 
     def test_commitment_releases_after_geometric_convergence(self):
         bridge = self._bridge()
-        bridge._route_tracking_lane_change_progress = 0.96
-        bridge._route_tracking_lane_change_phase = "target_lane_stabilization"
-        bridge._route_tracking_lane_change_reference = [
+        bridge.maneuver_manager.lane_change.progress = 0.96
+        bridge.maneuver_manager.lane_change.phase = "target_lane_stabilization"
+        self._install_lane_change_reference(bridge, [
             {
                 "x_ref_m": float(index),
                 "y_ref_m": 0.0,
@@ -719,7 +623,7 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
                 "lane_change_progress": 1.0,
             }
             for index in range(1, 11)
-        ]
+        ])
 
         reason = ""
         for _ in range(5):
@@ -730,17 +634,220 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
             )
 
         self.assertIn("lane_change_commitment_released", reason)
-        self.assertEqual(bridge._route_tracking_lane_change_reference, [])
+        self.assertEqual(self._lane_change_reference(bridge), [])
         self.assertEqual(
-            bridge._route_tracking_lane_change_completed_option,
+            bridge.maneuver_manager.lane_change.completed_option,
             "CHANGELANERIGHT",
+        )
+
+    def test_stabilization_release_uses_projected_arc_not_sample_index(self):
+        bridge = self._bridge()
+        bridge.maneuver_manager.lane_change.progress = 0.96
+        bridge.maneuver_manager.lane_change.phase = "target_lane_stabilization"
+        bridge.maneuver_manager.lane_change.transition_to_turn_arc_m = 10.0
+        bridge.maneuver_manager.lane_change.transition_to_turn_step_m = 1.0
+        # Resampling may legitimately produce a large point index even though
+        # the ego has moved only two metres over the immutable reference.
+        bridge.maneuver_manager.lane_change.progress_index = 50
+        bridge.maneuver_manager.lane_change.progress_s_m = 2.0
+        self._install_lane_change_reference(bridge, [
+            {
+                "x_ref_m": float(index),
+                "y_ref_m": 0.0,
+                "heading_rad": 0.0,
+                "lane_change_progress": 1.0,
+            }
+            for index in range(1, 21)
+        ])
+
+        reason = ""
+        for _ in range(8):
+            reason = bridge._release_completed_lane_change_commitment(
+                current_lane_id=2,
+                ego_location=bridge.carla.Location(x=5.0, y=0.1),
+                ego_yaw_rad=0.02,
+            )
+
+        self.assertEqual(reason, "")
+        self.assertTrue(self._lane_change_reference(bridge))
+
+    def test_post_turn_exit_locks_admap_topology_centerline(self):
+        bridge = self._bridge()
+        bridge.config["post_turn_exit_reference_arc_m"] = 12.0
+        bridge._local_map_snapshot = build_local_map_snapshot(
+            frame_id=1,
+            timestamp_s=1.0,
+            match={"valid": True, "ad_lane_id": 5960149},
+            local_graph={
+                "corridors": {0: [5960149, 540156]},
+                "lane_to_offset": {5960149: 0, 540156: 0},
+                "route_lane_sequence": [5960149, 540156],
+                "lane_centerlines": {
+                    5960149: [
+                        {"x_m": float(index), "y_m": 0.0}
+                        for index in range(16)
+                    ],
+                    540156: [
+                        {"x_m": 15.0 + float(index), "y_m": 0.0}
+                        for index in range(32)
+                    ],
+                },
+            },
+            route_target_lane_id=540156,
+        )
+
+        activated = bridge._start_post_turn_exit_reference(
+            ego_location=bridge.carla.Location(x=10.0, y=0.0),
+            ego_yaw_rad=0.0,
+            current_lane_id=5960149,
+            target_speed_mps=2.2,
+        )
+        window, reason = bridge._post_turn_exit_reference_window(
+            ego_location=bridge.carla.Location(x=11.0, y=0.0),
+            target_speed_mps=2.2,
+        )
+
+        self.assertTrue(activated)
+        snapshot = bridge._stable_reference_line_provider.snapshot(POST_TURN)
+        self.assertGreater(len(snapshot.samples), 20)
+        self.assertGreater(snapshot.activation_s_m, 5.0)
+        self.assertEqual(snapshot.activation_s_m, snapshot.progress_s_m - 1.0)
+        self.assertEqual(len(window), bridge.mpc.horizon_steps)
+        self.assertIn("post_turn_exit_locked_window", reason)
+        self.assertIn("travel=1.00", reason)
+        self.assertEqual(
+            {
+                row.get("reference_geometry_owner")
+                for row in snapshot.samples
+            },
+            {"local_map_snapshot"},
+        )
+        successor_kinds = [
+            row.get("lane_transition_kind")
+            for row in snapshot.samples
+            if int(row.get("lane_id", 0)) == 540156
+        ]
+        self.assertGreater(len(successor_kinds), 20)
+        self.assertEqual(set(successor_kinds), {"longitudinal_successor"})
+
+    def test_post_turn_exit_does_not_reshape_admap_master(self):
+        bridge = self._bridge()
+        bridge.config["post_turn_exit_reference_arc_m"] = 12.0
+        connector = [
+            {"x_m": 25.0 - float(index), "y_m": -23.0}
+            for index in range(16)
+        ] + [
+            {"x_m": 10.0, "y_m": -24.0 - float(index)}
+            for index in range(12)
+        ]
+        exit_lane = [
+            {"x_m": 10.0, "y_m": -35.0 - float(index)}
+            for index in range(64)
+        ]
+        bridge._local_map_snapshot = build_local_map_snapshot(
+            frame_id=1,
+            timestamp_s=1.0,
+            match={"valid": True, "ad_lane_id": 5960149},
+            local_graph={
+                "corridors": {0: [5960149, 540156]},
+                "lane_to_offset": {5960149: 0, 540156: 0},
+                "route_lane_sequence": [5960149, 540156],
+                "lane_centerlines": {
+                    5960149: connector,
+                    540156: exit_lane,
+                },
+            },
+            route_target_lane_id=540156,
+        )
+
+        activated = bridge._start_post_turn_exit_reference(
+            ego_location=bridge.carla.Location(x=10.0, y=-34.0),
+            ego_yaw_rad=-math.pi / 2.0,
+            current_lane_id=5960149,
+            target_speed_mps=2.2,
+        )
+
+        self.assertTrue(activated)
+        outgoing = [
+            row for row in bridge._stable_reference_line_provider.snapshot(
+                POST_TURN
+            ).samples
+            if int(row.get("lane_id", 0)) == 540156
+        ]
+        self.assertGreater(len(outgoing), 20)
+        self.assertEqual(
+            bridge._stable_reference_line_provider.snapshot(
+                POST_TURN
+            ).target_lane_id,
+            540156,
+        )
+        self.assertTrue(
+            all(abs(float(row["x_ref_m"]) - 10.0) < 1.0e-9 for row in outgoing)
+        )
+
+    def test_post_turn_exit_rejects_point_count_without_real_arc_length(self):
+        bridge = self._bridge()
+        bridge.config["post_turn_exit_reference_arc_m"] = 12.0
+        bridge.route_manager = types.SimpleNamespace(
+            geometry_route_points=lambda **_kwargs: [[0.0, 0.0], [2.0, 0.0]]
+        )
+        bridge.reference_generator.lane_center_samples = (
+            lambda **kwargs: [
+                {
+                    "x_ref_m": 0.02 * float(index + 1),
+                    "y_ref_m": 0.0,
+                    "heading_rad": 0.0,
+                    "lane_id": 5960149,
+                }
+                for index in range(kwargs["horizon_steps"])
+            ]
+        )
+
+        activated = bridge._start_post_turn_exit_reference(
+            ego_location=bridge.carla.Location(x=0.0, y=0.0),
+            ego_yaw_rad=0.0,
+            current_lane_id=5960149,
+            target_speed_mps=2.2,
+        )
+
+        self.assertFalse(activated)
+        self.assertFalse(
+            bridge._stable_reference_line_provider.snapshot(POST_TURN).active
+        )
+
+    def test_post_turn_exit_exhaustion_clears_lock(self):
+        bridge = self._bridge()
+        bridge._stable_reference_line_provider.install(
+            POST_TURN,
+            [
+            {
+                "x_ref_m": 0.02 * float(index + 1),
+                "y_ref_m": 0.0,
+                "heading_rad": 0.0,
+            }
+            for index in range(bridge.mpc.horizon_steps)
+            ],
+            route_revision="route-1",
+            map_epoch="town06",
+            event="phase_transition",
+        )
+
+        window, reason = bridge._post_turn_exit_reference_window(
+            ego_location=bridge.carla.Location(x=0.0, y=0.0),
+            target_speed_mps=2.2,
+        )
+
+        self.assertEqual(window, [])
+        self.assertIn("post_turn_exit_reference_exhausted", reason)
+        self.assertFalse(
+            bridge._stable_reference_line_provider.snapshot(POST_TURN).active
         )
 
     def test_lane_id_change_alone_does_not_release_commitment(self):
         bridge = self._bridge()
-        bridge._route_tracking_lane_change_progress = 0.96
-        bridge._route_tracking_lane_change_phase = "target_lane_stabilization"
-        bridge._route_tracking_lane_change_reference = [
+        bridge.maneuver_manager.lane_change.progress = 0.96
+        bridge.maneuver_manager.lane_change.phase = "target_lane_stabilization"
+        self._install_lane_change_reference(bridge, [
             {
                 "x_ref_m": float(index),
                 "y_ref_m": 0.0,
@@ -748,7 +855,7 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
                 "lane_change_progress": 1.0,
             }
             for index in range(1, 11)
-        ]
+        ])
 
         reason = bridge._release_completed_lane_change_commitment(
             current_lane_id=2,
@@ -757,7 +864,7 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
         )
 
         self.assertEqual(reason, "")
-        self.assertTrue(bridge._route_tracking_lane_change_reference)
+        self.assertTrue(self._lane_change_reference(bridge))
 
     def test_locked_window_advances_without_regenerating_master(self):
         bridge = self._bridge()
@@ -773,7 +880,7 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
                     "lane_change_progress": progress,
                 }
             )
-        bridge._route_tracking_lane_change_reference = master
+        self._install_lane_change_reference(bridge, master)
 
         first, _ = bridge._route_tracking_lane_change_window(
             ego_location=bridge.carla.Location(x=0.0, y=0.0),
@@ -791,14 +898,14 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
         self.assertEqual(len(first), 20)
         self.assertEqual(len(second), 20)
         self.assertGreaterEqual(
-            bridge._route_tracking_lane_change_progress_index,
+            bridge.maneuver_manager.lane_change.progress_index,
             6,
         )
         self.assertGreater(
             float(second[0]["lane_change_progress"]),
             float(first[0]["lane_change_progress"]),
         )
-        self.assertEqual(bridge._route_tracking_lane_change_reference, master)
+        self.assertEqual(self._lane_change_reference(bridge), master)
 
     def test_direct_tracking_progress_reflects_live_lag_not_stale_schedule(self):
         # Under direct target-lane tracking, the per-sample "lane_change_progress"
@@ -829,8 +936,8 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
                 {"x_ref_m": 0.3 * float(index + 1), "y_ref_m": 0.0},
                 {"x_ref_m": 0.3 * float(index + 1), "y_ref_m": 3.5},
             ))
-        bridge._route_tracking_lane_change_reference = master
-        bridge._route_tracking_lane_change_progress_pairs = pairs
+        self._install_lane_change_reference(bridge, master)
+        bridge.maneuver_manager.lane_change.progress_pairs = pairs
 
         # Ego is laterally only 30% of the way across (y=1.05 of a 3.5m gap),
         # even though the nearest station's *scheduled* tag already claims
@@ -844,7 +951,7 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
 
         self.assertTrue(window)
         self.assertAlmostEqual(
-            bridge._route_tracking_lane_change_progress, 0.30, places=2
+            bridge.maneuver_manager.lane_change.progress, 0.30, places=2
         )
 
     def test_validation_rejects_reference_over_25_degree_heading_error(self):

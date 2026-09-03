@@ -380,7 +380,7 @@ class RuleBasedBehaviorPlannerIntersectionTests(unittest.TestCase):
         self.assertEqual(int(result["target_lane_id"]), 1)
         self.assertEqual(int(result["selected_lane_id"]), 1)
 
-    def test_intersection_mode_releases_lane_change_once_blue_dot_reaches_route_lane(self):
+    def test_intersection_mode_releases_only_after_ego_match_reaches_route_lane(self):
         planner = RuleBasedBehaviorPlanner(hysteresis_delta=0.05)
 
         first_result = planner.update(
@@ -407,9 +407,23 @@ class RuleBasedBehaviorPlannerIntersectionTests(unittest.TestCase):
             next_macro_maneuver="right",
         )
 
-        self.assertEqual(second_result["decision"], "lane_follow")
+        self.assertEqual(second_result["decision"], "lane_change_right")
         self.assertEqual(int(second_result["target_lane_id"]), 1)
-        self.assertEqual(str(second_result["lc_state"]), "IDLE")
+
+        completed_result = planner.update(
+            lane_safety_scores={1: 1.0, 2: 1.0},
+            ego_lane_id=1,
+            selected_lane_id=1,
+            ego_lateral_offset_m=0.0,
+            ego_heading_error_rad=0.0,
+            mode="INTERSECTION",
+            route_optimal_lane_id=1,
+            next_macro_maneuver="right",
+        )
+
+        self.assertEqual(completed_result["decision"], "lane_follow")
+        self.assertEqual(int(completed_result["target_lane_id"]), 1)
+        self.assertEqual(str(completed_result["lc_state"]), "IDLE")
 
     def test_intersection_mode_moves_toward_route_lane_for_straight_maneuver(self):
         planner = RuleBasedBehaviorPlanner(hysteresis_delta=0.05)
@@ -834,8 +848,7 @@ class DisplayLaneChangeDirectionTests(unittest.TestCase):
     """`_candidate_record` debug/rejected-candidate labels must agree with
     what `_start_one_step_lane_change`/`_adjacent_lane_id` would actually
     drive -- position within this tick's available_lane_ids, not raw id
-    magnitude, since ego_lane_id can be a StableLaneIdTracker-held id that
-    no longer numerically lines up with a fresh recount."""
+    magnitude, since opaque AD-map lane IDs have no numeric lateral order."""
 
     def test_uses_list_position_when_both_ids_are_available(self):
         # Raw magnitude would say "right" (5 < 9), but position in this
@@ -850,8 +863,8 @@ class DisplayLaneChangeDirectionTests(unittest.TestCase):
 
     def test_falls_back_to_raw_magnitude_when_ego_id_is_stale(self):
         # ego_lane_id is not in the freshly-built available list (e.g. a
-        # StableLaneIdTracker id that survived a road-boundary re-anchor
-        # elsewhere) -- there is no position to compare, so this falls back
+        # stale AD-map lane ID from outside the local frame) -- there is no
+        # position to compare, so this falls back
         # to the old magnitude comparison rather than raising.
         decision = RuleBasedBehaviorPlanner._display_lane_change_direction(
             desired_lane_id=2,

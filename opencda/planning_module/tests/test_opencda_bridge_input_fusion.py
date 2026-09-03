@@ -27,9 +27,10 @@ if "carla" not in sys.modules:
 
 from opencda_bridge.cpx_mpc_planner import (
     CPXMPCPlannerBridge,
+    _destination_approach_speed_cap,
     _lane_change_execution_active,
+    _route_destination_stop_gate,
     _select_static_obstacle_local_avoidance_lane,
-    _should_suspend_mpc_for_normal_stop,
     _static_obstacle_cooldown_policy,
 )
 from opencda_bridge.cp_provider import OpenCDACPProvider
@@ -38,9 +39,67 @@ from pipeline.reference_gate import FinalReferenceGate
 from pipeline.reference_generator import GeneratedReference, ReferenceGenerator
 from pipeline.reference_pipeline import ReferencePipeline, ReferencePipelineRequest
 from pipeline.route_manager import RouteReplanResult
+from pipeline.mpc_entry_stage import MPCEntryStage
+from pipeline.maneuver_manager import ManeuverManager
+from pipeline.fallback_manager import TrajectoryFallbackManager
+from pipeline.nominal_trajectory import NominalTrajectoryGenerator
+from pipeline.reference_line_provider import LANE_FOLLOW, TURN, ReferenceLineProvider
 
 
 class OpenCDABridgeInputFusionTests(unittest.TestCase):
+    def test_destination_approach_speed_cap_is_continuous_stopping_profile(self):
+        self.assertAlmostEqual(
+            _destination_approach_speed_cap(
+                remaining_distance_m=11.5,
+                deceleration_mps2=2.0,
+                buffer_m=1.5,
+            ),
+            (40.0 ** 0.5),
+        )
+        self.assertEqual(
+            _destination_approach_speed_cap(
+                remaining_distance_m=1.5,
+                deceleration_mps2=2.0,
+                buffer_m=1.5,
+            ),
+            0.0,
+        )
+        self.assertEqual(
+            _destination_approach_speed_cap(
+                remaining_distance_m=0.0,
+                deceleration_mps2=2.0,
+                buffer_m=1.5,
+            ),
+            0.0,
+        )
+
+    def test_destination_stop_gate_uses_physical_stopping_distance(self):
+        active, required_m = _route_destination_stop_gate(
+            route_found=True,
+            remaining_distance_m=7.0,
+            ego_speed_mps=5.0,
+            deceleration_mps2=2.0,
+            buffer_m=1.5,
+        )
+        self.assertTrue(active)
+        self.assertAlmostEqual(required_m, 7.75)
+
+    def test_destination_stop_gate_rejects_missing_route_and_far_goal(self):
+        self.assertFalse(_route_destination_stop_gate(
+            route_found=False,
+            remaining_distance_m=0.0,
+            ego_speed_mps=0.0,
+            deceleration_mps2=2.0,
+            buffer_m=1.5,
+        )[0])
+        self.assertFalse(_route_destination_stop_gate(
+            route_found=True,
+            remaining_distance_m=20.0,
+            ego_speed_mps=5.0,
+            deceleration_mps2=2.0,
+            buffer_m=1.5,
+        )[0])
+
     def test_functional_isolation_removes_only_non_ego_vehicle_actors_once(self):
         ego = SimpleNamespace(id=10)
         stale_a = Mock(id=20)
@@ -156,12 +215,16 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
             True, "carla_grp_route_replanned:static_obstacle", 12
         )
         bridge.route_manager.active_route_summary = {"route": "new"}
-        bridge._temporary_destination_state = [1.0, 2.0]
-        bridge._previous_lane_center_reference = [{"x": 1.0}]
-        bridge._lane_reference_freeze_count = 4
-        bridge._last_required_lane_change_target_lane_id = 2
+        bridge.maneuver_manager = ManeuverManager(bridge.config)
+        bridge.nominal_trajectory_generator = NominalTrajectoryGenerator()
+        bridge.nominal_trajectory_generator.update(
+            target_state=[1.0, 2.0, 3.0, 0.0],
+            samples=[{"x": 1.0}],
+            reference_freeze_count=4,
+            source="test",
+        )
+        bridge.maneuver_manager.lane_change.required_target_lane_id = 2
         bridge._reset_route_tracking_lane_change_reference = Mock()
-        bridge._lane_id_tracker = Mock()
         bridge.maneuver_manager = Mock()
         bridge.control_buffer = Mock()
         bridge.mpc = Mock()
@@ -197,9 +260,13 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
             True, "carla_grp_route_replanned:test", 12
         )
         bridge.route_manager.active_route_summary = {"route": "new"}
-        bridge._temporary_destination_state = [1.0, 2.0]
-        bridge._previous_lane_center_reference = [{"x": 1.0}]
-        bridge._lane_reference_freeze_count = 4
+        bridge.nominal_trajectory_generator = NominalTrajectoryGenerator()
+        bridge.nominal_trajectory_generator.update(
+            target_state=[1.0, 2.0, 3.0, 0.0],
+            samples=[{"x": 1.0}],
+            reference_freeze_count=4,
+            source="test",
+        )
         bridge._reset_route_tracking_lane_change_reference = Mock()
         bridge.maneuver_manager = Mock()
         bridge.control_buffer = Mock()
@@ -212,8 +279,8 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         self.assertTrue(succeeded)
         self.assertIn("replanned", reason)
         self.assertEqual(bridge._active_route_summary, {"route": "new"})
-        self.assertIsNone(bridge._temporary_destination_state)
-        self.assertEqual(bridge._previous_lane_center_reference, [])
+        self.assertIsNone(bridge.nominal_trajectory_generator.current.target)
+        self.assertEqual(bridge.nominal_trajectory_generator.current.samples, ())
         bridge.maneuver_manager.reset.assert_called_once_with(
             reason="turn_route_replanned"
         )
@@ -240,39 +307,35 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         bridge.route_manager.replan_from.assert_not_called()
 
     def test_normal_stop_suspends_mpc_inside_low_speed_capture_region(self):
-        self.assertTrue(_should_suspend_mpc_for_normal_stop(
-            candidate_hard_gate_active=False,
+        self.assertTrue(MPCEntryStage({}).normal_stop_hold_required(
+            hard_gate_active=False,
             stop_goal_active=True,
             behavior_decision="stop_at_intersection",
             ego_speed_mps=0.25,
-            suspend_speed_mps=0.30,
         ))
 
     def test_normal_stop_keeps_mpc_above_capture_speed(self):
-        self.assertFalse(_should_suspend_mpc_for_normal_stop(
-            candidate_hard_gate_active=False,
+        self.assertFalse(MPCEntryStage({}).normal_stop_hold_required(
+            hard_gate_active=False,
             stop_goal_active=True,
             behavior_decision="stop_sign",
             ego_speed_mps=0.31,
-            suspend_speed_mps=0.30,
         ))
 
     def test_emergency_brake_never_uses_normal_stop_hold(self):
-        self.assertFalse(_should_suspend_mpc_for_normal_stop(
-            candidate_hard_gate_active=False,
+        self.assertFalse(MPCEntryStage({}).normal_stop_hold_required(
+            hard_gate_active=False,
             stop_goal_active=True,
             behavior_decision="emergency_brake",
             ego_speed_mps=0.0,
-            suspend_speed_mps=0.30,
         ))
 
     def test_uncommitted_stop_does_not_suspend_mpc(self):
-        self.assertFalse(_should_suspend_mpc_for_normal_stop(
-            candidate_hard_gate_active=False,
+        self.assertFalse(MPCEntryStage({}).normal_stop_hold_required(
+            hard_gate_active=False,
             stop_goal_active=False,
             behavior_decision="stop_at_intersection",
             ego_speed_mps=0.0,
-            suspend_speed_mps=0.30,
         ))
 
     def test_cp_normalization_preserves_cooperative_provenance(self):
@@ -357,24 +420,34 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
         bridge.route_manager = Mock()
         bridge.route_manager.set_destination.return_value = {"route": "ok"}
-        bridge._lane_id_tracker = Mock()
         bridge.control_buffer = Mock()
-        bridge._temporary_destination_state = [1.0, 2.0]
-        bridge._previous_lane_center_reference = [{"x": 1.0}]
-        bridge._lane_reference_freeze_count = 4
-        bridge._turn_latch_decision = "intersection_turn_left"
-        bridge._turn_latch_until_sim_time_s = 10.0
+        bridge.nominal_trajectory_generator = NominalTrajectoryGenerator()
+        bridge.nominal_trajectory_generator.update(
+            target_state=[1.0, 2.0, 3.0, 0.0],
+            samples=[{"x": 1.0}],
+            reference_freeze_count=4,
+            source="test",
+        )
+        bridge.maneuver_manager = ManeuverManager({})
+        bridge.maneuver_manager.resolve_post_turn_phase(
+            decision="lane_follow",
+            scenario_state="LANE_FOLLOW",
+            turn_reference_active=True,
+            post_turn_reference_active=False,
+            travelled_s_m=0.0,
+            required_s_m=12.0,
+            exit_aligned=False,
+        )
 
         bridge.set_destination(
             start_location={"x": 0.0, "y": 0.0, "z": 0.0},
             end_location={"x": 10.0, "y": 0.0, "z": 0.0},
         )
 
-        bridge._lane_id_tracker.reset.assert_called_once_with()
         bridge.control_buffer.reset.assert_called_once_with(
             reason="destination_updated"
         )
-        self.assertEqual(bridge._turn_latch_decision, "")
+        self.assertFalse(bridge.maneuver_manager.turn.active)
 
     def test_collect_object_snapshots_accepts_external_mapping_detections(self):
         bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
@@ -684,35 +757,36 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         self.assertFalse(bridge._boundary_recovery_request.active)
 
     def test_strict_reference_veto_hard_gates_explicit_fallback(self):
-        reason = CPXMPCPlannerBridge._candidate_hard_gate_reason(
-            reference_debug={
-                "candidate_pipeline_selected_status": "explicit_fallback",
-                "candidate_pipeline_selected": "explicit_fallback_keep_lane",
-                "candidate_pipeline_selected_reason": "all_candidates_infeasible",
-                "mpc_reference_stabilizer_reason": (
-                    "contract_violation:first_lateral_out_of_contract;"
-                    "strict_reference_veto"
-                ),
-            },
+        from pipeline.stage_contracts import authorize_mpc_entry
+
+        authorization = authorize_mpc_entry(
+            candidate_status="explicit_fallback",
+            candidate_name="explicit_fallback_keep_lane",
+            candidate_reason="all_candidates_infeasible",
+            final_reference_accepted=False,
+            final_reference_reason="strict_reference_veto",
             behavior_decision="lane_follow",
-            stop_goal_active=False,
         )
 
-        self.assertIn("candidate_hard_gate", reason)
-        self.assertIn("strict_reference_veto", reason)
+        self.assertFalse(authorization.allowed)
+        self.assertEqual(authorization.status, "reference_rejected")
+        self.assertIn("strict_reference_veto", authorization.reason)
 
     def test_emergency_brake_always_uses_direct_control_hard_gate(self):
-        reason = CPXMPCPlannerBridge._candidate_hard_gate_reason(
-            reference_debug={
-                "candidate_pipeline_selected_status": "explicit_fallback",
-                "candidate_pipeline_selected": "explicit_fallback_emergency_stop",
-                "candidate_pipeline_selected_reason": "all_candidates_infeasible",
-            },
+        from pipeline.stage_contracts import authorize_mpc_entry
+
+        authorization = authorize_mpc_entry(
+            candidate_status="explicit_fallback",
+            candidate_name="explicit_fallback_emergency_stop",
+            candidate_reason="all_candidates_infeasible",
+            final_reference_accepted=True,
+            final_reference_reason="",
             behavior_decision="emergency_brake",
-            stop_goal_active=True,
         )
 
-        self.assertIn("emergency_brake_direct_control", reason)
+        self.assertFalse(authorization.allowed)
+        self.assertEqual(authorization.status, "direct_emergency_control")
+        self.assertIn("emergency_brake_direct_control", authorization.reason)
 
     def test_geometry_hard_gate_does_not_request_emergency_stop(self):
         from opencda.planning_module.opencda_bridge.cpx_mpc_planner import (
@@ -745,9 +819,22 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
     def test_turn_explicit_fallback_hard_stops_on_prediction_collision_veto(self):
         bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
         bridge.config = {}
+        bridge.maneuver_manager = ManeuverManager(bridge.config)
         bridge.mpc = types.SimpleNamespace(dt_s=0.1, horizon_steps=3)
-        bridge._turn_latch_decision = ""
-        bridge._turn_latch_until_sim_time_s = 0.0
+        bridge._stable_reference_line_provider = ReferenceLineProvider()
+        bridge._trajectory_fallback_manager = TrajectoryFallbackManager()
+        bridge.route_manager = types.SimpleNamespace(route_revision="route-1")
+        bridge._stable_reference_line_provider.install(
+            TURN,
+            [
+                {"x_ref_m": 1.0, "y_ref_m": 4.0},
+                {"x_ref_m": 2.0, "y_ref_m": 4.0},
+                {"x_ref_m": 3.0, "y_ref_m": 4.0},
+            ],
+            route_revision="route-1",
+            map_epoch="town06",
+            event="maneuver_started",
+        )
         bridge._sim_time_s = lambda: 1.0
         route_reference = [
             {"x_ref_m": 1.0, "y_ref_m": 0.0, "lane_id": 1, "speed_ref_mps": 0.8},
@@ -803,8 +890,8 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
 
         self.assertEqual(decision, "emergency_brake")
         self.assertEqual(speed_mps, 0.0)
-        self.assertEqual(debug["reference_source"], "explicit_fallback_ego_heading_stop")
-        self.assertIn("candidate_collision_risk_veto", debug["route_turn_reference_reason"])
+        self.assertEqual(debug["reference_source"], "reference_line_provider:turn")
+        self.assertIn("bounded_safe_stop", debug["fallback_reason"])
 
     def test_turn_exit_contract_miss_keeps_retained_turn_instead_of_stopping(self):
         from pipeline.maneuver_manager import ManeuverManager
@@ -817,22 +904,27 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
             turn_speed_cap_mps=5.0,
         )
         bridge.maneuver_manager = ManeuverManager()
-        bridge.maneuver_manager.update(
-            reference_samples=[
+        retained_reference = [
                 {"x_ref_m": 1.0, "y_ref_m": 0.0, "heading_rad": 0.0, "speed_ref_mps": 5.0},
                 {"x_ref_m": 2.0, "y_ref_m": 0.1, "heading_rad": 0.1, "speed_ref_mps": 5.0},
                 {"x_ref_m": 3.0, "y_ref_m": 0.3, "heading_rad": 0.2, "speed_ref_mps": 5.0},
-            ],
-            destination_state=[3.0, 0.3, 5.0, 0.2, 1],
-            decision="intersection_turn_left",
-            behavior_fsm_state="INTERSECTION_TURN_LEFT",
-            current_lane_id=1,
-            target_lane_id=1,
-            ego_x_m=0.0,
-            ego_y_m=0.0,
-            reference_source="accepted_turn",
-            route_current_option="LEFT",
+            ]
+        bridge._stable_reference_line_provider = ReferenceLineProvider()
+        bridge._stable_reference_line_provider.install(
+            TURN,
+            retained_reference,
+            route_revision="route-1",
+            map_epoch="town06",
+            event="maneuver_started",
         )
+        bridge._trajectory_fallback_manager = TrajectoryFallbackManager()
+        bridge._trajectory_fallback_manager.record_valid(
+            retained_reference,
+            sim_time_s=1.0,
+            route_revision="route-1",
+        )
+        bridge.route_manager = types.SimpleNamespace(route_revision="route-1")
+        bridge._sim_time_s = lambda: 1.1
 
         decision, _, speed_mps, reference, _, debug = (
             bridge._explicit_fallback_candidate_for_mpc(
@@ -860,11 +952,11 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         self.assertTrue(reference)
         self.assertEqual(
             debug["candidate_pipeline_selected"],
-            "retained_turn_exit_continuation",
+            "hold_last_valid",
         )
         self.assertEqual(
             debug["reference_source"],
-            "unified_maneuver_turn_exit_continuation",
+            "reference_line_provider:turn",
         )
 
     def test_turn_stabilizer_does_not_treat_normal_curve_spacing_as_duplicate(self):
@@ -1212,7 +1304,7 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         self.assertIn(("101", "native_opencda_perception"), by_source)
         self.assertIn(("202", "native_opencda_v2x"), by_source)
 
-    def test_global_route_summary_uses_planning_module_global_planner(self):
+    def test_runtime_route_summary_requires_route_manager_cursor(self):
         bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
         bridge.vehicle_manager = types.SimpleNamespace(vehicle=types.SimpleNamespace(id=7))
         bridge.global_planner = types.SimpleNamespace(
@@ -1231,10 +1323,11 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
             fallback_lane_id=1,
         )
 
-        self.assertTrue(summary["route_found"])
-        self.assertEqual(summary["optimal_lane_id"], 2)
-        self.assertEqual(summary["current_road_option"], "LEFT")
-        self.assertEqual(summary["next_macro_maneuver"], "Left Turn")
+        self.assertFalse(summary["route_found"])
+        self.assertEqual(summary["optimal_lane_id"], 1)
+        self.assertEqual(summary["current_road_option"], "")
+        self.assertEqual(summary["debug_reason"], "route_manager_unavailable")
+        self.assertEqual(summary["next_macro_maneuver"], "Continue Straight")
 
     def test_admap_target_preserves_opaque_lane_identity(self):
         bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
@@ -1271,7 +1364,16 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
             ),
         )
         bridge.route_manager = types.SimpleNamespace(
-            accept_authoritative_route_summary=Mock()
+            sync_route_progress=Mock(return_value="route_progress_local_update"),
+            get_route_info=Mock(return_value={
+                "route_found": True,
+                "optimal_lane_id": 500144,
+                "current_road_option": "LANEFOLLOW",
+                "next_macro_maneuver": "Lane Change Right",
+                "next_macro_distance_m": 30.0,
+                "remaining_distance_m": 100.0,
+            }),
+            accept_authoritative_route_summary=Mock(),
         )
 
         summary = bridge._planning_module_global_route_summary(
@@ -1282,6 +1384,7 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         )
 
         self.assertEqual(summary["optimal_lane_id"], 500144)
+        bridge.route_manager.get_route_info.assert_called_once()
         self.assertEqual(summary["ad_current_lane_id"], 500145)
         self.assertEqual(summary["ad_target_lane_id"], 500144)
         self.assertEqual(summary["lane_change_offset"], -1)

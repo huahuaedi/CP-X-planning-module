@@ -26,6 +26,8 @@ class Waypoint:
     lane_width_m: float | None
     is_intersection: bool
     _planner: "GlobalPlanner" = field(repr=False, compare=False)
+    left_boundary_position: dict[str, float] | None = None
+    right_boundary_position: dict[str, float] | None = None
 
     @property
     def lane_width(self) -> float | None:

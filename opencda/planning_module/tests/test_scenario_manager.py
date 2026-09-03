@@ -1,4 +1,7 @@
 import unittest
+from pathlib import Path
+
+import yaml
 
 from opencda.planning_module.pipeline.scenario_manager import (
     BOUNDARY_RECOVERY,
@@ -14,6 +17,41 @@ from opencda.planning_module.pipeline.scenario_manager import (
 
 
 class CPXScenarioManagerTests(unittest.TestCase):
+    def test_town06_turn_speed_contract_uses_consumed_prepare_key(self):
+        config_path = (
+            Path(__file__).resolve().parents[2]
+            / "scenario_testing"
+            / "config_yaml"
+            / "single_intersection_town06_carla.yaml"
+        )
+        payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+        turn_configs = []
+
+        def collect(node):
+            if isinstance(node, dict):
+                if "waypoint_turn_speed_cap_mps" in node:
+                    turn_configs.append(node)
+                for value in node.values():
+                    collect(value)
+            elif isinstance(node, list):
+                for value in node:
+                    collect(value)
+
+        collect(payload)
+        self.assertGreaterEqual(len(turn_configs), 1)
+        for config in turn_configs:
+            self.assertNotIn(
+                "full_intersection_turn_prepare_speed_cap_mps", config
+            )
+            self.assertEqual(
+                float(config["full_intersection_turn_speed_cap_mps"]),
+                float(config["waypoint_turn_speed_cap_mps"]),
+            )
+            manager = CPXScenarioManager(config)
+            self.assertAlmostEqual(manager.turn_speed_cap_mps, 2.2)
+            self.assertAlmostEqual(manager.turn_prepare_speed_cap_mps, 2.8)
+
     def test_default_pipeline_keeps_boundary_recovery_diagnostic_only(self):
         manager = CPXScenarioManager()
 
@@ -185,6 +223,57 @@ class CPXScenarioManagerTests(unittest.TestCase):
         # an early fixed low-speed cap. SpeedPlanner owns distance-based
         # deceleration toward the turn-entry speed.
         self.assertEqual(decision.speed_cap_mps, 8.0)
+
+    def test_route_cursor_connector_entry_starts_turn_without_junction_flag(self):
+        manager = CPXScenarioManager({
+            "full_intersection_turn_speed_cap_mps": 2.2,
+        })
+        prepared = manager.update(
+            traffic_state="unknown",
+            stop_target=None,
+            stop_forward_m=0.0,
+            stop_target_reliable=False,
+            ego_speed_mps=3.0,
+            ego_in_junction=False,
+            current_road_option="LANEFOLLOW",
+            next_macro_maneuver="Turn Right",
+            sim_time_s=1.0,
+            upcoming_turn_direction="right",
+            upcoming_turn_distance_m=5.0,
+        )
+        entered = manager.update(
+            traffic_state="unknown",
+            stop_target=None,
+            stop_forward_m=0.0,
+            stop_target_reliable=False,
+            ego_speed_mps=2.2,
+            ego_in_junction=False,
+            current_road_option="LANEFOLLOW",
+            next_macro_maneuver="Turn Right",
+            sim_time_s=1.1,
+            upcoming_turn_direction="right",
+            upcoming_turn_distance_m=0.0,
+        )
+        held = manager.update(
+            traffic_state="unknown",
+            stop_target=None,
+            stop_forward_m=0.0,
+            stop_target_reliable=False,
+            ego_speed_mps=2.2,
+            ego_in_junction=False,
+            current_road_option="LANEFOLLOW",
+            next_macro_maneuver="Turn Right",
+            sim_time_s=2.0,
+            upcoming_turn_direction="right",
+            upcoming_turn_distance_m=0.0,
+        )
+
+        self.assertEqual(prepared.state, PREPARE_TURN)
+        self.assertEqual(entered.state, INTERSECTION_TURN)
+        self.assertEqual(held.state, INTERSECTION_TURN)
+        self.assertEqual(entered.behavior_override_decision,
+                         "intersection_turn_right")
+        self.assertTrue(entered.turn_latched)
 
     def test_far_macro_turn_does_not_enter_prepare_turn(self):
         manager = CPXScenarioManager({

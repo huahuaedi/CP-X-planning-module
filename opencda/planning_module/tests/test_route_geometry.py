@@ -163,6 +163,43 @@ class StableReferenceLineTests(unittest.TestCase):
         self.assertGreater(path[-1]["heading_rad"], 0.1)
         self.assertEqual(path[-1]["lane_id"], 202)
 
+    def test_frenet_lane_change_keeps_target_tail_after_short_source_ends(self):
+        source = [{"x_ref_m": float(i), "y_ref_m": 0.0, "lane_id": 101}
+                  for i in range(21)]
+        target = [{"x_ref_m": float(i), "y_ref_m": 3.5, "lane_id": 202}
+                  for i in range(41)]
+        path = rg.frenet_lane_change_path(
+            rg.build_reference_line(source, spacing_m=1.0),
+            lateral_offset_m=3.5,
+            transition_length_m=20.0,
+            target_lane_id=202,
+            target_speed_mps=8.0,
+            target_reference_line=rg.build_reference_line(target, spacing_m=1.0),
+        )
+        self.assertGreater(len(path), len(source))
+        self.assertAlmostEqual(path[-1]["x_ref_m"], 40.0, delta=1e-6)
+        self.assertAlmostEqual(path[-1]["y_ref_m"], 3.5, delta=1e-6)
+        self.assertEqual(path[-1]["lane_change_progress"], 1.0)
+
+    def test_frenet_lane_change_accepts_target_shorter_than_source(self):
+        source = [{"x_ref_m": float(i), "y_ref_m": 0.0, "lane_id": 101}
+                  for i in range(41)]
+        target = [{"x_ref_m": float(i), "y_ref_m": 3.5, "lane_id": 202}
+                  for i in range(21)]
+
+        path = rg.frenet_lane_change_path(
+            rg.build_reference_line(source, spacing_m=1.0),
+            lateral_offset_m=3.5,
+            transition_length_m=20.0,
+            target_lane_id=202,
+            target_speed_mps=8.0,
+            target_reference_line=rg.build_reference_line(target, spacing_m=1.0),
+        )
+
+        self.assertTrue(path)
+        self.assertEqual(path[-1]["lane_id"], 202)
+        self.assertAlmostEqual(path[-1]["y_ref_m"], 3.5, delta=1e-6)
+
 
 class ProjectionTests(unittest.TestCase):
     def test_project_returns_arc_length_and_signed_lateral(self):
@@ -175,6 +212,19 @@ class ProjectionTests(unittest.TestCase):
         pts = _straight(20, 1.0)
         s_m, _ = rg.project_to_polyline(pts, 3.0, 0.0, s_lower_m=8.0)
         self.assertGreaterEqual(s_m, 8.0)
+
+    def test_projection_upper_bound_rejects_nearby_later_branch(self):
+        # The final branch returns spatially close to the query, but a
+        # persistent cursor at s=2 may only search the next 3 m this tick.
+        points = [(0.0, 0.0), (10.0, 0.0), (10.0, 1.0), (2.0, 1.0)]
+        s_m, _ = rg.project_to_polyline(
+            points,
+            2.0,
+            0.9,
+            s_lower_m=2.0,
+            s_upper_m=5.0,
+        )
+        self.assertLessEqual(s_m, 5.0 + 1e-9)
 
 
 class RouteGeometrySegmentationTests(unittest.TestCase):
@@ -249,11 +299,7 @@ class RouteGeometrySegmentationTests(unittest.TestCase):
         self.assertEqual(len(poses), 6)
         self.assertGreater(poses[-1].x_m, geom.total_m)  # extrapolated forward
 
-    def test_junction_geometry_does_not_invent_route_topology(self):
-        # No LEFT/RIGHT road option -- direction falls back to the heading
-        # sweep. CARLA world coords are left-handed, so a quarter-circle from
-        # heading 0 (+x) sweeping toward +y (positive atan2 sweep) is a
-        # physical RIGHT turn -- matches CARLA GlobalRoutePlanner.
+    def test_junction_geometry_marks_admap_connector_without_angle_guess(self):
         def jwp(x, y):
             return type("WP", (), {"transform": type("T", (), {
                 "location": type("L", (), {"x": x, "y": y, "z": 0.0})()})(),
@@ -275,6 +321,9 @@ class RouteGeometrySegmentationTests(unittest.TestCase):
         geom = RouteGeometry.from_entries(entries)
         turn = geom.next_turn(0.0, 200.0)
         self.assertIsNone(turn)
+        self.assertTrue(
+            any(segment.kind == "junction_connector" for segment in geom.segments)
+        )
 
     def test_lane_change_segment_carries_exact_ad_lane_ids(self):
         entries = self._entries(

@@ -68,6 +68,36 @@ class OpenCDAVelocitySteeringAdapter:
                 throttle = 0.0
                 brake = min(0.3, float(self.controller.max_brake))
                 reason = "opencda_pid_stop_hold"
+            elif target_speed_mps > actual_speed_mps:
+                # OpenCDA's longitudinal PID contains a derivative term.  A
+                # downward update of an MPC preview setpoint can therefore
+                # make its instantaneous output negative even while the ego
+                # is still below that setpoint.  Braking in that state is
+                # physically inconsistent and caused the repeatable one-shot
+                # brake pulses in the 8/12 m/s lane-change sweeps.  Preserve
+                # OpenCDA as the longitudinal controller, but enforce the
+                # sign implied by the speed error at this platform boundary.
+                throttle = min(
+                    max(0.0, float(pid_output)),
+                    float(self.controller.max_throttle),
+                )
+                brake = 0.0
+                reason = (
+                    "opencda_pid_accelerate"
+                    if float(throttle) > 0.0
+                    else "opencda_pid_underspeed_coast"
+                )
+            elif target_speed_mps < actual_speed_mps:
+                throttle = 0.0
+                brake = min(
+                    max(0.0, -float(pid_output)),
+                    float(self.controller.max_brake),
+                )
+                reason = (
+                    "opencda_pid_tracking_brake"
+                    if float(brake) > 0.0
+                    else "opencda_pid_overspeed_coast"
+                )
             elif pid_output >= 0.0 and target_speed_mps > 0.0:
                 throttle = min(pid_output, float(self.controller.max_throttle))
                 brake = 0.0

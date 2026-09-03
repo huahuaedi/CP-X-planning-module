@@ -78,25 +78,21 @@ def normalize_architecture_config(
     normalized["full_mpc_reference_stabilizer_enabled"] = True
     normalized["control_buffer_enabled"] = True
     normalized["safety_supervisor_enabled"] = True
-    velocity_steering_interface = bool(
-        normalized.get("velocity_steering_interface_enabled", False)
-    )
-    profile_name = (
-        "unified_velocity_steering_v1"
-        if bool(velocity_steering_interface)
-        else "unified_full_v2"
-    )
-    normalized["architecture_profile"] = str(profile_name)
+    # The planning/platform boundary has one supported form: MPC publishes
+    # velocity and physical steering, OpenCDA's longitudinal PID maps velocity
+    # to pedals. Keeping the historical acceleration-to-pedals mode behind a
+    # flag made both nominal controllers execute in the same tick.
+    if not bool(normalized.get("velocity_steering_interface_enabled", True)):
+        overrides.append("velocity_steering_interface_enabled:False->True")
+    normalized["velocity_steering_interface_enabled"] = True
+    profile_name = "unified_velocity_steering_v1"
+    normalized["architecture_profile"] = profile_name
     return normalized, ArchitectureProfile(
         name=str(profile_name),
         behavior_owner="BehaviorPlanner+CandidateEvaluator",
-        speed_owner="SpeedPlanner",
-        reference_owner="ReferenceGenerator+ReferencePipeline",
-        control_memory_owner=(
-            "OpenCDAVelocitySteeringAdapter"
-            if bool(velocity_steering_interface)
-            else "MPCControlBuffer"
-        ),
+        speed_owner="SpeedTargetPlanner",
+        reference_owner="ReferenceLineProvider",
+        control_memory_owner="MPCControlBuffer+MPCCommandExtractor",
         safety_owner="MinimalSafetySupervisor",
         normalized_overrides=tuple(overrides),
     )

@@ -270,17 +270,8 @@ class ReferencePipeline:
             )
         if not validation.valid:
             reasons.append("contract_violation:" + validation.reason())
-            # Even when already inside the boundary-recovery path, still try
-            # _recover_once once: for intersection_turn it builds the
-            # reference from route_aligned_samples (a different geometry
-            # source than whatever produced the out-of-corridor reference in
-            # the first place), and it does not recurse back into boundary
-            # recovery, so this cannot loop forever. Skipping it here used to
-            # mean a failed boundary-recovery validation had no fallback at
-            # all -- validate_boundary_recovery_progress's worsening check
-            # (reference_generator.py) then vetoes every subsequent tick's
-            # attempt identically, and the vehicle stops permanently with no
-            # path back to a valid reference.
+            # Recovery may repair lane-follow/stop geometry only. Persistent
+            # maneuver geometry is retained and its failure is reported.
             recovered_reference, recovered_destination, recovery_reason = (
                 self._recover_once(
                     request=request,
@@ -666,24 +657,14 @@ class ReferencePipeline:
                 current_state=request.current_state,
             )
             return reference, aligned, "lane_recovery_reference"
+        # Executing maneuvers have persistent geometry owned by
+        # ReferenceLineProvider.  A validation failure is not a lifecycle
+        # event and must never replace that geometry with a route polyline or
+        # a lane-follow path.  The caller will report the failed contract to
+        # the fallback/safety owner while the provider retains its immutable
+        # master for the next tick.
         if mode == "intersection_turn":
-            reference = self.generator.route_aligned_samples(
-                ego_location=request.ego_location,
-                ego_heading_rad=float(request.ego_yaw_rad),
-                current_lane_id=int(request.current_lane_id),
-                horizon_steps=int(self.horizon_steps),
-                step_distance_m=float(step_distance_m),
-                route_points=request.route_points,
-            )
-            aligned = self._aligned_destination(
-                mode=mode,
-                destination=destination,
-                reference=reference,
-                current_state=request.current_state,
-            )
-            return reference, aligned, "route_aligned_turn_recovery"
-        # A committed lane change may only continue its locked trajectory or
-        # be rejected by the caller. It must never be rebuilt as lane follow.
+            return [], list(destination), "turn_geometry_recovery_forbidden"
         return [], list(destination), "lane_change_recovery_forbidden"
 
     def _aligned_destination(

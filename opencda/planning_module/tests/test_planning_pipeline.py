@@ -126,6 +126,37 @@ class PlanningPipelineTests(unittest.TestCase):
         risky_candidate = [candidate for candidate in frame.candidates if candidate.target_lane_id == 2][0]
         self.assertFalse(risky_candidate.feasible)
 
+    def test_candidate_evaluation_uses_progress_cost_for_slow_lead(self):
+        frame = evaluate_behavior_candidates(
+            lane_safety_scores={1: 0.88, 2: 1.0},
+            lane_prediction_risks={1: {"risk": False}, 2: {"risk": False}},
+            ego_lane_id=1,
+            selected_lane_id=1,
+            available_lane_ids=[1, 2],
+            route_optimal_lane_id=1,
+            nearest_front_obstacles_by_lane={1: {"v": 0.0}},
+            desired_speed_mps=8.0,
+        )
+
+        self.assertEqual(frame.selected.target_lane_id, 2)
+        self.assertEqual(frame.selected.decision, "lane_change_left")
+        keep = [candidate for candidate in frame.candidates if candidate.target_lane_id == 1][0]
+        self.assertEqual(keep.cost_terms["progress_cost"], 4.0)
+
+    def test_progress_cost_cannot_override_prediction_gate(self):
+        frame = evaluate_behavior_candidates(
+            lane_safety_scores={1: 0.88, 2: 1.0},
+            lane_prediction_risks={1: {"risk": False}, 2: {"risk": True}},
+            ego_lane_id=1,
+            selected_lane_id=1,
+            available_lane_ids=[1, 2],
+            route_optimal_lane_id=1,
+            nearest_front_obstacles_by_lane={1: {"v": 0.0}},
+            desired_speed_mps=8.0,
+        )
+
+        self.assertEqual(frame.selected.target_lane_id, 1)
+
     def test_candidate_preferred_lane_feeds_behavior_fsm(self):
         planner = RuleBasedBehaviorPlanner(
             hysteresis_delta=0.05,

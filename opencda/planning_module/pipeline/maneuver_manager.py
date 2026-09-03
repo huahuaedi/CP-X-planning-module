@@ -1,587 +1,335 @@
-"""Persistent maneuver ownership between behavior and reference sampling."""
+"""Semantic lifecycle owner for committed planning maneuvers.
 
+XY reference geometry belongs exclusively to ``ReferenceLineProvider``.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 import math
-from typing import Mapping, Sequence
-
-
-_LANE_CHANGE = {"lane_change", "lane_change_left", "lane_change_right"}
-_TURN = {"intersection_turn_left", "intersection_turn_right"}
+from typing import Optional
 
 
 @dataclass
-class ManeuverPlan:
-    maneuver_id: str
-    maneuver_type: str
-    direction: str
-    phase: str
-    source_lane_id: int
-    target_lane_id: int
-    geometry: list[dict[str, object]] = field(default_factory=list)
+class LaneChangeLifecycle:
+    option: str = ""
+    phase: str = "idle"
+    source_lane_id: int = 0
+    target_lane_id: int = 0
+    target_speed_mps: float = 0.0
+    progress: float = 0.0
     progress_index: int = 0
-    geometry_revision: int = 0
-    reference_source: str = ""
+    progress_s_m: float = 0.0
+    stabilization_frames: int = 0
+    completion_stable_frames: int = 0
+    geometry_completion_latched: bool = False
+    completion_reference: list = field(default_factory=list)
+    completion_debug: dict = field(default_factory=dict)
+    completed_option: str = ""
+    progress_pairs: list = field(default_factory=list)
+    envelope_blocks: object = None
+    envelope_epsilon0: float = 0.0
+    commitment_invalid_frames: int = 0
+    duration_comfort_reason: str = ""
+    resolved_duration_s: float = 0.0
+    committed_at_s: float = -float("inf")
+    transition_to_turn_arc_m: float = 0.0
+    transition_to_turn_step_m: float = 0.0
+    required_target_lane_id: Optional[int] = None
+    required_target_ad_lane_id: Optional[int] = None
+
+    @property
+    def active(self):
+        return bool(self.option and self.phase != "idle")
+
+    def reset(self, preserve_completed_option=True):
+        completed = str(self.completed_option) if preserve_completed_option else ""
+        self.option, self.phase = "", "idle"
+        self.source_lane_id = self.target_lane_id = 0
+        self.target_speed_mps = self.progress = self.progress_s_m = 0.0
+        self.progress_index = self.stabilization_frames = 0
+        self.completion_stable_frames = self.commitment_invalid_frames = 0
+        self.geometry_completion_latched = False
+        self.completion_reference, self.completion_debug = [], {}
+        self.completed_option = completed
+        self.progress_pairs, self.envelope_blocks = [], None
+        self.envelope_epsilon0 = self.resolved_duration_s = 0.0
+        self.duration_comfort_reason = ""
+        self.committed_at_s = -float("inf")
+        self.transition_to_turn_arc_m = self.transition_to_turn_step_m = 0.0
+        self.required_target_lane_id = self.required_target_ad_lane_id = None
+
+
+@dataclass
+class TurnLifecycle:
+    decision: str = ""
+    phase: str = "idle"
+
+    @property
+    def active(self):
+        return self.phase != "idle"
+
+    def reset(self):
+        self.decision, self.phase = "", "idle"
 
 
 @dataclass(frozen=True)
-class ManeuverReferenceResult:
-    reference_samples: list[dict[str, object]]
-    destination_state: list[float]
-    debug: dict[str, object]
+class LaneChangeTransition:
+    action: str
+    reason: str = ""
 
 
 class ManeuverManager:
-    """Keep one geometric owner across lane-change/approach/turn phases.
+    """Own identity, phase and monotonic progress, never reference samples."""
 
-    Behavior may change phase and SpeedPlanner may replace the velocity
-    profile, but neither operation replaces the maneuver identity. Incoming
-    geometry is joined to the retained path with a short C1 handoff instead
-    of exposing a generator boundary directly to MPC.
-    """
-
-    def __init__(self, config: Mapping[str, object] | None = None) -> None:
+    def __init__(self, config=None):
         self.config = dict(config or {})
-        self.active_plan: ManeuverPlan | None = None
-        self._next_id = 1
-        self._last_output: list[dict[str, object]] = []
-        # A reference-source switch (e.g. the winning candidate flipping from
-        # a full-speed to a slowed-down variant) can change the reference's
-        # own commanded speed -- and therefore its forward extent/point
-        # count -- by a large amount in one step. Blending only the first 8
-        # points (the old default) isn't enough to hide a jump that size; it
-        # just compresses the discontinuity into a shorter, sharper ramp
-        # that still reads to MPC's lane-center cost as a near-step change.
-        # Spreading the handoff over more points trades a slightly longer
-        # transition for actually removing that step.
-        self.continuous_handoff_blend_count = max(
-            1,
-            int(self.config.get("maneuver_continuous_handoff_blend_count", 8)),
-        )
+        self.lane_change = LaneChangeLifecycle()
+        self.turn = TurnLifecycle()
+        self.last_release = {}
+        self._route_lane_change_edge_id = ""
+        self._completed_route_lane_change_edge_id = ""
 
-    def reset(self, reason: str = "reset") -> None:
-        del reason
-        self.active_plan = None
-        self._last_output = []
+    def reset(self, reason="reset"):
+        self.last_release = {"reason": str(reason), "outcome": "reset"}
+        self.lane_change.reset(preserve_completed_option=False)
+        self.turn.reset()
+        self._route_lane_change_edge_id = ""
+        self._completed_route_lane_change_edge_id = ""
 
-    def retained_turn_continuation(
-        self,
-        *,
-        ego_x_m: float,
-        ego_y_m: float,
-        target_speed_mps: float,
-        count: int,
-    ) -> list[dict[str, object]]:
-        """Return the forward part of the currently owned turn geometry.
+    def observe_route_lane_change_edge(self, edge_id):
+        """Track one immutable route edge and retire completion on advance."""
 
-        ScenarioManager intentionally keeps the turn authoritative during
-        TURN_EXIT_STABILIZATION.  Candidate generation can nevertheless have
-        a one-frame map/footprint contract miss after the route has advanced.
-        The already accepted maneuver geometry is the continuous reference
-        for that transient; rebuilding a fresh route or emergency-stop path
-        here changes ownership and produces a control spike.
-        """
-
-        plan = self.active_plan
-        if plan is None or str(plan.maneuver_type) != "intersection_turn":
-            return []
-        retained, retained_index = self._forward_window(
-            plan.geometry,
-            ego_x_m=float(ego_x_m),
-            ego_y_m=float(ego_y_m),
-            count=max(2, int(count)),
-            start_index=int(plan.progress_index),
-        )
-        if not retained:
-            return []
-        plan.progress_index = max(int(plan.progress_index), int(retained_index))
-        result = self._apply_velocity_profile(
-            retained,
-            [
-                {"speed_ref_mps": float(target_speed_mps)}
-                for _ in retained
-            ],
-        )
-        return [dict(sample) for sample in result]
-
-    def update(
-        self,
-        *,
-        reference_samples: Sequence[Mapping[str, object]],
-        destination_state: Sequence[float],
-        decision: str,
-        behavior_fsm_state: str,
-        current_lane_id: int,
-        target_lane_id: int,
-        ego_x_m: float,
-        ego_y_m: float,
-        reference_source: str,
-        route_current_option: str = "",
-        route_next_maneuver: str = "",
-        stop_goal_active: bool = False,
-        lane_change_commitment_active: bool | None = None,
-    ) -> ManeuverReferenceResult:
-        incoming = [dict(sample) for sample in list(reference_samples or [])]
-        normalized_decision = str(decision or "").strip().lower()
-        phase = self._phase(normalized_decision, behavior_fsm_state, stop_goal_active)
-        normalized_route_next = (
-            str(route_next_maneuver or "")
-            .strip()
-            .lower()
-            .replace("-", "_")
-            .replace(" ", "_")
-        )
-        route_advanced_to_lane_change = normalized_route_next in {
-            "lane_change_left",
-            "lane_change_right",
-            "change_lane_left",
-            "change_lane_right",
-        }
-        released_debug: dict[str, object] = {}
+        edge_id = str(edge_id or "")
         if (
-            self.active_plan is not None
-            and self.active_plan.maneuver_type == "intersection_turn"
-            and bool(route_advanced_to_lane_change)
-            and normalized_decision not in _TURN
+            self._completed_route_lane_change_edge_id
+            and edge_id != self._completed_route_lane_change_edge_id
         ):
-            released_debug = {
-                "maneuver_geometry_release_reason": "route_advanced_to_lane_change",
-                "maneuver_geometry_released_id": str(
-                    self.active_plan.maneuver_id
-                ),
-            }
-            self.active_plan = None
-            self._last_output = []
+            self._completed_route_lane_change_edge_id = ""
+            self.lane_change.completed_option = ""
+        self._route_lane_change_edge_id = edge_id
+        return edge_id
+
+    @property
+    def route_lane_change_edge_completed(self):
+        return bool(
+            self._route_lane_change_edge_id
+            and self._route_lane_change_edge_id
+            == self._completed_route_lane_change_edge_id
+        )
+
+    @property
+    def route_lane_change_edge_id(self):
+        return str(self._route_lane_change_edge_id)
+
+    @property
+    def completed_route_lane_change_edge_id(self):
+        return str(self._completed_route_lane_change_edge_id)
+
+    def clear_turn(self, reason="turn_released"):
+        if self.turn.active:
+            self.last_release = {"reason": str(reason), "outcome": "turn_complete",
+                                 "decision": str(self.turn.decision)}
+        self.turn.reset()
+
+    def resolve_post_turn_phase(self, decision, scenario_state,
+                                turn_reference_active, post_turn_reference_active,
+                                travelled_s_m, required_s_m, exit_aligned):
+        lane_follow = str(decision).strip().lower() == "lane_follow"
+        if (lane_follow and str(scenario_state).strip().upper() == "LANE_FOLLOW"
+                and not post_turn_reference_active and turn_reference_active):
+            self.turn.phase = "post_turn"
+            return "activate"
+        if not (lane_follow and post_turn_reference_active):
+            return "inactive"
+        self.turn.phase = "post_turn"
+        if float(travelled_s_m) + 1e-3 >= float(required_s_m) and exit_aligned:
+            self.clear_turn(reason="post_turn_complete")
+            return "complete"
+        return "hold"
+
+    def begin_lane_change(self, option, phase, source_lane_id, target_lane_id,
+                          target_speed_mps, completion_reference,
+                          committed_at_s=None):
+        state = self.lane_change
+        state.reset(preserve_completed_option=True)
+        state.option, state.phase = str(option), str(phase or "executing")
+        state.source_lane_id, state.target_lane_id = int(source_lane_id), int(target_lane_id)
+        state.target_speed_mps = max(0.0, float(target_speed_mps))
+        # Diagnostic completion snapshot only; never returned as control geometry.
+        state.completion_reference = [dict(x) for x in completion_reference or []]
+        if committed_at_s is not None:
+            state.committed_at_s = float(committed_at_s)
+        return state
+
+    def remember_required_lane_change(self, target_lane_id, target_ad_lane_id=None):
+        self.lane_change.required_target_lane_id = int(target_lane_id)
+        self.lane_change.required_target_ad_lane_id = (
+            int(target_ad_lane_id) if target_ad_lane_id is not None else None
+        )
+
+    def clear_required_lane_change(self):
+        self.lane_change.required_target_lane_id = None
+        self.lane_change.required_target_ad_lane_id = None
+
+    def lane_change_start_feasibility(
+        self, *, authorization_allowed, distance_to_turn_m,
+        geometry_arc_m, handoff_arc_m
+    ):
+        """Decide whether a new lane change can finish before a turn."""
+
+        if not bool(authorization_allowed):
+            return LaneChangeTransition("hold", "lane_change_not_authorized")
+        if self.lane_change.active:
+            return LaneChangeTransition("allow", "lane_change_already_active")
+        try:
+            turn_distance_m = float(distance_to_turn_m)
+        except (TypeError, ValueError):
+            turn_distance_m = float("inf")
+        if not math.isfinite(turn_distance_m):
+            return LaneChangeTransition("allow", "no_turn_in_route_horizon")
+        required_arc_m = max(0.0, float(geometry_arc_m)) + max(
+            0.0, float(handoff_arc_m)
+        )
+        if float(turn_distance_m) + 1.0e-3 < float(required_arc_m):
+            return LaneChangeTransition(
+                "deny",
+                "required_lane_change_no_longer_feasible:"
+                f"turn_distance={float(turn_distance_m):.2f}:"
+                f"required_arc={float(required_arc_m):.2f}",
+            )
+        return LaneChangeTransition("allow", "lane_change_fits_before_turn")
+
+    def transfer_lateral_ownership_to_turn(self, *, owner_state):
+        """Release a lane-change commitment when turn geometry takes over."""
+
+        state = str(owner_state or "").strip().upper()
+        if state not in {
+            "PREPARE_TURN", "INTERSECTION_TURN", "TURN_EXIT_STABILIZATION",
+            "CREEP", "BOUNDARY_RECOVERY",
+        }:
+            return LaneChangeTransition("hold", "turn_does_not_own_lateral")
+        if not self.lane_change.active:
+            return LaneChangeTransition("hold", "lane_change_not_active")
+        self.abandon_lane_change(
+            f"lateral_ownership_transferred_to_{state.lower()}",
+            suppress_recommit=True,
+        )
+        return LaneChangeTransition(
+            "release", f"lateral_ownership_transferred_to_{state.lower()}"
+        )
+
+    def set_lane_change_transition_arc(self, *, arc_m, step_m):
+        self.lane_change.transition_to_turn_arc_m = max(0.0, float(arc_m))
+        self.lane_change.transition_to_turn_step_m = max(0.0, float(step_m))
+
+    def advance_lane_change(self, progress=None, progress_index=None,
+                            progress_s_m=None, phase=None):
+        state = self.lane_change
+        if progress is not None:
+            state.progress = max(state.progress, min(1.0, float(progress)))
+        if progress_index is not None:
+            state.progress_index = max(state.progress_index, int(progress_index))
+        if progress_s_m is not None:
+            state.progress_s_m = max(state.progress_s_m, float(progress_s_m))
+        if phase is not None:
+            state.phase = str(phase)
+        return state
+
+    def finish_lane_change_lifecycle(self, completed):
+        state, released = self.lane_change, str(self.lane_change.option)
+        if completed:
+            state.completed_option = released
+            if self._route_lane_change_edge_id:
+                self._completed_route_lane_change_edge_id = str(
+                    self._route_lane_change_edge_id
+                )
+        state.reset(preserve_completed_option=True)
+        return released
+
+    def begin_lane_change_stabilization(self):
+        state = self.lane_change
+        state.phase = "target_lane_stabilization"
+        state.progress_index = 0
+        state.progress_s_m = 0.0
+        state.stabilization_frames = state.completion_stable_frames = 0
+        state.geometry_completion_latched = False
+        return state
+
+    def lane_change_handoff_transition(self, *, geometry_ready):
+        state = self.lane_change
+        if state.phase == "target_lane_stabilization":
+            return LaneChangeTransition("hold", "already_stabilizing")
+        if not bool(geometry_ready):
+            return LaneChangeTransition("hold", "handoff_geometry_not_ready")
+        return LaneChangeTransition("start_stabilization", "handoff_ready")
+
+    def tick_lane_change_stabilization(self, *, timeout_frames):
+        state = self.lane_change
+        if state.phase != "target_lane_stabilization":
+            return LaneChangeTransition("hold", "not_stabilizing")
+        state.stabilization_frames += 1
+        if state.stabilization_frames <= max(1, int(timeout_frames)):
+            return LaneChangeTransition("hold", "stabilizing")
+        self.abandon_lane_change(
+            "stabilization_timeout", suppress_recommit=True
+        )
+        return LaneChangeTransition("abandon", "stabilization_timeout")
+
+    def accept_lane_change_completion(
+        self, *, stable_frames, debug, geometrically_complete,
+        completion_reason, transition_progress_m, transition_arc_m
+    ):
+        self.record_lane_change_completion_evidence(
+            stable_frames=int(stable_frames),
+            debug=debug,
+            geometrically_complete=bool(geometrically_complete),
+        )
+        if not self.lane_change.geometry_completion_latched:
+            return LaneChangeTransition("hold", "completion_not_converged")
         if (
-            self.active_plan is not None
-            and self.active_plan.maneuver_type in {"lane_change", "lane_change_to_turn"}
-            and normalized_decision not in _LANE_CHANGE
-            and lane_change_commitment_active is False
+            float(transition_arc_m) > 0.0
+            and float(transition_progress_m) + 1.0e-3
+            < float(transition_arc_m)
         ):
-            released_debug = {
-                "maneuver_geometry_release_reason": "lane_change_commitment_complete",
-                "maneuver_geometry_released_id": str(
-                    self.active_plan.maneuver_id
-                ),
-            }
-            self.active_plan = None
-            self._last_output = []
-        direction = self._direction(
-            normalized_decision,
-            route_current_option,
-            route_next_maneuver,
+            return LaneChangeTransition("hold", "transition_arc_incomplete")
+        return LaneChangeTransition("complete", str(completion_reason))
+
+    def clear_completed_lane_change_if_route_advanced(self, route_option):
+        if (self.lane_change.completed_option
+                and str(route_option) != self.lane_change.completed_option):
+            self.lane_change.completed_option = ""
+            return True
+        return False
+
+    def record_lane_change_completion_evidence(self, stable_frames, debug,
+                                               geometrically_complete=False):
+        self.lane_change.completion_stable_frames = max(0, int(stable_frames))
+        # Geometric completion is a one-way lifecycle event.  The following
+        # fixed-arc handoff may temporarily move outside the tight completion
+        # tolerance; that must not make an already completed crossing become
+        # incomplete again.
+        self.lane_change.geometry_completion_latched = bool(
+            self.lane_change.geometry_completion_latched
+            or geometrically_complete
         )
-        should_start = normalized_decision in _LANE_CHANGE | _TURN
-        should_continue = bool(
-            self.active_plan is not None
-            and (
-                bool(stop_goal_active)
-                or phase in {"LANE_CHANGE", "STABILIZATION", "TURN", "STOP"}
-                or self._route_still_requires_direction(
-                    self.active_plan.direction,
-                    route_current_option,
-                    route_next_maneuver,
-                )
-            )
-        )
+        self.lane_change.completion_debug = dict(debug or {})
+        return self.lane_change
 
-        if self.active_plan is None and should_start and incoming:
-            # "chained with a route turn" must come from the ROUTE's own
-            # upcoming-maneuver hints, not from `decision` -- a plain
-            # lane_change_left/right decision trivially contains "left"/
-            # "right" itself, so using `direction` (which folds `decision`
-            # into the same text match) here always finds a match and no
-            # lane change was ever classified as the plain "lane_change"
-            # type, even ones with no upcoming turn at all (e.g. a local
-            # static-obstacle avoidance lane change). That silently routed
-            # every lane change through the turn-chained geometry path.
-            route_turn_direction = self._route_direction(
-                route_current_option, route_next_maneuver
-            )
-            maneuver_type = (
-                "lane_change_to_turn"
-                if normalized_decision in _LANE_CHANGE and route_turn_direction
-                else "lane_change"
-                if normalized_decision in _LANE_CHANGE
-                else "intersection_turn"
-            )
-            self.active_plan = ManeuverPlan(
-                maneuver_id=f"maneuver-{self._next_id}",
-                maneuver_type=maneuver_type,
-                direction=direction,
-                phase=phase,
-                source_lane_id=int(current_lane_id),
-                target_lane_id=int(target_lane_id),
-                geometry=self._geometry_only(incoming),
-                geometry_revision=1,
-                reference_source=str(reference_source),
-            )
-            self._next_id += 1
+    def update_lane_change_target_speed(self, target_speed_mps):
+        self.lane_change.target_speed_mps = max(0.0, float(target_speed_mps))
+        return self.lane_change
 
-        if self.active_plan is None:
-            self._last_output = []
-            inactive_debug = self._inactive_debug()
-            inactive_debug.update(released_debug)
-            return ManeuverReferenceResult(
-                reference_samples=incoming,
-                destination_state=list(destination_state or []),
-                debug=inactive_debug,
-            )
+    def complete_lane_change(self, reason):
+        return self._release_lane_change("complete", reason, False)
 
-        if not should_continue and not should_start:
-            completed_id = self.active_plan.maneuver_id
-            self.active_plan = None
-            self._last_output = []
-            debug = self._inactive_debug()
-            debug.update({
-                "maneuver_geometry_release_reason": "route_maneuver_complete",
-                "maneuver_geometry_released_id": completed_id,
-            })
-            return ManeuverReferenceResult(
-                reference_samples=incoming,
-                destination_state=list(destination_state or []),
-                debug=debug,
-            )
+    def abandon_lane_change(self, reason, suppress_recommit=False):
+        return self._release_lane_change("abandoned", reason, suppress_recommit)
 
-        plan = self.active_plan
-        plan.phase = phase
-        # Source/target lane identity belongs to the committed maneuver.  A
-        # continuous matcher is expected to move current_lane_id onto the
-        # target lane during execution; that is progress, not a reason to
-        # retarget or rebuild the maneuver.
-        if int(target_lane_id) and not (
-            plan.maneuver_type in {"lane_change", "lane_change_to_turn"}
-            and int(plan.target_lane_id)
-        ):
-            plan.target_lane_id = int(target_lane_id)
-        retained, retained_index = self._forward_window(
-            plan.geometry,
-            ego_x_m=float(ego_x_m),
-            ego_y_m=float(ego_y_m),
-            count=max(len(incoming), 2),
-            start_index=plan.progress_index,
-        )
-        incoming_source_changed = bool(
-            str(reference_source) and str(reference_source) != plan.reference_source
-        )
-        owns_lane_change_geometry = bool(
-            plan.maneuver_type in {"lane_change", "lane_change_to_turn"}
-            and plan.phase in {"LANE_CHANGE", "STABILIZATION"}
-        )
-        # A lane-change is committed once.  Candidate/source labels can
-        # legitimately change on the next tick (intent -> locked reference,
-        # source-lane match -> target-lane match), but they must not transfer
-        # XY ownership.  Keep the accepted prefix and only append genuinely
-        # new points beyond its tail; per-frame speed is applied separately.
-        source_changed = bool(incoming_source_changed and not owns_lane_change_geometry)
-        window_start_index = retained_index
-        if incoming:
-            if owns_lane_change_geometry:
-                plan.geometry = self._extend_geometry(plan.geometry, incoming)
-                geometry = retained
-            elif retained and bool(stop_goal_active):
-                geometry = retained[:len(incoming)]
-            elif retained and source_changed:
-                geometry = self._continuous_handoff(
-                    retained,
-                    incoming,
-                    blend_count=int(self.continuous_handoff_blend_count),
-                )
-            else:
-                geometry = self._geometry_only(incoming)
-            if not owns_lane_change_geometry:
-                plan.geometry = self._extend_geometry(geometry, incoming)
-                plan.geometry_revision += int(source_changed)
-                plan.reference_source = str(reference_source or plan.reference_source)
-                # The rebuilt geometry's index 0 is re-anchored near ego (it
-                # is built from retained[0]/incoming[0], the point nearest
-                # ego found above), so the next search must restart at 0.
-                window_start_index = 0
-
-        window, window_index = self._forward_window(
-            plan.geometry,
-            ego_x_m=float(ego_x_m),
-            ego_y_m=float(ego_y_m),
-            count=max(1, len(incoming)),
-            start_index=window_start_index,
-        )
-        plan.progress_index = int(window_index)
-        if not window:
-            window = self._geometry_only(incoming)
-        output = self._apply_velocity_profile(window, incoming)
-        destination = self._destination(output, destination_state, plan.target_lane_id)
-        first_point_jump_m, first_heading_jump_deg = self._frame_jump(output)
-        self._last_output = [dict(sample) for sample in output]
-        return ManeuverReferenceResult(
-            reference_samples=output,
-            destination_state=destination,
-            debug={
-                "maneuver_geometry_active": True,
-                "maneuver_geometry_id": str(plan.maneuver_id),
-                "maneuver_geometry_type": str(plan.maneuver_type),
-                "maneuver_geometry_direction": str(plan.direction),
-                "maneuver_geometry_phase": str(plan.phase),
-                "maneuver_geometry_revision": int(plan.geometry_revision),
-                "maneuver_geometry_source_changed": bool(source_changed),
-                "maneuver_geometry_owner": "ManeuverManager",
-                "maneuver_geometry_point_count": int(len(plan.geometry)),
-                "maneuver_first_point_jump_m": float(first_point_jump_m),
-                "maneuver_first_heading_jump_deg": float(
-                    first_heading_jump_deg
-                ),
-            },
-        )
-
-    @staticmethod
-    def _inactive_debug() -> dict[str, object]:
-        return {
-            "maneuver_geometry_active": False,
-            "maneuver_geometry_id": "",
-            "maneuver_geometry_type": "",
-            "maneuver_geometry_direction": "",
-            "maneuver_geometry_phase": "IDLE",
-            "maneuver_geometry_revision": 0,
-            "maneuver_geometry_source_changed": False,
-            "maneuver_geometry_owner": "",
-            "maneuver_geometry_point_count": 0,
-            "maneuver_first_point_jump_m": 0.0,
-            "maneuver_first_heading_jump_deg": 0.0,
-        }
-
-    @staticmethod
-    def _phase(decision: str, fsm: str, stop: bool) -> str:
-        if stop:
-            return "STOP"
-        normalized_fsm = str(fsm or "").upper()
-        if "STABILIZATION" in normalized_fsm:
-            return "STABILIZATION"
-        if decision in _LANE_CHANGE:
-            return "LANE_CHANGE"
-        if decision in _TURN:
-            return "TURN"
-        return "APPROACH"
-
-    @staticmethod
-    def _direction(decision: str, current: str, upcoming: str) -> str:
-        text = " ".join((str(decision), str(current), str(upcoming))).lower()
-        if "right" in text:
-            return "right"
-        if "left" in text:
-            return "left"
-        return ""
-
-    @staticmethod
-    def _route_direction(current: str, upcoming: str) -> str:
-        """Return a direction only for an explicit intersection turn hint.
-
-        ``CHANGELANERIGHT`` and ``Lane Change Right`` contain the word
-        ``right`` but are lateral maneuvers, not evidence of a following
-        right turn.  Treating them as turns changes a plain lane-change
-        reference into ``lane_change_to_turn`` and creates a short curved
-        trajectory even when the global route crosses the junction straight.
-        """
-        current_option = str(current or "").strip().upper().replace("_", "")
-        upcoming_option = (
-            str(upcoming or "")
-            .strip()
-            .lower()
-            .replace("-", " ")
-            .replace("_", " ")
-        )
-        if current_option == "RIGHT":
-            return "right"
-        if current_option == "LEFT":
-            return "left"
-        if upcoming_option in {"right", "turn right", "right turn"}:
-            return "right"
-        if upcoming_option in {"left", "turn left", "left turn"}:
-            return "left"
-        return ""
-
-    @staticmethod
-    def _route_still_requires_direction(direction: str, current: str, upcoming: str) -> bool:
-        if not direction:
+    def _release_lane_change(self, outcome, reason, preserve_completed_option):
+        if not self.lane_change.active:
             return False
-        return direction in f"{current} {upcoming}".lower()
-
-    @staticmethod
-    def _xy(sample: Mapping[str, object]) -> tuple[float, float]:
-        return (
-            float(sample.get("x_ref_m", sample.get("x", 0.0))),
-            float(sample.get("y_ref_m", sample.get("y", 0.0))),
-        )
-
-    @classmethod
-    def _geometry_only(cls, samples: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
-        result = [dict(sample) for sample in list(samples or [])]
-        return cls._recompute_geometry(result)
-
-    @classmethod
-    def _forward_window(
-        cls,
-        geometry,
-        *,
-        ego_x_m: float,
-        ego_y_m: float,
-        count: int,
-        start_index: int = 0,
-    ) -> tuple[list[dict[str, object]], int]:
-        """Return a forward window plus the resolved (monotonic) start index.
-
-        The nearest-point search is bounded to a span starting at
-        ``start_index`` and never resolves to an index before it, instead of
-        an unconstrained global nearest-neighbor search over the whole
-        geometry array. Callers must only carry the returned index forward
-        into a later search over the SAME (unmodified) array; once the array
-        is rebuilt/replaced, restart the search at 0 instead (a rebuilt
-        array's index 0 is always re-anchored near ego by construction).
-        """
-
-        points = [dict(sample) for sample in list(geometry or [])]
-        if not points:
-            return [], max(0, int(start_index))
-        start = min(max(0, int(start_index)), len(points) - 1)
-        search_span = max(int(count) * 2, 20)
-        search_end = min(len(points), start + search_span)
-        nearest = min(
-            range(start, search_end),
-            key=lambda index: (
-                cls._xy(points[index])[0] - ego_x_m
-            ) ** 2 + (cls._xy(points[index])[1] - ego_y_m) ** 2,
-        )
-        resolved_index = max(start, nearest)
-        return (
-            points[resolved_index:resolved_index + max(1, int(count))],
-            int(resolved_index),
-        )
-
-    @classmethod
-    def _continuous_handoff(cls, retained, incoming, blend_count: int = 8):
-        count = min(len(retained), len(incoming))
-        blend_count = min(count, max(1, int(blend_count)))
-        output: list[dict[str, object]] = []
-        for index in range(len(incoming)):
-            sample = dict(incoming[index])
-            if index < blend_count:
-                old_x, old_y = cls._xy(retained[index])
-                new_x, new_y = cls._xy(sample)
-                alpha = (index + 1.0) / float(blend_count + 1.0)
-                sample["x_ref_m"] = (1.0 - alpha) * old_x + alpha * new_x
-                sample["y_ref_m"] = (1.0 - alpha) * old_y + alpha * new_y
-                sample["x"] = sample["x_ref_m"]
-                sample["y"] = sample["y_ref_m"]
-            output.append(sample)
-        return cls._recompute_geometry(output)
-
-    @classmethod
-    def _extend_geometry(cls, base, incoming):
-        result = [dict(sample) for sample in list(base or [])]
-        source = [dict(sample) for sample in list(incoming or [])]
-        if result and source:
-            # Continue after the incoming point nearest the retained
-            # endpoint.  Iterating from source[0] appends the whole path a
-            # second time whenever base already contains incoming, creating
-            # a terminal->start loop and an artificial ~180 degree heading
-            # reversal once the forward window reaches that seam.
-            lx, ly = cls._xy(result[-1])
-            nearest = min(
-                range(len(source)),
-                key=lambda index: (
-                    cls._xy(source[index])[0] - lx
-                ) ** 2 + (cls._xy(source[index])[1] - ly) ** 2,
-            )
-            source = source[nearest + 1 :]
-        for sample in source:
-            if not result:
-                result.append(dict(sample))
-                continue
-            x, y = cls._xy(sample)
-            lx, ly = cls._xy(result[-1])
-            if math.hypot(x - lx, y - ly) >= 0.20:
-                result.append(dict(sample))
-        return cls._recompute_geometry(result)
-
-    @classmethod
-    def _recompute_geometry(cls, samples):
-        result = [dict(sample) for sample in list(samples or [])]
-        for index, sample in enumerate(result):
-            if len(result) == 1:
-                heading = float(sample.get("heading_rad", 0.0))
-            else:
-                first = result[max(0, index - 1)]
-                second = result[min(len(result) - 1, index + 1)]
-                x0, y0 = cls._xy(first)
-                x1, y1 = cls._xy(second)
-                heading = math.atan2(y1 - y0, x1 - x0)
-            sample["heading_rad"] = float(heading)
-            sample["psi_ref"] = float(heading)
-        return result
-
-    @staticmethod
-    def _apply_velocity_profile(geometry, incoming):
-        result = [dict(sample) for sample in list(geometry or [])]
-        source = list(incoming or [])
-        # `result` is the persisted geometry window (may span many ticks
-        # unchanged); `source` is this tick's freshly planned speed
-        # profile, which is very often shorter (e.g. speed_planner only
-        # extends a few points ahead) or simply a different length than
-        # the geometry window. Plain index alignment (source[i]) then
-        # silently repeats source's LAST speed value for every geometry
-        # point beyond len(source), regardless of how far along the
-        # locked maneuver that point actually is -- decoupling commanded
-        # speed from lateral progress (e.g. a stale following-cap speed
-        # from early in a lane change getting stamped onto points already
-        # well into the target lane). Match by each sample's own
-        # `lane_change_progress` instead when both sides carry it: that
-        # tag is a physical/time position along the maneuver shared by
-        # both arrays, not an incidental array offset.
-        source_has_progress = any("lane_change_progress" in item for item in source)
-        for index, sample in enumerate(result):
-            if not source:
-                speed = 0.0
-            elif source_has_progress and "lane_change_progress" in sample:
-                target_progress = float(sample.get("lane_change_progress", 0.0) or 0.0)
-                speed_sample = min(
-                    source,
-                    key=lambda item: abs(
-                        float(item.get("lane_change_progress", 0.0) or 0.0)
-                        - target_progress
-                    ),
-                )
-                speed = float(speed_sample.get(
-                    "speed_ref_mps",
-                    speed_sample.get("v_ref_mps", speed_sample.get("speed_mps", 0.0)),
-                ) or 0.0)
-            else:
-                speed_sample = source[min(index, len(source) - 1)]
-                speed = float(speed_sample.get(
-                    "speed_ref_mps",
-                    speed_sample.get("v_ref_mps", speed_sample.get("speed_mps", 0.0)),
-                ) or 0.0)
-            sample["speed_ref_mps"] = speed
-            sample["v_ref_mps"] = speed
-            sample["speed_mps"] = speed
-        return result
-
-    @classmethod
-    def _destination(cls, reference, fallback, lane_id):
-        if not reference:
-            return list(fallback or [])
-        terminal = reference[-1]
-        x, y = cls._xy(terminal)
-        speed = float(terminal.get("speed_ref_mps", 0.0) or 0.0)
-        return [x, y, speed, float(terminal.get("heading_rad", 0.0)), int(lane_id)]
-
-    def _frame_jump(self, output) -> tuple[float, float]:
-        if not output or not self._last_output:
-            return 0.0, 0.0
-        x, y = self._xy(output[0])
-        old_x, old_y = self._xy(self._last_output[0])
-        heading = float(output[0].get("heading_rad", 0.0))
-        old_heading = float(self._last_output[0].get("heading_rad", 0.0))
-        heading_delta = math.atan2(
-            math.sin(heading - old_heading),
-            math.cos(heading - old_heading),
-        )
-        return math.hypot(x - old_x, y - old_y), abs(math.degrees(heading_delta))
+        self.last_release = {"reason": str(reason), "outcome": str(outcome),
+                             "option": str(self.lane_change.option)}
+        self.finish_lane_change_lifecycle(
+            completed=(outcome == "complete" or bool(preserve_completed_option)))
+        return True

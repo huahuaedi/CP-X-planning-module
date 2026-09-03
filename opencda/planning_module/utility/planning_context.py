@@ -249,6 +249,9 @@ class PredictionContext:
     lane_assignments: Mapping[str, int] = field(default_factory=dict)
     lane_prediction_risks: Mapping[int, Mapping[str, object]] = field(default_factory=dict)
     obstacle_future_trajectories: Mapping[str, Sequence[Sequence[float]]] = field(default_factory=dict)
+    predicted_objects: Mapping[str, object] = field(default_factory=dict)
+    revision: str = ""
+    timestamp_s: float = 0.0
     model: str = "constant_acceleration"
     horizon_s: float = 0.0
     dt_s: float = 0.0
@@ -383,6 +386,7 @@ class PlannerInputFrame:
             "planner_input_prediction_risky_lane_count": int(
                 self.prediction.risky_lane_count
             ),
+            "planner_input_prediction_revision": str(self.prediction.revision),
             "planner_input_cp_message_path": str(self.cp_messages.message_path),
             "planner_input_cp_traffic_control_count": int(
                 self.cp_messages.traffic_control_count

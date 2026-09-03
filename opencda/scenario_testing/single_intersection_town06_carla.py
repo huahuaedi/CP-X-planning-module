@@ -283,7 +283,17 @@ def run_scenario(opt, scenario_params):
 
             if debug_viewer is not None:
                 debug_viewer.render(single_cav_list)
+            if bool(
+                getattr(single_cav_list[0], "_opencda_agent_finished", False)
+            ):
+                termination_reason = "route_destination_stopped"
+                break
+            primary_uses_cpx_planner = bool(
+                getattr(single_cav_list[0], "cpx_planner", None) is not None
+            )
             if (
+                not primary_uses_cpx_planner
+                and
                 _distance_to_destination(
                     single_cav_list[0].vehicle,
                     destination,

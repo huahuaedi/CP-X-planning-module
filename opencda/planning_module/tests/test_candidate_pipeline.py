@@ -1356,6 +1356,40 @@ class CandidatePipelineTest(unittest.TestCase):
         self.assertIsNone(outcome.selected)
         self.assertEqual(outcome.reason, "locked_maneuver_reference_infeasible")
 
+    def test_committed_contract_valid_reference_survives_one_probe_failure(self):
+        locked = candidate_pipeline.CandidateReferenceResult(
+            intent=candidate_pipeline.CandidateBehaviorIntent(
+                name="committed_lane_change_continuation",
+                decision="lane_change_right",
+                target_lane_id=1,
+                target_speed_mps=2.5,
+            ),
+            destination_state=[],
+            lane_center_reference=[],
+            contract_result=reference_contract.ReferenceValidationResult(valid=True),
+            feasibility_status="mpc_probe_infeasible",
+            total_cost=10000.0,
+        )
+        commitment = candidate_pipeline.ManeuverCommitment(
+            state="COMMITTED",
+            decision="lane_change_right",
+            source_lane_id=2,
+            target_lane_id=1,
+            progress=0.45,
+            reference_locked=True,
+        )
+
+        outcome = candidate_pipeline.select_candidate_with_commitment(
+            [locked], commitment=commitment
+        )
+
+        self.assertIs(outcome.selected, locked)
+        self.assertEqual(outcome.status, "selected_committed")
+        self.assertEqual(
+            outcome.reason,
+            "locked_maneuver_reference_preserved_after_probe_failure",
+        )
+
     def test_progress_alone_does_not_end_locked_commitment(self):
         commitment = candidate_pipeline.ManeuverCommitment(
             state="COMMITTED",
@@ -1529,6 +1563,33 @@ class LaneCostTopologyAliasTests(unittest.TestCase):
         lane_changes = [intent for intent in intents if "lane_change" in intent.decision]
         self.assertTrue(lane_changes)
         self.assertTrue(all(intent.decision == "lane_change_right" for intent in lane_changes))
+
+    def test_route_authorization_direction_overrides_stale_behavior_direction(self):
+        intents = candidate_pipeline.build_candidate_intents(
+            selected_decision="lane_change_left",
+            selected_target_lane_id=500144,
+            current_lane_id=11640145,
+            target_speed_mps=12.0,
+            candidate_lane_ids=[11640145, 500144],
+            lane_safety_scores={11640145: 1.0, 500144: 1.0},
+            lane_prediction_risks={},
+            stop_goal_active=False,
+            traffic_stop_active=False,
+            lane_change_authorized=True,
+            lane_change_authorized_target_lane_id=500144,
+            lane_change_authorization_direction="right",
+            lane_change_authorization_source="route",
+            allow_lane_change_candidates=True,
+        )
+
+        route_changes = [
+            intent for intent in intents
+            if intent.target_lane_id == 500144 and "lane_change" in intent.decision
+        ]
+        self.assertTrue(route_changes)
+        self.assertTrue(all(
+            intent.decision == "lane_change_right" for intent in route_changes
+        ))
 
 
 if __name__ == "__main__":

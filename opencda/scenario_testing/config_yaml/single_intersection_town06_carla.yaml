@@ -63,9 +63,9 @@ vehicle_base:
     # during that test stage all stay in place -- they don't depend on this
     # cruise value and are non-binding (higher than cruise) at 3.0.
     target_speed_mps: 3.0
-    velocity_steering_interface_enabled: true
-    # OpenCDA PID tracks the optimized MPC velocity at this future time,
-    # rather than the nearly-identical one-step-ahead velocity.
+    # Safe baseline: track a near-term feasible MPC velocity. A terminal
+    # horizon state is not a current actuator command and caused overspeed.
+    mpc_velocity_command_source: preview
     mpc_velocity_command_preview_time_s: 0.6
     # MPC outputs physical acceleration, while CARLA accepts normalized pedal
     # positions. This inverse-actuator model compensates steady-state drag and
@@ -154,7 +154,6 @@ vehicle_base:
     human_like_lane_change_enabled: true
     human_lane_change_min_duration_s: 3.0
     human_lane_change_max_duration_s: 6.5
-    route_tracking_baseline_enabled: false
     route_tracking_rejoin_distance_m: 7.0
     route_tracking_destination_arc_m: 8.0
     route_tracking_destination_horizon_fraction: 0.9
@@ -178,8 +177,14 @@ vehicle_base:
     full_intersection_turn_prepare_enabled: true
     full_intersection_turn_prepare_lookahead_m: 22.0
     full_intersection_turn_prepare_min_m: 3.0
-    full_intersection_turn_speed_cap_mps: 5.0
-    full_intersection_turn_prepare_speed_cap_mps: 5.0
+    # One longitudinal contract for the complete turn pipeline.  The AD-map
+    # connector is sampled for 2.2 m/s below, so entering/tracking it at the
+    # old 5.0 m/s ceiling made the vehicle demand excessive lateral
+    # acceleration on Town06's tight connector.  PREPARE_TURN uses the
+    # ScenarioManager key explicitly and sheds speed before geometry ownership
+    # transfers to the connector.
+    full_intersection_turn_speed_cap_mps: 2.2
+    scenario_turn_prepare_speed_cap_mps: 2.8
     turn_approach_comfort_decel_mps2: 2.5
     turn_approach_entry_buffer_m: 5.0
     turn_approach_preview_margin_m: 10.0
@@ -204,8 +209,6 @@ vehicle_base:
     # full_intersection_turn_speed_cap_mps governs the real comfort speed.
     waypoint_turn_speed_cap_mps: 2.2
     waypoint_turn_min_step_m: 0.35
-    waypoint_turn_connector_distance_m: 7.0
-    waypoint_turn_anchor_to_ego_heading: false
     waypoint_turn_destination_arc_m: 4.5
     route_turn_connector_smoothing_passes: 16
     reference_contract_intersection_turn_max_curvature_1pm: 0.55
@@ -215,7 +218,7 @@ vehicle_base:
     road_boundary_projection_max_heading_step_rad: 0.04
     road_boundary_projection_reset_distance_m: 2.5
     road_boundary_carla_drivable_footprint_enabled: true
-    lane_change_target_lane_entry_min_progress: 0.50
+    # One contract owns both stabilization entry and geometric completion.
     lane_change_stabilization_duration_s: 2.5
     lane_change_stabilization_speed_mps: 1.5
     lane_change_stabilization_timeout_frames: 100
@@ -308,7 +311,7 @@ scenario:
         publish_cp_message: true
         require_native_opencda_cp: true
         target_speed_mps: 3.0
-        velocity_steering_interface_enabled: true
+        mpc_velocity_command_source: preview
         mpc_velocity_command_preview_time_s: 0.6
         actuator_compensation_enabled: true
         actuator_cruise_throttle_feedforward: 0.28
@@ -384,7 +387,6 @@ scenario:
         human_like_lane_change_enabled: true
         human_lane_change_min_duration_s: 3.0
         human_lane_change_max_duration_s: 6.5
-        route_tracking_baseline_enabled: false
         route_tracking_rejoin_distance_m: 7.0
         route_tracking_destination_arc_m: 8.0
         route_tracking_destination_horizon_fraction: 0.9
@@ -407,16 +409,14 @@ scenario:
         full_intersection_turn_prepare_enabled: true
         full_intersection_turn_prepare_lookahead_m: 22.0
         full_intersection_turn_prepare_min_m: 3.0
-        full_intersection_turn_speed_cap_mps: 5.0
-        full_intersection_turn_prepare_speed_cap_mps: 5.0
+        full_intersection_turn_speed_cap_mps: 2.2
+        scenario_turn_prepare_speed_cap_mps: 2.8
         turn_approach_comfort_decel_mps2: 2.5
         turn_approach_entry_buffer_m: 5.0
         turn_approach_preview_margin_m: 10.0
         full_lane_change_speed_cap_mps: 6.0
         waypoint_turn_speed_cap_mps: 2.2
         waypoint_turn_min_step_m: 0.35
-        waypoint_turn_connector_distance_m: 7.0
-        waypoint_turn_anchor_to_ego_heading: false
         waypoint_turn_destination_arc_m: 4.5
         route_turn_connector_smoothing_passes: 16
         reference_contract_intersection_turn_max_curvature_1pm: 0.55

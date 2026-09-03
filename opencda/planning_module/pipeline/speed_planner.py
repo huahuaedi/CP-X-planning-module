@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Mapping, Optional, Sequence
+from typing import TYPE_CHECKING, Mapping, Optional, Sequence
+
+if TYPE_CHECKING:
+    from .behavior_decision import BehaviorDecision
 
 from opencda.planning_module.behavior_planner.car_follow import idm_acceleration
 
@@ -28,6 +31,7 @@ class SpeedPlan:
     upcoming_turn_distance_m: Optional[float] = None
     limiting_owner: str = "behavior_request"
     active_constraints: tuple[str, ...] = ()
+    external_constraints: tuple = ()
 
     def as_debug_fields(self) -> dict[str, object]:
         return {
@@ -89,6 +93,193 @@ class SpeedCeilingResult:
     reference_samples: list[dict[str, object]]
     applied: bool
     reduction_mps: float
+
+
+@dataclass(frozen=True)
+class SpeedConstraint:
+    """One named upper bound submitted to the longitudinal planner."""
+
+    owner: str
+    maximum_mps: float
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class SpeedTarget:
+    """Final immutable longitudinal intent for one planning frame."""
+
+    requested_mps: float
+    target_mps: float
+    limiting_owner: str
+    stop_required: bool
+    constraints: tuple[SpeedConstraint, ...] = ()
+    revision: int = 0
+
+    def as_debug_fields(self) -> dict[str, object]:
+        return {
+            "speed_target_revision": int(self.revision),
+            "speed_target_requested_mps": float(self.requested_mps),
+            "speed_target_mps": float(self.target_mps),
+            "speed_target_limiting_owner": str(self.limiting_owner),
+            "speed_target_stop_required": bool(self.stop_required),
+            "speed_target_constraints": ";".join(
+                constraint.owner for constraint in self.constraints
+            ),
+        }
+
+
+class SpeedTargetPlanner:
+    """Sole owner that freezes behavior speed proposals into a frame target.
+
+    Behavior and scenario modules may submit named ceilings.  They never edit
+    the trajectory themselves.  Safety/fallback layers are deliberately not
+    represented here: they may only reduce this target after validation.
+    """
+
+    def __init__(self):
+        self._revision = 0
+        self._destination_route_revision = ""
+        self._destination_approach_active = False
+        self._destination_approach_cap_mps = float("inf")
+
+    def destination_approach_constraint(
+        self,
+        *,
+        route_revision: str,
+        route_found: bool,
+        route_reached_destination: bool,
+        remaining_distance_m: float,
+        ego_speed_mps: float,
+        deceleration_mps2: float,
+        buffer_m: float,
+    ) -> tuple[Optional[SpeedConstraint], bool, float]:
+        """Return a monotonic destination-speed phase for one route.
+
+        Once the braking envelope is entered, slowing the vehicle must not
+        shrink that envelope and release the constraint. The phase resets
+        only when route identity changes or the route disappears.
+        """
+
+        revision = str(route_revision or "")
+        if revision != self._destination_route_revision or not bool(route_found):
+            self._destination_route_revision = revision
+            self._destination_approach_active = False
+            self._destination_approach_cap_mps = float("inf")
+        deceleration = max(0.5, float(deceleration_mps2))
+        buffer = max(0.0, float(buffer_m))
+        required_distance_m = (
+            max(0.0, float(ego_speed_mps)) ** 2 / (2.0 * deceleration)
+            + buffer
+        )
+        finite_remaining = math.isfinite(float(remaining_distance_m))
+        entered = bool(
+            route_found
+            and finite_remaining
+            and float(remaining_distance_m) >= 0.0
+            and float(remaining_distance_m) <= float(required_distance_m)
+        )
+        if entered:
+            self._destination_approach_active = True
+        if bool(route_reached_destination):
+            self._destination_approach_active = False
+            self._destination_approach_cap_mps = 0.0
+            return None, False, float(required_distance_m)
+        if not self._destination_approach_active:
+            return None, False, float(required_distance_m)
+        usable_distance_m = max(0.0, float(remaining_distance_m) - buffer)
+        cap_mps = math.sqrt(2.0 * deceleration * usable_distance_m)
+        self._destination_approach_cap_mps = min(
+            float(self._destination_approach_cap_mps), float(cap_mps)
+        )
+        return SpeedConstraint(
+            owner="destination_approach",
+            maximum_mps=max(0.0, float(self._destination_approach_cap_mps)),
+            reason="route_destination_approach_speed_profile",
+        ), True, float(required_distance_m)
+
+    @staticmethod
+    def propose(**kwargs) -> SpeedPlan:
+        """Build the typed longitudinal policy proposal for one frame."""
+
+        return build_speed_plan(**kwargs)
+
+    def resolve(
+        self,
+        *,
+        behavior: "BehaviorDecision",
+        speed_plan: Optional[SpeedPlan] = None,
+        additional_constraints: Sequence[SpeedConstraint] = (),
+    ) -> SpeedTarget:
+        # SpeedPlan is a typed policy proposal. Debug dictionaries are output
+        # only and must never be parsed back into the control path.
+        requested = max(0.0, float(behavior.requested_speed_mps))
+        target = requested
+        limiting_owner = "behavior_request"
+        constraints = []
+        if speed_plan is not None:
+            planned_target = max(0.0, float(speed_plan.target_speed_mps))
+            target = min(float(requested), float(planned_target))
+            limiting_owner = (
+                "behavior_request"
+                if float(requested) < float(planned_target)
+                else str(speed_plan.limiting_owner)
+            )
+            for owner, maximum in (
+                ("scenario_cap", speed_plan.scenario_cap_mps),
+                ("turn_cap", speed_plan.turn_cap_mps),
+                ("lane_change_cap", speed_plan.lane_change_cap_mps),
+                (
+                    "idm_following"
+                    if speed_plan.continuous_following_active
+                    and speed_plan.idm_acceleration_mps2 is not None
+                    else "following_cap",
+                    speed_plan.following_cap_mps,
+                ),
+                ("turn_approach_cap", speed_plan.turn_approach_cap_mps),
+            ):
+                if maximum is not None and math.isfinite(float(maximum)):
+                    constraints.append(SpeedConstraint(
+                        owner=owner,
+                        maximum_mps=max(0.0, float(maximum)),
+                    ))
+            constraints.extend(speed_plan.external_constraints)
+        constraints.extend(additional_constraints)
+        for constraint in constraints:
+            if float(constraint.maximum_mps) < target:
+                target = max(0.0, float(constraint.maximum_mps))
+                limiting_owner = str(constraint.owner)
+        if behavior.stop_required or bool(
+            speed_plan is not None and speed_plan.stop_goal_active
+        ):
+            target = 0.0
+            limiting_owner = (
+                str(speed_plan.limiting_owner)
+                if speed_plan is not None and speed_plan.stop_goal_active
+                else "behavior_stop"
+            )
+        self._revision += 1
+        return SpeedTarget(
+            requested_mps=requested,
+            target_mps=float(target),
+            limiting_owner=limiting_owner,
+            stop_required=bool(behavior.stop_required),
+            constraints=tuple(constraints),
+            revision=self._revision,
+        )
+
+    @staticmethod
+    def apply(
+        target: SpeedTarget,
+        *,
+        destination_state: Sequence[float],
+        reference_samples: Sequence[Mapping[str, object]],
+    ) -> SpeedCeilingResult:
+        return enforce_speed_ceiling(
+            proposed_target_mps=float(target.requested_mps),
+            ceiling_mps=float(target.target_mps),
+            destination_state=destination_state,
+            reference_samples=reference_samples,
+        )
 
 
 def turn_approach_lookahead_m(
@@ -215,7 +406,9 @@ def build_speed_plan(
     upcoming_turn_direction: str = "",
     upcoming_turn_distance_m: Optional[float] = None,
     lane_change_commitment_active: bool = False,
+    front_obstacle_is_source_lane: bool = False,
     previous_idm_acceleration_mps2: Optional[float] = None,
+    additional_constraints: Sequence[SpeedConstraint] = (),
 ) -> SpeedPlan:
     """Return the speed target owned by the scenario/behavior layer."""
 
@@ -334,7 +527,26 @@ def build_speed_plan(
     following_gap_m = None
     desired_gap_m = None
     idm_acceleration_mps2 = None
-    if front_gap_m is not None and math.isfinite(float(front_gap_m)) and not stop_goal:
+    source_lane_following_suppressed = bool(
+        bool(front_obstacle_is_source_lane)
+        and (
+            decision in {"lane_change_left", "lane_change_right"}
+            or lane_change_commitment_active
+        )
+    )
+    if bool(source_lane_following_suppressed):
+        # Candidate/authorization has already established a safe target
+        # corridor.  A lead reported in the source lane is no longer the
+        # longitudinal owner while ego is crossing away from it.  Emergency
+        # stop remains upstream and target-lane collision risk remains in the
+        # candidate/prediction gate.
+        active_constraints.append("source_lane_following_suppressed")
+    if (
+        front_gap_m is not None
+        and math.isfinite(float(front_gap_m))
+        and not stop_goal
+        and not source_lane_following_suppressed
+    ):
         gap_m = max(0.0, float(front_gap_m))
         following_gap_m = float(gap_m)
         emergency_gap_m = max(
@@ -555,6 +767,14 @@ def build_speed_plan(
             if float(cap) < previous_cap:
                 limiting_owner = "following_cap"
             following_active = True
+    # Context modules submit named ceilings; they do not write the selected
+    # speed directly. Apply them after following so they remain hard limits.
+    for constraint in additional_constraints:
+        maximum_mps = max(0.0, float(constraint.maximum_mps))
+        active_constraints.append(str(constraint.owner))
+        if maximum_mps < float(cap):
+            cap = float(maximum_mps)
+            limiting_owner = str(constraint.owner)
     if stop_goal:
         cap = 0.0
         active_constraints.append("stop_zero")
@@ -598,6 +818,7 @@ def build_speed_plan(
         upcoming_turn_distance_m=finite_turn_distance_m,
         limiting_owner=str(limiting_owner),
         active_constraints=tuple(active_constraints),
+        external_constraints=tuple(additional_constraints),
     )
 
 

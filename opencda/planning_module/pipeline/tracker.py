@@ -137,6 +137,8 @@ class CPXObstacleTracker:
             prediction_model=str(prediction_model),
             max_abs_acceleration_mps2=float(max_abs_acceleration_mps2),
             lane_step_fn=lane_step_fn,
+            timestamp_s=float(self._timestamp_s),
+            revision=f"tracker:{float(self._timestamp_s):.3f}",
         )
 
     @property

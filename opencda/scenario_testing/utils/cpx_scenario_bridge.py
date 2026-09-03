@@ -825,9 +825,22 @@ def run_legacy_scenario_port(
 
             if debug_viewer is not None:
                 debug_viewer.render(single_cav_list)
+            if bool(
+                getattr(single_cav_list[int(cav_index)], "_opencda_agent_finished", False)
+            ):
+                termination_reason = "route_destination_stopped"
+                break
             ego_location = ego_vehicle.get_location()
             goal_location = context.destination_transform.location
-            if ego_location.distance(goal_location) <= destination_tolerance_m:
+            primary_uses_cpx_planner = bool(
+                getattr(single_cav_list[int(cav_index)], "cpx_planner", None)
+                is not None
+            )
+            if (
+                not primary_uses_cpx_planner
+                and ego_location.distance(goal_location)
+                <= destination_tolerance_m
+            ):
                 termination_reason = "destination_reached"
                 break
         print(
