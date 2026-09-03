@@ -1023,6 +1023,25 @@ class CPXMPCPlannerBridge:
         control_safety_stage = ControlSafetyStage(
             supervisor=self.safety_supervisor, config=self.config
         )
+        from opencda.planning_module.pipeline.candidate_selection_stage import (
+            CandidateSelectionStage,
+        )
+        candidate_selection_stage = CandidateSelectionStage(
+            evaluator=self._candidate_trajectory_evaluator,
+            provider=self._stable_reference_line_provider,
+            maneuver_manager=self.maneuver_manager,
+            reference_pipeline=self.reference_pipeline,
+            fallback_manager=fallback_manager,
+            static_obstacle_stage=static_obstacle_stage,
+            mpc=self.mpc,
+            config=self.config,
+            map_epoch="admap",
+            normal_clearance_m=self.full_candidate_reference_min_object_distance_m,
+            static_clearance_m=self.static_obstacle_local_avoidance_min_object_distance_m,
+            risk_hysteresis_margin_m=self.candidate_risk_hysteresis_margin_m,
+            strict_ownership=self.strict_decision_ownership_enabled,
+            target_speed_mps=self.target_speed_mps,
+        )
         self.pipeline = PlanningPipeline(
             runtime_input=runtime_input_stage,
             perception=perception_stage,
@@ -1036,6 +1055,7 @@ class CPXMPCPlannerBridge:
             mpc_entry=mpc_entry_stage,
             fallback=fallback_manager,
             behavior_reference_execution=behavior_reference_execution_stage,
+            candidate_selection=candidate_selection_stage,
         )
         self._build_decision_record = build_decision_record
         self.velocity_steering_adapter = OpenCDAVelocitySteeringAdapter(
@@ -5671,48 +5691,10 @@ class CPXMPCPlannerBridge:
         required_lane_change_decision: str = "",
         required_lane_change_target_lane_id: int = 0,
     ) -> tuple[str, int, float, list[dict[str, object]], list[float], dict[str, object]]:
-        from opencda.planning_module.pipeline.candidate_pipeline import (
-            summarize_candidate_results,
-        )
-        lane_change_commitment_release_reason = (
-            self._release_completed_lane_change_commitment(
-                current_lane_id=int(current_lane_id),
-                ego_location=ego_location,
-                ego_yaw_rad=float(ego_yaw_rad),
-            )
-        )
         intents = list(candidate_intents or [])
-        if self.maneuver_manager.route_lane_change_edge_completed:
-            # Completion can be detected at the start of this very candidate
-            # tick.  Remove the just-completed edge immediately; waiting for
-            # next-tick authorization lets commitment selection install the
-            # same maneuver a second time with a downstream lane as target.
-            intents = [
-                intent
-                for intent in intents
-                if str(getattr(intent, "decision", ""))
-                not in {"lane_change_left", "lane_change_right"}
-            ]
         prediction_trajectories = dict(
             planner_input_frame.prediction.obstacle_future_trajectories
         )
-        if not intents:
-            return (
-                str(baseline_decision),
-                int(baseline_target_lane_id),
-                float(baseline_speed_ref_mps),
-                [dict(sample) for sample in list(baseline_reference or [])],
-                list(baseline_destination_state or []),
-                {
-                    "candidate_pipeline_selected": "baseline_no_candidates",
-                    "candidate_pipeline_selected_status": "feasible",
-                    "candidate_pipeline_selected_reason": "",
-                    "candidate_pipeline_count": 0,
-                    "candidate_prediction_trajectory_count": int(len(prediction_trajectories)),
-                    "candidate_pipeline_summary": "[]",
-                },
-            )
-
         reference_context = CandidateReferenceBuildContext(
             map_planner=self.reference_map,
             local_map=getattr(self, "_local_map_snapshot", None),
@@ -5762,213 +5744,50 @@ class CPXMPCPlannerBridge:
             ),
             lane_width_m=float(getattr(self.mpc, "lane_width_m", 3.5)),
         )
-        candidate_results = self._candidate_trajectory_evaluator.build_candidate_set(
-            intents=intents,
-            provider=self._stable_reference_line_provider,
-            reference_context=reference_context,
-            baseline_lane_change_state=str(baseline_lc_state),
-            reference_pipeline=self.reference_pipeline,
-            object_snapshots=object_snapshots,
-            prediction_trajectories=prediction_trajectories,
-            required_lane_change_decision=str(required_lane_change_decision),
-            required_lane_change_target_lane_id=int(
-                required_lane_change_target_lane_id
-            ),
-            static_obstacle_target_lane_id=(
-                self.pipeline.static_obstacle.target_lane_id
-            ),
-            normal_min_object_distance_m=float(
-                self.full_candidate_reference_min_object_distance_m
-            ),
-            static_min_object_distance_m=float(
-                self.static_obstacle_local_avoidance_min_object_distance_m
-            ),
-            risk_hysteresis_margin_m=float(
-                self.candidate_risk_hysteresis_margin_m
-            ),
+        from opencda.planning_module.pipeline.candidate_selection_stage import (
+            CandidateSelectionRequest,
         )
-        # A committed maneuver owns one immutable master trajectory. New
-        # variants may be evaluated, but cannot replace this continuation.
-        if self._stable_reference_line_provider.snapshot(LANE_CHANGE).active:
-            committed_is_static_obstacle_local_avoidance = bool(
-                self.pipeline.static_obstacle.target_lane_id is not None
-                and int(self.maneuver_manager.lane_change.target_lane_id)
-                == int(self.pipeline.static_obstacle.target_lane_id)
-                and int(self.maneuver_manager.lane_change.target_lane_id)
-                != int(current_lane_id)
-            )
-            evaluated_committed_result = (
-                self._candidate_trajectory_evaluator.build_committed_continuation(
-                provider=self._stable_reference_line_provider,
-                maneuver_manager=self.maneuver_manager,
-                config=self.config,
-                mpc=self.mpc,
-                ego_location=ego_location,
-                ego_yaw_rad=float(ego_yaw_rad),
-                current_state=current_state,
-                current_lane_id=int(current_lane_id),
-                baseline_speed_mps=float(baseline_speed_ref_mps),
-                planner_target_speed_mps=float(self.target_speed_mps),
-                validate_contract=self._validate_candidate_reference_contract,
-                object_snapshots=object_snapshots,
-                prediction_trajectories=prediction_trajectories,
-                min_object_distance_m=float(
-                    self.static_obstacle_local_avoidance_min_object_distance_m
-                    if committed_is_static_obstacle_local_avoidance
-                    else self.full_candidate_reference_min_object_distance_m
-                ),
-                risk_hysteresis_margin_m=float(
-                    self.candidate_risk_hysteresis_margin_m
-                ),
-            ))
-            if evaluated_committed_result is not None:
-                candidate_results.append(evaluated_committed_result)
-
-        probe_summary = self._candidate_trajectory_evaluator.probe_mpc(
-            candidate_results=candidate_results,
-            mpc=self.mpc,
-            sim_time_s=float(self._sim_time_s()),
-            current_state=current_state,
-            object_snapshots=object_snapshots,
-            current_acceleration_mps2=float(self._last_accel_mps2),
-            current_steering_rad=float(self._last_steer_rad),
-            road_envelope_payload_world=(
-                self._current_route_tracking_lane_change_envelope_payload_world()
-            ),
-            required_decision=str(required_lane_change_decision),
-            required_target_lane_id=int(required_lane_change_target_lane_id),
-        )
-        lane_change_reference_locked = bool(
-            self._stable_reference_line_provider.snapshot(
-                LANE_CHANGE
-            ).mutable_samples()
-        )
-        (
-            maneuver_commitment,
-            selection_outcome,
-            selected,
-        ) = self._candidate_trajectory_evaluator.select_with_commitment(
-            candidate_results=candidate_results,
-            lane_change_phase=str(self.maneuver_manager.lane_change.phase),
-            lane_change_option=str(self.maneuver_manager.lane_change.option),
-            source_lane_id=int(self.maneuver_manager.lane_change.source_lane_id),
-            target_lane_id=int(self.maneuver_manager.lane_change.target_lane_id),
-            progress=float(self.maneuver_manager.lane_change.progress),
-            reference_locked=bool(lane_change_reference_locked),
-            required_decision=str(required_lane_change_decision),
-            required_target_lane_id=int(required_lane_change_target_lane_id),
-        )
-
-        if (
-            bool(self.strict_decision_ownership_enabled)
-            and candidate_results
-            and selection_outcome.selected is None
-        ):
-            fallback_result = self.pipeline.resolve_candidate_failure(
-                candidate_results=candidate_results,
+        selected = self.pipeline.select_candidate(
+            CandidateSelectionRequest(
+                intents=intents,
+                reference_context=reference_context,
+                baseline_lane_change_state=str(baseline_lc_state),
                 baseline_decision=str(baseline_decision),
                 baseline_target_lane_id=int(baseline_target_lane_id),
-                current_lane_id=int(current_lane_id),
+                baseline_speed_mps=float(baseline_speed_ref_mps),
+                baseline_reference=baseline_reference,
+                baseline_destination_state=list(baseline_destination_state or []),
                 current_state=current_state,
-                ego_x_m=float(ego_location.x),
-                ego_y_m=float(ego_location.y),
-                reference_provider=self._stable_reference_line_provider,
-                route_revision=str(self.route_manager.route_revision),
-                sim_time_s=float(self._sim_time_s()),
-                mpc_dt_s=float(self.mpc.dt_s),
-                horizon_steps=int(self.mpc.horizon_steps),
-                lane_change_min_first_forward_m=float(
-                    self.config.get(
-                        "reference_contract_lane_change_min_first_forward_m",
-                        0.2,
-                    )
-                ),
-                lane_follow_min_first_forward_m=float(
-                    self.config.get(
-                        "reference_contract_lane_follow_min_first_forward_m",
-                        0.2,
-                    )
-                ),
-                summarize_candidates=summarize_candidate_results,
-                maneuver_commitment=maneuver_commitment,
-                selection_reason=str(selection_outcome.reason),
-            )
-            return (
-                fallback_result.decision,
-                fallback_result.target_lane_id,
-                fallback_result.target_speed_mps,
-                fallback_result.mutable_trajectory(),
-                fallback_result.mutable_destination_state(),
-                fallback_result.mutable_diagnostics(),
-            )
-
-        selected_debug = dict(selected.reference_debug or {})
-        selected_reference = [
-            dict(sample)
-            for sample in list(selected.lane_center_reference or [])
-        ]
-        selected_destination = list(selected.destination_state or [])
-        selected_decision = str(selected.intent.decision)
-        if selected_decision in {"lane_change_left", "lane_change_right"}:
-            (
-                selected_reference,
-                selected_destination,
-                selected_debug,
-            ) = self._candidate_trajectory_evaluator.activate_selected_lane_change(
-                selected=selected,
-                selected_reference=selected_reference,
-                selected_destination=selected_destination,
-                selected_debug=selected_debug,
-                provider=self._stable_reference_line_provider,
-                maneuver_manager=self.maneuver_manager,
-                route_revision=str(self.route_manager.route_revision),
-                map_epoch=str(self.waypoint_backend or "admap"),
-                local_map=getattr(self, "_local_map_snapshot", None),
                 current_lane_id=int(current_lane_id),
-                current_state=current_state,
                 ego_location=ego_location,
                 ego_yaw_rad=float(ego_yaw_rad),
                 ego_speed_mps=float(ego_speed_mps),
-                sim_time_s=float(self._sim_time_s()),
-                config=self.config,
-                mpc=self.mpc,
-                validate_locked_reference=(
-                    self._validate_route_tracking_lane_change_reference
-                ),
-            )
-        finalized = self._candidate_trajectory_evaluator.finalize_selection(
-            selected=selected,
-            candidate_results=candidate_results,
-            selected_reference=selected_reference,
-            selected_destination=selected_destination,
-            selected_debug=selected_debug,
-            prediction_trajectory_count=len(prediction_trajectories),
-            probe_summary=probe_summary,
-            selection_outcome=selection_outcome,
-            commitment=maneuver_commitment,
-            commitment_release_reason=lane_change_commitment_release_reason,
-            lane_change_phase=self.maneuver_manager.lane_change.phase,
-            lane_change_stabilization_frames=(
-                self.maneuver_manager.lane_change.stabilization_frames
+                object_snapshots=object_snapshots,
+                prediction_trajectories=prediction_trajectories,
+                current_acceleration_mps2=float(self._last_accel_mps2),
+                current_steering_rad=float(self._last_steer_rad),
+                required_decision=str(required_lane_change_decision),
+                required_target_lane_id=int(required_lane_change_target_lane_id),
             ),
-            completion_debug=self.maneuver_manager.lane_change.completion_debug,
-        )
-        self.pipeline.record_valid_trajectory(
-            finalized.reference,
             sim_time_s=float(self._sim_time_s()),
-            route_revision=str(
-                getattr(self.route_manager, "route_revision", "")
+            route_revision=str(self.route_manager.route_revision),
+            release_completed=lambda: self._release_completed_lane_change_commitment(
+                current_lane_id=int(current_lane_id),
+                ego_location=ego_location,
+                ego_yaw_rad=float(ego_yaw_rad),
             ),
+            road_envelope=self._current_route_tracking_lane_change_envelope_payload_world,
+            validate_contract=self._validate_candidate_reference_contract,
+            validate_locked_reference=self._validate_route_tracking_lane_change_reference,
         )
         return (
-            finalized.decision,
-            finalized.target_lane_id,
-            finalized.target_speed_mps,
-            finalized.mutable_reference(),
-            finalized.mutable_destination_state(),
-            finalized.mutable_diagnostics(),
+            selected.decision,
+            selected.target_lane_id,
+            selected.target_speed_mps,
+            selected.mutable_reference(),
+            selected.mutable_destination_state(),
+            selected.mutable_diagnostics(),
         )
-
     def _release_completed_lane_change_commitment(
         self,
         *,

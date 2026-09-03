@@ -52,6 +52,7 @@ class PlanningPipeline:
         mpc_execution: Any = None,
         fallback: Any = None,
         behavior_reference_execution: Any = None,
+        candidate_selection: Any = None,
     ) -> None:
         self._runtime_input = runtime_input
         self._perception = perception
@@ -66,6 +67,7 @@ class PlanningPipeline:
         self.mpc_execution = mpc_execution
         self.fallback = fallback
         self.behavior_reference_execution = behavior_reference_execution
+        self.candidate_selection = candidate_selection
 
     def begin_tick(
         self, *, timestamp_s: float, ego_transform: Any, ego_speed_kmh: float
@@ -252,3 +254,8 @@ class PlanningPipeline:
         if self.behavior_reference_execution is None:
             raise RuntimeError("behavior/reference execution stage is not configured")
         return self.behavior_reference_execution.run(request, planner=planner)
+
+    def select_candidate(self, request, **kwargs):
+        if self.candidate_selection is None:
+            raise RuntimeError("candidate selection stage is not configured")
+        return self.candidate_selection.run(request, **kwargs)
