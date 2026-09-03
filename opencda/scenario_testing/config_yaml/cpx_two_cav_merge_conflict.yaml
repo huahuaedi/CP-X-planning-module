@@ -2,74 +2,71 @@ base_config: cpx_lane_change_2lanefree.yaml
 
 description: |-
   ============================================================================
-  Two-CAV overtake-into-moving-traffic conflict, on 2lane_freeway_simplified.
-  Purpose: validate that consuming the OTHER CAV's predicted trajectory
-  (its broadcast MPC plan) produces a safer merge than treating it as a
-  bare current-position obstacle.
+  Two-CAV cooperative car-following, on 2lane_freeway_simplified.
+  Purpose: isolate what feeding the OTHER CAV's predicted trajectory (its
+  broadcast MPC plan) does to OUR MPC solve -- nothing else.
   ============================================================================
 
-  Layout (straight freeway, travel +x):
-    main lane      y = 8.3
-    passing lane   y = 4.8
+  Straight freeway, single lane used (y = 8.3), travel +x, NO lane change,
+  NO blocker, NO other traffic:
 
-    cav2  spawn (-340, 8.3)  dest (350, 8.3)  target 14 m/s   -- the merging car
-    cav1  spawn (-300, 8.3)  ... no: cav1 is in the PASSING lane:
-    cav1  spawn (-300, 4.8)  dest (350, 4.8)  target 10 m/s   -- cruises straight, never maneuvers
-    blocker  (-180, 8.3)  ~1 m/s  -- forces cav2 to detour into the passing lane
+    cav1  spawn (-285, 8.3)  dest (-45, 8.3)  target  8 m/s   -- slow lead
+    cav2  spawn (-340, 8.3)  dest (-45, 8.3)  target 16 m/s   -- fast follower, 55 m back
 
-  Only cav1 sits in the passing lane. cav2, cruising the main lane at 14 m/s,
-  catches the crawling blocker near x = -190 and must do the behavior-planner
-  safety-score detour into the passing lane to get around it -- exactly where
-  cav1 is cruising ~20 m ahead at 10 m/s. cav2 is closing at ~4 m/s, so it
-  cannot simply pull out level with cav1; it has to size the gap against where
-  cav1 WILL be.
+  cav2 closes on cav1 at ~8 m/s and must settle into a steady following gap.
+  That approach is the whole experiment.
 
-  cav_conflict_enabled = true  (this file):
-    Stage A tags cav1 as FOLLOW / CUT_IN in cav2's target lane.
+  Route stops at x = -45 on purpose: 2lane_freeway_simplified has a
+  road-63 -> road-60 junction connector around x = 0 where the reference /
+  road-boundary geometry across the seam drives the MPC primal-infeasible;
+  mpc_feedback then blocks the ego lane and bounded_safe_stop latches. Both
+  CAVs hit it independently -- it is a map artifact, not an interaction bug.
+  Everything before x ~= -20 is clean.
+
+  cav_conflict_enabled = true (this file):
+    cav2 receives cav1's broadcast MPC trajectory. Stage A tags cav1 FOLLOW;
     Stage C caps cav2's corridor s_hi one RSS gap behind cav1's *projected*
-      station (from cav1's broadcast plan), so cav2 bleeds to ~10 m/s BEFORE
-      it crosses the lane line and slots in cleanly behind cav1.
+    station; Stage D feeds that as a linear QP row. cav2's MPC can brake
+    early and smoothly against where cav1 WILL be.
   cpx_two_cav_merge_conflict_baseline (cav_conflict_enabled = false):
-    cav1 is only an exponential-potential obstacle at its current pose, so cav2
-    merges at 14 m/s, closes on cav1 in-lane, then hard-brakes / triggers
-    fallback. Diff the two with compare_cav_interaction.py.
+    cav2 sees cav1 only as a current-pose obstacle + constant-velocity
+    rollout in the exponential repulsive potential -- re-linearised every
+    tick. Expect later, harder braking and more solve chatter.
 
-  Single maneuvering vehicle, 14 m/s (cpx_lane_change_speed_15 proves the LC
-  MPC is stable at 15) -- deliberately NOT the earlier "both CAVs change lanes
-  around the same blocker at 20 m/s", which over-constrained the QP (blocker
-  keep-out + road boundary + peer corridor) and deadlocked both cars straddling
-  the lane line.
+  Diff with compare_cav_interaction.py -- look at the second table
+  (MPC solved fraction, infeasible/fallback/replan ticks, QP solve time,
+  raw pre-supervisor accel sign-flips and jerk, Cost_Repulsive mean/max).
+
+  Deliberately NO lane change: the LC-execution path is not robust to a
+  vehicle already occupying the target lane (MPC goes primal-infeasible
+  mid-maneuver and the fallback freezes the car straddling the line -- seen
+  in both the 20 m/s both-merge and 14 m/s overtake variants). Merge/
+  arbitration scenarios wait until that single-vehicle LC path is hardened.
 
 cpx_mature:
-  max_ticks: 1500
+  max_ticks: 650
   destination_tolerance_m: 6.0
+
+carla_traffic_manager:
+  vehicle_list: []
 
 vehicle_base:
   behavior:
     max_speed: 90
     ignore_traffic_light: true
-    overtake_allowed: true
+    overtake_allowed: false
   planner:
-    full_lane_change_dynamic_speed_cap_enabled: true
-    full_lane_change_speed_ceiling_mps: 14.0
-    full_allow_opportunistic_lane_change: true
+    # keep both CAVs in-lane: no opportunistic overtake of the slow lead
+    full_allow_opportunistic_lane_change: false
     # master switch: peer intents -> classify -> assign -> corridor -> QP row.
     # Also flips MPC.corridor_constraint_enabled on at bridge construction.
     cav_conflict_enabled: true
 
-# One crawling blocker in the MAIN lane; only cav2 (main lane) must detour.
-carla_traffic_manager:
-  vehicle_list:
-    - spawn_position: [-180.0, 8.3, 0.3, 0, 0, 0]
-      vehicle_speed_perc: 95
-
 scenario:
   single_cav_list:
-    # cav1: cruises the passing lane at 10 m/s. Never changes lane. It is the
-    # moving obstacle cav2 must merge behind.
     - name: cav1
-      spawn_position: [-300.0, 4.8, 0.3, 0, 0, 0]
-      destination: [350.0, 4.8, 0.3]
+      spawn_position: [-300.0, 8.3, 0.3, 0, 0, 0]
+      destination: [-90.0, 8.3, 0.3]
       v2x:
         enabled: true
         communication_range: 80
@@ -78,14 +75,12 @@ scenario:
           debug_trajectory: true
           debug: true
       planner:
-        target_speed_mps: 10.0
+        target_speed_mps: 3.0
         debug_output_dir: opencda/planning_module/opencda_bridge/debug_two_cav_merge_cav1
 
-    # cav2: main lane at 14 m/s, catches the blocker, detours into the passing
-    # lane where cav1 is. This is the car whose merge quality we measure.
     - name: cav2
-      spawn_position: [-340.0, 8.3, 0.3, 0, 0, 0]
-      destination: [350.0, 8.3, 0.3]
+      spawn_position: [-358.0, 8.3, 0.3, 0, 0, 0]
+      destination: [-90.0, 8.3, 0.3]
       v2x:
         enabled: true
         communication_range: 80

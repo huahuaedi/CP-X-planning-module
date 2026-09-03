@@ -145,9 +145,14 @@ def _one_cav(rows: List[dict], status: dict) -> Dict[str, object]:
     n_solved = sum(1 for r in rows
                    if r.get("mpc_feasibility_status", "") == "solved")
     repcost = [v for v in (_f(r, "Cost_Repulsive") for r in rows) if v is not None]
-    coll = max((int(cs.get("collision_count", 0) or 0)
-                for cs in status.get("cav_states", []) or []), default=0)
-    coll = max(coll, max((int(_f(r, "collision_count") or 0) for r in rows), default=0))
+    # Prefer the CSV's own collision_count. run_status.json is only written by
+    # some runners and a stale one from an earlier scenario contaminates this.
+    has_coll_col = any("collision_count" in r for r in rows[:1])
+    if has_coll_col:
+        coll = max((int(_f(r, "collision_count") or 0) for r in rows), default=0)
+    else:
+        coll = max((int(cs.get("collision_count", 0) or 0)
+                    for cs in status.get("cav_states", []) or []), default=0)
     fsm = [r.get("behavior_fsm_state", "") for r in rows]
     return {
         "ticks": n,

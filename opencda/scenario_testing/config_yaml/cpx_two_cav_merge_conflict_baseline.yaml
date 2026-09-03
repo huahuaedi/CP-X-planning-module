@@ -1,11 +1,11 @@
 base_config: cpx_two_cav_merge_conflict.yaml
 
 description: |-
-  Baseline for cpx_two_cav_merge_conflict: identical overtake-into-moving-
-  traffic layout with the multi-CAV interaction pipeline OFF
-  (cav_conflict_enabled: false). cav2 then plans its merge treating cav1 as an
-  ordinary exponential-potential obstacle at its current pose -- no
-  classify / assign / predicted-station corridor / keep-out QP rows.
+  Baseline for cpx_two_cav_merge_conflict: identical two-CAV car-following
+  approach with the multi-CAV interaction pipeline OFF
+  (cav_conflict_enabled: false). cav2 then plans against cav1 as an ordinary
+  current-pose obstacle in the exponential repulsive potential -- no
+  classify / predicted-station corridor / QP keep-out rows.
 
   Run both and diff with opencda/scenario_testing/compare_cav_interaction.py.
 
@@ -13,18 +13,13 @@ vehicle_base:
   planner:
     cav_conflict_enabled: false
 
-# OmegaConf replaces lists wholesale, so the blocker and both CAVs must be
-# repeated here; only cav_conflict_enabled and the debug dirs differ.
-carla_traffic_manager:
-  vehicle_list:
-    - spawn_position: [-180.0, 8.3, 0.3, 0, 0, 0]
-      vehicle_speed_perc: 95
-
+# OmegaConf replaces lists wholesale, so both CAVs must be repeated here;
+# only cav_conflict_enabled and the debug dirs differ.
 scenario:
   single_cav_list:
     - name: cav1
-      spawn_position: [-300.0, 4.8, 0.3, 0, 0, 0]
-      destination: [350.0, 4.8, 0.3]
+      spawn_position: [-300.0, 8.3, 0.3, 0, 0, 0]
+      destination: [-90.0, 8.3, 0.3]
       v2x:
         enabled: true
         communication_range: 80
@@ -33,12 +28,12 @@ scenario:
           debug_trajectory: true
           debug: true
       planner:
-        target_speed_mps: 10.0
+        target_speed_mps: 3.0
         debug_output_dir: opencda/planning_module/opencda_bridge/debug_two_cav_merge_off_cav1
 
     - name: cav2
-      spawn_position: [-340.0, 8.3, 0.3, 0, 0, 0]
-      destination: [350.0, 8.3, 0.3]
+      spawn_position: [-358.0, 8.3, 0.3, 0, 0, 0]
+      destination: [-90.0, 8.3, 0.3]
       v2x:
         enabled: true
         communication_range: 80
