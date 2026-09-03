@@ -67,6 +67,7 @@ class PlanningPipeline:
         fallback: Any = None,
         behavior_reference_execution: Any = None,
         candidate_selection: Any = None,
+        control_finalization: Any = None,
     ) -> None:
         self._runtime_input = runtime_input
         self._perception = perception
@@ -82,6 +83,7 @@ class PlanningPipeline:
         self.fallback = fallback
         self.behavior_reference_execution = behavior_reference_execution
         self.candidate_selection = candidate_selection
+        self.control_finalization = control_finalization
 
     def begin_tick(
         self, *, timestamp_s: float, ego_transform: Any, ego_speed_kmh: float
@@ -288,6 +290,11 @@ class PlanningPipeline:
 
     def apply_control_safety(self, **kwargs):
         return self.control_safety.run(**kwargs)
+
+    def finalize_control(self, request, **kwargs):
+        if self.control_finalization is None:
+            raise RuntimeError("control finalization stage is not configured")
+        return self.control_finalization.run(request, **kwargs)
 
     def record_valid_trajectory(self, trajectory, **kwargs):
         if self.fallback is None:

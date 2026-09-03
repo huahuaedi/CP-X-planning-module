@@ -1181,6 +1181,17 @@ class CPXMPCPlannerBridge:
             hold_s=float(self.config.get("mpc_feedback_hold_s", 1.5)),
             min_failures=int(self.config.get("mpc_feedback_min_failures", 1)),
         )
+        from opencda.planning_module.pipeline.control_finalization_stage import (
+            ControlFinalizationStage,
+        )
+        self.pipeline.control_finalization = ControlFinalizationStage(
+            mpc=self.mpc,
+            command_extractor=self.mpc_command_extractor,
+            feedback=self.mpc_feedback,
+            control_safety=control_safety_stage,
+            config=self.config,
+            hard_gate_requires_emergency_stop=_hard_gate_requires_emergency_stop,
+        )
         self.control_buffer = MPCControlBuffer(
             enabled=bool(self.config.get("control_buffer_enabled", True)),
             replan_period_s=float(
@@ -1857,159 +1868,67 @@ class CPXMPCPlannerBridge:
         mpc_jerk_seed_accel_mps2 = float(
             execution_result.jerk_seed_acceleration_mps2
         )
-        accel_mps2 = float(execution_result.acceleration_mps2)
-        steer_rad = float(execution_result.steering_rad)
-        control = execution_result.control
+        from opencda.planning_module.pipeline.control_finalization_stage import (
+            ControlFinalizationRequest,
+        )
+        finalized_control = self.pipeline.finalize_control(
+            ControlFinalizationRequest(
+                execution=execution_result,
+                behavior=behavior_decision,
+                ego_transform=ego_transform,
+                ego_speed_mps=float(ego_speed_mps),
+                target_speed_mps=float(speed_ref_mps),
+                destination_state=destination_state,
+                reference_samples=lane_center_reference,
+                stop_goal_active=bool(mpc_stop_goal_active),
+                stop_target_forward_m=stop_target_forward_m_debug,
+                final_reference_accepted=bool(final_reference_gate.accepted),
+                candidate_status=str(reference_debug.get(
+                    "candidate_pipeline_selected_status", ""
+                )),
+                safety_manager=latest_update.get("safety_manager"),
+                carla_module=self.carla,
+                sim_time_s=float(sim_time_s),
+            ),
+            set_actuator_context=self._set_actuator_context,
+            acceleration_from_control=self._accel_from_control,
+            steering_from_control=self._steer_rad_from_control,
+            apply_velocity_steering=self._apply_velocity_steering_interface,
+            control_factory=self._control_from_mpc,
+            boundary_metrics=self._road_boundary_metrics,
+            update_boundary_recovery=self._update_boundary_recovery_request,
+            reset_boundary_recovery=self._reset_boundary_recovery_request,
+        )
+        mpc_jerk_seed_accel_mps2 = float(
+            execution_result.jerk_seed_acceleration_mps2
+        )
         mpc_status = str(execution_result.status)
         fallback_reason = str(execution_result.fallback_reason)
+        hard_gate_active = fallback_reason.startswith("candidate_hard_gate:")
         mpc_replan_executed = bool(execution_result.replan_executed)
         failed_replan_buffer_reused = bool(
             execution_result.failed_replan_buffer_reused
         )
-        self._set_actuator_context(
-            ego_speed_mps=float(ego_speed_mps),
-            target_speed_mps=float(speed_ref_mps),
-            stop_goal_active=bool(mpc_stop_goal_active),
-        )
-        if control is not None:
-            accel_mps2 = float(self._accel_from_control(control))
-            steer_rad = float(self._steer_rad_from_control(control))
         if fallback_reason and not self._warned:
             print("[CP-X OpenCDA Bridge] MPC fallback active: " + fallback_reason)
             self._warned = True
-        mpc_feedback_record_reason = self.mpc_feedback.record_result(
-            decision=str(behavior_decision.maneuver),
-            target_lane_id=int(behavior_decision.target_lane_id),
-            status=str(mpc_status),
-            reason=str(fallback_reason),
-            timestamp_s=float(sim_time_s),
-            success=not bool(fallback_reason),
-        )
-
-        platform_adapter_debug: dict[str, object] = {
-            "control_interface": "mpc_acceleration_steering",
-        }
-        hard_gate_active = str(fallback_reason).startswith(
-            "candidate_hard_gate:"
-        )
-        # The platform adapter is part of actuation, not a post-processing
-        # owner. Run it before every safety guard so signal, boundary and
-        # collision decisions remain authoritative at apply_control(). Keep
-        # non-gate MPC fallback controls intact instead of converting them
-        # back into a routine target-speed command.
-        if (
-            not str(fallback_reason)
-            or bool(hard_gate_active)
-            or bool(failed_replan_buffer_reused)
-        ):
-            normalized_behavior_maneuver = str(
-                behavior_decision.maneuver
-            ).strip().lower()
-            optimized_state_solution = getattr(self.mpc, "_last_x_solution", None)
-            if (
-                str(mpc_status).strip().lower() in {"solved", "solved inaccurate"}
-                and optimized_state_solution is not None
-                and len(optimized_state_solution) > 0
-            ):
-                tracking_command = self.mpc_command_extractor.extract(
-                    state_solution=optimized_state_solution,
-                    steering_rad=float(steer_rad),
-                    solution_dt_s=float(self.mpc.dt_s),
-                    timestamp_s=float(sim_time_s),
-                    max_velocity_mps=float(self.mpc.constraints.max_velocity_mps),
-                )
-            else:
-                tracking_command = self.mpc_command_extractor.hold(
-                    steering_rad=float(steer_rad),
-                    reason=(
-                        "mpc_velocity_command_hold_after_failed_replan"
-                        if bool(failed_replan_buffer_reused)
-                        else "mpc_velocity_command_hold_control_buffer"
-                    ),
-                )
-            emergency_stop_required = bool(
-                _hard_gate_requires_emergency_stop(
-                    fallback_reason=str(fallback_reason),
-                    behavior_decision=str(normalized_behavior_maneuver),
-                    stop_goal_active=bool(mpc_stop_goal_active),
-                )
-                or normalized_behavior_maneuver == "emergency_brake"
-            )
-            platform_target_velocity_mps = (
-                self.mpc_command_extractor.platform_target_velocity(
-                    nominal_velocity_mps=float(speed_ref_mps),
-                    stop_goal_active=bool(mpc_stop_goal_active),
-                    emergency_stop=bool(emergency_stop_required),
-                )
-            )
-            (
-                control,
-                accel_mps2,
-                steer_rad,
-                platform_adapter_debug,
-            ) = self._apply_velocity_steering_interface(
-                target_speed_mps=float(platform_target_velocity_mps),
-                target_steering_rad=float(tracking_command.target_steering_rad),
-                actual_speed_mps=float(ego_speed_mps),
-                stop_goal_active=bool(mpc_stop_goal_active),
-                emergency_stop=bool(emergency_stop_required),
-                sim_time_s=float(sim_time_s),
-            )
-            platform_adapter_debug.update({
-                "mpc_velocity_preview_time_s": float(
-                    tracking_command.velocity_preview_time_s
-                ),
-                "mpc_velocity_source_index": float(
-                    tracking_command.velocity_source_index
-                ),
-                "mpc_optimized_velocity_mps": float(
-                    tracking_command.target_velocity_mps
-                ),
-                "nominal_speed_ref_mps": float(speed_ref_mps),
-                "pid_target_velocity_mps": float(
-                    platform_target_velocity_mps
-                ),
-                "velocity_command_source": "speed_target_planner",
-                "velocity_command_valid": bool(tracking_command.valid),
-            })
-
-        safety_result = self.pipeline.apply_control_safety(
-            control=control,
-            carla_module=self.carla,
-            acceleration_mps2=float(accel_mps2),
-            steering_rad=float(steer_rad),
-            ego_transform=ego_transform,
-            ego_speed_mps=float(ego_speed_mps),
-            destination_state=destination_state,
-            behavior=behavior_decision,
-            stop_goal_active=bool(mpc_stop_goal_active),
-            stop_target_forward_m=stop_target_forward_m_debug,
-            min_acceleration_mps2=float(self.mpc.constraints.min_acceleration_mps2),
-            control_factory=self._control_from_mpc,
-            reference_samples=lane_center_reference,
-            final_reference_accepted=bool(final_reference_gate.accepted),
-            candidate_status=str(reference_debug.get(
-                "candidate_pipeline_selected_status", ""
-            )),
-            safety_manager=latest_update.get("safety_manager"),
-            sim_time_s=float(sim_time_s),
-            boundary_metrics=self._road_boundary_metrics,
-            update_boundary_recovery=self._update_boundary_recovery_request,
-            reset_boundary_recovery=self._reset_boundary_recovery_request,
-            acceleration_from_control=self._accel_from_control,
-            steering_from_control=self._steer_rad_from_control,
-        )
-        control = safety_result.control
-        control_guard_reason = str(safety_result.control_guard_reason)
-        boundary_guard_reason = str(safety_result.boundary_guard_reason)
-        boundary_snapshot = safety_result.boundary_snapshot
+        control = finalized_control.control
+        accel_mps2 = float(finalized_control.acceleration_mps2)
+        steer_rad = float(finalized_control.steering_rad)
         pre_supervisor_accel_mps2 = float(
-            safety_result.pre_filter_acceleration_mps2
+            finalized_control.pre_filter_acceleration_mps2
         )
-        pre_supervisor_steer_rad = float(safety_result.pre_filter_steering_rad)
-        safety_supervisor_reason = str(safety_result.supervisor_reason)
-        post_supervisor_accel_mps2 = float(safety_result.acceleration_mps2)
-        post_supervisor_steer_rad = float(safety_result.steering_rad)
+        pre_supervisor_steer_rad = float(
+            finalized_control.pre_filter_steering_rad
+        )
+        post_supervisor_accel_mps2 = accel_mps2
+        post_supervisor_steer_rad = steer_rad
+        control_guard_reason = str(finalized_control.control_guard_reason)
+        boundary_guard_reason = str(finalized_control.boundary_guard_reason)
+        boundary_snapshot = finalized_control.boundary_snapshot
+        safety_supervisor_reason = str(finalized_control.supervisor_reason)
+        platform_adapter_debug = dict(finalized_control.platform_debug)
+        mpc_feedback_record_reason = str(finalized_control.feedback_reason)
         self._last_accel_mps2 = post_supervisor_accel_mps2
         self._last_steer_rad = post_supervisor_steer_rad
         cp_summary = dict(getattr(self.cp_provider, "last_publish_summary", {}) or {})
