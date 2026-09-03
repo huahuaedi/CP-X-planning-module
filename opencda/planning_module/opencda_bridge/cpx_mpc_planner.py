@@ -15,7 +15,6 @@ import math
 import os
 import re
 import sys
-import traceback
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping, Optional, Sequence
@@ -53,7 +52,6 @@ from opencda.planning_module.pipeline.nominal_trajectory import (
     NominalTrajectoryGenerator,
 )
 from opencda.planning_module.pipeline.fallback_manager import (
-    FailureReason,
     TrajectoryFallbackManager,
 )
 from opencda.planning_module.pipeline.speed_planner import (
@@ -271,6 +269,15 @@ class CPXMPCPlannerBridge:
             safe_stop_deceleration_mps2=float(
                 self.config.get("fallback_safe_stop_deceleration_mps2", 2.0)
             ),
+        )
+        from opencda.planning_module.pipeline.behavior_reference_execution_stage import (
+            BehaviorReferenceExecutionStage,
+        )
+        behavior_reference_execution_stage = BehaviorReferenceExecutionStage(
+            reference_provider=self._stable_reference_line_provider,
+            fallback_manager=fallback_manager,
+            behavior_stage=behavior_stage,
+            lane_id_at_location=self._lane_id_at_location,
         )
         self._route_replan_last_attempt_s = -float("inf")
         self._route_replan_attempt_count = 0
@@ -1028,6 +1035,7 @@ class CPXMPCPlannerBridge:
             reference_publication=reference_publication_stage,
             mpc_entry=mpc_entry_stage,
             fallback=fallback_manager,
+            behavior_reference_execution=behavior_reference_execution_stage,
         )
         self._build_decision_record = build_decision_record
         self.velocity_steering_adapter = OpenCDAVelocitySteeringAdapter(
@@ -1550,101 +1558,38 @@ class CPXMPCPlannerBridge:
         requested_speed_mps = float(cycle.requested_speed_mps)
         current_state = list(tick.current_state)
 
-        behavior_debug: dict[str, Any] = {}
-        reference_debug: dict[str, Any] = {}
-        try:
-            (
-                destination_state,
-                lane_center_reference,
-                behavior_stage_result,
-                reference_debug,
-                typed_speed_plan,
-            ) = (
-                self._plan_behavior_and_reference(
-                    ego_location=ego_location,
-                    ego_yaw_rad=ego_yaw_rad,
-                    ego_speed_mps=ego_speed_mps,
-                    speed_ref_mps=requested_speed_mps,
-                    object_snapshots=object_snapshots,
-                    stop_goal_active=stop_goal_active,
-                    cp_payload=cp_payload,
-                )
-            )
-            behavior_decision = behavior_stage_result.decision
-            behavior_debug = behavior_stage_result.mutable_diagnostics()
-        except Exception as exc:
-            # Persist the failing stage and source line.  ``str(exc)`` alone
-            # made a route/reference failure appear as the same opaque tuple
-            # error for hundreds of frames in the CSV.
-            pipeline_traceback = traceback.format_exc(limit=8).strip()
-            if self.debug:
-                print(
-                    "[CP-X OpenCDA Bridge] behavior/reference pipeline failed: "
-                    f"{exc}\n{pipeline_traceback}"
-                )
-            generated_fallback = (
-                self._stable_reference_line_provider.lane_fallback_reference(
-                    ego_location=ego_location,
-                    ego_yaw_rad=float(ego_yaw_rad),
-                    current_state=current_state,
-                    speed_ref_mps=float(requested_speed_mps),
-                )
-            )
-            failure = FailureReason(
-                stage="behavior_reference",
-                code="pipeline_exception",
-                severity="degraded",
-                recoverable=True,
-                details=str(exc),
-            )
-            fallback = self.pipeline.resolve_fallback(
+        from opencda.planning_module.pipeline.behavior_reference_execution_stage import (
+            BehaviorReferenceRequest,
+        )
+        behavior_reference = self.pipeline.execute_behavior_reference(
+            BehaviorReferenceRequest(
+                ego_location=ego_location,
+                ego_yaw_rad=float(ego_yaw_rad),
+                ego_speed_mps=float(ego_speed_mps),
+                requested_speed_mps=float(requested_speed_mps),
+                object_snapshots=object_snapshots,
+                stop_goal_active=bool(stop_goal_active),
+                cp_payload=cp_payload,
+                current_state=current_state,
                 sim_time_s=float(tick.timestamp_s),
                 route_revision=str(self.route_manager.route_revision),
-                current_speed_mps=float(ego_speed_mps),
-                current_reference=list(generated_fallback.samples or []),
-                failure_reason=failure,
+            ),
+            planner=self._plan_behavior_and_reference,
+        )
+        destination_state = list(behavior_reference.destination_state)
+        lane_center_reference = [
+            dict(item) for item in behavior_reference.reference_samples
+        ]
+        behavior_stage_result = behavior_reference.behavior_stage_result
+        behavior_decision = behavior_stage_result.decision
+        behavior_debug = behavior_stage_result.mutable_diagnostics()
+        reference_debug = dict(behavior_reference.reference_debug)
+        typed_speed_plan = behavior_reference.speed_plan
+        if behavior_reference.failure_reason and self.debug:
+            print(
+                "[CP-X OpenCDA Bridge] behavior/reference pipeline failed: "
+                + str(behavior_reference.failure_reason)
             )
-            lane_center_reference = fallback.mutable_trajectory()
-            destination_state = list(generated_fallback.destination_state or [])
-            if lane_center_reference:
-                terminal = dict(lane_center_reference[-1])
-                destination_state = [
-                    float(terminal.get("x_ref_m", terminal.get("x", current_state[0]))),
-                    float(terminal.get("y_ref_m", terminal.get("y", current_state[1]))),
-                    float(fallback.target_speed_mps),
-                    float(terminal.get("heading_rad", current_state[3])),
-                    int(self._lane_id_at_location(ego_location)),
-                ]
-            fallback_stop = bool(
-                str(fallback.mode) == "bounded_safe_stop"
-                or float(fallback.target_speed_mps) <= 0.0
-            )
-            behavior_stage_result = self.pipeline.finalize_behavior(
-                maneuver="lane_follow",
-                phase="FALLBACK",
-                source_lane_id=self._lane_id_at_location(ego_location),
-                target_lane_id=0,
-                requested_speed_mps=float(fallback.target_speed_mps),
-                stop_required=bool(fallback_stop),
-                route_required=False,
-                traffic_signal_state="unknown",
-                boundary_recovery_active=False,
-                stop_target=None,
-                reason=str(fallback.reason),
-                diagnostics={
-                    "pipeline_error": str(exc),
-                    "pipeline_error_traceback": pipeline_traceback,
-                },
-            )
-            behavior_decision = behavior_stage_result.decision
-            behavior_debug = behavior_stage_result.mutable_diagnostics()
-            reference_debug = {
-                "reference_source": "fallback_manager:" + str(fallback.mode),
-                "fallback_reason": str(fallback.reason),
-                "pipeline_error": str(exc),
-                "pipeline_error_traceback": pipeline_traceback,
-            }
-            typed_speed_plan = None
 
         route_status = getattr(
             getattr(self, "route_manager", None), "last_status", None
