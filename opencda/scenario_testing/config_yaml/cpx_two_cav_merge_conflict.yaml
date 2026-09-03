@@ -1,49 +1,56 @@
-base_config: single_intersection_town06_carla.yaml
+base_config: cpx_lane_change_2lanefree.yaml
 
 description: |-
-  Two CP-X CAVs on the Town06 southbound arterial (x ~= 6.31, y: 122 -> -60).
-  Both start in the same lane -- cav2 ~14 m ahead of cav1 -- and both have a
-  route-required lane change into the adjacent lane at x ~= 9.8. The leader
-  (cav2) triggers and commits its lane change first, so:
-    Stage B  -> cav2 role = proceed, cav1 role = make_gap
-    Stage C  -> cav1's corridor s_hi capped a RSS gap behind cav2's
-                projected station in the target lane
-    Stage D  -> that corridor becomes a linear QP row; cav1's MPC holds the
-                slot behind cav2 instead of both merging into the same spot.
+  Two CP-X CAVs on the 2lane_freeway_simplified straight freeway, both in the
+  outer lane (y = 4.8) and both route-required to merge into the inner lane
+  (y = 8.3). cav1 spawns ~10 m ahead of cav2; it triggers and commits its
+  merge first, so:
+    Stage A  -> cav2 tags cav1 as a MERGE / CUT_IN conflict in the target lane
+    Stage B  -> cav1 role = proceed, cav2 role = make_gap
+    Stage C  -> cav2's corridor s_hi is capped an RSS gap behind cav1's
+                projected station in the inner lane
+    Stage D  -> that corridor becomes a linear QP row; cav2 holds the slot
+                behind cav1 instead of both aiming for the same longitudinal
+                spot in the inner lane.
 
-  Interaction goes CAV-to-CAV through v2x_manager.cav_nearby (each peer's
-  cpx_planner.maneuver_manager is read directly); no cav_intents broadcast
-  is needed. TM traffic and traffic-light response are off so the only
-  thing shaping the trajectories is the merge conflict.
+  ~20 m/s, empty road (carla_traffic_manager.vehicle_list: []), ground-truth
+  perception + no localization noise (inherited from cpx_lane_change_2lanefree).
+  Interaction is CAV-to-CAV through v2x_manager.cav_nearby -- each peer's
+  cpx_planner.last_cav_intent (its real MPC-planned path + ResourceClaim) is
+  read directly; no cav_intents broadcast bus is needed.
 
   Watch the two debug CSVs (debug_two_cav_merge_cav1/ , _cav2/):
-    cav_conflict_summary   e.g. "peer<id>=make_gap;corridor_feasible"
+    cav_conflict_summary   e.g. "<peer_id>=make_gap;corridor_feasible"
     cav_corridor_binding   the peer id capping each stage
+  Baseline with the interaction pipeline OFF: cpx_two_cav_merge_conflict_baseline.
+  Diff the two runs with opencda/scenario_testing/compare_cav_interaction.py.
+
+cpx_mature:
+  max_ticks: 2200
+  destination_tolerance_m: 12.0
 
 carla_traffic_manager:
   vehicle_list: []
-  range: ~
 
 vehicle_base:
   behavior:
+    max_speed: 90
     ignore_traffic_light: true
+    overtake_allowed: true
   planner:
-    global_planner_mode: dij
-    global_planner_xodr_path: Global_Planner/maps/Town06.xodr
-    global_planner_strict: false
-    ignore_traffic_control: true
-    route_replan_enabled: false
+    target_speed_mps: 20.0
+    full_lane_change_dynamic_speed_cap_enabled: true
+    full_lane_change_speed_ceiling_mps: 20.0
+    full_allow_opportunistic_lane_change: true
     # master switch: peer intents -> classify -> assign -> corridor -> QP row.
     # Also flips MPC.corridor_constraint_enabled on at bridge construction.
     cav_conflict_enabled: true
 
 scenario:
-  max_ticks: 4000
-  destination_tolerance_m: 3.0
   single_cav_list:
     - name: cav1
-      spawn_position: [6.31, 108.0, 0.3, 0, -92, 0]
-      destination: [9.8, -60.0, 0.3]
+      spawn_position: [-320.0, 4.8, 0.3, 0, 0, 0]
+      destination: [650.0, 8.3, 0.3]
       v2x:
         enabled: true
         communication_range: 80
@@ -55,8 +62,8 @@ scenario:
         debug_output_dir: opencda/planning_module/opencda_bridge/debug_two_cav_merge_cav1
 
     - name: cav2
-      spawn_position: [6.31, 122.0, 0.3, 0, -92, 0]
-      destination: [9.8, -60.0, 0.3]
+      spawn_position: [-330.0, 4.8, 0.3, 0, 0, 0]
+      destination: [650.0, 8.3, 0.3]
       v2x:
         enabled: true
         communication_range: 80
