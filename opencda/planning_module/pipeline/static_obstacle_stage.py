@@ -72,7 +72,6 @@ class StaticObstacleStage:
                  normal_mode: bool, available_lane_ids: Sequence[int],
                  lane_safety_scores: Mapping[int, float],
                  lane_prediction_risks: Mapping[int, Mapping[str, object]],
-                 cooperative_yield: Callable[[int], str],
                  attempt_replan: Callable[[], tuple[bool, bool, str]]) -> StaticObstacleResult:
         if (self.target_lane_id is not None
                 and int(current_lane_id) == int(self.target_lane_id)
@@ -108,9 +107,6 @@ class StaticObstacleStage:
                         "static_obstacle_local_lane_min_safety_score", 0.55)),
                 ) if normal_mode and bool(self.config.get(
                     "static_obstacle_local_avoidance_enabled", True)) else None
-                yield_reason = cooperative_yield(int(target)) if target is not None else ""
-                if yield_reason:
-                    target = None
                 if target is not None:
                     self.target_lane_id = int(target)
                     active = True
@@ -143,11 +139,8 @@ class StaticObstacleStage:
                 else:
                     self.failed_latched = True
                     self.route_transition_pending = False
-                    self.status = (
-                        "local_avoidance_yield_to_peer_cav" if yield_reason
-                        else "local_avoidance_unavailable_stop"
-                    )
-                    self.reason = yield_reason or "static_obstacle_local_avoidance_unavailable"
+                    self.status = "local_avoidance_unavailable_stop"
+                    self.reason = "static_obstacle_local_avoidance_unavailable"
         self.stop_active = bool(
             self.failed_latched or transition_hold or cooldown_hold
         )

@@ -2955,18 +2955,6 @@ class CPXMPCPlannerBridge:
                 cav_horizon_steps=int(self.mpc.horizon_steps),
             ),
             maneuver_manager=self.maneuver_manager,
-            cooperative_yield_reason=lambda location, yaw: (
-                self._cooperative_lane_change_yield_reason(
-                    ego_location=location, ego_yaw_rad=float(yaw)
-                )
-            ),
-            cooperative_wait_speed_cap=lambda location, speed, reason: (
-                self._cooperative_wait_speed_cap_mps(
-                    ego_location=location,
-                    ego_speed_mps=float(speed),
-                    cooperative_lane_change_yield_reason=str(reason),
-                )
-            ),
         )
         lane_change_authorization = conflict_resolution.authorization
         lateral_ownership = conflict_resolution.lateral_ownership
@@ -2987,14 +2975,6 @@ class CPXMPCPlannerBridge:
         lane_change_gate_reason = str(
             conflict_resolution.lane_change_gate_reason
         )
-        if conflict_resolution.cooperative_wait_speed_cap_mps is not None:
-            additional_speed_constraints.append(SpeedConstraint(
-                owner="cooperative_wait",
-                maximum_mps=float(
-                    conflict_resolution.cooperative_wait_speed_cap_mps
-                ),
-                reason=str(conflict_resolution.cooperative_yield_reason),
-            ))
         if lateral_handoff.action == "release":
             released, release_result = self._stable_reference_line_provider.release(
                 LANE_CHANGE,
@@ -3069,10 +3049,6 @@ class CPXMPCPlannerBridge:
             static_obstacle_stage=self.pipeline.static_obstacle,
             reference_map=self.reference_map,
             nearest_front_obstacles=self._nearest_front_obstacle_by_lane,
-            cooperative_yield=lambda target: self._cooperative_avoidance_lane_yield_reason(
-                target_lane_id=int(target), ego_location=ego_location,
-                ego_yaw_rad=float(ego_yaw_rad),
-            ),
             attempt_replan=lambda obstacle: self._attempt_static_obstacle_route_replan(
                 ego_location=ego_location, obstacle=obstacle,
             ),

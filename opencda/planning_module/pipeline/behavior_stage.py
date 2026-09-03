@@ -159,9 +159,6 @@ class ConflictResolutionResult:
     lateral_ownership: LateralOwnershipResult
     opportunistic_allowed: bool
     lane_change_gate_reason: str
-    cooperative_yield_reason: str
-    cooperative_wait_speed_cap_mps: Optional[float]
-
     # --- multi-CAV interaction outputs (empty when the pipeline did not run) ---
     conflict_tags: Sequence[Any] = ()
     conflict_assignments: Sequence[Any] = ()
@@ -293,8 +290,8 @@ class BehaviorStage:
     def produce_command_from_frame(
         self, request: BehaviorCommandFrameRequest, *, behavior_planner: Any,
         static_obstacle_stage: Any, reference_map: Any,
-        nearest_front_obstacles: Any, cooperative_yield: Any,
-        attempt_replan: Any, object_track_id: Any,
+        nearest_front_obstacles: Any, attempt_replan: Any,
+        object_track_id: Any,
     ) -> BehaviorCommandFrameResult:
         """Evaluate lane candidates and produce one command from a frozen frame."""
 
@@ -378,7 +375,7 @@ class BehaviorStage:
                 request.lane_change_reference_active
             ),
             config=request.config, runtime_config=request.runtime_config,
-            cooperative_yield=cooperative_yield, attempt_replan=attempt_replan,
+            attempt_replan=attempt_replan,
             object_track_id=object_track_id,
         )
         return BehaviorCommandFrameResult(
@@ -404,7 +401,7 @@ class BehaviorStage:
         preferred_target_lane_id: int, opportunistic_lane_change_allowed: bool,
         lane_change_reference_active: bool, config: Mapping[str, object],
         runtime_config: Mapping[str, object],
-        cooperative_yield: Any, attempt_replan: Any, object_track_id: Any,
+        attempt_replan: Any, object_track_id: Any,
     ) -> BehaviorCommandResult:
         """Produce one behavior command through the sole obstacle arbitration path."""
 
@@ -474,7 +471,6 @@ class BehaviorStage:
             available_lane_ids=tuple(available_lane_ids),
             lane_safety_scores=lane_safety_scores,
             lane_prediction_risks=lane_prediction_risks,
-            cooperative_yield=cooperative_yield,
             attempt_replan=lambda: attempt_replan(dict(front_obstacle or {})),
         )
         local_avoidance = bool(obstacle_result.local_avoidance_active)
@@ -1180,8 +1176,6 @@ class BehaviorStage:
         request: ConflictResolutionRequest,
         *,
         maneuver_manager: Any,
-        cooperative_yield_reason: Any,
-        cooperative_wait_speed_cap: Any,
     ) -> ConflictResolutionResult:
         """Resolve cooperative, opportunistic and lateral-owner conflicts.
 
@@ -1191,26 +1185,6 @@ class BehaviorStage:
         """
 
         authorization = request.route_authorization
-        yield_reason = (
-            str(cooperative_yield_reason(
-                request.ego_location, float(request.ego_yaw_rad)
-            ) or "")
-            if bool(authorization.allowed)
-            else ""
-        )
-        wait_cap = None
-        if yield_reason:
-            authorization = replace(
-                authorization, allowed=False, reason=str(yield_reason)
-            )
-            wait_cap = cooperative_wait_speed_cap(
-                request.ego_location,
-                float(request.ego_speed_mps),
-                str(yield_reason),
-            )
-            if wait_cap is not None:
-                wait_cap = float(wait_cap)
-
         opportunistic = self.authorize_opportunistic_lane_change(
             request.opportunistic_request
         )
@@ -1246,8 +1220,6 @@ class BehaviorStage:
             lateral_ownership=ownership,
             opportunistic_allowed=bool(opportunistic_allowed),
             lane_change_gate_reason=str(gate_reason),
-            cooperative_yield_reason=str(yield_reason),
-            cooperative_wait_speed_cap_mps=wait_cap,
             conflict_tags=cav["tags"],
             conflict_assignments=cav["assignments"],
             corridor=cav["corridor"],

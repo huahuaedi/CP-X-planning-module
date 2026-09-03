@@ -487,7 +487,7 @@ def test_opportunistic_authorization_is_owned_by_behavior_stage():
     assert blocked.reason == "opportunistic_lane_change_dense_traffic_lock"
 
 
-def test_conflict_resolution_exposes_cooperative_prediction_seam():
+def test_conflict_resolution_uses_only_the_cav_pipeline_for_cooperation():
     stage = BehaviorStage()
     manager = ManeuverManager()
     authorization = stage.authorize_route_lane_change(
@@ -516,13 +516,9 @@ def test_conflict_resolution_exposes_cooperative_prediction_seam():
             ego_yaw_rad=0.0,
         ),
         maneuver_manager=manager,
-        cooperative_yield_reason=lambda _location, _yaw: "yield:peer=2",
-        cooperative_wait_speed_cap=lambda _location, _speed, _reason: 3.0,
     )
 
-    assert not result.authorization.allowed
-    assert result.authorization.reason == "yield:peer=2"
-    assert result.cooperative_wait_speed_cap_mps == 3.0
+    assert result.authorization.allowed
     assert result.opportunistic_allowed
     # multi-CAV pipeline is inactive by default -> empty rider fields
     assert result.conflict_assignments == ()
@@ -554,8 +550,6 @@ def test_cav_disabled_leaves_the_result_riders_empty():
     result = stage.resolve_conflicts(
         _conflict_request(obstacle_snapshots=[crosser]),      # cav_enabled defaults False
         maneuver_manager=ManeuverManager(),
-        cooperative_yield_reason=lambda *_: "",
-        cooperative_wait_speed_cap=lambda *_: None,
     )
     assert result.conflict_tags == ()
     assert result.corridor is None
@@ -577,8 +571,6 @@ def test_cav_enabled_runs_the_pipeline_and_rides_a_corridor_on_the_result():
             cav_horizon_steps=20,
         ),
         maneuver_manager=ManeuverManager(),
-        cooperative_yield_reason=lambda *_: "",
-        cooperative_wait_speed_cap=lambda *_: None,
     )
     assert result.cav_diagnostics.get("tags", {}).get("x") == "CROSSING"
     assert result.corridor is not None

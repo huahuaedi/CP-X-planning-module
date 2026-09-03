@@ -8,7 +8,7 @@ def _evaluate(stage, **overrides):
         lane_change_reference_active=False, sim_time_s=2.0,
         normal_mode=True, available_lane_ids=(10, 11),
         lane_safety_scores={10: 1.0, 11: 1.0},
-        lane_prediction_risks={}, cooperative_yield=lambda _lane: "",
+        lane_prediction_risks={},
         attempt_replan=lambda: (True, True, "replanned"),
     )
     values.update(overrides)
