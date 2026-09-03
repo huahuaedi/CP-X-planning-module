@@ -59,12 +59,18 @@ def _rows(d: Path) -> List[dict]:
 
 def _status(d: Path) -> dict:
     p = d / "run_status.json"
-    if p.is_file():
-        try:
-            return json.loads(p.read_text(encoding="utf-8"))
-        except Exception:
+    csv_path = d / "opencda_planner_debug.csv"
+    if not p.is_file():
+        return {}
+    # An interrupted/new run truncates the CSV before its final status is
+    # written.  Never combine that CSV with a status left by an older run.
+    try:
+        if csv_path.is_file() and p.stat().st_mtime_ns < csv_path.stat().st_mtime_ns:
             return {}
-    return {}
+        value = json.loads(p.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
 
 
 def _inter_cav_gap(rows_a: List[dict], rows_b: List[dict]) -> List[tuple]:
