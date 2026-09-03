@@ -85,13 +85,9 @@ def test_pipeline_owns_speed_resolution_sequence():
     calls = []
 
     class Speed:
-        def resolve(self, **kwargs):
-            calls.append(("resolve", kwargs))
-            return "target"
-
-        def apply(self, target, **kwargs):
-            calls.append(("apply", target, kwargs))
-            return "ceiling"
+        def resolve_frame(self, **kwargs):
+            calls.append(("resolve_frame", kwargs))
+            return "speed-frame"
 
     pipeline = PlanningPipeline(
         runtime_input=RuntimeInputStage(_Mapper()),
@@ -106,8 +102,8 @@ def test_pipeline_owns_speed_resolution_sequence():
         destination_state=[1.0], reference_samples=[{"x": 1.0}],
     )
 
-    assert result == ("target", "ceiling")
-    assert [call[0] for call in calls] == ["resolve", "apply"]
+    assert result == "speed-frame"
+    assert [call[0] for call in calls] == ["resolve_frame"]
 
 
 def test_pipeline_is_the_only_behavior_stage_caller():

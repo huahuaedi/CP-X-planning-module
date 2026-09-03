@@ -197,17 +197,13 @@ class PlanningPipeline:
         self, *, behavior, speed_plan, additional_constraints,
         destination_state, reference_samples,
     ):
-        target = self.speed.resolve(
+        return self.speed.resolve_frame(
             behavior=behavior,
             speed_plan=speed_plan,
             additional_constraints=additional_constraints,
-        )
-        ceiling = self.speed.apply(
-            target,
             destination_state=destination_state,
             reference_samples=reference_samples,
         )
-        return target, ceiling
 
     def propose_speed(self, **kwargs):
         return self.speed.propose(**kwargs)

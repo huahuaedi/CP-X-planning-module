@@ -128,6 +128,32 @@ class SpeedTarget:
         }
 
 
+@dataclass(frozen=True)
+class ResolvedSpeedFrame:
+    """One frozen longitudinal target and its applied trajectory ceiling."""
+
+    target: SpeedTarget
+    ceiling: SpeedCeilingResult
+
+    def trace_fields(self) -> dict[str, object]:
+        fields = self.target.as_debug_fields()
+        fields.update({
+            "speed_owner_selected_target_mps": float(self.target.target_mps),
+            "speed_owner_limiting_owner": str(self.target.limiting_owner),
+            "speed_owner_active_constraints": ";".join(
+                constraint.owner for constraint in self.target.constraints
+            ),
+            "speed_owner_proposed_post_plan_target_mps": float(
+                self.target.target_mps
+            ),
+            "speed_owner_ceiling_applied": bool(self.ceiling.applied),
+            "speed_owner_ceiling_reduction_mps": float(
+                self.ceiling.reduction_mps
+            ),
+        })
+        return fields
+
+
 class SpeedTargetPlanner:
     """Sole owner that freezes behavior speed proposals into a frame target.
 
@@ -279,6 +305,29 @@ class SpeedTargetPlanner:
             ceiling_mps=float(target.target_mps),
             destination_state=destination_state,
             reference_samples=reference_samples,
+        )
+
+    def resolve_frame(
+        self,
+        *,
+        behavior: "BehaviorDecision",
+        speed_plan: Optional[SpeedPlan],
+        additional_constraints: Sequence[SpeedConstraint],
+        destination_state: Sequence[float],
+        reference_samples: Sequence[Mapping[str, object]],
+    ) -> ResolvedSpeedFrame:
+        target = self.resolve(
+            behavior=behavior,
+            speed_plan=speed_plan,
+            additional_constraints=additional_constraints,
+        )
+        return ResolvedSpeedFrame(
+            target=target,
+            ceiling=self.apply(
+                target,
+                destination_state=destination_state,
+                reference_samples=reference_samples,
+            ),
         )
 
 

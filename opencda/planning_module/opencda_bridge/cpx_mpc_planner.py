@@ -1667,7 +1667,7 @@ class CPXMPCPlannerBridge:
         # front-gap threshold is only an input proposal and must not re-latch
         # stop after candidate evaluation has selected a safe route maneuver.
         selected_stop_goal_active = bool(behavior_decision.stop_required)
-        speed_target, ceiling_result = self.pipeline.resolve_speed(
+        speed_frame = self.pipeline.resolve_speed(
             behavior=behavior_decision,
             speed_plan=typed_speed_plan,
             additional_constraints=(
@@ -1678,30 +1678,12 @@ class CPXMPCPlannerBridge:
             destination_state=destination_state,
             reference_samples=lane_center_reference,
         )
+        speed_target = speed_frame.target
+        ceiling_result = speed_frame.ceiling
         speed_ref_mps = float(speed_target.target_mps)
         destination_state = list(ceiling_result.destination_state)
         lane_center_reference = list(ceiling_result.reference_samples)
-        reference_debug.update(speed_target.as_debug_fields())
-        reference_debug.update({
-            # Compatibility diagnostics now mirror the immutable resolver
-            # result instead of the earlier SpeedPlan proposal.
-            "speed_owner_selected_target_mps": float(
-                speed_target.target_mps
-            ),
-            "speed_owner_limiting_owner": str(
-                speed_target.limiting_owner
-            ),
-            "speed_owner_active_constraints": ";".join(
-                constraint.owner for constraint in speed_target.constraints
-            ),
-            "speed_owner_proposed_post_plan_target_mps": float(
-                speed_target.target_mps
-            ),
-            "speed_owner_ceiling_applied": bool(ceiling_result.applied),
-            "speed_owner_ceiling_reduction_mps": float(
-                ceiling_result.reduction_mps
-            ),
-        })
+        reference_debug.update(speed_frame.trace_fields())
         mpc_stop_goal_active = bool(selected_stop_goal_active)
         behavior_decision_normalized = str(behavior_decision.maneuver).strip().lower()
         normal_stop_requested = behavior_decision_normalized in {
