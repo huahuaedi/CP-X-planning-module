@@ -2989,10 +2989,20 @@ class CPXMPCPlannerBridge:
                 reason=str(conflict_resolution.cooperative_yield_reason),
             ))
         if lateral_handoff.action == "release":
-            self._stable_reference_line_provider.release(
+            released, release_result = self._stable_reference_line_provider.release(
                 LANE_CHANGE,
-                event=str(lateral_handoff.reason),
+                event=str(lateral_ownership.reference_release_event),
             )
+            if (
+                not released
+                and self._stable_reference_line_provider.snapshot(
+                    LANE_CHANGE
+                ).active
+            ):
+                raise RuntimeError(
+                    "lane-change semantic ownership was released but its "
+                    "reference remained active: " + str(release_result)
+                )
             reset_lane_change = getattr(
                 self.behavior_planner, "_reset_lane_change_state", None
             )

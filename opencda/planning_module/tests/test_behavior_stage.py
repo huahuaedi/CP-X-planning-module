@@ -455,6 +455,7 @@ def test_turn_lateral_owner_releases_lane_change_commitment_once():
     )
 
     assert result.handoff.action == "release"
+    assert result.reference_release_event == "maneuver_abandoned"
     assert not manager.lane_change.active
     assert manager.lane_change.required_target_lane_id is None
     assert not result.authorization.allowed

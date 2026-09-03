@@ -103,6 +103,7 @@ class LateralOwnershipResult:
     authorization: Any
     start_transition: Any
     handoff: Any
+    reference_release_event: str
     geometry_arc_m: float
     operational_curvature_1pm: float
 
@@ -1165,6 +1166,11 @@ class BehaviorStage:
             authorization=authorization,
             start_transition=start_transition,
             handoff=handoff,
+            reference_release_event=(
+                "maneuver_abandoned"
+                if str(handoff.action) == "release"
+                else ""
+            ),
             geometry_arc_m=float(geometry_arc_m),
             operational_curvature_1pm=float(operational_curvature),
         )
