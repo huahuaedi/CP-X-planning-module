@@ -2796,6 +2796,9 @@ class CPXMPCPlannerBridge:
         cp_payload: Mapping[str, Any] | None = None,
     ):
         sim_time_s = self._sim_time_s()
+        route_replan_attempted = False
+        route_replan_succeeded = False
+        route_replan_reason = "route_replan_not_requested"
         additional_speed_constraints = []
         adapter_output = self.input_adapter.build(
             ego_location=ego_location,
@@ -2858,7 +2861,11 @@ class CPXMPCPlannerBridge:
         )
         lane_change_authorization = route_behavior.authorization
         if str(route_behavior.replan_reason):
-            self._attempt_turn_route_replan(
+            (
+                route_replan_attempted,
+                route_replan_succeeded,
+                route_replan_reason,
+            ) = self._attempt_turn_route_replan(
                 ego_location=ego_location,
                 trigger_reason=str(route_behavior.replan_reason),
             )
@@ -3319,6 +3326,9 @@ class CPXMPCPlannerBridge:
             "upcoming_turn_distance_m": upcoming_turn_distance_m,
             "upcoming_turn_reason": upcoming_turn_reason,
             "source_quality": source_quality,
+            "route_replan_attempted": bool(route_replan_attempted),
+            "route_replan_succeeded": bool(route_replan_succeeded),
+            "route_replan_reason": str(route_replan_reason),
         })
         if bool(self.full_candidate_pipeline_enabled):
             candidate_reference_context = CandidateReferenceBuildContext(

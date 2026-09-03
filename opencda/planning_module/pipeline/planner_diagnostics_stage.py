@@ -596,7 +596,9 @@ class PlannerDiagnosticsStage:
             "route_replan_attempt_count": int(
                 self._route_replan_attempt_count
             ),
-            "route_replan_reason": str(self._route_replan_last_reason),
+            "route_replan_reason": str(reference_debug.get(
+                "route_replan_reason", "route_replan_not_requested"
+            )),
             "route_remaining_distance_m": float(
                 self.route_manager.last_status.remaining_distance_m
             ),

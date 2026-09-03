@@ -261,6 +261,7 @@ class RouteManagerADMapReferenceTest(unittest.TestCase):
         self.assertTrue(result.success, result.reason)
         self.assertEqual(len(manager._route_nodes()), 3)
         self.assertIn("blocked_summary_route_replanned", result.reason)
+        self.assertEqual(manager.route_debug_reason, "admap_route_ready")
 
     def test_turn_replan_rejects_long_macro_changing_disconnected_route(self):
         planner = _planner([
@@ -322,6 +323,7 @@ class RouteManagerADMapReferenceTest(unittest.TestCase):
         self.assertTrue(result.success, result.reason)
         self.assertEqual(manager.route_revision, "route-2")
         self.assertEqual(manager._route_nodes()[0][3].ad_lane_id, 101)
+        self.assertEqual(manager.route_debug_reason, "admap_route_ready")
 
     def test_alignment_uses_admap_route_geometry(self):
         planner = _planner([

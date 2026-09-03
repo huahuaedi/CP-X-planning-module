@@ -293,7 +293,7 @@ class CPXRouteManager:
             self._start_point = normalized_start
             self._fallback_route_points = []
             self._last_status = self._status_from_summary(summary)
-            self._route_debug_reason = (
+            replan_event_reason = (
                 f"blocked_summary_route_replanned:{str(trigger_reason)}"
                 if str(trigger_reason).strip().lower().startswith("static_obstacle")
                 else f"admap_route_replanned:{str(trigger_reason)}"
@@ -301,7 +301,7 @@ class CPXRouteManager:
             self._route_revision += 1
             return RouteReplanResult(
                 True,
-                str(self._route_debug_reason),
+                str(replan_event_reason),
                 route_point_count=route_point_count,
             )
         except Exception as exc:
