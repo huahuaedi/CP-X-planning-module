@@ -191,6 +191,9 @@ class PlanningPipeline:
     def prepare_route_lane_change(self, **kwargs):
         return self.behavior.prepare_route_lane_change(**kwargs)
 
+    def resolve_route_context(self, **kwargs):
+        return self.behavior.resolve_route_context(**kwargs)
+
     def prepare_turn_scenario_context(self, **kwargs):
         return self.behavior.prepare_turn_scenario_context(**kwargs)
 

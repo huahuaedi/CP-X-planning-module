@@ -121,23 +121,6 @@ class _WaypointMapAdapter:
             return None
 
 
-def _lane_change_execution_active(
-        *, reference_locked: bool, phase: object) -> bool:
-    """Return whether a committed lane change still owns route execution.
-
-    The route progress tracker is allowed to observe a temporarily lapsed lane
-    change requirement while ego follows the locked lateral trajectory.  That
-    lapse must not be interpreted as a missed maneuver until the trajectory is
-    released.  The phase check also protects the stabilization hand-off, where
-    the semantic route instruction may already have advanced.
-    """
-    normalized_phase = str(phase or "").strip().lower()
-    return bool(reference_locked) or normalized_phase in {
-        "executing",
-        "target_lane_stabilization",
-    }
-
-
 class CPXMPCPlannerBridge:
     """Direct-control planner used inside ``VehicleManager.run_step``."""
 
@@ -2808,48 +2791,26 @@ class CPXMPCPlannerBridge:
         route_optimal_lane_id = int(adapter_output.route_optimal_lane_id)
         route_reference_allowed = bool(adapter_output.route_reference_allowed)
         route_reference_gate_reason = str(adapter_output.route_reference_gate_reason)
-        # Route maneuver authorization depends on topology availability, not
-        # on permission to use the global route as XY reference geometry.
-        # AD-map owns geometry even when route_reference_allowed is false.
-        route_lane_change_allowed = bool(route_context.route_found)
-        # BehaviorStage owns all AD-map topology interpretation (lane direction,
-        # physical adjacency, trigger windows) for the route-required lane
-        # change.  The bridge only supplies one immutable map/route snapshot and
-        # keeps the maneuver-lifecycle side effects that follow.
-        lane_change_context = self.pipeline.prepare_route_lane_change(
-            route_manager=self.route_manager,
+        route_behavior = self.pipeline.resolve_route_context(
+            adapter_output=adapter_output,
             local_map_snapshot=local_map_snapshot,
-            route_summary=adapter_output.route_summary,
+            route_manager=self.route_manager,
+            maneuver_manager=self.maneuver_manager,
+            reference_provider=self._stable_reference_line_provider,
             current_lane_id=int(current_lane_id),
-            route_optimal_lane_id=int(route_optimal_lane_id),
-            route_found=bool(route_lane_change_allowed),
-            next_macro_maneuver=str(route_context.next_macro_maneuver),
-            current_road_option=str(route_context.current_road_option),
-            next_macro_distance_m=float(route_context.next_macro_distance_m),
             available_lane_ids=tuple(planner_input_frame.map_lane.allowed_lane_ids),
-            lane_safety_scores=dict(lane_safety_scores),
-            lane_prediction_risks=dict(
-                planner_input_frame.prediction.lane_prediction_risks
-            ),
             ego_x_m=float(ego_location.x),
             ego_y_m=float(ego_location.y),
             ego_heading_rad=float(ego_yaw_rad),
             ego_speed_mps=float(ego_speed_mps),
             config=self.config,
         )
-        # Locals still consumed by the maneuver-lifecycle and diagnostics code
-        # further down.  ``topology_route_target_lane_id`` is the raw AD target
-        # (used to remember the requirement); the physically resolved target
-        # lives on the request the stage built.
-        topology_current_lane_id = int(
-            lane_change_context.topology_current_lane_id
+        lane_change_context = route_behavior.context
+        route_lane_change_allowed = bool(
+            route_behavior.route_lane_change_allowed
         )
         topology_route_target_lane_id = int(
             lane_change_context.topology_target_lane_id
-        )
-        topology_lane_offset = int(lane_change_context.topology_lane_offset)
-        topology_target_in_local_frame = bool(
-            lane_change_context.topology_target_in_local_frame
         )
         physical_route_target_lane_id = int(
             lane_change_context.physical_target_lane_id
@@ -2863,30 +2824,11 @@ class CPXMPCPlannerBridge:
         route_geometry_lane_change_reason = str(
             lane_change_context.geometry_reason
         )
-        route_cursor = self.route_manager.route_cursor
-        lane_change_execution_active = _lane_change_execution_active(
-            reference_locked=bool(
-                self._stable_reference_line_provider.snapshot(
-                    LANE_CHANGE
-                ).mutable_samples()
-            ),
-            phase=self.maneuver_manager.lane_change.phase,
-        )
-        lane_change_stage_result = self.pipeline.resolve_route_lane_change(
-            lane_change_context,
-            maneuver_manager=self.maneuver_manager,
-            route_cursor=route_cursor,
-            current_lane_id=int(current_lane_id),
-            execution_active=bool(lane_change_execution_active),
-            replan_missed_lane_change=bool(
-                self.config.get("missed_lane_change_route_replan_enabled", True)
-            ),
-        )
-        lane_change_authorization = lane_change_stage_result.authorization
-        if str(lane_change_stage_result.replan_reason):
+        lane_change_authorization = route_behavior.authorization
+        if str(route_behavior.replan_reason):
             self._attempt_turn_route_replan(
                 ego_location=ego_location,
-                trigger_reason=str(lane_change_stage_result.replan_reason),
+                trigger_reason=str(route_behavior.replan_reason),
             )
         route_lane_change_required = bool(lane_change_authorization.required_by_route)
         signal_context = dict(adapter_output.signal_context)
@@ -2936,22 +2878,12 @@ class CPXMPCPlannerBridge:
         filtered_traffic_state = str(scenario_observation.filtered_traffic_state)
         full_traffic_memory_reason = str(scenario_result.traffic_memory_reason)
         traffic_stop_forward_m = float(scenario_observation.stop_forward_m)
-        traffic_stop_target_reliable = bool(scenario_observation.stop_target_reliable)
         upcoming_turn_direction = str(turn_context.direction)
         upcoming_turn_distance_m = float(turn_context.distance_m)
         upcoming_turn_reason = str(turn_context.reason)
         route_advanced_to_lane_change = bool(
             turn_context.route_advanced_to_lane_change
         )
-        turn_exit_heading_error_rad = float(
-            turn_context.exit_heading_error_rad
-        )
-        turn_exit_lateral_m = float(turn_context.exit_lateral_m)
-        turn_exit_alignment_reason = str(
-            turn_context.exit_alignment_reason
-        )
-        turn_exit_alignment_valid = bool(turn_context.exit_alignment_valid)
-        turn_exit_aligned = bool(turn_context.exit_aligned)
         scenario_decision = scenario_result.decision
         conflict_resolution = self.pipeline.resolve_conflicts(
             ConflictResolutionRequest(

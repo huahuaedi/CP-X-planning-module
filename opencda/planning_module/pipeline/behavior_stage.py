@@ -8,6 +8,7 @@ from types import MappingProxyType
 from typing import Any, Mapping, Optional, Sequence
 
 from .behavior_decision import BehaviorDecision
+from .reference_line_provider import LANE_CHANGE
 from .candidate_evaluation import evaluate_behavior_candidates
 from .route_authorization import (
     RouteLaneChangeAuthorizationLatch,
@@ -68,6 +69,16 @@ class RouteLaneChangeStageResult:
     context: RouteLaneChangeContext
     authorization: Any
     replan_reason: str = ""
+
+
+@dataclass(frozen=True)
+class RouteBehaviorContextResult:
+    """Route topology interpretation for one immutable planning frame."""
+
+    context: RouteLaneChangeContext
+    authorization: Any
+    replan_reason: str
+    route_lane_change_allowed: bool
 
 
 @dataclass(frozen=True)
@@ -814,6 +825,56 @@ class BehaviorStage:
                 ),
             )
         return authorization
+
+    def resolve_route_context(
+        self, *, adapter_output: Any, local_map_snapshot: Any,
+        route_manager: Any, maneuver_manager: Any, reference_provider: Any,
+        current_lane_id: int, ego_x_m: float, ego_y_m: float,
+        ego_heading_rad: float, ego_speed_mps: float,
+        available_lane_ids: Sequence[int], config: Mapping[str, object],
+    ) -> RouteBehaviorContextResult:
+        """Prepare and authorize the route maneuver from one input frame."""
+
+        frame = adapter_output.frame
+        route = frame.planning.route
+        route_allowed = bool(route.route_found)
+        context = self.prepare_route_lane_change(
+            route_manager=route_manager,
+            local_map_snapshot=local_map_snapshot,
+            route_summary=adapter_output.route_summary,
+            current_lane_id=int(current_lane_id),
+            route_optimal_lane_id=int(adapter_output.route_optimal_lane_id),
+            route_found=bool(route_allowed),
+            next_macro_maneuver=str(route.next_macro_maneuver),
+            current_road_option=str(route.current_road_option),
+            next_macro_distance_m=float(route.next_macro_distance_m),
+            available_lane_ids=tuple(available_lane_ids),
+            lane_safety_scores=dict(adapter_output.lane_safety_scores),
+            lane_prediction_risks=dict(frame.prediction.lane_prediction_risks),
+            ego_x_m=float(ego_x_m), ego_y_m=float(ego_y_m),
+            ego_heading_rad=float(ego_heading_rad),
+            ego_speed_mps=float(ego_speed_mps), config=config,
+        )
+        phase = str(maneuver_manager.lane_change.phase or "").strip().lower()
+        execution_active = bool(
+            reference_provider.snapshot(LANE_CHANGE).mutable_samples()
+        ) or phase in {"executing", "target_lane_stabilization"}
+        resolved = self.resolve_route_lane_change(
+            context,
+            maneuver_manager=maneuver_manager,
+            route_cursor=route_manager.route_cursor,
+            current_lane_id=int(current_lane_id),
+            execution_active=bool(execution_active),
+            replan_missed_lane_change=bool(
+                config.get("missed_lane_change_route_replan_enabled", True)
+            ),
+        )
+        return RouteBehaviorContextResult(
+            context=context,
+            authorization=resolved.authorization,
+            replan_reason=str(resolved.replan_reason),
+            route_lane_change_allowed=bool(route_allowed),
+        )
 
     def resolve_route_lane_change(
         self,

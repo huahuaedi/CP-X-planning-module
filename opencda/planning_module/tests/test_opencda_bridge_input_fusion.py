@@ -28,7 +28,6 @@ if "carla" not in sys.modules:
 from opencda_bridge.cpx_mpc_planner import (
     CPXMPCPlannerBridge,
     _destination_approach_speed_cap,
-    _lane_change_execution_active,
     _route_destination_stop_gate,
 )
 from pipeline.static_obstacle_stage import (
@@ -128,24 +127,6 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         stale_b.destroy.assert_called_once_with()
         self.assertFalse(hasattr(ego, "destroy"))
         self.assertTrue(bridge._functional_test_world_actors_cleaned)
-
-    def test_missed_lane_change_replan_is_suppressed_during_locked_execution(self):
-        self.assertTrue(_lane_change_execution_active(
-            reference_locked=True,
-            phase="executing",
-        ))
-
-    def test_missed_lane_change_replan_is_suppressed_during_stabilization(self):
-        self.assertTrue(_lane_change_execution_active(
-            reference_locked=False,
-            phase="target_lane_stabilization",
-        ))
-
-    def test_missed_lane_change_replan_resumes_after_release(self):
-        self.assertFalse(_lane_change_execution_active(
-            reference_locked=False,
-            phase="idle",
-        ))
 
     def test_static_obstacle_local_avoidance_selects_safest_adjacent_lane(self):
         selected = _select_static_obstacle_local_avoidance_lane(

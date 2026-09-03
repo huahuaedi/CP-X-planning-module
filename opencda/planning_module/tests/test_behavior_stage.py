@@ -357,6 +357,53 @@ def test_active_lane_change_is_not_invalidated_by_missed_cursor():
     assert result.replan_reason == ""
 
 
+def test_route_context_keeps_persistent_lane_change_execution_active():
+    stage = BehaviorStage()
+    context = SimpleNamespace()
+    stage.prepare_route_lane_change = lambda **_kwargs: context
+    captured = {}
+
+    def resolve(value, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            context=value,
+            authorization=SimpleNamespace(allowed=True),
+            replan_reason="",
+        )
+
+    stage.resolve_route_lane_change = resolve
+    frame = SimpleNamespace(
+        planning=SimpleNamespace(route=SimpleNamespace(
+            route_found=True, next_macro_maneuver="lane_change_right",
+            current_road_option="LANEFOLLOW", next_macro_distance_m=20.0,
+        )),
+        prediction=SimpleNamespace(lane_prediction_risks={}),
+    )
+    adapter = SimpleNamespace(
+        frame=frame, route_summary={}, route_optimal_lane_id=11,
+        lane_safety_scores={10: 1.0, 11: 1.0},
+    )
+    manager = SimpleNamespace(
+        lane_change=SimpleNamespace(phase="executing")
+    )
+    provider = SimpleNamespace(snapshot=lambda _mode: SimpleNamespace(
+        mutable_samples=lambda: []
+    ))
+    route_manager = SimpleNamespace(route_cursor=SimpleNamespace())
+
+    result = stage.resolve_route_context(
+        adapter_output=adapter, local_map_snapshot=SimpleNamespace(),
+        route_manager=route_manager, maneuver_manager=manager,
+        reference_provider=provider, current_lane_id=10,
+        ego_x_m=0.0, ego_y_m=0.0, ego_heading_rad=0.0,
+        ego_speed_mps=5.0, available_lane_ids=(10, 11), config={},
+    )
+
+    assert captured["execution_active"]
+    assert result.route_lane_change_allowed
+    assert result.authorization.allowed
+
+
 def test_lateral_ownership_denies_lane_change_that_cannot_finish_before_turn():
     stage = BehaviorStage()
     manager = ManeuverManager()

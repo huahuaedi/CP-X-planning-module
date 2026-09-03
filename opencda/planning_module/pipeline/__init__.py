@@ -33,6 +33,7 @@ from .behavior_stage import (
     BehaviorStageResult,
     ConflictResolutionRequest,
     ConflictResolutionResult,
+    RouteBehaviorContextResult,
 )
 from .fallback_manager import (
     FailureReason,
@@ -131,6 +132,7 @@ __all__ = [
     "BehaviorMPCFeedback",
     "ConflictResolutionRequest",
     "ConflictResolutionResult",
+    "RouteBehaviorContextResult",
     "MPCCommandExtractor",
     "MPCTrackingCommand",
     "MPCEntryStage",
