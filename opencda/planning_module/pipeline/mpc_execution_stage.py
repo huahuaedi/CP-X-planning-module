@@ -25,6 +25,9 @@ class MPCExecutionRequest:
     control_context: Any
     road_envelope_payload_world: Any = None
     speed_crossing_deadband_mps: float = 0.15
+    # Stage-D interaction corridor rows (pipeline.mpc_corridor_constraints);
+    # empty for a single-vehicle tick.
+    corridor_rows: Sequence[Any] = ()
 
 
 @dataclass(frozen=True)
@@ -139,6 +142,7 @@ class MPCExecutionStage:
                     lane_center_reference_samples=request.reference_samples,
                     stop_goal_active=bool(request.stop_goal_active),
                     road_envelope_payload_world=request.road_envelope_payload_world,
+                    corridor_rows=request.corridor_rows,
                 )
                 status = str(getattr(self._mpc, "_last_status", "")).strip().lower()
                 if status and status not in {"solved", "solved inaccurate"}:
