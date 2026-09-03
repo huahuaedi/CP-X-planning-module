@@ -862,7 +862,6 @@ class CPXMPCPlannerBridge:
         from opencda.planning_module.opencda_bridge.cp_provider import OpenCDACPProvider
         from opencda.planning_module.opencda_bridge.planner_input_adapter import OpenCDAPlanningAdapter
         from opencda.planning_module.pipeline.control_buffer import MPCControlBuffer
-        from opencda.planning_module.pipeline.decision_record import build_decision_record
         from opencda.planning_module.pipeline.mpc_feedback import BehaviorMPCFeedback
         from opencda.planning_module.pipeline.mpc_command_extractor import (
             MPCCommandExtractor,
@@ -1059,7 +1058,6 @@ class CPXMPCPlannerBridge:
             behavior_reference_execution=behavior_reference_execution_stage,
             candidate_selection=candidate_selection_stage,
         )
-        self._build_decision_record = build_decision_record
         self.velocity_steering_adapter = OpenCDAVelocitySteeringAdapter(
             self.vehicle_manager.controller
         )
@@ -2626,36 +2624,7 @@ class CPXMPCPlannerBridge:
                 boundary_snapshot=boundary_snapshot,
             )
         )
-        decision_record = self._build_decision_record(
-            scenario_state=diagnostics.get("scenario_fsm_state", ""),
-            behavior_decision=diagnostics.get("behavior_decision", ""),
-            behavior_fsm_state=diagnostics.get("behavior_fsm_state", ""),
-            candidate_selected_name=diagnostics.get("candidate_pipeline_selected", ""),
-            candidate_selected_decision=diagnostics.get("candidate_selected_decision", ""),
-            candidate_selected_status=diagnostics.get("candidate_pipeline_selected_status", ""),
-            candidate_selected_reason=diagnostics.get("candidate_pipeline_selected_reason", ""),
-            candidate_pipeline_summary=diagnostics.get("candidate_pipeline_summary", ""),
-            candidate_mpc_probe_summary=diagnostics.get("candidate_mpc_probe_summary", ""),
-            reference_source=diagnostics.get("reference_source", ""),
-            reference_stage=diagnostics.get("reference_pipeline_stage", ""),
-            reference_fallback_reason=diagnostics.get("reference_pipeline_fallback", ""),
-            reference_lateral_guard_reason=diagnostics.get("reference_lateral_guard_reason", ""),
-            reference_stabilizer_reason=diagnostics.get("mpc_reference_stabilizer_reason", ""),
-            final_reference_gate_reason=diagnostics.get("final_reference_gate_reason", ""),
-            lane_change_authorized=diagnostics.get("lane_change_authorized", ""),
-            lane_change_gate_reason=diagnostics.get("lane_change_gate_reason", ""),
-            route_lane_change_required=diagnostics.get("route_lane_change_required", ""),
-            behavior_override_reason=diagnostics.get("behavior_override_reason", ""),
-            mode_transition_guard_reason=diagnostics.get("mode_transition_guard_reason", ""),
-            mpc_status=diagnostics.get("mpc_status", ""),
-            mpc_fallback_reason=diagnostics.get("mpc_fallback_reason", ""),
-            control_guard_reason=diagnostics.get("control_guard_reason", ""),
-            control_buffer_reason=diagnostics.get("control_buffer_reason", ""),
-            safety_supervisor_reason=diagnostics.get("safety_supervisor_reason", ""),
-            applied_throttle=diagnostics.get("applied_throttle", 0.0),
-            applied_brake=diagnostics.get("applied_brake", 0.0),
-            applied_steer=diagnostics.get("applied_steer", 0.0),
-        )
+        decision_record = self.pipeline.explain_decision(diagnostics)
         diagnostics.update(decision_record.as_debug_fields())
         self._draw_world_debug_primitives(
             destination_state=destination_state,

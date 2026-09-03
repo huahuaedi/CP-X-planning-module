@@ -220,6 +220,44 @@ def build_decision_record(
     )
 
 
+def decision_record_from_diagnostics(
+    diagnostics: Mapping[str, object],
+) -> DecisionRecord:
+    """Build the ownership trace from the frozen diagnostic frame."""
+
+    d = diagnostics
+    return build_decision_record(
+        scenario_state=d.get("scenario_fsm_state", ""),
+        behavior_decision=d.get("behavior_decision", ""),
+        behavior_fsm_state=d.get("behavior_fsm_state", ""),
+        candidate_selected_name=d.get("candidate_pipeline_selected", ""),
+        candidate_selected_decision=d.get("candidate_selected_decision", ""),
+        candidate_selected_status=d.get("candidate_pipeline_selected_status", ""),
+        candidate_selected_reason=d.get("candidate_pipeline_selected_reason", ""),
+        candidate_pipeline_summary=d.get("candidate_pipeline_summary", ""),
+        candidate_mpc_probe_summary=d.get("candidate_mpc_probe_summary", ""),
+        reference_source=d.get("reference_source", ""),
+        reference_stage=d.get("reference_pipeline_stage", ""),
+        reference_fallback_reason=d.get("reference_pipeline_fallback", ""),
+        reference_lateral_guard_reason=d.get("reference_lateral_guard_reason", ""),
+        reference_stabilizer_reason=d.get("mpc_reference_stabilizer_reason", ""),
+        final_reference_gate_reason=d.get("final_reference_gate_reason", ""),
+        lane_change_authorized=d.get("lane_change_authorized", ""),
+        lane_change_gate_reason=d.get("lane_change_gate_reason", ""),
+        route_lane_change_required=d.get("route_lane_change_required", ""),
+        behavior_override_reason=d.get("behavior_override_reason", ""),
+        mode_transition_guard_reason=d.get("mode_transition_guard_reason", ""),
+        mpc_status=d.get("mpc_status", ""),
+        mpc_fallback_reason=d.get("mpc_fallback_reason", ""),
+        control_guard_reason=d.get("control_guard_reason", ""),
+        control_buffer_reason=d.get("control_buffer_reason", ""),
+        safety_supervisor_reason=d.get("safety_supervisor_reason", ""),
+        applied_throttle=d.get("applied_throttle", 0.0),
+        applied_brake=d.get("applied_brake", 0.0),
+        applied_steer=d.get("applied_steer", 0.0),
+    )
+
+
 def _truthy(value: object) -> bool:
     if isinstance(value, bool):
         return bool(value)

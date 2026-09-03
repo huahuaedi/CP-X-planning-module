@@ -1,10 +1,25 @@
 import json
 import unittest
 
-from opencda.planning_module.pipeline.decision_record import build_decision_record
+from opencda.planning_module.pipeline.decision_record import (
+    build_decision_record,
+    decision_record_from_diagnostics,
+)
 
 
 class DecisionRecordTest(unittest.TestCase):
+    def test_frozen_diagnostics_are_the_only_record_input(self):
+        record = decision_record_from_diagnostics({
+            "behavior_decision": "lane_change_right",
+            "candidate_selected_decision": "lane_change_right",
+            "reference_source": "lane_change_master",
+            "mpc_status": "solved",
+            "applied_throttle": 0.3,
+        })
+        self.assertEqual(record.behavior_decision, "lane_change_right")
+        self.assertEqual(record.reference_source, "lane_change_master")
+        self.assertEqual(record.mpc_status, "solved")
+
     def test_final_reference_gate_has_independent_veto_owner(self):
         record = build_decision_record(
             reference_stabilizer_reason="rebuilt_current_lane_reference",

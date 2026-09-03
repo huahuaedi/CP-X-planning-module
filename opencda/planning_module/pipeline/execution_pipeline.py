@@ -296,6 +296,12 @@ class PlanningPipeline:
             raise RuntimeError("control finalization stage is not configured")
         return self.control_finalization.run(request, **kwargs)
 
+    @staticmethod
+    def explain_decision(diagnostics):
+        from .decision_record import decision_record_from_diagnostics
+
+        return decision_record_from_diagnostics(diagnostics)
+
     def record_valid_trajectory(self, trajectory, **kwargs):
         if self.fallback is None:
             return False
