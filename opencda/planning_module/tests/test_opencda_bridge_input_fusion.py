@@ -1545,6 +1545,46 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
             "traffic_memory_fail_safe_hold_red_until_green",
         )
 
+    def test_traffic_memory_owns_world_fixed_stop_target_lifecycle(self):
+        memory = TrafficLightMemory()
+        created, reason = memory.latch_stop_target(
+            traffic_state="red",
+            stop_target=None,
+            ego_x_m=2.0,
+            ego_y_m=3.0,
+            ego_yaw_rad=0.0,
+            current_lane_id=7,
+            virtual_stop_distance_m=12.0,
+        )
+        self.assertEqual(reason, "stop_target_latch_create")
+        self.assertEqual(created["x_m"], 14.0)
+        self.assertEqual(memory.latched_stop_state, "red")
+
+        reused, reason = memory.latch_stop_target(
+            traffic_state="yellow",
+            stop_target={"x_m": 99.0, "y_m": 99.0},
+            ego_x_m=20.0,
+            ego_y_m=30.0,
+            ego_yaw_rad=0.0,
+            current_lane_id=8,
+            virtual_stop_distance_m=12.0,
+        )
+        self.assertEqual(reason, "stop_target_latch_reuse")
+        self.assertEqual(reused["x_m"], 14.0)
+
+        released, reason = memory.latch_stop_target(
+            traffic_state="green",
+            stop_target=None,
+            ego_x_m=20.0,
+            ego_y_m=30.0,
+            ego_yaw_rad=0.0,
+            current_lane_id=8,
+            virtual_stop_distance_m=12.0,
+        )
+        self.assertIsNone(released)
+        self.assertEqual(reason, "stop_target_latch_release")
+        self.assertIsNone(memory.latched_stop_target)
+
     def test_full_mode_resolves_unknown_from_latched_carla_signal_actor(self):
         signal_actor = types.SimpleNamespace(
             get_state=lambda: types.SimpleNamespace(name="Green")
@@ -1557,8 +1597,16 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
             vehicle=types.SimpleNamespace(get_world=lambda: world)
         )
         bridge._full_signal_actor_id = ""
-        bridge._full_latched_stop_target = {"x_m": 10.0, "y_m": 0.0}
-        bridge._full_latched_stop_state = "red"
+        bridge._full_traffic_memory = TrafficLightMemory()
+        bridge._full_traffic_memory.latch_stop_target(
+            traffic_state="red",
+            stop_target={"x_m": 10.0, "y_m": 0.0},
+            ego_x_m=0.0,
+            ego_y_m=0.0,
+            ego_yaw_rad=0.0,
+            current_lane_id=1,
+            virtual_stop_distance_m=12.0,
+        )
 
         state, reason = bridge._resolve_full_traffic_state_from_carla_actor(
             raw_state="red",
@@ -1582,8 +1630,16 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
             vehicle=types.SimpleNamespace(get_world=lambda: world)
         )
         bridge._full_signal_actor_id = "42"
-        bridge._full_latched_stop_target = {"x_m": 10.0, "y_m": 0.0}
-        bridge._full_latched_stop_state = "red"
+        bridge._full_traffic_memory = TrafficLightMemory()
+        bridge._full_traffic_memory.latch_stop_target(
+            traffic_state="red",
+            stop_target={"x_m": 10.0, "y_m": 0.0},
+            ego_x_m=0.0,
+            ego_y_m=0.0,
+            ego_yaw_rad=0.0,
+            current_lane_id=1,
+            virtual_stop_distance_m=12.0,
+        )
 
         state, reason = bridge._resolve_full_traffic_state_from_carla_actor(
             raw_state="unknown",

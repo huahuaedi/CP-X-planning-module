@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Mapping
 
 
@@ -31,6 +32,77 @@ class TrafficLightMemory:
         self._last_stop_target: dict[str, object] | None = None
         self._hold_until_s = -float("inf")
         self._green_since_s: float | None = None
+        self._latched_stop_target: dict[str, object] | None = None
+        self._latched_stop_state = "unknown"
+
+    @property
+    def latched_stop_target(self) -> dict[str, object] | None:
+        return (
+            dict(self._latched_stop_target)
+            if self._latched_stop_target is not None
+            else None
+        )
+
+    @property
+    def latched_stop_state(self) -> str:
+        return str(self._latched_stop_state)
+
+    def latch_stop_target(
+        self,
+        *,
+        traffic_state: str,
+        stop_target: Mapping[str, object] | None,
+        ego_x_m: float,
+        ego_y_m: float,
+        ego_yaw_rad: float,
+        current_lane_id: int,
+        virtual_stop_distance_m: float,
+    ) -> tuple[dict[str, object] | None, str]:
+        """Keep one world-fixed stop target throughout a red/yellow phase."""
+
+        state = str(traffic_state or "unknown").strip().lower()
+        if state not in {"red", "yellow"}:
+            if self._latched_stop_target is not None:
+                self._latched_stop_target = None
+                self._latched_stop_state = state
+                return None, "stop_target_latch_release"
+            self._latched_stop_state = state
+            return None, ""
+        if (
+            self._latched_stop_target is not None
+            and self._latched_stop_state in {"red", "yellow"}
+        ):
+            return dict(self._latched_stop_target), "stop_target_latch_reuse"
+
+        latched = None
+        if isinstance(stop_target, Mapping):
+            try:
+                x_value = stop_target.get("x_m", stop_target.get("x"))
+                y_value = stop_target.get("y_m", stop_target.get("y"))
+                if x_value is not None and y_value is not None:
+                    latched = dict(stop_target)
+                    latched.update({
+                        "x_m": float(x_value), "y_m": float(y_value),
+                        "x": float(x_value), "y": float(y_value),
+                        "source": str(latched.get("source", ""))
+                        + ":latched_world_stop_target",
+                    })
+            except (TypeError, ValueError):
+                latched = None
+        if latched is None:
+            distance_m = max(2.0, float(virtual_stop_distance_m))
+            x_m = float(ego_x_m) + distance_m * math.cos(float(ego_yaw_rad))
+            y_m = float(ego_y_m) + distance_m * math.sin(float(ego_yaw_rad))
+            latched = {
+                "x_m": x_m, "y_m": y_m, "x": x_m, "y": y_m,
+                "heading_rad": float(ego_yaw_rad),
+                "lane_id": int(current_lane_id),
+                "distance_m": distance_m,
+                "source": "latched_virtual_stop_target",
+            }
+        self._latched_stop_target = dict(latched)
+        self._latched_stop_state = state
+        return dict(latched), "stop_target_latch_create"
 
     def update(
         self,

@@ -298,8 +298,6 @@ class CPXMPCPlannerBridge:
         )
         self._authoritative_ego_waypoint: Any = None
         self._stop_release_temp_smooth_until_sim_time_s = 0.0
-        self._full_latched_stop_target: dict[str, object] | None = None
-        self._full_latched_stop_state = "unknown"
         self._full_signal_actor_id = ""
         self._full_traffic_memory = TrafficLightMemory(
             hold_unknown_s=float(self.config.get("full_traffic_unknown_hold_s", 1.5)),
@@ -3243,63 +3241,6 @@ class CPXMPCPlannerBridge:
             diagnostics=PlannerDiagnostics(diagnostics),
         )
 
-    def _full_latched_stop_target_for_signal(
-        self,
-        *,
-        traffic_state: str,
-        stop_target: Mapping[str, object] | None,
-        ego_location: carla.Location,
-        ego_yaw_rad: float,
-        current_lane_id: int,
-    ) -> tuple[dict[str, object] | None, str]:
-        state = str(traffic_state or "unknown").strip().lower()
-        if state not in {"red", "yellow"}:
-            if self._full_latched_stop_target is not None:
-                self._full_latched_stop_target = None
-                self._full_latched_stop_state = str(state)
-                return None, "stop_target_latch_release"
-            self._full_latched_stop_state = str(state)
-            return None, ""
-
-        if self._full_latched_stop_target is not None and self._full_latched_stop_state in {"red", "yellow"}:
-            return dict(self._full_latched_stop_target), "stop_target_latch_reuse"
-
-        latched: dict[str, object] | None = None
-        if isinstance(stop_target, Mapping):
-            try:
-                x_value = stop_target.get("x_m", stop_target.get("x", None))
-                y_value = stop_target.get("y_m", stop_target.get("y", None))
-                if x_value is not None and y_value is not None:
-                    latched = dict(stop_target)
-                    latched["x_m"] = float(x_value)
-                    latched["y_m"] = float(y_value)
-                    latched["x"] = float(x_value)
-                    latched["y"] = float(y_value)
-                    latched["source"] = str(latched.get("source", "")) + ":latched_world_stop_target"
-            except Exception:
-                latched = None
-        if latched is None:
-            distance_m = max(
-                2.0,
-                float(self.config.get("full_latched_virtual_stop_distance_m", 12.0)),
-            )
-            x_m = float(ego_location.x) + float(distance_m) * math.cos(float(ego_yaw_rad))
-            y_m = float(ego_location.y) + float(distance_m) * math.sin(float(ego_yaw_rad))
-            latched = {
-                "x_m": float(x_m),
-                "y_m": float(y_m),
-                "x": float(x_m),
-                "y": float(y_m),
-                "heading_rad": float(ego_yaw_rad),
-                "lane_id": int(current_lane_id),
-                "distance_m": float(distance_m),
-                "source": "latched_virtual_stop_target",
-            }
-
-        self._full_latched_stop_target = dict(latched)
-        self._full_latched_stop_state = str(state)
-        return dict(latched), "stop_target_latch_create"
-
     def _resolve_full_traffic_state_from_carla_actor(
         self,
         *,
@@ -3324,8 +3265,9 @@ class CPXMPCPlannerBridge:
             state == "unknown"
             and bool(self._full_signal_actor_id)
             and (
-                self._full_latched_stop_target is not None
-                or str(self._full_latched_stop_state) in {"red", "yellow"}
+                self._full_traffic_memory.latched_stop_target is not None
+                or self._full_traffic_memory.latched_stop_state
+                in {"red", "yellow"}
             )
         )
         if not bool(should_query_latched_actor):
@@ -4308,16 +4250,20 @@ class CPXMPCPlannerBridge:
                 if str(full_traffic_memory_reason)
                 else str(signal_actor_resolution_reason)
             )
-        filtered_stop_target, stop_latch_reason = self._full_latched_stop_target_for_signal(
+        filtered_stop_target, stop_latch_reason = self._full_traffic_memory.latch_stop_target(
             traffic_state=str(filtered_traffic_state),
             stop_target=(
                 dict(filtered_stop_target)
                 if isinstance(filtered_stop_target, Mapping)
                 else None
             ),
-            ego_location=ego_location,
+            ego_x_m=float(ego_location.x),
+            ego_y_m=float(ego_location.y),
             ego_yaw_rad=float(ego_yaw_rad),
             current_lane_id=int(current_lane_id),
+            virtual_stop_distance_m=float(
+                self.config.get("full_latched_virtual_stop_distance_m", 12.0)
+            ),
         )
         if str(stop_latch_reason):
             full_traffic_memory_reason = (
