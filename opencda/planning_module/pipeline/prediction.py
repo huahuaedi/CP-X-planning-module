@@ -148,6 +148,7 @@ def build_prediction_frame(
     timestamp_s: float = 0.0,
     revision: str = "",
     risk_probability_threshold: float = 0.05,
+    snapshot_transform: Callable[[dict, float], Mapping[str, Any]] | None = None,
 ) -> PredictionFrame:
     """Build an Apollo-style prediction frame for one planning tick.
 
@@ -174,6 +175,15 @@ def build_prediction_frame(
         for snapshot in list(obstacle_snapshots or [])
         if isinstance(snapshot, Mapping)
     ]
+    if snapshot_transform is not None:
+        # Prediction-knowledge ablation hook: rewrite each obstacle snapshot's
+        # future model before both the per-object rollout and the per-lane risk
+        # summary consume it (they share ``normalized_obstacles``).  ``cv`` mode
+        # passes ``None`` here and this is a no-op.
+        normalized_obstacles = [
+            dict(snapshot_transform(dict(snapshot), float(timestamp_s)))
+            for snapshot in normalized_obstacles
+        ]
     predicted_objects: Dict[str, PredictedObject] = {}
     obstacle_future_trajectories: Dict[str, List[dict]] = {}
     for snapshot in normalized_obstacles:

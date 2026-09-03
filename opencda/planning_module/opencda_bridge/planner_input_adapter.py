@@ -314,6 +314,7 @@ class OpenCDAPlanningAdapter:
             min_rear_gap_m=float(speed_scaled_min_gap_m),
             min_ttc_s=float(bridge.config.get("prediction_min_ttc_s", 2.0)),
             lane_step_fn=bridge.lane_step_fn(),
+            snapshot_transform=bridge.prediction_snapshot_transform(),
         )
         route_context = RouteContext(
             optimal_lane_id=int(route_optimal_lane_id),

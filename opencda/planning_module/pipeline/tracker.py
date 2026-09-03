@@ -123,6 +123,7 @@ class CPXObstacleTracker:
         prediction_model: str = "constant_acceleration",
         max_abs_acceleration_mps2: float = 4.0,
         lane_step_fn: Optional[Callable[[float, float, float], Any]] = None,
+        snapshot_transform: Optional[Callable[[dict, float], Any]] = None,
     ) -> PredictionFrame:
         return build_prediction_frame(
             ego_snapshot=ego_snapshot,
@@ -139,6 +140,7 @@ class CPXObstacleTracker:
             lane_step_fn=lane_step_fn,
             timestamp_s=float(self._timestamp_s),
             revision=f"tracker:{float(self._timestamp_s):.3f}",
+            snapshot_transform=snapshot_transform,
         )
 
     @property
