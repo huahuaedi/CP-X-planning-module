@@ -232,10 +232,6 @@ class CPXMPCPlannerBridge:
         self.nominal_trajectory_generator = NominalTrajectoryGenerator()
         speed_target_planner = SpeedTargetPlanner()
         behavior_stage = BehaviorStage()
-        destination_speed_stage = DestinationSpeedStage(
-            config=self.config,
-            speed_planner=speed_target_planner,
-        )
         self._authoritative_ego_waypoint: Any = None
         self._stop_release_temp_smooth_until_sim_time_s = 0.0
         self._full_signal_actor_id = ""
@@ -269,6 +265,12 @@ class CPXMPCPlannerBridge:
             safe_stop_deceleration_mps2=float(
                 self.config.get("fallback_safe_stop_deceleration_mps2", 2.0)
             ),
+        )
+        destination_speed_stage = DestinationSpeedStage(
+            config=self.config,
+            speed_planner=speed_target_planner,
+            fallback_manager=fallback_manager,
+            behavior_stage=behavior_stage,
         )
         from opencda.planning_module.pipeline.behavior_reference_execution_stage import (
             BehaviorReferenceExecutionStage,
@@ -1633,96 +1635,32 @@ class CPXMPCPlannerBridge:
                 + str(behavior_reference.failure_reason)
             )
 
-        route_status = getattr(
-            getattr(self, "route_manager", None), "last_status", None
-        )
-        destination_stage = self.pipeline.evaluate_destination(
-            route_status=route_status,
-            route_revision=str(getattr(self.route_manager, "route_revision", "")),
+        destination_application = self.pipeline.apply_destination(
+            route_status=getattr(self.route_manager, "last_status", None),
+            route_revision=str(self.route_manager.route_revision),
             ego_speed_mps=float(ego_speed_mps),
+            current_state=current_state,
+            destination_state=destination_state,
+            reference_samples=lane_center_reference,
+            behavior_stage_result=behavior_stage_result,
+            reference_debug=reference_debug,
+            fallback_lane_id=int(getattr(self._local_map_snapshot, "ego_lane_id", 0)),
         )
+        destination_stage = destination_application.stage
+        destination_state = destination_application.mutable_destination_state()
+        lane_center_reference = destination_application.mutable_reference()
+        behavior_stage_result = destination_application.behavior_stage_result
+        behavior_decision = behavior_stage_result.decision
+        behavior_debug = behavior_stage_result.mutable_diagnostics()
+        reference_debug = destination_application.mutable_reference_debug()
         route_reached_destination = bool(destination_stage.reached_destination)
         route_remaining_distance_m = float(destination_stage.remaining_distance_m)
         route_destination_approach = bool(destination_stage.approach_active)
         destination_stopping_distance_m = float(destination_stage.required_distance_m)
         destination_stop_buffer_m = float(destination_stage.stop_buffer_m)
         destination_speed_constraint = destination_stage.constraint
-        # Entering the physical braking envelope is a speed-planning event,
-        # not an emergency-stop event.  Keep the accepted route/reference and
-        # lower its longitudinal target continuously.  Latching a zero-speed
-        # fallback here used to make OpenCDA's PID apply near-full braking and
-        # stop roughly ten metres before the destination.
-        if bool(route_destination_approach) and not bool(route_reached_destination):
-            reference_debug.update({
-                "destination_stop_latched": False,
-                "destination_stop_reason": "route_destination_approach_speed_profile",
-                "destination_stop_remaining_distance_m": float(
-                    route_remaining_distance_m
-                ),
-                "destination_stop_required_distance_m": float(
-                    destination_stopping_distance_m
-                ),
-            })
-        if bool(destination_stage.stop_latched):
-            stop_result = self.pipeline.bounded_safe_stop(
-                current_speed_mps=float(ego_speed_mps),
-                current_reference=lane_center_reference,
-                reason=(
-                    "route_destination_reached"
-                    if route_reached_destination
-                    else "route_destination_approach"
-                ),
-            )
-            stop_reference = stop_result.mutable_trajectory()
-            if len(stop_reference) >= 2:
-                lane_center_reference = stop_reference
-                terminal = dict(stop_reference[-1])
-                destination_state = [
-                    float(terminal.get("x_ref_m", terminal.get("x", current_state[0]))),
-                    float(terminal.get("y_ref_m", terminal.get("y", current_state[1]))),
-                    0.0,
-                    float(terminal.get("heading_rad", current_state[3])),
-                    int(
-                        behavior_debug.get(
-                            "target_lane_id", getattr(
-                                getattr(self, "_local_map_snapshot", None),
-                                "ego_lane_id",
-                                0,
-                            ),
-                        )
-                        or 0
-                    ),
-                ]
-            behavior_debug.update({
-                "decision": "destination_stop",
-                "lc_state": "DESTINATION_STOP",
-                "stop_goal_active": True,
-                "target_speed_mps": 0.0,
-            })
-            behavior_stage_result = self.pipeline.destination_stop_behavior(
-                behavior_stage_result
-            )
-            behavior_decision = behavior_stage_result.decision
-            behavior_debug = behavior_stage_result.mutable_diagnostics()
-            reference_debug.update({
-                "reference_source": "persistent_bounded_safe_stop",
-                "final_reference_geometry_source": (
-                    "persistent_bounded_safe_stop"
-                ),
-                "destination_stop_latched": True,
-                "destination_stop_reason": str(stop_result.reason),
-                "destination_stop_remaining_distance_m": float(
-                    route_remaining_distance_m
-                ),
-                "destination_stop_required_distance_m": float(
-                    destination_stopping_distance_m
-                ),
-            })
-            if float(ego_speed_mps) <= float(
-                self.config.get("destination_stop_complete_speed_mps", 0.15)
-            ):
-                setattr(self.vehicle_manager, "_opencda_agent_finished", True)
-
+        if destination_application.finished:
+            setattr(self.vehicle_manager, "_opencda_agent_finished", True)
         behavior_debug.update(behavior_decision.as_debug_fields())
 
         # The typed behavior decision owns the final stop state. The raw

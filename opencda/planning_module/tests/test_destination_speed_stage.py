@@ -55,3 +55,48 @@ def test_destination_stage_route_change_releases_old_stop_latch():
     )
     assert not result.stop_latched
     assert not result.approach_active
+
+
+def test_destination_apply_owns_terminal_reference_and_behavior():
+    behavior_result = SimpleNamespace(
+        decision=SimpleNamespace(),
+        mutable_diagnostics=lambda: {"target_lane_id": 7},
+    )
+    stopped_behavior = SimpleNamespace(decision=SimpleNamespace())
+
+    class Fallback:
+        def bounded_safe_stop(self, **_kwargs):
+            return SimpleNamespace(
+                reason="route_destination_reached",
+                mutable_trajectory=lambda: [
+                    {"x_ref_m": 1.0, "y_ref_m": 2.0, "heading_rad": 0.0},
+                    {"x_ref_m": 2.0, "y_ref_m": 2.0, "heading_rad": 0.0},
+                ],
+            )
+
+    class Behavior:
+        def destination_stop(self, result):
+            assert result is behavior_result
+            return stopped_behavior
+
+    stage = DestinationSpeedStage(
+        config={"destination_stop_complete_speed_mps": 0.15},
+        speed_planner=SpeedTargetPlanner(),
+        fallback_manager=Fallback(),
+        behavior_stage=Behavior(),
+    )
+    result = stage.apply(
+        route_status=_status(remaining_m=0.0, reached=True),
+        route_revision="route-1",
+        ego_speed_mps=0.1,
+        current_state=(0.0, 0.0, 0.1, 0.0),
+        destination_state=(),
+        reference_samples=(),
+        behavior_stage_result=behavior_result,
+        reference_debug={},
+        fallback_lane_id=3,
+    )
+    assert result.finished
+    assert result.behavior_stage_result is stopped_behavior
+    assert result.destination_state[-1] == 7
+    assert result.reference_debug["reference_source"] == "persistent_bounded_safe_stop"

@@ -149,6 +149,9 @@ class PlanningPipeline:
     def evaluate_destination(self, **kwargs):
         return self.destination_speed.evaluate(**kwargs)
 
+    def apply_destination(self, **kwargs):
+        return self.destination_speed.apply(**kwargs)
+
     def finalize_behavior(self, **kwargs):
         return self.behavior.finalize(**kwargs)
 
