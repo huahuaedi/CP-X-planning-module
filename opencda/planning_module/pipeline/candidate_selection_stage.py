@@ -58,6 +58,12 @@ class CandidateSelectionStage:
         self._risk_hysteresis_margin_m = float(risk_hysteresis_margin_m)
         self._strict_ownership = bool(strict_ownership)
         self._target_speed_mps = float(target_speed_mps)
+        self._lane_change_lifecycle = None
+
+    def set_lane_change_lifecycle(self, lifecycle: Any) -> None:
+        if self._lane_change_lifecycle is not None:
+            raise RuntimeError("lane-change lifecycle is already configured")
+        self._lane_change_lifecycle = lifecycle
 
     @staticmethod
     def _baseline(request, prediction_count: int) -> CandidateSelectionResult:
@@ -83,12 +89,17 @@ class CandidateSelectionStage:
         *,
         sim_time_s: float,
         route_revision: str,
-        release_completed: Callable[[], str],
         road_envelope: Callable[[], Any],
         validate_contract: Callable[..., Any],
         validate_locked_reference: Callable[..., Any],
     ) -> CandidateSelectionResult:
-        release_reason = str(release_completed() or "")
+        if self._lane_change_lifecycle is None:
+            raise RuntimeError("lane-change lifecycle is not configured")
+        release_reason = str(self._lane_change_lifecycle.release_completed(
+            current_lane_id=int(request.current_lane_id),
+            ego_location=request.ego_location,
+            ego_yaw_rad=float(request.ego_yaw_rad),
+        ) or "")
         intents = list(request.intents or ())
         if self._maneuver.route_lane_change_edge_completed:
             intents = [

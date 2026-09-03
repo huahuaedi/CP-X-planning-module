@@ -30,6 +30,10 @@ def test_no_candidates_returns_typed_baseline_and_runs_completion_release():
         strict_ownership=True,
         target_speed_mps=8.0,
     )
+    releases = []
+    stage.set_lane_change_lifecycle(SimpleNamespace(
+        release_completed=lambda **_kwargs: releases.append(True) or ""
+    ))
     request = CandidateSelectionRequest(
         intents=(),
         reference_context=SimpleNamespace(local_map=None),
@@ -47,12 +51,10 @@ def test_no_candidates_returns_typed_baseline_and_runs_completion_release():
         object_snapshots=(),
         prediction_trajectories={},
     )
-    releases = []
     result = stage.run(
         request,
         sim_time_s=1.0,
         route_revision="route:1",
-        release_completed=lambda: releases.append(True) or "",
         road_envelope=lambda: None,
         validate_contract=lambda **_kwargs: None,
         validate_locked_reference=lambda **_kwargs: None,

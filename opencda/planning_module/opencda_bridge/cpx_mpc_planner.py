@@ -1207,6 +1207,28 @@ class CPXMPCPlannerBridge:
                 )
             ),
         )
+        from opencda.planning_module.pipeline.lane_change_lifecycle_stage import (
+            LaneChangeLifecycleStage,
+        )
+        self.lane_change_lifecycle_stage = LaneChangeLifecycleStage(
+            provider=self._stable_reference_line_provider,
+            maneuver_manager=self.maneuver_manager,
+            reference_generator=self.reference_generator,
+            route_manager=self.route_manager,
+            mpc=self.mpc,
+            control_buffer=self.control_buffer,
+            config=self.config,
+            target_speed_mps=self.target_speed_mps,
+            map_epoch="admap",
+            vehicle_extent=lambda: getattr(
+                getattr(self.vehicle_manager.vehicle, "bounding_box", None),
+                "extent",
+                None,
+            ),
+        )
+        candidate_selection_stage.set_lane_change_lifecycle(
+            self.lane_change_lifecycle_stage
+        )
         self.pipeline.mpc_execution = MPCExecutionStage(
             mpc=self.mpc,
             control_buffer=self.control_buffer,
@@ -5506,12 +5528,6 @@ class CPXMPCPlannerBridge:
             f"boundary_failures={int(boundary_failures)}",
         )
 
-    def _reset_route_tracking_lane_change_reference(self) -> None:
-        self.maneuver_manager.lane_change.reset()
-        self._stable_reference_line_provider.release(
-            LANE_CHANGE, event="reset"
-        )
-
     def _attempt_turn_route_replan(
         self,
         *,
@@ -5771,11 +5787,6 @@ class CPXMPCPlannerBridge:
             ),
             sim_time_s=float(self._sim_time_s()),
             route_revision=str(self.route_manager.route_revision),
-            release_completed=lambda: self._release_completed_lane_change_commitment(
-                current_lane_id=int(current_lane_id),
-                ego_location=ego_location,
-                ego_yaw_rad=float(ego_yaw_rad),
-            ),
             road_envelope=self._current_route_tracking_lane_change_envelope_payload_world,
             validate_contract=self._validate_candidate_reference_contract,
             validate_locked_reference=self._validate_route_tracking_lane_change_reference,
@@ -5788,332 +5799,55 @@ class CPXMPCPlannerBridge:
             selected.mutable_destination_state(),
             selected.mutable_diagnostics(),
         )
+
+    def _lane_change_lifecycle(self):
+        stage = getattr(self, "lane_change_lifecycle_stage", None)
+        if stage is not None:
+            return stage
+        from opencda.planning_module.pipeline.lane_change_lifecycle_stage import (
+            LaneChangeLifecycleStage,
+        )
+        stage = LaneChangeLifecycleStage(
+            provider=self._stable_reference_line_provider,
+            maneuver_manager=self.maneuver_manager,
+            reference_generator=self.reference_generator,
+            route_manager=self.route_manager,
+            mpc=self.mpc,
+            control_buffer=getattr(self, "control_buffer", None),
+            config=self.config,
+            target_speed_mps=float(getattr(self, "target_speed_mps", 3.0)),
+            map_epoch=str(getattr(self, "waypoint_backend", "admap") or "admap"),
+            vehicle_extent=lambda: getattr(
+                getattr(
+                    getattr(self, "vehicle_manager", None), "vehicle", None
+                ),
+                "bounding_box",
+                None,
+            ) and getattr(self.vehicle_manager.vehicle.bounding_box, "extent", None),
+        )
+        self.lane_change_lifecycle_stage = stage
+        return stage
+
+    # Transitional compatibility ports for focused tests and external tools.
+    # The lifecycle implementation and state ownership live in the stage.
+    def _reset_route_tracking_lane_change_reference(self) -> None:
+        self._lane_change_lifecycle().reset_reference()
+
     def _release_completed_lane_change_commitment(
-        self,
-        *,
-        current_lane_id: int,
-        ego_location: carla.Location,
-        ego_yaw_rad: float,
+        self, *, current_lane_id: int, ego_location: Any, ego_yaw_rad: float,
     ) -> str:
-        """Release only after the ego converges to the locked target path."""
-
-        if not self._stable_reference_line_provider.snapshot(LANE_CHANGE).mutable_samples():
-            return ""
-        phase = str(self.maneuver_manager.lane_change.phase)
-        target_lane_id = int(self.maneuver_manager.lane_change.target_lane_id)
-        from opencda.planning_module.pipeline.stage_contracts import (
-            LaneChangeContract,
-        )
-
-        lane_change_contract = LaneChangeContract.from_config(self.config)
-        entry_min_progress = float(lane_change_contract.min_progress)
-        completion_reference = [
-            dict(sample)
-            for sample in self.maneuver_manager.lane_change.completion_reference
-        ]
-        if not completion_reference:
-            # Compatibility for commitments restored from older state.
-            completion_reference = [
-                dict(sample) for sample in self._stable_reference_line_provider.snapshot(LANE_CHANGE).mutable_samples()
-            ]
-        alignment = (
-            self._stable_reference_line_provider.lane_change_completion_alignment(
-                reference_samples=completion_reference,
-                ego_x_m=float(ego_location.x),
-                ego_y_m=float(ego_location.y),
-                ego_heading_rad=float(ego_yaw_rad),
-            )
-        )
-        target_corridor_sample = (
-            alignment.mutable_target_sample() if alignment.available else None
-        )
-        stabilization_entry_lateral_error_m = float(alignment.lateral_error_m)
-        stabilization_entry_heading_error_rad = float(
-            alignment.heading_error_rad
-        )
-        target_lane_width_m = max(
-            0.1, float(getattr(self.mpc, "lane_width_m", 3.5))
-        )
-        stabilization_geometry_ready = lane_change_contract.stabilization_handoff_ready(
-            progress=float(self.maneuver_manager.lane_change.progress),
-            lateral_error_m=float(stabilization_entry_lateral_error_m),
-            heading_error_rad=float(stabilization_entry_heading_error_rad),
-            lane_width_m=float(target_lane_width_m),
-        )
-        # Lane IDs identify the source/target topology but do not own motion
-        # phase transitions.  Enter stabilization only from continuous
-        # progress and convergence to the locked target corridor.  This is
-        # robust both when the map ID flips early and when a road-boundary
-        # re-anchor changes the ID namespace during the maneuver.
-        handoff_transition = self.maneuver_manager.lane_change_handoff_transition(
-            geometry_ready=bool(
-                float(self.maneuver_manager.lane_change.progress)
-                >= float(entry_min_progress)
-                and bool(stabilization_geometry_ready)
-            ),
-        )
-        if handoff_transition.action == "start_stabilization":
-            start_reason = self._start_target_lane_stabilization(
-                ego_location=ego_location,
-                ego_yaw_rad=float(ego_yaw_rad),
-            )
-            if str(start_reason).startswith(
-                "target_lane_stabilization_started"
-            ):
-                return str(start_reason)
-            self.maneuver_manager.complete_lane_change(
-                "stabilization_handoff_unavailable"
-            )
-            self._reset_route_tracking_lane_change_reference()
-            return (
-                "lane_change_stabilization_unavailable_to_lane_follow_recovery:"
-                f"target_lane={int(target_lane_id)}:"
-                f"{str(start_reason)}"
-            )
-
-        phase = str(self.maneuver_manager.lane_change.phase)
-        if str(phase) == "target_lane_stabilization":
-            timeout_frames = max(
-                1,
-                int(
-                    self.config.get(
-                        "lane_change_stabilization_timeout_frames",
-                        100,
-                    )
-                ),
-            )
-            stabilization_transition = (
-                self.maneuver_manager.tick_lane_change_stabilization(
-                    timeout_frames=int(timeout_frames)
-                )
-            )
-            if stabilization_transition.action == "abandon":
-                self._reset_route_tracking_lane_change_reference()
-                return (
-                    "lane_change_stabilization_timeout_to_lane_follow_recovery:"
-                    f"target_lane={int(target_lane_id)}:"
-                    f"map_lane={int(current_lane_id)}"
-                )
-        completion_progress = float(self.maneuver_manager.lane_change.progress)
-        if (
-            str(phase) == "target_lane_stabilization"
-            and math.isfinite(float(stabilization_entry_lateral_error_m))
-        ):
-            target_lane_width_m = max(
-                0.1,
-                float(getattr(self.mpc, "lane_width_m", 3.5)),
-            )
-            completion_progress = min(
-                1.0,
-                max(
-                    0.0,
-                    1.0
-                    - abs(float(stabilization_entry_lateral_error_m))
-                    / float(target_lane_width_m),
-                ),
-            )
-        vehicle_manager = getattr(self, "vehicle_manager", None)
-        vehicle = getattr(vehicle_manager, "vehicle", None)
-        extent = getattr(getattr(vehicle, "bounding_box", None), "extent", None)
-        occupancy = self.reference_generator.lane_corridor_occupancy(
-            x_m=float(ego_location.x),
-            y_m=float(ego_location.y),
-            heading_rad=float(ego_yaw_rad),
-            ego_half_width_m=float(
-                getattr(
-                    extent,
-                    "y",
-                    self.config.get("reference_vehicle_half_width_m", 1.0),
-                )
-            ),
-            ego_half_length_m=float(
-                getattr(
-                    extent,
-                    "x",
-                    self.config.get("reference_vehicle_half_length_m", 2.4),
-                )
-            ),
-            safety_margin_m=float(
-                self.config.get(
-                    "lane_change_completion_footprint_margin_m",
-                    0.05,
-                )
-            ),
-            corridor_sample=target_corridor_sample,
-            prefer_tracking_point=True,
-        )
-        completion = self.maneuver_manager.evaluate_lane_change_completion(
-            alignment=alignment,
-            progress=float(completion_progress),
-            target_lane_matches=bool(
-                int(current_lane_id) == int(target_lane_id)
-            ),
-            footprint_clearance_m=(
-                float(occupancy.footprint_clearance_m)
-                if bool(occupancy.valid)
-                else float("-inf")
-            ),
-            contract=lane_change_contract,
-        )
-        completion_transition = (
-            self.maneuver_manager.accept_evaluated_lane_change_completion(
-                completion=completion,
-                contract=lane_change_contract,
-                stabilization_geometry_ready=bool(
-                    stabilization_geometry_ready
-                ),
-                stabilization_lateral_error_m=float(
-                    stabilization_entry_lateral_error_m
-                ),
-                stabilization_heading_error_rad=float(
-                    stabilization_entry_heading_error_rad
-                ),
-            )
-        )
-        if completion_transition.action != "complete":
-            return ""
-        # The stable provider projects the ego onto the immutable handoff
-        # master and exposes real arc length.  The old index * nominal-step
-        # approximation could jump several samples when the target-lane
-        # reference was resampled, releasing this phase after only one or two
-        # frames and handing an incompatible geometry to MPC.
-        self.maneuver_manager.complete_lane_change(
-            str(completion_transition.reason)
-        )
-        self._reset_route_tracking_lane_change_reference()
-        # The next tick changes geometry ownership from the locked Frenet
-        # maneuver to AD-map lane-follow / turn approach.  Reusing the former
-        # QP rollout or buffered control across that discontinuity caused a
-        # short burst of primal-infeasible solves immediately after otherwise
-        # successful lane changes.
-        clear_seed = getattr(self.mpc, "clear_solution_memory", None)
-        if not callable(clear_seed):
-            clear_seed = getattr(self.mpc, "clear_previous_solution_seed", None)
-        if callable(clear_seed):
-            clear_seed()
-        control_buffer = getattr(self, "control_buffer", None)
-        reset_buffer = getattr(control_buffer, "reset", None)
-        if callable(reset_buffer):
-            reset_buffer(reason="lane_change_geometrically_complete")
-        return (
-            "lane_change_commitment_released:"
-            f"target_lane={int(target_lane_id)}:"
-            f"map_lane={int(current_lane_id)}:"
-            f"progress={float(completion.progress):.3f}:"
-            f"lateral_error={float(completion.target_lateral_error_m):.3f}:"
-            f"heading_error_deg="
-            f"{math.degrees(float(completion.target_heading_error_rad)):.2f}"
+        return self._lane_change_lifecycle().release_completed(
+            current_lane_id=current_lane_id,
+            ego_location=ego_location,
+            ego_yaw_rad=ego_yaw_rad,
         )
 
     def _start_target_lane_stabilization(
-        self,
-        *,
-        ego_location: carla.Location,
-        ego_yaw_rad: float,
+        self, *, ego_location: Any, ego_yaw_rad: float,
     ) -> str:
-        """Replace the completed lateral crossing with a target-lane handoff."""
-
-        target_lane_id = int(self.maneuver_manager.lane_change.target_lane_id)
-        # Stabilization is a geometric phase, not a separate low-speed
-        # behavior. Preserve the committed maneuver speed; curvature and
-        # traffic-control constraints are applied by the unified speed path.
-        committed_speed_mps = float(
-            self.maneuver_manager.lane_change.target_speed_mps
-            or self.target_speed_mps
+        return self._lane_change_lifecycle()._start_stabilization(
+            ego_location=ego_location, ego_yaw_rad=ego_yaw_rad
         )
-        speed_mps = max(
-            0.5,
-            min(
-                float(getattr(self, "target_speed_mps", committed_speed_mps)),
-                float(committed_speed_mps),
-            ),
-        )
-        step_distance_m = max(
-            0.10,
-            float(self.mpc.dt_s) * float(speed_mps),
-        )
-        transition_arc_m = max(
-            float(step_distance_m),
-            float(
-                self.config.get(
-                    "lane_change_to_turn_reference_transition_arc_m",
-                    10.0,
-                )
-            ),
-        )
-        master_steps = max(
-            int(self.mpc.horizon_steps),
-            int(math.ceil(float(transition_arc_m) / float(step_distance_m)))
-            + 1,
-        )
-        route_points = []
-        route_points_fn = getattr(
-            getattr(self, "route_manager", None),
-            "geometry_route_points",
-            None,
-        )
-        if callable(route_points_fn):
-            route_points = route_points_fn(
-                x_m=float(ego_location.x),
-                y_m=float(ego_location.y),
-                query_key="lane_change_to_turn_transition",
-            )
-        reference, curvature_reason = (
-            self._stable_reference_line_provider.target_lane_stabilization_master(
-                ego_location=ego_location,
-                ego_yaw_rad=float(ego_yaw_rad),
-                target_lane_id=int(target_lane_id),
-                horizon_steps=int(master_steps),
-                step_distance_m=float(step_distance_m),
-                # Preserve the selected AD-map successor/turn branch instead
-                # of extending a local target lane independently of topology.
-                route_points=route_points,
-                target_speed_mps=float(speed_mps),
-                max_curvature_1pm=float(
-                    self.config.get(
-                        "reference_vehicle_max_curvature_1pm",
-                        0.20,
-                    )
-                )
-            )
-        )
-        if len(reference) < int(self.mpc.horizon_steps):
-            return (
-                "target_lane_stabilization_failed:"
-                f"short_reference={len(reference)}"
-            )
-        installed, install_reason = self._stable_reference_line_provider.install(
-            LANE_CHANGE,
-            reference,
-            route_revision=str(
-                getattr(getattr(self, "route_manager", None), "route_revision", "")
-            ),
-            map_epoch=str(getattr(self, "waypoint_backend", "admap") or "admap"),
-            event="phase_transition",
-            source_lane_id=int(self.maneuver_manager.lane_change.source_lane_id),
-            target_lane_id=int(target_lane_id),
-            build_reason="target_lane_stabilization_reference",
-            ego_x_m=float(ego_location.x),
-            ego_y_m=float(ego_location.y),
-        )
-        if not installed:
-            return "target_lane_stabilization_failed:" + str(install_reason)
-        self.maneuver_manager.begin_lane_change_stabilization()
-        # Do not manufacture completion here. The release contract measures
-        # geometric progress against the immutable target-lane centerline.
-        self.maneuver_manager.update_lane_change_target_speed(float(speed_mps))
-        self.maneuver_manager.set_lane_change_transition_arc(
-            arc_m=float(transition_arc_m), step_m=float(step_distance_m)
-        )
-        return (
-            "target_lane_stabilization_started:"
-            f"target_lane={int(target_lane_id)}:"
-            f"N={len(reference)}:"
-            f"transition_arc_m={float(transition_arc_m):.2f}:"
-            f"speed={float(speed_mps):.2f}:"
-            f"curvature_conditioning={str(curvature_reason or 'not_required')}"
-        )
-
     def _clear_turn_master_reference(self) -> None:
         provider = getattr(self, "_stable_reference_line_provider", None)
         if provider is not None:
