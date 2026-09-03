@@ -394,7 +394,18 @@ def reference_first_sample_invalid_reason(
     dy_m = ref_y - ego_y
     forward_m = math.cos(ego_yaw) * dx_m + math.sin(ego_yaw) * dy_m
     lateral_m = -math.sin(ego_yaw) * dx_m + math.cos(ego_yaw) * dy_m
-    if float(forward_m) < -float(max_backward_m) and math.hypot(dx_m, dy_m) > 3.0:
+    normalized_decision = str(normalize_behavior_decision(decision))
+    persistent_maneuver = bool(
+        is_lane_change_reference_decision(decision)
+        or normalized_decision in {
+            "intersection_turn_left", "intersection_turn_right",
+        }
+    )
+    if (
+        not persistent_maneuver
+        and float(forward_m) < -float(max_backward_m)
+        and math.hypot(dx_m, dy_m) > 3.0
+    ):
         return "first_sample_behind_ego"
     if abs(float(lateral_m)) > 4.5 and float(forward_m) < 2.0:
         return "first_sample_lateral_jump"
@@ -404,7 +415,7 @@ def reference_first_sample_invalid_reason(
     jump_m = reference_first_sample_jump_m(previous_reference, current_reference)
     if (
         bool(previous_reference)
-        and not is_lane_change_reference_decision(decision)
+        and not persistent_maneuver
         and not bool(is_fixed_stop_decision(normalize_behavior_decision(decision)))
         and float(jump_m) > float(max_non_lc_jump_m)
     ):
@@ -887,7 +898,19 @@ def generate_mpc_reference(
             ),
         )
     )
-    forward_filter = not bool(is_fixed_stop_decision(current_applied_behavior))
+    lane_follow_filter = (
+        str(reference_intent.mode) == "lane_follow"
+        and str(normalize_behavior_decision(current_applied_behavior)) == "lane_follow"
+        and not bool(is_fixed_stop_decision(current_applied_behavior))
+        and str(cached_planner_lc_state or "").upper() in {"IDLE", "LANE_KEEP"}
+    )
+    route_branch_filter = (
+        str(reference_intent.mode) == "route_branch_follow"
+        and str(normalize_behavior_decision(current_applied_behavior)) == "lane_follow"
+        and not bool(is_fixed_stop_decision(current_applied_behavior))
+        and str(cached_planner_lc_state or "").upper() in {"IDLE", "LANE_KEEP"}
+    )
+    forward_filter = bool(lane_follow_filter) or bool(route_branch_filter)
     if bool(forward_filter):
         raw_reference = reference_forward_trim(
             raw_reference,
@@ -930,12 +953,6 @@ def generate_mpc_reference(
     ):
         fallback_reason = f"{fallback_reason}:route_reference_{global_route_reference_gate_reason}"
 
-    lane_follow_filter = (
-        str(reference_intent.mode) == "lane_follow"
-        and str(normalize_behavior_decision(current_applied_behavior)) == "lane_follow"
-        and not bool(is_fixed_stop_decision(current_applied_behavior))
-        and str(cached_planner_lc_state or "").upper() in {"IDLE", "LANE_KEEP"}
-    )
     previous_for_stabilization = previous_for_validation
 
     reference_samples, stabilized, jump_m = stabilize_lane_reference_samples(

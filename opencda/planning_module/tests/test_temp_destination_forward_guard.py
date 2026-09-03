@@ -148,6 +148,27 @@ class TempDestinationForwardGuardTests(unittest.TestCase):
         self.assertEqual(int(samples[0]["lane_id"]), 2)
         self.assertGreater(float(samples[0]["x_ref_m"]), 0.0)
 
+    def test_persistent_lane_change_is_not_replaced_when_prefix_is_behind(self):
+        reference = [
+            {"x_ref_m": -4.0, "y_ref_m": 0.0, "heading_rad": 0.0, "lane_id": 1},
+            {"x_ref_m": 2.0, "y_ref_m": 1.0, "heading_rad": 0.1, "lane_id": 2},
+        ]
+
+        samples, reason = reference_with_route_fallback(
+            ego_state=[0.0, 0.0, 4.0, 0.0],
+            current_reference=reference,
+            previous_reference=None,
+            decision="lane_change_right",
+            global_route_points=[],
+            horizon_steps=2,
+            step_distance_m=2.0,
+            target_lane_id=2,
+            allow_route_fallback=False,
+        )
+
+        self.assertEqual(reason, "")
+        self.assertEqual(samples, reference)
+
     def test_reference_stabilizer_freezes_non_lane_change_jump(self):
         previous = [
             {"x_ref_m": 2.0, "y_ref_m": 0.0, "heading_rad": 0.0, "lane_id": 1},
