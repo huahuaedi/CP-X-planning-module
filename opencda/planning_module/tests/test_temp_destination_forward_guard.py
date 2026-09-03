@@ -10,12 +10,44 @@ from planning_runner import (
     _select_mpc_cost_profile_with_hysteresis,
 )
 from behavior_planner.reference_pipeline import (
+    reference_forward_trim,
     reference_with_route_fallback,
     stabilize_lane_reference_samples,
 )
 
 
 class TempDestinationForwardGuardTests(unittest.TestCase):
+    def test_persistent_maneuver_reference_consumes_behind_prefix(self):
+        samples = reference_forward_trim(
+            [
+                {"x_ref_m": -2.0, "y_ref_m": 0.0, "heading_rad": 0.0},
+                {"x_ref_m": 0.5, "y_ref_m": 0.2, "heading_rad": 0.1},
+                {"x_ref_m": 2.0, "y_ref_m": 0.5, "heading_rad": 0.2},
+                {"x_ref_m": 4.0, "y_ref_m": 1.0, "heading_rad": 0.3},
+            ],
+            ego_state=[0.0, 0.0, 3.0, 0.0],
+            min_first_forward_m=1.0,
+            step_distance_m=2.0,
+        )
+
+        self.assertEqual(len(samples), 4)
+        self.assertAlmostEqual(float(samples[0]["x_ref_m"]), 2.0)
+        self.assertAlmostEqual(float(samples[0]["y_ref_m"]), 0.5)
+        self.assertAlmostEqual(float(samples[0]["heading_rad"]), 0.2)
+
+    def test_consumed_reference_is_not_returned_behind_ego(self):
+        samples = reference_forward_trim(
+            [
+                {"x_ref_m": -3.0, "y_ref_m": 0.0, "heading_rad": 0.0},
+                {"x_ref_m": -1.0, "y_ref_m": 0.0, "heading_rad": 0.0},
+            ],
+            ego_state=[0.0, 0.0, 3.0, 0.0],
+            min_first_forward_m=1.0,
+            step_distance_m=2.0,
+        )
+
+        self.assertEqual(samples, [])
+
     def test_uses_previous_destination_when_new_destination_is_behind(self):
         repaired = _keep_temporary_destination_ahead(
             temporary_destination_state=[-5.0, 0.0, 4.0, 0.0, 2, 0.0, 10, 0.0],

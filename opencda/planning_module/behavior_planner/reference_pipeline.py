@@ -209,14 +209,20 @@ def extrapolate_reference_sample(
     return next_sample
 
 
-def lane_follow_reference_forward_trim(
+def reference_forward_trim(
     reference_samples: Sequence[Mapping[str, object]] | None,
     *,
     ego_state: Sequence[float],
     min_first_forward_m: float,
     step_distance_m: float,
 ) -> List[Dict[str, object]]:
-    """Drop near/behind first samples so lane-follow tracking starts ahead."""
+    """Advance a rolling world reference without changing its geometry.
+
+    Leading samples naturally move behind the ego while a persistent lane
+    change or turn is being executed.  Consuming that prefix is progress, not
+    a geometry failure.  Preserve the path and extend its terminal tangent so
+    the MPC horizon length remains constant.
+    """
     samples = [dict(sample) for sample in list(reference_samples or [])]
     if len(samples) <= 1 or len(ego_state) < 4 or float(min_first_forward_m) <= 0.0:
         return samples
@@ -231,7 +237,7 @@ def lane_follow_reference_forward_trim(
             first_valid_index = int(index)
             break
     else:
-        first_valid_index = min(len(samples) - 1, 1)
+        return []
 
     if int(first_valid_index) <= 0:
         return samples
@@ -259,6 +265,10 @@ def lane_follow_reference_forward_trim(
             )
         )
     return trimmed[: len(samples)]
+
+
+# Backward-compatible import with a single, maneuver-independent owner.
+lane_follow_reference_forward_trim = reference_forward_trim
 
 
 def blend_reference_samples_with_previous(
@@ -869,10 +879,37 @@ def generate_mpc_reference(
         force_stop_reference=False,
         authoritative_ego_waypoint=context.authoritative_ego_waypoint,
     )
+    min_first_forward_m = float(
+        behavior_runtime_cfg.get(
+            "reference_min_first_forward_m",
+            behavior_runtime_cfg.get(
+                "lane_follow_reference_min_first_forward_m", 1.0
+            ),
+        )
+    )
+    forward_filter = not bool(is_fixed_stop_decision(current_applied_behavior))
+    if bool(forward_filter):
+        raw_reference = reference_forward_trim(
+            raw_reference,
+            ego_state=ego_state,
+            min_first_forward_m=float(min_first_forward_m),
+            step_distance_m=float(lane_reference_step_distance_m),
+        )
+    previous_for_validation = previous_lane_center_reference
+    if previous_lane_center_reference:
+        previous_forward_m, _ = reference_sample_forward_lateral_m(
+            reference_sample=previous_lane_center_reference[0],
+            ego_state=ego_state,
+        )
+        if (
+            previous_forward_m is not None
+            and float(previous_forward_m) < 0.5 * float(min_first_forward_m)
+        ):
+            previous_for_validation = []
     reference_samples, fallback_reason = reference_with_route_fallback(
         ego_state=ego_state,
         current_reference=raw_reference,
-        previous_reference=previous_lane_center_reference,
+        previous_reference=previous_for_validation,
         decision=str(current_applied_behavior),
         global_route_points=active_global_route_points,
         horizon_steps=int(mpc_horizon_steps),
@@ -899,32 +936,7 @@ def generate_mpc_reference(
         and not bool(is_fixed_stop_decision(current_applied_behavior))
         and str(cached_planner_lc_state or "").upper() in {"IDLE", "LANE_KEEP"}
     )
-    route_branch_filter = (
-        str(reference_intent.mode) == "route_branch_follow"
-        and str(normalize_behavior_decision(current_applied_behavior)) == "lane_follow"
-        and not bool(is_fixed_stop_decision(current_applied_behavior))
-        and str(cached_planner_lc_state or "").upper() in {"IDLE", "LANE_KEEP"}
-    )
-    min_first_forward_m = float(
-        behavior_runtime_cfg.get("lane_follow_reference_min_first_forward_m", 1.0)
-    )
-    forward_filter = bool(lane_follow_filter) or bool(route_branch_filter)
-    if bool(forward_filter):
-        reference_samples = lane_follow_reference_forward_trim(
-            reference_samples,
-            ego_state=ego_state,
-            min_first_forward_m=float(min_first_forward_m),
-            step_distance_m=float(lane_reference_step_distance_m),
-        )
-
-    previous_for_stabilization = previous_lane_center_reference
-    if bool(forward_filter) and previous_lane_center_reference:
-        previous_forward_m, _ = reference_sample_forward_lateral_m(
-            reference_sample=previous_lane_center_reference[0],
-            ego_state=ego_state,
-        )
-        if previous_forward_m is not None and float(previous_forward_m) < 0.5 * float(min_first_forward_m):
-            previous_for_stabilization = []
+    previous_for_stabilization = previous_for_validation
 
     reference_samples, stabilized, jump_m = stabilize_lane_reference_samples(
         reference_samples,
