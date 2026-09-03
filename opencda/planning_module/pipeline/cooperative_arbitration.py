@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Optional, Sequence, Tuple
+from typing import Dict, Mapping, Optional, Sequence, Tuple
 
 
 @dataclass(frozen=True)
@@ -93,3 +93,200 @@ def should_yield(
             f"peer={peer_actor_id}:distance_m={distance_m:.1f}"
         )
     return None
+
+
+# --------------------------------------------------------------------------- #
+# Stage B: role / homotopy assignment (superset of ``should_yield``)
+#
+# ``should_yield`` answers one binary question ("may I proceed?"). The
+# interaction-aware MPC plan needs more per conflict: a role
+# (proceed / yield / make-gap), a pass side (homotopy), the conflict
+# location, and tick-to-tick stability so the downstream corridor and MPC
+# constraints don't flip. This block adds that without touching
+# ``should_yield`` -- the two existing bridge call sites and their tests are
+# unaffected. Still pure and CARLA-free: the hysteresis latch is passed in
+# and returned; the caller owns persistence.
+# --------------------------------------------------------------------------- #
+
+_ROLE_PROCEED = "proceed"
+_ROLE_YIELD = "yield"
+_ROLE_MAKE_GAP = "make_gap"
+
+# Merge-type conflicts get the bilateral "winner proceeds, loser opens a
+# gap" treatment; other kinds (junction crossing, avoidance-lane pick) are
+# plain proceed/yield.
+_MERGE_KINDS = frozenset({"lane_change", "merge", "on_ramp_merge"})
+
+
+@dataclass(frozen=True)
+class PeerIntent:
+    """One connected peer CAV's broadcast this tick (C1 message schema).
+
+    ``planned_path`` is ``(t_rel_s, x, y, v)`` samples of the peer's own
+    plan, empty when the peer does not share a trajectory. ``cooperative``
+    is False for a connected vehicle that reports state/claim but does not
+    participate in role assignment -- such a peer is left to the obstacle /
+    keep-out path, not assigned here.
+    """
+
+    actor_id: int
+    position_xy: Tuple[float, float]
+    claim: ResourceClaim
+    heading_rad: float = 0.0
+    speed_mps: float = 0.0
+    planned_path: Tuple[Tuple[float, float, float, float], ...] = ()
+    cooperative: bool = True
+
+
+@dataclass(frozen=True)
+class ConflictAssignment:
+    """Resolved role for one (ego, peer) conflict."""
+
+    peer_actor_id: int
+    role: str                       # proceed | yield | make_gap
+    homotopy_side: str              # "" | left | right | behind
+    conflict_xy: Optional[Tuple[float, float]]
+    peer_wins: bool
+    reason: str
+
+
+@dataclass
+class ArbitrationLatchEntry:
+    role: str = _ROLE_PROCEED
+    side: str = ""
+    candidate_role: str = ""
+    candidate_side: str = ""
+    candidate_count: int = 0
+
+
+def lateral_side(
+    origin_xy: Tuple[float, float],
+    heading_rad: float,
+    target_xy: Tuple[float, float],
+) -> str:
+    """"left" or "right": which side of ``origin``'s heading ``target`` is on."""
+
+    dx = float(target_xy[0]) - float(origin_xy[0])
+    dy = float(target_xy[1]) - float(origin_xy[1])
+    cross = math.cos(float(heading_rad)) * dy - math.sin(float(heading_rad)) * dx
+    return "left" if cross >= 0.0 else "right"
+
+
+def _raw_peer_wins(
+    my_claim: ResourceClaim, my_actor_id: int,
+    peer_claim: ResourceClaim, peer_actor_id: int,
+) -> bool:
+    return float(peer_claim.committed_at_s) < float(my_claim.committed_at_s) or (
+        float(peer_claim.committed_at_s) == float(my_claim.committed_at_s)
+        and int(peer_actor_id) < int(my_actor_id)
+    )
+
+
+def assign_conflict_roles(
+    *,
+    my_claim: ResourceClaim,
+    my_actor_id: int,
+    my_position_xy: Tuple[float, float],
+    my_heading_rad: float,
+    peers: Sequence[PeerIntent],
+    latch_state: Optional[Mapping[str, ArbitrationLatchEntry]] = None,
+    range_m: float = 40.0,
+    hysteresis_ticks: int = 3,
+    decisive_margin_s: float = 1.0,
+) -> Tuple[Sequence[ConflictAssignment], Dict[str, ArbitrationLatchEntry]]:
+    """Assign a role + pass side per conflicting cooperative peer.
+
+    Role decision uses the exact ``should_yield`` rule (earliest
+    ``committed_at_s`` wins, ``actor_id`` breaks ties) so every CAV resolves
+    the same winner independently. On a merge-kind conflict the loser's role
+    is ``make_gap`` rather than a bare ``yield``.
+
+    Hysteresis: a per-peer latch holds the previous role/side unless the new
+    decision persists for ``hysteresis_ticks`` calls, or the commitment-time
+    margin exceeds ``decisive_margin_s`` (then it switches immediately).
+    Returns ``(assignments, new_latch_state)``; pass ``new_latch_state`` back
+    in next call.
+    """
+
+    old = dict(latch_state or {})
+    new: Dict[str, ArbitrationLatchEntry] = {}
+    assignments = []
+
+    fwd_x = math.cos(float(my_heading_rad))
+    fwd_y = math.sin(float(my_heading_rad))
+    is_merge = str(my_claim.kind) in _MERGE_KINDS
+
+    for peer in peers:
+        if not bool(getattr(peer, "cooperative", True)):
+            continue
+        pclaim = peer.claim
+        if not bool(pclaim.active):
+            continue
+        if str(pclaim.kind) != str(my_claim.kind):
+            continue
+        if str(pclaim.resource_id) != str(my_claim.resource_id):
+            continue
+        px, py = float(peer.position_xy[0]), float(peer.position_xy[1])
+        dx = px - float(my_position_xy[0])
+        dy = py - float(my_position_xy[1])
+        distance_m = math.hypot(dx, dy)
+        if distance_m > float(range_m):
+            continue
+        if bool(my_claim.require_ahead):
+            if dx * fwd_x + dy * fwd_y <= 0.0:
+                continue
+
+        key = str(peer.actor_id)
+        peer_wins = _raw_peer_wins(my_claim, my_actor_id, pclaim, peer.actor_id)
+        raw_role = (
+            (_ROLE_MAKE_GAP if is_merge else _ROLE_YIELD) if peer_wins
+            else _ROLE_PROCEED
+        )
+        raw_side = lateral_side(my_position_xy, my_heading_rad, (px, py))
+
+        margin_s = abs(
+            float(pclaim.committed_at_s) - float(my_claim.committed_at_s)
+        )
+        prev = old.get(key, ArbitrationLatchEntry())
+        entry = ArbitrationLatchEntry(
+            role=prev.role or _ROLE_PROCEED,
+            side=prev.side,
+            candidate_role=prev.candidate_role,
+            candidate_side=prev.candidate_side,
+            candidate_count=int(prev.candidate_count),
+        )
+
+        decisive = margin_s >= float(decisive_margin_s)
+        first_seen = key not in old
+        if raw_role == entry.role and raw_side == entry.side:
+            entry.candidate_role, entry.candidate_side, entry.candidate_count = "", "", 0
+        elif decisive or first_seen:
+            entry.role, entry.side = raw_role, raw_side
+            entry.candidate_role, entry.candidate_side, entry.candidate_count = "", "", 0
+        else:
+            if raw_role == entry.candidate_role and raw_side == entry.candidate_side:
+                entry.candidate_count += 1
+            else:
+                entry.candidate_role, entry.candidate_side = raw_role, raw_side
+                entry.candidate_count = 1
+            if entry.candidate_count >= int(hysteresis_ticks):
+                entry.role, entry.side = raw_role, raw_side
+                entry.candidate_role, entry.candidate_side, entry.candidate_count = "", "", 0
+
+        new[key] = entry
+        assignments.append(
+            ConflictAssignment(
+                peer_actor_id=int(peer.actor_id),
+                role=entry.role,
+                homotopy_side=entry.side,
+                conflict_xy=(px, py),
+                peer_wins=bool(peer_wins),
+                reason=(
+                    f"kind={my_claim.kind}:resource={my_claim.resource_id}:"
+                    f"peer={peer.actor_id}:margin_s={margin_s:.2f}:"
+                    f"raw={raw_role}:latched={entry.role}"
+                ),
+            )
+        )
+
+    return assignments, new
