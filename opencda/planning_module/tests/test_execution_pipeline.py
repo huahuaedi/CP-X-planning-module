@@ -71,3 +71,26 @@ def test_pipeline_owns_speed_resolution_sequence():
 
     assert result == ("target", "ceiling")
     assert [call[0] for call in calls] == ["resolve", "apply"]
+
+
+def test_pipeline_is_the_only_behavior_stage_caller():
+    calls = []
+
+    class Behavior:
+        def finalize(self, **kwargs):
+            calls.append(("finalize", kwargs))
+            return "decision"
+
+        def reset_route_lane_change_authorization(self):
+            calls.append(("reset", {}))
+
+    pipeline = PlanningPipeline(
+        runtime_input=RuntimeInputStage(_Mapper()),
+        perception=PerceptionStage(),
+        behavior=Behavior(), speed=object(), destination_speed=object(),
+        reference_publication=object(), mpc_entry=object(),
+    )
+
+    assert pipeline.finalize_behavior(maneuver="lane_follow") == "decision"
+    pipeline.reset_route_lane_change_authorization()
+    assert [call[0] for call in calls] == ["finalize", "reset"]

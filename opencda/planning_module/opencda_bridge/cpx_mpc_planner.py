@@ -206,10 +206,6 @@ class CPXMPCPlannerBridge:
         provider.attach_builder(builder)
 
     @property
-    def behavior_stage(self):
-        return self.pipeline.behavior
-
-    @property
     def speed_target_planner(self):
         return self.pipeline.speed
 
@@ -1668,7 +1664,7 @@ class CPXMPCPlannerBridge:
             )
             destination_state = generated_fallback.destination_state
             lane_center_reference = generated_fallback.samples
-            behavior_stage_result = self.behavior_stage.finalize(
+            behavior_stage_result = self.pipeline.finalize_behavior(
                 maneuver="lane_follow",
                 phase="FALLBACK",
                 source_lane_id=self._lane_id_at_location(ego_location),
@@ -1764,7 +1760,7 @@ class CPXMPCPlannerBridge:
                 "stop_goal_active": True,
                 "target_speed_mps": 0.0,
             })
-            behavior_stage_result = self.behavior_stage.destination_stop(
+            behavior_stage_result = self.pipeline.destination_stop_behavior(
                 behavior_stage_result
             )
             behavior_decision = behavior_stage_result.decision
@@ -4276,7 +4272,7 @@ class CPXMPCPlannerBridge:
                 adjacent_lane_directions[int(adjacent_lane_id)] = str(
                     geometry_direction
                 )
-        lane_change_authorization = self.behavior_stage.authorize_route_lane_change(
+        lane_change_authorization = self.pipeline.authorize_route_lane_change(
             RouteLaneChangeRequest(
                 route_lane_change_allowed=bool(route_lane_change_allowed),
                 current_lane_id=int(current_lane_id),
@@ -4327,7 +4323,7 @@ class CPXMPCPlannerBridge:
                 f"s={float(route_cursor.route_s_m):.2f}:"
                 f"untracked_motion={float(route_cursor.stalled_motion_m):.2f}"
             )
-            self.behavior_stage.reset_route_lane_change_authorization()
+            self.pipeline.reset_route_lane_change_authorization()
             self.maneuver_manager.clear_required_lane_change()
             self._attempt_turn_route_replan(
                 ego_location=ego_location,
@@ -4431,7 +4427,7 @@ class CPXMPCPlannerBridge:
                 self.maneuver_manager.clear_required_lane_change()
         lane_change_authorized = bool(lane_change_authorization.allowed)
         opportunistic_authorization = (
-            self.behavior_stage.authorize_opportunistic_lane_change(
+            self.pipeline.authorize_opportunistic_lane_change(
                 OpportunisticLaneChangeRequest(
                     enabled=bool(self.full_allow_opportunistic_lane_change),
                     sim_time_s=float(sim_time_s),
@@ -4670,7 +4666,7 @@ class CPXMPCPlannerBridge:
             )
         )
         if lane_change_start_transition.action == "deny":
-            self.behavior_stage.reset_route_lane_change_authorization()
+            self.pipeline.reset_route_lane_change_authorization()
             lane_change_authorization = dataclasses.replace(
                 lane_change_authorization,
                 allowed=False,
@@ -4684,7 +4680,7 @@ class CPXMPCPlannerBridge:
             owner_state=scenario_decision.state,
         )
         if lateral_handoff.action == "release":
-            self.behavior_stage.reset_route_lane_change_authorization()
+            self.pipeline.reset_route_lane_change_authorization()
             self.maneuver_manager.clear_required_lane_change()
             self._stable_reference_line_provider.release(
                 LANE_CHANGE,
@@ -4791,7 +4787,7 @@ class CPXMPCPlannerBridge:
             candidate_lane_ids = list(planner_input_frame.map_lane.allowed_lane_ids)
         else:
             candidate_lane_ids = [int(current_lane_id)]
-        candidate_frame = self.behavior_stage.evaluate_lane_candidates(
+        candidate_frame = self.pipeline.evaluate_behavior_candidates(
             BehaviorCandidateRequest(
                 lane_safety_scores=dict(lane_safety_scores),
                 lane_prediction_risks=dict(
@@ -5207,7 +5203,7 @@ class CPXMPCPlannerBridge:
             self._clear_turn_master_reference()
         route_turn_prepare_decision = ""
         scenario_behavior_override = str(scenario_decision.behavior_override_decision or "")
-        override_result = self.behavior_stage.apply_overrides(
+        override_result = self.pipeline.apply_behavior_overrides(
             BehaviorOverrideRequest(
                 decision=str(decision), target_lane_id=int(target_lane_id),
                 phase=str(lc_state), current_lane_id=int(current_lane_id),
@@ -6136,7 +6132,7 @@ class CPXMPCPlannerBridge:
         return (
             list(nominal_destination_state),
             list(local_lane_center_reference),
-            self.behavior_stage.finalize(
+            self.pipeline.finalize_behavior(
                 maneuver=str(decision),
                 phase=str(lc_state),
                 source_lane_id=int(current_lane_id),

@@ -62,6 +62,27 @@ class PlanningPipeline:
     def evaluate_destination(self, **kwargs):
         return self.destination_speed.evaluate(**kwargs)
 
+    def finalize_behavior(self, **kwargs):
+        return self.behavior.finalize(**kwargs)
+
+    def destination_stop_behavior(self, result):
+        return self.behavior.destination_stop(result)
+
+    def authorize_route_lane_change(self, request):
+        return self.behavior.authorize_route_lane_change(request)
+
+    def reset_route_lane_change_authorization(self):
+        self.behavior.reset_route_lane_change_authorization()
+
+    def authorize_opportunistic_lane_change(self, request):
+        return self.behavior.authorize_opportunistic_lane_change(request)
+
+    def evaluate_behavior_candidates(self, request):
+        return self.behavior.evaluate_lane_candidates(request)
+
+    def apply_behavior_overrides(self, request):
+        return self.behavior.apply_overrides(request)
+
     def resolve_speed(
         self, *, behavior, speed_plan, additional_constraints,
         destination_state, reference_samples,
