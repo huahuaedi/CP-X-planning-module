@@ -6636,7 +6636,6 @@ class CPXMPCPlannerBridge:
         required_lane_change_target_lane_id: int = 0,
     ) -> tuple[str, int, float, list[dict[str, object]], list[float], dict[str, object]]:
         from opencda.planning_module.pipeline.candidate_pipeline import (
-            predicted_lane_change_average_speed_mps,
             summarize_candidate_results,
         )
         lane_change_commitment_release_reason = (
@@ -7094,173 +7093,32 @@ class CPXMPCPlannerBridge:
         selected_destination = list(selected.destination_state or [])
         selected_decision = str(selected.intent.decision)
         if selected_decision in {"lane_change_left", "lane_change_right"}:
-            selected_target_lane_id = int(selected.intent.target_lane_id)
-            route_option = (
-                "CHANGELANELEFT"
-                if selected_decision == "lane_change_left"
-                else "CHANGELANERIGHT"
-            )
-            planned_lane_change_speed_mps = predicted_lane_change_average_speed_mps(
+            (
+                selected_reference,
+                selected_destination,
+                selected_debug,
+            ) = self._candidate_trajectory_evaluator.activate_selected_lane_change(
+                selected=selected,
+                selected_reference=selected_reference,
+                selected_destination=selected_destination,
+                selected_debug=selected_debug,
+                provider=self._stable_reference_line_provider,
+                maneuver_manager=self.maneuver_manager,
+                route_revision=str(self.route_manager.route_revision),
+                map_epoch=str(self.waypoint_backend or "admap"),
+                local_map=getattr(self, "_local_map_snapshot", None),
+                current_lane_id=int(current_lane_id),
+                current_state=current_state,
+                ego_location=ego_location,
+                ego_yaw_rad=float(ego_yaw_rad),
                 ego_speed_mps=float(ego_speed_mps),
-                target_speed_mps=float(selected.intent.target_speed_mps),
-                duration_s=float(selected.intent.lane_change_duration_s or 4.0),
-                acceleration_limit_mps2=float(
-                    self.config.get(
-                        "lane_change_planning_acceleration_limit_mps2",
-                        2.0,
-                    )
+                sim_time_s=float(self._sim_time_s()),
+                config=self.config,
+                mpc=self.mpc,
+                validate_locked_reference=(
+                    self._validate_route_tracking_lane_change_reference
                 ),
             )
-            selected_geometry_plan = (
-                self._candidate_trajectory_evaluator.geometry_plan(
-                    decision=str(selected_decision),
-                    ego_speed_mps=float(ego_speed_mps),
-                    target_speed_mps=float(selected.intent.target_speed_mps),
-                    lane_change_duration_s=float(
-                        selected.intent.lane_change_duration_s or 4.0
-                    ),
-                    dt_s=float(self.mpc.dt_s),
-                    lane_width_m=float(getattr(self.mpc, "lane_width_m", 3.5)),
-                    config=self.config,
-                )
-            )
-            lane_change_geometry_speed_mps = float(
-                selected_geometry_plan.geometry_speed_mps
-            )
-            lane_change_geometry_length_m = float(
-                selected_geometry_plan.geometry_length_m
-            )
-            step_distance_m = max(0.1, float(selected_geometry_plan.step_m))
-            selected_is_committed_continuation = bool(
-                str(selected.intent.name)
-                == "committed_lane_change_continuation"
-            )
-            lock_matches = bool(
-                self._stable_reference_line_provider.snapshot(LANE_CHANGE).mutable_samples()
-                and int(self.maneuver_manager.lane_change.target_lane_id)
-                == int(selected_target_lane_id)
-                and str(self.maneuver_manager.lane_change.option)
-                == str(route_option)
-                and (
-                    bool(selected_is_committed_continuation)
-                    or int(self.maneuver_manager.lane_change.source_lane_id)
-                    == int(current_lane_id)
-                )
-            )
-            lock_reason = "candidate_lane_change_lock_reused"
-            if not bool(lock_matches):
-                # The selected candidate has already passed the reference
-                # contract and MPC probe.  It is the nominal trajectory; make
-                # that exact geometry persistent instead of rebuilding a
-                # second quintic from waypoint queries at the hand-off.
-                completion_snapshot = getattr(self, "_local_map_snapshot", None)
-                completion_reference, completion_reason = (
-                    self._stable_reference_line_provider.lane_change_completion_reference(
-                        completion_snapshot,
-                        target_lane_id=int(selected_target_lane_id),
-                        target_speed_mps=float(selected.intent.target_speed_mps),
-                    )
-                )
-                installed, install_reason = (
-                    self._stable_reference_line_provider.install(
-                        LANE_CHANGE,
-                        selected_reference,
-                        route_revision=str(self.route_manager.route_revision),
-                        map_epoch=str(getattr(self, "waypoint_backend", "admap") or "admap"),
-                        event="maneuver_started",
-                        source_lane_id=int(current_lane_id),
-                        target_lane_id=int(selected_target_lane_id),
-                        maneuver_direction=(
-                            "left" if route_option == "CHANGELANELEFT" else "right"
-                        ),
-                        build_reason="accepted_candidate_nominal_trajectory",
-                        ego_x_m=float(current_state[0]),
-                        ego_y_m=float(current_state[1]),
-                    )
-                )
-                if installed:
-                    self.maneuver_manager.begin_lane_change(
-                        option=str(route_option),
-                        phase="executing",
-                        source_lane_id=int(current_lane_id),
-                        target_lane_id=int(selected_target_lane_id),
-                        target_speed_mps=float(selected.intent.target_speed_mps),
-                        completion_reference=completion_reference,
-                        committed_at_s=float(self._sim_time_s()),
-                    )
-                lock_reason = (
-                    "accepted_candidate_committed:"
-                    + str(install_reason)
-                    + ":"
-                    + str(completion_reason)
-                )
-            locked_window, window_reason = (
-                self.maneuver_manager.locked_lane_change_window(
-                    provider=self._stable_reference_line_provider,
-                    ego_x_m=float(ego_location.x),
-                    ego_y_m=float(ego_location.y),
-                    ego_heading_rad=float(ego_yaw_rad),
-                    target_speed_mps=float(selected.intent.target_speed_mps),
-                    spacing_m=float(step_distance_m),
-                    horizon_steps=int(self.mpc.horizon_steps),
-                )
-            )
-            locked_valid, locked_validation_reason = (
-                self._validate_route_tracking_lane_change_reference(
-                    reference=locked_window,
-                    ego_location=ego_location,
-                    ego_yaw_rad=float(ego_yaw_rad),
-                )
-            )
-            if locked_window and bool(locked_valid):
-                selected_reference = [
-                    dict(sample) for sample in locked_window
-                ]
-                terminal = selected_reference[-1]
-                if len(selected_destination) >= 4:
-                    selected_destination[0] = float(
-                        terminal.get("x_ref_m", terminal.get("x", selected_destination[0]))
-                    )
-                    selected_destination[1] = float(
-                        terminal.get("y_ref_m", terminal.get("y", selected_destination[1]))
-                    )
-                    selected_destination[2] = float(
-                        selected.intent.target_speed_mps
-                    )
-                    selected_destination[3] = float(
-                        terminal.get("heading_rad", selected_destination[3])
-                    )
-                    if len(selected_destination) >= 5:
-                        selected_destination[4] = int(selected_target_lane_id)
-            selected_debug.update({
-                "lane_change_planning_average_speed_mps": float(
-                    planned_lane_change_speed_mps
-                ),
-                "lane_change_geometry_speed_mps": float(
-                    lane_change_geometry_speed_mps
-                ),
-                "lane_change_geometry_length_m": float(
-                    lane_change_geometry_length_m
-                ),
-                "lane_change_geometry_step_m": float(step_distance_m),
-                "route_tracking_lane_change_locked": bool(
-                    self._stable_reference_line_provider.snapshot(LANE_CHANGE).mutable_samples()
-                ),
-                "route_tracking_lane_change_progress_index": int(
-                    self.maneuver_manager.lane_change.progress_index
-                ),
-                "route_tracking_lane_change_source_lane_id": int(
-                    self.maneuver_manager.lane_change.source_lane_id
-                ),
-                "route_tracking_lane_change_target_lane_id": int(
-                    self.maneuver_manager.lane_change.target_lane_id
-                ),
-                "candidate_lane_change_lock_reason": str(lock_reason),
-                "candidate_lane_change_window_reason": str(window_reason),
-                "candidate_lane_change_lock_validation_reason": str(
-                    locked_validation_reason
-                ),
-            })
         finalized = self._candidate_trajectory_evaluator.finalize_selection(
             selected=selected,
             candidate_results=candidate_results,

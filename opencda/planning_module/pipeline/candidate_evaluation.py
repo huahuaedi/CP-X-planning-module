@@ -418,6 +418,178 @@ class CandidateTrajectoryEvaluator:
             risk_hysteresis_margin_m=float(risk_hysteresis_margin_m),
         )
 
+    def activate_selected_lane_change(
+        self,
+        *,
+        selected,
+        selected_reference,
+        selected_destination,
+        selected_debug,
+        provider,
+        maneuver_manager,
+        route_revision,
+        map_epoch,
+        local_map,
+        current_lane_id,
+        current_state,
+        ego_location,
+        ego_yaw_rad,
+        ego_speed_mps,
+        sim_time_s,
+        config,
+        mpc,
+        validate_locked_reference,
+    ):
+        """Commit and window an accepted lane-change candidate once."""
+
+        from .candidate_pipeline import predicted_lane_change_average_speed_mps
+        from .reference_line_provider import LANE_CHANGE
+
+        decision = str(selected.intent.decision)
+        if decision not in {_DECISION_CHANGE_LEFT, _DECISION_CHANGE_RIGHT}:
+            return (
+                [dict(sample) for sample in selected_reference],
+                list(selected_destination),
+                dict(selected_debug),
+            )
+        target_lane_id = int(selected.intent.target_lane_id)
+        route_option = (
+            "CHANGELANELEFT"
+            if decision == _DECISION_CHANGE_LEFT else "CHANGELANERIGHT"
+        )
+        duration_s = float(selected.intent.lane_change_duration_s or 4.0)
+        geometry = self.geometry_plan(
+            decision=decision,
+            ego_speed_mps=float(ego_speed_mps),
+            target_speed_mps=float(selected.intent.target_speed_mps),
+            lane_change_duration_s=duration_s,
+            dt_s=float(mpc.dt_s),
+            lane_width_m=float(getattr(mpc, "lane_width_m", 3.5)),
+            config=config,
+        )
+        committed_continuation = (
+            str(selected.intent.name) == "committed_lane_change_continuation"
+        )
+        snapshot = provider.snapshot(LANE_CHANGE)
+        lock_matches = bool(
+            snapshot.active
+            and int(maneuver_manager.lane_change.target_lane_id)
+            == target_lane_id
+            and str(maneuver_manager.lane_change.option) == route_option
+            and (
+                committed_continuation
+                or int(maneuver_manager.lane_change.source_lane_id)
+                == int(current_lane_id)
+            )
+        )
+        lock_reason = "candidate_lane_change_lock_reused"
+        if not lock_matches:
+            completion_reference, completion_reason = (
+                provider.lane_change_completion_reference(
+                    local_map,
+                    target_lane_id=target_lane_id,
+                    target_speed_mps=float(selected.intent.target_speed_mps),
+                )
+            )
+            installed, install_reason = provider.install(
+                LANE_CHANGE,
+                selected_reference,
+                route_revision=str(route_revision),
+                map_epoch=str(map_epoch or "admap"),
+                event="maneuver_started",
+                source_lane_id=int(current_lane_id),
+                target_lane_id=target_lane_id,
+                maneuver_direction=(
+                    "left" if route_option == "CHANGELANELEFT" else "right"
+                ),
+                build_reason="accepted_candidate_nominal_trajectory",
+                ego_x_m=float(current_state[0]),
+                ego_y_m=float(current_state[1]),
+            )
+            if installed:
+                maneuver_manager.begin_lane_change(
+                    option=route_option,
+                    phase="executing",
+                    source_lane_id=int(current_lane_id),
+                    target_lane_id=target_lane_id,
+                    target_speed_mps=float(selected.intent.target_speed_mps),
+                    completion_reference=completion_reference,
+                    committed_at_s=float(sim_time_s),
+                )
+            lock_reason = "accepted_candidate_committed:%s:%s" % (
+                str(install_reason), str(completion_reason)
+            )
+        reference, window_reason = maneuver_manager.locked_lane_change_window(
+            provider=provider,
+            ego_x_m=float(ego_location.x),
+            ego_y_m=float(ego_location.y),
+            ego_heading_rad=float(ego_yaw_rad),
+            target_speed_mps=float(selected.intent.target_speed_mps),
+            spacing_m=max(0.1, float(geometry.step_m)),
+            horizon_steps=int(mpc.horizon_steps),
+        )
+        locked_valid, validation_reason = validate_locked_reference(
+            reference=reference,
+            ego_location=ego_location,
+            ego_yaw_rad=float(ego_yaw_rad),
+        )
+        destination = list(selected_destination)
+        if reference and locked_valid:
+            terminal = reference[-1]
+            if len(destination) >= 4:
+                destination[0] = float(
+                    terminal.get("x_ref_m", terminal.get("x", destination[0]))
+                )
+                destination[1] = float(
+                    terminal.get("y_ref_m", terminal.get("y", destination[1]))
+                )
+                destination[2] = float(selected.intent.target_speed_mps)
+                destination[3] = float(
+                    terminal.get("heading_rad", destination[3])
+                )
+                if len(destination) >= 5:
+                    destination[4] = target_lane_id
+        diagnostics = dict(selected_debug)
+        diagnostics.update({
+            "lane_change_planning_average_speed_mps": float(
+                predicted_lane_change_average_speed_mps(
+                    ego_speed_mps=float(ego_speed_mps),
+                    target_speed_mps=float(selected.intent.target_speed_mps),
+                    duration_s=duration_s,
+                    acceleration_limit_mps2=float(
+                        config.get(
+                            "lane_change_planning_acceleration_limit_mps2", 2.0
+                        )
+                    ),
+                )
+            ),
+            "lane_change_geometry_speed_mps": float(
+                geometry.geometry_speed_mps
+            ),
+            "lane_change_geometry_length_m": float(
+                geometry.geometry_length_m
+            ),
+            "lane_change_geometry_step_m": float(geometry.step_m),
+            "route_tracking_lane_change_locked": bool(
+                provider.snapshot(LANE_CHANGE).active
+            ),
+            "route_tracking_lane_change_progress_index": int(
+                maneuver_manager.lane_change.progress_index
+            ),
+            "route_tracking_lane_change_source_lane_id": int(
+                maneuver_manager.lane_change.source_lane_id
+            ),
+            "route_tracking_lane_change_target_lane_id": int(
+                maneuver_manager.lane_change.target_lane_id
+            ),
+            "candidate_lane_change_lock_reason": str(lock_reason),
+            "candidate_lane_change_window_reason": str(window_reason),
+            "candidate_lane_change_lock_validation_reason": str(
+                validation_reason
+            ),
+        })
+        return [dict(sample) for sample in reference], destination, diagnostics
+
     @staticmethod
     def lane_change_state(
         *, decision: str, baseline_decision: str, baseline_lane_change_state: str
