@@ -19,6 +19,7 @@ class PlanningPipeline:
         behavior: Any,
         scenario: Any,
         static_obstacle: Any,
+        control_safety: Any,
         speed: Any,
         destination_speed: Any,
         reference_publication: Any,
@@ -30,6 +31,7 @@ class PlanningPipeline:
         self.behavior = behavior
         self.scenario = scenario
         self.static_obstacle = static_obstacle
+        self.control_safety = control_safety
         self.speed = speed
         self.destination_speed = destination_speed
         self.reference_publication = reference_publication
@@ -143,6 +145,9 @@ class PlanningPipeline:
 
     def low_speed_mpc_replan_required(self, **kwargs):
         return self.mpc_entry.low_speed_replan_required(**kwargs)
+
+    def apply_control_safety(self, **kwargs):
+        return self.control_safety.run(**kwargs)
 
     def record_valid_trajectory(self, trajectory, **kwargs):
         if self.fallback is None:

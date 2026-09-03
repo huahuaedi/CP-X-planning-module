@@ -19,6 +19,7 @@ def test_pipeline_sequences_runtime_and_perception_without_bridge():
         behavior=object(),
         scenario=object(),
         static_obstacle=object(),
+        control_safety=object(),
         speed=object(),
         destination_speed=object(),
         reference_publication=object(),
@@ -62,7 +63,7 @@ def test_pipeline_owns_speed_resolution_sequence():
     pipeline = PlanningPipeline(
         runtime_input=RuntimeInputStage(_Mapper()),
         perception=PerceptionStage(),
-        behavior=object(), scenario=object(), static_obstacle=object(),
+        behavior=object(), scenario=object(), static_obstacle=object(), control_safety=object(),
         speed=Speed(), destination_speed=object(),
         reference_publication=object(), mpc_entry=object(),
     )
@@ -90,7 +91,7 @@ def test_pipeline_is_the_only_behavior_stage_caller():
     pipeline = PlanningPipeline(
         runtime_input=RuntimeInputStage(_Mapper()),
         perception=PerceptionStage(),
-        behavior=Behavior(), scenario=object(), static_obstacle=object(),
+        behavior=Behavior(), scenario=object(), static_obstacle=object(), control_safety=object(),
         speed=object(), destination_speed=object(),
         reference_publication=object(), mpc_entry=object(),
     )
@@ -119,7 +120,7 @@ def test_pipeline_is_the_only_fallback_stage_caller():
     pipeline = PlanningPipeline(
         runtime_input=RuntimeInputStage(_Mapper()),
         perception=PerceptionStage(),
-        behavior=object(), scenario=object(), static_obstacle=object(),
+        behavior=object(), scenario=object(), static_obstacle=object(), control_safety=object(),
         speed=object(), destination_speed=object(),
         reference_publication=object(), mpc_entry=object(),
         fallback=Fallback(),

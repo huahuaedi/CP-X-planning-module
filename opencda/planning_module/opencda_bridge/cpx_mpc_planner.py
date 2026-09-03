@@ -70,6 +70,7 @@ from opencda.planning_module.pipeline.mpc_entry_stage import MPCEntryStage
 from opencda.planning_module.pipeline.perception_stage import PerceptionStage
 from opencda.planning_module.pipeline.execution_pipeline import PlanningPipeline
 from opencda.planning_module.pipeline.static_obstacle_stage import StaticObstacleStage
+from opencda.planning_module.pipeline.control_safety_stage import ControlSafetyStage
 from opencda.planning_module.pipeline.candidate_evaluation import (
     CandidateTrajectoryEvaluator,
     mpc_cost_profile_for_behavior,
@@ -1021,19 +1022,6 @@ class CPXMPCPlannerBridge:
             **self.behavior_runtime_cfg,
             **self.config,
         })
-        self.pipeline = PlanningPipeline(
-            runtime_input=runtime_input_stage,
-            perception=perception_stage,
-            behavior=behavior_stage,
-            scenario=scenario_manager,
-            static_obstacle=static_obstacle_stage,
-            speed=speed_target_planner,
-            destination_speed=destination_speed_stage,
-            reference_publication=reference_publication_stage,
-            mpc_entry=mpc_entry_stage,
-            fallback=fallback_manager,
-        )
-        self._build_decision_record = build_decision_record
         self.safety_supervisor = SafetySupervisor(
             enabled=bool(self.config.get("safety_supervisor_enabled", True)),
             max_steer_delta=float(self.config.get("safety_max_steer_delta", 0.25)),
@@ -1043,6 +1031,23 @@ class CPXMPCPlannerBridge:
                 self.config.get("safety_stuck_release_min_accel_mps2", 0.01)
             ),
         )
+        control_safety_stage = ControlSafetyStage(
+            supervisor=self.safety_supervisor, config=self.config
+        )
+        self.pipeline = PlanningPipeline(
+            runtime_input=runtime_input_stage,
+            perception=perception_stage,
+            behavior=behavior_stage,
+            scenario=scenario_manager,
+            static_obstacle=static_obstacle_stage,
+            control_safety=control_safety_stage,
+            speed=speed_target_planner,
+            destination_speed=destination_speed_stage,
+            reference_publication=reference_publication_stage,
+            mpc_entry=mpc_entry_stage,
+            fallback=fallback_manager,
+        )
+        self._build_decision_record = build_decision_record
         self.velocity_steering_adapter = OpenCDAVelocitySteeringAdapter(
             self.vehicle_manager.controller
         )
@@ -2292,113 +2297,45 @@ class CPXMPCPlannerBridge:
                 "velocity_command_valid": bool(tracking_command.valid),
             })
 
-        control, accel_mps2, steer_rad, control_guard_reason = (
-            self.safety_supervisor.enforce_signal_stop(
-                control=control,
-                carla_module=self.carla,
-                accel_mps2=float(accel_mps2),
-                steer_rad=float(steer_rad),
-                ego_transform=ego_transform,
-                ego_speed_mps=float(ego_speed_mps),
-                destination_state=destination_state,
-                stop_goal_active=bool(mpc_stop_goal_active),
-                traffic_signal_state=str(
-                    behavior_decision.traffic_signal_state
-                ),
-                min_acceleration_mps2=float(
-                    self.mpc.constraints.min_acceleration_mps2
-                ),
-                control_factory=self._control_from_mpc,
-                config=self.config,
-                stop_target_forward_m=stop_target_forward_m_debug,
-            )
-        )
-        boundary_guard_reason = ""
-        boundary_snapshot = None
-        turn_behavior_active = str(behavior_decision.maneuver) in {
-            "intersection_turn_left",
-            "intersection_turn_right",
-        }
-        if bool(turn_behavior_active):
-            boundary_snapshot = self._road_boundary_metrics(
-                ego_location,
-                record_sample=True,
-                ego_yaw_rad=float(ego_yaw_rad),
-                reference_samples=lane_center_reference,
-            )
-            if bool(self.config.get("boundary_recovery_enabled", False)):
-                self._update_boundary_recovery_request(
-                    boundary_snapshot=boundary_snapshot,
-                    behavior_decision=str(
-                        behavior_decision.maneuver
-                    ),
-                    sim_time_s=float(sim_time_s),
-                    recovery_planned=bool(
-                        behavior_decision.boundary_recovery_active
-                    ),
-                    recovery_reference_feasible=bool(
-                        str(
-                            reference_debug.get(
-                                "candidate_pipeline_selected_status",
-                                "",
-                            )
-                        ).strip().lower()
-                        != "infeasible"
-                        and bool(final_reference_gate.accepted)
-                    ),
-                )
-            else:
-                self._reset_boundary_recovery_request()
-            (
-                control,
-                accel_mps2,
-                steer_rad,
-                boundary_guard_reason,
-            ) = self.safety_supervisor.enforce_turn_boundary(
-                control=control,
-                carla_module=self.carla,
-                accel_mps2=float(accel_mps2),
-                steer_rad=float(steer_rad),
-                ego_speed_mps=float(ego_speed_mps),
-                behavior_decision=str(behavior_decision.maneuver),
-                boundary_clearance_m=boundary_snapshot.get(
-                    "road_boundary_clearance_m", ""
-                ),
-                min_acceleration_mps2=float(
-                    self.mpc.constraints.min_acceleration_mps2
-                ),
-                config=self.config,
-                control_factory=self._control_from_mpc,
-                boundary_recovery_planned=bool(
-                    behavior_decision.boundary_recovery_active
-                ),
-            )
-            control_guard_reason = ";".join(
-                reason
-                for reason in (
-                    str(control_guard_reason),
-                    str(boundary_guard_reason),
-                )
-                if reason
-            )
-        else:
-            self._reset_boundary_recovery_request()
-        pre_supervisor_accel_mps2 = float(accel_mps2)
-        pre_supervisor_steer_rad = float(steer_rad)
-        control, safety_supervisor_reason = self.safety_supervisor.filter_control(
+        safety_result = self.pipeline.apply_control_safety(
             control=control,
             carla_module=self.carla,
-            safety_manager=latest_update.get("safety_manager"),
-            behavior_decision=str(behavior_decision.maneuver),
-            traffic_signal_state=str(behavior_decision.traffic_signal_state),
+            acceleration_mps2=float(accel_mps2),
+            steering_rad=float(steer_rad),
+            ego_transform=ego_transform,
+            ego_speed_mps=float(ego_speed_mps),
+            destination_state=destination_state,
+            behavior=behavior_decision,
             stop_goal_active=bool(mpc_stop_goal_active),
-            planner_accel_mps2=float(pre_supervisor_accel_mps2),
+            stop_target_forward_m=stop_target_forward_m_debug,
+            min_acceleration_mps2=float(self.mpc.constraints.min_acceleration_mps2),
+            control_factory=self._control_from_mpc,
+            reference_samples=lane_center_reference,
+            final_reference_accepted=bool(final_reference_gate.accepted),
+            candidate_status=str(reference_debug.get(
+                "candidate_pipeline_selected_status", ""
+            )),
+            safety_manager=latest_update.get("safety_manager"),
             sim_time_s=float(sim_time_s),
+            boundary_metrics=self._road_boundary_metrics,
+            update_boundary_recovery=self._update_boundary_recovery_request,
+            reset_boundary_recovery=self._reset_boundary_recovery_request,
+            acceleration_from_control=self._accel_from_control,
+            steering_from_control=self._steer_rad_from_control,
         )
-        post_supervisor_accel_mps2 = self._accel_from_control(control)
-        post_supervisor_steer_rad = self._steer_rad_from_control(control)
-        self._last_accel_mps2 = float(post_supervisor_accel_mps2)
-        self._last_steer_rad = float(post_supervisor_steer_rad)
+        control = safety_result.control
+        control_guard_reason = str(safety_result.control_guard_reason)
+        boundary_guard_reason = str(safety_result.boundary_guard_reason)
+        boundary_snapshot = safety_result.boundary_snapshot
+        pre_supervisor_accel_mps2 = float(
+            safety_result.pre_filter_acceleration_mps2
+        )
+        pre_supervisor_steer_rad = float(safety_result.pre_filter_steering_rad)
+        safety_supervisor_reason = str(safety_result.supervisor_reason)
+        post_supervisor_accel_mps2 = float(safety_result.acceleration_mps2)
+        post_supervisor_steer_rad = float(safety_result.steering_rad)
+        self._last_accel_mps2 = post_supervisor_accel_mps2
+        self._last_steer_rad = post_supervisor_steer_rad
         cp_summary = dict(getattr(self.cp_provider, "last_publish_summary", {}) or {})
         diagnostics = {
             "sim_time_s": float(self._sim_time_s()),
