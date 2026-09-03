@@ -330,17 +330,7 @@ class PlanningPipeline:
             raise RuntimeError("behavior/reference execution stage is not configured")
         return self.behavior_reference_execution.run(request, planner=planner)
 
-    def select_candidate(self, request, **kwargs):
+    def arbitrate_candidates(self, request, **kwargs):
         if self.candidate_selection is None:
             raise RuntimeError("candidate selection stage is not configured")
-        return self.candidate_selection.run(request, **kwargs)
-
-    def build_candidate_intents(self, **kwargs):
-        if self.candidate_selection is None:
-            raise RuntimeError("candidate selection stage is not configured")
-        return self.candidate_selection.build_intents(**kwargs)
-
-    def finalize_selected_candidate(self, **kwargs):
-        if self.candidate_selection is None:
-            raise RuntimeError("candidate selection stage is not configured")
-        return self.candidate_selection.finalize_selected_frame(**kwargs)
+        return self.candidate_selection.arbitrate(request, **kwargs)

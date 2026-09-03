@@ -35,6 +35,7 @@ from pipeline.maneuver_manager import ManeuverManager
 from pipeline.fallback_manager import TrajectoryFallbackManager
 from pipeline.candidate_evaluation import CandidateTrajectoryEvaluator
 from pipeline.reference_line_provider import (
+    CandidateReferenceBuildContext,
     LANE_CHANGE,
     LANE_FOLLOW,
     POST_TURN,
@@ -308,7 +309,7 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
 
     def test_candidate_reference_selection_requires_upcoming_turn_context(self):
         parameters = inspect.signature(
-            CPXMPCPlannerBridge._select_candidate_reference_for_mpc
+            CandidateReferenceBuildContext
         ).parameters
 
         self.assertIn("upcoming_turn_direction", parameters)

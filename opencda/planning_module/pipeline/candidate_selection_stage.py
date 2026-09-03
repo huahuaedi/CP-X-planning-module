@@ -45,6 +45,60 @@ class CandidatePostSelectionResult:
     diagnostics: Mapping[str, Any]
 
 
+@dataclass(frozen=True)
+class CandidateArbitrationRequest:
+    """Complete immutable input for one candidate-arbitration cycle."""
+
+    reference_context: Any
+    selected_decision: str
+    selected_target_lane_id: int
+    current_lane_id: int
+    target_speed_mps: float
+    candidate_lane_ids: Sequence[int]
+    lane_safety_scores: Mapping[int, float]
+    lane_prediction_risks: Mapping[int, Mapping[str, object]]
+    stop_goal_active: bool
+    traffic_stop_active: bool
+    lane_change_authorization: Any
+    opportunistic_lane_change_allowed: bool
+    stop_target: Any
+    local_obstacle_avoidance_active: bool
+    ego_speed_mps: float
+    lane_width_m: float
+    baseline_lane_change_state: str
+    current_state: Sequence[float]
+    ego_location: Any
+    ego_yaw_rad: float
+    object_snapshots: Sequence[Mapping[str, Any]]
+    prediction_trajectories: Mapping[str, Any]
+    current_acceleration_mps2: float
+    current_steering_rad: float
+    route_required: bool
+    scenario_stop_required: bool
+    speed_plan: Any
+    turn_prepare_speed_suppressed: bool
+
+
+@dataclass(frozen=True)
+class CandidateArbitrationResult:
+    decision: str
+    target_lane_id: int
+    target_speed_mps: float
+    reference: tuple
+    destination_state: tuple
+    lane_change_state: str
+    stop_goal_active: bool
+    speed_plan: Any
+    speed_constraints: tuple
+    diagnostics: Mapping[str, Any]
+
+    def mutable_reference(self):
+        return [dict(sample) for sample in self.reference]
+
+    def mutable_destination_state(self):
+        return list(self.destination_state)
+
+
 class CandidateSelectionStage:
     """Own the complete candidate lifecycle for one planning tick."""
 
@@ -141,6 +195,141 @@ class CandidateSelectionStage:
             human_lane_change_max_duration_s=float(
                 cfg.get("human_lane_change_max_duration_s", 6.5)
             ),
+        )
+
+    def arbitrate(
+        self,
+        request: CandidateArbitrationRequest,
+        *,
+        sim_time_s: float,
+        route_revision: str,
+        road_envelope: Callable[[], Any],
+        validate_contract: Callable[..., Any],
+        validate_locked_reference: Callable[..., Any],
+    ) -> CandidateArbitrationResult:
+        """Build, select and finalize candidates through one stage boundary."""
+
+        authorization = request.lane_change_authorization
+        behavior_lane_change = str(request.selected_decision) in {
+            "lane_change_left", "lane_change_right",
+        }
+        opportunistic_authorized = bool(
+            behavior_lane_change
+            and request.opportunistic_lane_change_allowed
+            and not bool(authorization.allowed)
+        )
+        lane_change_authorized = bool(
+            authorization.allowed or opportunistic_authorized
+        )
+        target_lane_id = int(
+            authorization.target_lane_id
+            if bool(authorization.allowed)
+            else request.selected_target_lane_id
+        )
+        direction = (
+            str(authorization.direction or "")
+            if bool(authorization.allowed)
+            else "left" if str(request.selected_decision) == "lane_change_left"
+            else "right" if str(request.selected_decision) == "lane_change_right"
+            else ""
+        )
+        intents = self.build_intents(
+            selected_decision=str(request.selected_decision),
+            selected_target_lane_id=int(request.selected_target_lane_id),
+            current_lane_id=int(request.current_lane_id),
+            target_speed_mps=float(request.target_speed_mps),
+            candidate_lane_ids=request.candidate_lane_ids,
+            lane_safety_scores=request.lane_safety_scores,
+            lane_prediction_risks=request.lane_prediction_risks,
+            stop_goal_active=bool(
+                request.stop_goal_active or request.scenario_stop_required
+            ),
+            traffic_stop_active=bool(request.traffic_stop_active),
+            lane_change_authorized=bool(lane_change_authorized),
+            lane_change_target_lane_id=int(target_lane_id),
+            stop_target=request.stop_target,
+            lane_change_authorization_source=(
+                "route" if bool(authorization.allowed) else "opportunistic"
+            ),
+            lane_change_authorization_direction=str(direction),
+            local_obstacle_avoidance_active=bool(
+                request.local_obstacle_avoidance_active
+            ),
+            ego_speed_mps=float(request.ego_speed_mps),
+            lane_width_m=float(request.lane_width_m),
+            lane_change_available_distance_m=(
+                authorization.distance_to_maneuver_m
+                if bool(lane_change_authorized) else None
+            ),
+        )
+        required_decision = (
+            "lane_change_left"
+            if request.route_required and bool(authorization.allowed)
+            and str(authorization.direction).strip().lower() == "left"
+            else "lane_change_right"
+            if request.route_required and bool(authorization.allowed)
+            and str(authorization.direction).strip().lower() == "right"
+            else ""
+        )
+        selected = self.run(
+            CandidateSelectionRequest(
+                intents=intents,
+                reference_context=request.reference_context,
+                baseline_lane_change_state=str(request.baseline_lane_change_state),
+                baseline_decision=str(request.selected_decision),
+                baseline_target_lane_id=int(request.selected_target_lane_id),
+                baseline_speed_mps=float(request.target_speed_mps),
+                baseline_reference=request.reference_context.baseline_reference,
+                baseline_destination_state=list(
+                    request.reference_context.baseline_destination_state or []
+                ),
+                current_state=request.current_state,
+                current_lane_id=int(request.current_lane_id),
+                ego_location=request.ego_location,
+                ego_yaw_rad=float(request.ego_yaw_rad),
+                ego_speed_mps=float(request.ego_speed_mps),
+                object_snapshots=request.object_snapshots,
+                prediction_trajectories=request.prediction_trajectories,
+                current_acceleration_mps2=float(
+                    request.current_acceleration_mps2
+                ),
+                current_steering_rad=float(request.current_steering_rad),
+                required_decision=str(required_decision),
+                required_target_lane_id=(
+                    int(authorization.target_lane_id)
+                    if required_decision else 0
+                ),
+            ),
+            sim_time_s=float(sim_time_s),
+            route_revision=str(route_revision),
+            road_envelope=road_envelope,
+            validate_contract=validate_contract,
+            validate_locked_reference=validate_locked_reference,
+        )
+        final = self.finalize_selected_frame(
+            decision=str(selected.decision),
+            lane_change_state=str(request.baseline_lane_change_state),
+            reference=selected.reference,
+            selected_diagnostics=selected.diagnostics,
+            reference_diagnostics=request.reference_context.baseline_debug,
+            ego_speed_mps=float(request.ego_speed_mps),
+            scenario_stop_required=bool(request.scenario_stop_required),
+            speed_plan=request.speed_plan,
+            turn_prepare_speed_suppressed=bool(
+                request.turn_prepare_speed_suppressed
+            ),
+        )
+        return CandidateArbitrationResult(
+            decision=str(selected.decision),
+            target_lane_id=int(selected.target_lane_id),
+            target_speed_mps=float(selected.target_speed_mps),
+            reference=tuple(dict(x) for x in selected.reference),
+            destination_state=tuple(selected.destination_state),
+            lane_change_state=str(final.lane_change_state),
+            stop_goal_active=bool(final.stop_goal_active),
+            speed_plan=final.speed_plan,
+            speed_constraints=tuple(final.speed_constraints),
+            diagnostics=dict(final.diagnostics),
         )
 
     def finalize_selected_frame(

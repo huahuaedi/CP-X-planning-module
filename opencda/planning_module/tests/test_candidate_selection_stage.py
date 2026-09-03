@@ -1,9 +1,11 @@
 from types import SimpleNamespace
 
 from pipeline.candidate_selection_stage import (
+    CandidateArbitrationRequest,
     CandidateSelectionRequest,
     CandidateSelectionStage,
 )
+from pipeline.candidate_evaluation import CandidateSelectionResult
 from pipeline.speed_planner import SpeedPlan
 
 
@@ -54,6 +56,61 @@ def test_post_selection_turn_submits_named_speed_constraint():
     assert result.speed_plan.target_speed_mps == 2.2
     assert result.speed_plan.limiting_owner == "selected_turn_cap"
     assert result.speed_constraints[0].owner == "selected_turn_cap"
+
+
+def test_arbitrate_owns_intent_selection_and_finalization():
+    stage = _post_selection_stage()
+    captured = {}
+    stage.build_intents = lambda **kwargs: captured.setdefault("intent", kwargs) or []
+
+    def select(request, **kwargs):
+        captured["selection"] = request
+        return CandidateSelectionResult(
+            decision="lane_follow", target_lane_id=12, target_speed_mps=6.0,
+            reference=({"x_ref_m": 2.0, "y_ref_m": 0.0},),
+            destination_state=(2.0, 0.0, 6.0, 0.0, 12), diagnostics={},
+        )
+
+    stage.run = select
+    speed = SpeedPlan(target_speed_mps=6.0, speed_cap_mps=6.0,
+                      stop_goal_active=False)
+    context = SimpleNamespace(
+        baseline_reference=({"x_ref_m": 1.0, "y_ref_m": 0.0},),
+        baseline_destination_state=(1.0, 0.0, 6.0, 0.0, 12),
+        baseline_debug={},
+    )
+    authorization = SimpleNamespace(
+        allowed=False, target_lane_id=0, direction="",
+        distance_to_maneuver_m=float("inf"),
+    )
+    result = stage.arbitrate(
+        CandidateArbitrationRequest(
+            reference_context=context, selected_decision="lane_follow",
+            selected_target_lane_id=12, current_lane_id=12,
+            target_speed_mps=6.0, candidate_lane_ids=(12,),
+            lane_safety_scores={12: 1.0}, lane_prediction_risks={},
+            stop_goal_active=False, traffic_stop_active=False,
+            lane_change_authorization=authorization,
+            opportunistic_lane_change_allowed=False, stop_target=None,
+            local_obstacle_avoidance_active=False, ego_speed_mps=5.0,
+            lane_width_m=3.5, baseline_lane_change_state="LANE_KEEP",
+            current_state=(0.0, 0.0, 5.0, 0.0),
+            ego_location=SimpleNamespace(x=0.0, y=0.0), ego_yaw_rad=0.0,
+            object_snapshots=(), prediction_trajectories={},
+            current_acceleration_mps2=0.0, current_steering_rad=0.0,
+            route_required=False, scenario_stop_required=False,
+            speed_plan=speed, turn_prepare_speed_suppressed=False,
+        ),
+        sim_time_s=1.0, route_revision="route:1",
+        road_envelope=lambda: None,
+        validate_contract=lambda **_kwargs: None,
+        validate_locked_reference=lambda **_kwargs: None,
+    )
+
+    assert captured["intent"]["selected_decision"] == "lane_follow"
+    assert captured["selection"].reference_context is context
+    assert result.decision == "lane_follow"
+    assert result.mutable_destination_state()[0] == 2.0
 
 
 def test_no_candidates_returns_typed_baseline_and_runs_completion_release():

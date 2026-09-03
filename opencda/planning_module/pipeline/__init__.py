@@ -9,6 +9,11 @@ from .candidate_evaluation import (
     CandidateEvaluationFrame,
     evaluate_behavior_candidates,
 )
+from .candidate_selection_stage import (
+    CandidateArbitrationRequest,
+    CandidateArbitrationResult,
+    CandidateSelectionStage,
+)
 from .actuator_mapper import ActuatorCommand, CarlaActuatorMapper
 from .architecture_profile import ArchitectureProfile, normalize_architecture_config
 from .candidate_pipeline import (
@@ -120,6 +125,9 @@ from .tracker import CPXObstacleTracker
 
 __all__ = [
     "ActuatorCommand",
+    "CandidateArbitrationRequest",
+    "CandidateArbitrationResult",
+    "CandidateSelectionStage",
     "BehaviorMPCFeedback",
     "ConflictResolutionRequest",
     "ConflictResolutionResult",
