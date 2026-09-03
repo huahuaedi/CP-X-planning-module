@@ -520,61 +520,6 @@ def test_conflict_resolution_uses_only_the_cav_pipeline_for_cooperation():
 
     assert result.authorization.allowed
     assert result.opportunistic_allowed
-    # multi-CAV pipeline is inactive by default -> empty rider fields
-    assert result.conflict_assignments == ()
-    assert result.corridor is None
-    assert result.cav_diagnostics == {}
-
-
-def _conflict_request(**overrides):
-    values = dict(
-        route_authorization=SimpleNamespace(allowed=False, reason="", required_by_route=False),
-        opportunistic_request=OpportunisticLaneChangeRequest(
-            enabled=False, sim_time_s=0.0, start_lock_until_s=0.0,
-            dense_traffic_lock_enabled=False, object_count=0,
-            dense_object_count=5, lane_prediction_risks={}, dense_risky_lane_count=2,
-        ),
-        owner_state="LANE_FOLLOW", ego_speed_mps=9.0, planning_speed_mps=9.0,
-        lane_change_duration_s=4.0, dt_s=0.1, lane_width_m=3.5,
-        distance_to_turn_m=100.0, config={},
-        ego_location=SimpleNamespace(x=0.0, y=0.0), ego_yaw_rad=0.0,
-    )
-    values.update(overrides)
-    return ConflictResolutionRequest(**values)
-
-
-def test_cav_disabled_leaves_the_result_riders_empty():
-    stage = BehaviorStage()
-    crosser = {"id": "x", "x": 30.0, "y": -6.0, "v": 8.0, "psi": math.pi / 2.0,
-               "predicted_trajectory": [{"x": 30.0, "y": -6.0 + k} for k in range(21)]}
-    result = stage.resolve_conflicts(
-        _conflict_request(obstacle_snapshots=[crosser]),      # cav_enabled defaults False
-        maneuver_manager=ManeuverManager(),
-    )
-    assert result.conflict_tags == ()
-    assert result.corridor is None
-
-
-def test_cav_enabled_runs_the_pipeline_and_rides_a_corridor_on_the_result():
-    stage = BehaviorStage()
-    ref = [{"x_ref_m": 0.0, "y_ref_m": float(y)} for y in range(0, 61, 2)]
-    # ego drives +y; a non-connected vehicle drives +x across the ego path at
-    # y = 20 -> CROSSING -> (no assignment) default yield -> corridor cap.
-    crosser = {
-        "id": "x", "x": -6.0, "y": 20.0, "v": 8.0, "psi": 0.0,
-        "predicted_trajectory": [{"x": -6.0 + 0.7 * k, "y": 20.0} for k in range(21)],
-    }
-    result = stage.resolve_conflicts(
-        _conflict_request(
-            cav_enabled=True, reference_samples=ref, obstacle_snapshots=[crosser],
-            ego_location=SimpleNamespace(x=0.0, y=0.0), ego_yaw_rad=math.pi / 2.0,
-            cav_horizon_steps=20,
-        ),
-        maneuver_manager=ManeuverManager(),
-    )
-    assert result.cav_diagnostics.get("tags", {}).get("x") == "CROSSING"
-    assert result.corridor is not None
-    assert any(h < 1e8 for h in result.corridor.s_hi)
 
 
 def test_behavior_stage_consumes_prediction_when_selecting_lane_candidate():

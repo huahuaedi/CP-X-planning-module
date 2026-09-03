@@ -2940,35 +2940,12 @@ class CPXMPCPlannerBridge:
                 config=self.config,
                 ego_location=ego_location,
                 ego_yaw_rad=float(ego_yaw_rad),
-                cav_enabled=bool(self._cav_conflict_enabled),
-                reference_samples=[
-                    {"x_ref_m": float(p[0]), "y_ref_m": float(p[1])}
-                    for p in route_points
-                ],
-                cav_intents=self._collect_cav_intents(),
-                obstacle_snapshots=list(object_snapshots or []),
-                cav_latch_state=self._cav_latch,
-                my_actor_id=int(
-                    getattr(self.vehicle_manager.vehicle, "id", -1)
-                ),
-                my_claim=self._ego_cav_claim(sim_time_s=float(sim_time_s)),
-                cav_horizon_steps=int(self.mpc.horizon_steps),
             ),
             maneuver_manager=self.maneuver_manager,
         )
         lane_change_authorization = conflict_resolution.authorization
         lateral_ownership = conflict_resolution.lateral_ownership
         lateral_handoff = lateral_ownership.handoff
-        if self._cav_conflict_enabled:
-            self._cav_latch = dict(conflict_resolution.cav_latch_state or {})
-            self._last_cav_corridor = conflict_resolution.corridor
-            self._last_cav_corridor_reference = [
-                {"x_ref_m": float(p[0]), "y_ref_m": float(p[1])}
-                for p in route_points
-            ]
-            self._last_cav_diagnostics = dict(
-                conflict_resolution.cav_diagnostics or {}
-            )
         opportunistic_lane_change_allowed = bool(
             conflict_resolution.opportunistic_allowed
         )
@@ -3421,6 +3398,30 @@ class CPXMPCPlannerBridge:
             reference_debug = dict(candidate_result.diagnostics)
         else:
             reference_debug["candidate_pipeline_enabled"] = False
+
+        if self._cav_conflict_enabled:
+            cav_result = self.pipeline.resolve_cav_interaction(
+                reference_samples=local_lane_center_reference,
+                ego_location=ego_location,
+                ego_yaw_rad=float(ego_yaw_rad),
+                ego_speed_mps=float(ego_speed_mps),
+                actor_id=int(getattr(self.vehicle_manager.vehicle, "id", -1)),
+                claim=self._ego_cav_claim(sim_time_s=float(sim_time_s)),
+                obstacle_snapshots=list(object_snapshots or []),
+                cav_intents=self._collect_cav_intents(),
+                latch_state=self._cav_latch,
+                horizon_steps=int(self.mpc.horizon_steps),
+                dt_s=float(self.mpc.dt_s),
+            )
+            self._cav_latch = dict(cav_result.latch_state or {})
+            self._last_cav_corridor = cav_result.corridor
+            self._last_cav_corridor_reference = [
+                dict(sample) for sample in local_lane_center_reference
+            ]
+            self._last_cav_diagnostics = dict(cav_result.diagnostics or {})
+            reference_debug["cav_conflict_diagnostics"] = dict(
+                self._last_cav_diagnostics
+            )
 
         boundary_recovery_active = bool(
             self.config.get("boundary_recovery_enabled", False)

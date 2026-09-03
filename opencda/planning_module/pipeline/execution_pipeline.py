@@ -8,6 +8,9 @@ from typing import Any, Callable, Mapping, Optional
 from .perception_stage import PerceptionStage, PerceptionStageResult
 from .runtime_input_stage import RuntimeInputStage, RuntimeTickSnapshot
 from .speed_planner import effective_emergency_gap_m
+from .cav_conflict_pipeline import resolve_conflicts as resolve_cav_conflicts
+from .conflict_classifier import ClassifierParams
+from .spatiotemporal_corridor import CorridorParams
 
 
 @dataclass(frozen=True)
@@ -204,6 +207,31 @@ class PlanningPipeline:
 
     def resolve_conflicts(self, request, **kwargs):
         return self.behavior.resolve_conflicts(request, **kwargs)
+
+    @staticmethod
+    def resolve_cav_interaction(
+        *, reference_samples, ego_location, ego_yaw_rad, ego_speed_mps,
+        actor_id, claim, obstacle_snapshots, cav_intents, latch_state,
+        horizon_steps, dt_s,
+    ):
+        """Resolve cooperation against the candidate selected for execution."""
+
+        return resolve_cav_conflicts(
+            reference_samples=reference_samples,
+            ego_snapshot={
+                "x": float(ego_location.x), "y": float(ego_location.y),
+                "v": float(ego_speed_mps), "psi": float(ego_yaw_rad),
+            },
+            my_actor_id=int(actor_id), my_claim=claim,
+            obstacle_snapshots=obstacle_snapshots, cav_intents=cav_intents,
+            latch_state=latch_state,
+            classifier_params=ClassifierParams(
+                horizon_steps=max(1, int(horizon_steps)), dt_s=float(dt_s)
+            ),
+            corridor_params=CorridorParams(
+                horizon_steps=max(1, int(horizon_steps)), dt_s=float(dt_s)
+            ),
+        )
 
     def prepare_route_lane_change(self, **kwargs):
         return self.behavior.prepare_route_lane_change(**kwargs)
