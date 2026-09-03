@@ -6316,103 +6316,6 @@ class CPXMPCPlannerBridge:
         )
         return str(reason) if reason else ""
 
-    def _route_tracking_lane_change_window(
-        self,
-        *,
-        ego_location: carla.Location,
-        ego_yaw_rad: float,
-        target_speed_mps: float,
-        step_distance_m: float,
-    ) -> tuple[list[dict[str, object]], str]:
-        """Advance monotonically over the locked lane-change trajectory."""
-
-        min_first_forward_m = float(
-            self.config.get(
-                "reference_contract_lane_change_min_first_forward_m",
-                0.2,
-            )
-        )
-        stable_provider = getattr(
-            self, "_stable_reference_line_provider", ReferenceLineProvider()
-        )
-        stable_window = stable_provider.locked_lane_change_window(
-            ego_x_m=float(ego_location.x),
-            ego_y_m=float(ego_location.y),
-            ego_heading_rad=float(ego_yaw_rad),
-            target_lane_id=int(self.maneuver_manager.lane_change.target_lane_id),
-            target_speed_mps=float(target_speed_mps),
-            spacing_m=max(0.05, float(step_distance_m)),
-            count=int(self.mpc.horizon_steps),
-            min_first_forward_m=float(min_first_forward_m),
-            anchor_margin_m=float(
-                self.config.get(
-                    "lane_change_reference_anchor_margin_m", 0.05
-                )
-            ),
-            max_projection_advance_m=max(2.0, 2.0 * float(step_distance_m)),
-        )
-        self._stable_reference_line_provider = stable_provider
-        self.maneuver_manager.advance_lane_change(
-            progress_s_m=float(stable_window.projection_s_m)
-        )
-        best_index = int(stable_window.master_index)
-        self.maneuver_manager.advance_lane_change(progress_index=int(best_index))
-        window = [dict(sample) for sample in stable_window.samples]
-        progress_pairs = self.maneuver_manager.lane_change.progress_pairs
-        if window and not progress_pairs:
-            sample = window[0]
-            required = (
-                "lane_change_source_x_m", "lane_change_source_y_m",
-                "lane_change_target_x_m", "lane_change_target_y_m",
-            )
-            if all(key in sample for key in required):
-                from opencda.planning_module.pipeline.candidate_pipeline import (
-                    _lane_change_initial_progress,
-                )
-                self.maneuver_manager.advance_lane_change(
-                    progress=_lane_change_initial_progress(
-                        source_sample={
-                            "x_ref_m": sample["lane_change_source_x_m"],
-                            "y_ref_m": sample["lane_change_source_y_m"],
-                        },
-                        target_sample={
-                            "x_ref_m": sample["lane_change_target_x_m"],
-                            "y_ref_m": sample["lane_change_target_y_m"],
-                        },
-                        ego_x_m=float(ego_location.x),
-                        ego_y_m=float(ego_location.y),
-                    )
-                )
-        if progress_pairs:
-            # Under direct target-lane tracking (progress_pairs populated),
-            # the per-sample "lane_change_progress" tag is a stale
-            # time-schedule, not a genuine crossing measurement -- taking
-            # its max against a live geometric read would let one bad
-            # (over-reported) schedule value permanently inflate progress,
-            # since this accumulator is monotonic. Measure live progress
-            # instead, monotonic only against its own prior value.
-            from opencda.planning_module.pipeline.candidate_pipeline import (
-                _lane_change_initial_progress,
-            )
-
-            pair_index = min(int(best_index), len(progress_pairs) - 1)
-            source_sample, target_sample = progress_pairs[pair_index]
-            live_progress = _lane_change_initial_progress(
-                source_sample=source_sample,
-                target_sample=target_sample,
-                ego_x_m=float(ego_location.x),
-                ego_y_m=float(ego_location.y),
-            )
-            self.maneuver_manager.advance_lane_change(progress=float(live_progress))
-        return (
-            window,
-            "lane_change_locked_window:"
-            f"phase={str(self.maneuver_manager.lane_change.phase)}:"
-            f"index={int(best_index)}:s={float(stable_window.start_s_m):.2f}:"
-            f"provider={stable_window.reason}:"
-            f"progress={float(self.maneuver_manager.lane_change.progress):.3f}",
-        )
-
     def _validate_route_tracking_lane_change_reference(
         self,
         *,
@@ -7096,11 +6999,14 @@ class CPXMPCPlannerBridge:
                 float(self.mpc.dt_s) * float(committed_speed_mps),
             )
             committed_reference, committed_window_reason = (
-                self._route_tracking_lane_change_window(
-                    ego_location=ego_location,
-                    ego_yaw_rad=float(ego_yaw_rad),
+                self.maneuver_manager.locked_lane_change_window(
+                    provider=self._stable_reference_line_provider,
+                    ego_x_m=float(ego_location.x),
+                    ego_y_m=float(ego_location.y),
+                    ego_heading_rad=float(ego_yaw_rad),
                     target_speed_mps=float(committed_speed_mps),
-                    step_distance_m=float(committed_step_m),
+                    spacing_m=float(committed_step_m),
+                    horizon_steps=int(self.mpc.horizon_steps),
                 )
             )
             # Windowing the locked master path (nearest-point search plus
@@ -7456,11 +7362,14 @@ class CPXMPCPlannerBridge:
                     + str(completion_reason)
                 )
             locked_window, window_reason = (
-                self._route_tracking_lane_change_window(
-                    ego_location=ego_location,
-                    ego_yaw_rad=float(ego_yaw_rad),
+                self.maneuver_manager.locked_lane_change_window(
+                    provider=self._stable_reference_line_provider,
+                    ego_x_m=float(ego_location.x),
+                    ego_y_m=float(ego_location.y),
+                    ego_heading_rad=float(ego_yaw_rad),
                     target_speed_mps=float(selected.intent.target_speed_mps),
-                    step_distance_m=float(step_distance_m),
+                    spacing_m=float(step_distance_m),
+                    horizon_steps=int(self.mpc.horizon_steps),
                 )
             )
             locked_valid, locked_validation_reason = (

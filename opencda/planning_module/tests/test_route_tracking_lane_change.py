@@ -907,17 +907,23 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
             )
         self._install_lane_change_reference(bridge, master)
 
-        first, _ = bridge._route_tracking_lane_change_window(
-            ego_location=bridge.carla.Location(x=0.0, y=0.0),
-            ego_yaw_rad=0.0,
+        first, _ = bridge.maneuver_manager.locked_lane_change_window(
+            provider=bridge._stable_reference_line_provider,
+            ego_x_m=0.0,
+            ego_y_m=0.0,
+            ego_heading_rad=0.0,
             target_speed_mps=3.0,
-            step_distance_m=0.3,
+            spacing_m=0.3,
+            horizon_steps=bridge.mpc.horizon_steps,
         )
-        second, _ = bridge._route_tracking_lane_change_window(
-            ego_location=bridge.carla.Location(x=2.1, y=0.5),
-            ego_yaw_rad=0.0,
+        second, _ = bridge.maneuver_manager.locked_lane_change_window(
+            provider=bridge._stable_reference_line_provider,
+            ego_x_m=2.1,
+            ego_y_m=0.5,
+            ego_heading_rad=0.0,
             target_speed_mps=3.0,
-            step_distance_m=0.3,
+            spacing_m=0.3,
+            horizon_steps=bridge.mpc.horizon_steps,
         )
 
         self.assertEqual(len(first), 20)
@@ -967,11 +973,14 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
         # Ego is laterally only 30% of the way across (y=1.05 of a 3.5m gap),
         # even though the nearest station's *scheduled* tag already claims
         # 100% (index 19+ -> scheduled_progress=1.0).
-        window, _ = bridge._route_tracking_lane_change_window(
-            ego_location=bridge.carla.Location(x=6.0, y=1.05),
-            ego_yaw_rad=0.0,
+        window, _ = bridge.maneuver_manager.locked_lane_change_window(
+            provider=bridge._stable_reference_line_provider,
+            ego_x_m=6.0,
+            ego_y_m=1.05,
+            ego_heading_rad=0.0,
             target_speed_mps=3.0,
-            step_distance_m=0.3,
+            spacing_m=0.3,
+            horizon_steps=bridge.mpc.horizon_steps,
         )
 
         self.assertTrue(window)

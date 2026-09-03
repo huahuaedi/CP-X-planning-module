@@ -14,6 +14,12 @@ from .stage_contracts import (
 )
 
 
+def _lane_change_progress(**kwargs):
+    from .candidate_pipeline import _lane_change_initial_progress
+
+    return _lane_change_initial_progress(**kwargs)
+
+
 @dataclass
 class LaneChangeLifecycle:
     option: str = ""
@@ -239,6 +245,86 @@ class ManeuverManager:
         if phase is not None:
             state.phase = str(phase)
         return state
+
+    def locked_lane_change_window(
+        self,
+        *,
+        provider,
+        ego_x_m,
+        ego_y_m,
+        ego_heading_rad,
+        target_speed_mps,
+        spacing_m,
+        horizon_steps,
+    ):
+        """Advance the sole committed reference and its geometric progress."""
+
+        spacing_m = max(0.05, float(spacing_m))
+        window_result = provider.locked_lane_change_window(
+            ego_x_m=float(ego_x_m),
+            ego_y_m=float(ego_y_m),
+            ego_heading_rad=float(ego_heading_rad),
+            target_lane_id=int(self.lane_change.target_lane_id),
+            target_speed_mps=float(target_speed_mps),
+            spacing_m=spacing_m,
+            count=int(horizon_steps),
+            min_first_forward_m=float(
+                self.config.get(
+                    "reference_contract_lane_change_min_first_forward_m", 0.2
+                )
+            ),
+            anchor_margin_m=float(
+                self.config.get("lane_change_reference_anchor_margin_m", 0.05)
+            ),
+            max_projection_advance_m=max(2.0, 2.0 * spacing_m),
+        )
+        self.advance_lane_change(
+            progress_s_m=float(window_result.projection_s_m),
+            progress_index=int(window_result.master_index),
+        )
+        rows = [dict(sample) for sample in window_result.samples]
+        progress_pairs = self.lane_change.progress_pairs
+        if rows and not progress_pairs:
+            sample = rows[0]
+            required = (
+                "lane_change_source_x_m", "lane_change_source_y_m",
+                "lane_change_target_x_m", "lane_change_target_y_m",
+            )
+            if all(key in sample for key in required):
+                self.advance_lane_change(progress=_lane_change_progress(
+                    source_sample={
+                        "x_ref_m": sample["lane_change_source_x_m"],
+                        "y_ref_m": sample["lane_change_source_y_m"],
+                    },
+                    target_sample={
+                        "x_ref_m": sample["lane_change_target_x_m"],
+                        "y_ref_m": sample["lane_change_target_y_m"],
+                    },
+                    ego_x_m=float(ego_x_m),
+                    ego_y_m=float(ego_y_m),
+                ))
+        if progress_pairs:
+            pair_index = min(
+                int(window_result.master_index), len(progress_pairs) - 1
+            )
+            source_sample, target_sample = progress_pairs[pair_index]
+            self.advance_lane_change(progress=_lane_change_progress(
+                source_sample=source_sample,
+                target_sample=target_sample,
+                ego_x_m=float(ego_x_m),
+                ego_y_m=float(ego_y_m),
+            ))
+        return rows, (
+            "lane_change_locked_window:phase=%s:index=%d:s=%.2f:provider=%s:"
+            "progress=%.3f"
+            % (
+                str(self.lane_change.phase),
+                int(window_result.master_index),
+                float(window_result.start_s_m),
+                str(window_result.reason),
+                float(self.lane_change.progress),
+            )
+        )
 
     def finish_lane_change_lifecycle(self, completed):
         state, released = self.lane_change, str(self.lane_change.option)
