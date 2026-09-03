@@ -70,6 +70,13 @@ def _cav_to_agent_snapshot(cav: CavIntent) -> dict:
     }
 
 
+def _agent_id(agent: Mapping[str, Any]) -> str:
+    return str(agent.get(
+        "id",
+        agent.get("vehicle_id", agent.get("track_id", agent.get("actor_id", ""))),
+    ))
+
+
 def resolve_conflicts(
     *,
     reference_samples: Sequence[Any],
@@ -87,7 +94,13 @@ def resolve_conflicts(
 ) -> ConflictResolution:
     cavs = list(cav_intents or [])
     cav_agents = [_cav_to_agent_snapshot(c) for c in cavs]
-    all_agents: List[Mapping[str, Any]] = list(obstacle_snapshots or []) + cav_agents
+    # A connected vehicle normally also appears in perception.  Its shared
+    # trajectory is the richer representation, so replace (rather than add
+    # to) the perception track for the same actor.
+    cav_ids = {str(c.actor_id) for c in cavs}
+    raw_obstacles = list(obstacle_snapshots or [])
+    perception_agents = [a for a in raw_obstacles if _agent_id(a) not in cav_ids]
+    all_agents: List[Mapping[str, Any]] = perception_agents + cav_agents
 
     # Stage A -----------------------------------------------------------------
     tags = classify_conflicts(
@@ -127,9 +140,7 @@ def resolve_conflicts(
     # Stage C ---------------------------------------------------------------
     items: List[Tuple[Mapping[str, Any], ConflictTag, Optional[ConflictAssignment]]] = []
     for agent in all_agents:
-        aid = str(
-            agent.get("id", agent.get("vehicle_id", agent.get("track_id", agent.get("actor_id", ""))))
-        )
+        aid = _agent_id(agent)
         t = tag_by_id.get(aid)
         if t is None or t.tag == IGNORE:
             continue
@@ -141,6 +152,7 @@ def resolve_conflicts(
 
     diagnostics = {
         "conflict_agent_count": len(all_agents),
+        "deduplicated_agent_count": len(raw_obstacles) + len(cav_agents) - len(all_agents),
         "cav_count": len(cavs),
         "non_ignore_count": sum(1 for t in tags if t.tag != IGNORE),
         "tags": {t.agent_id: t.tag for t in tags},

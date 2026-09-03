@@ -108,3 +108,19 @@ def test_latch_state_round_trips_and_holds():
         latch_state=r1.latch_state, hysteresis_ticks=3,
     )
     assert r2.diagnostics["roles"].get("2") == "proceed"
+
+
+def test_connected_cav_replaces_same_actor_perception_track():
+    path = [(20.0 + k, 0.0) for k in range(20)]
+    cav = _cav(2, (20.0, 0.0), committed_at_s=4.0, path=path)
+    duplicate_track = {
+        "id": 2, "x": 200.0, "y": 0.0, "v": 0.0,
+        "predicted_trajectory": [{"x": 200.0, "y": 0.0}] * 21,
+    }
+    r = resolve_conflicts(
+        reference_samples=REF, ego_snapshot=EGO, my_actor_id=1,
+        obstacle_snapshots=[duplicate_track], cav_intents=[cav],
+    )
+    assert r.diagnostics["conflict_agent_count"] == 1
+    assert r.diagnostics["deduplicated_agent_count"] == 1
+    assert set(r.diagnostics["tags"]) == {"2"}

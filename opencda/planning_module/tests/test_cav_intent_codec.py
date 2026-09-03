@@ -84,6 +84,42 @@ def test_collect_reads_nested_intent_and_backfills_id():
     assert cavs[0].claim.committed_at_s == 3.0
 
 
+def test_collect_drops_expired_low_probability_and_keeps_newest_sequence():
+    def payload(sequence, generated_at_s, valid_for_s, probability):
+        return cav_intent_to_payload(build_ego_cav_intent(
+            actor_id=2, position_xy=(10, 0), heading_rad=0, speed_mps=6,
+            claim=_claim(), sequence=sequence, generated_at_s=generated_at_s,
+            valid_for_s=valid_for_s, probability=probability,
+        ))
+
+    records = [
+        payload(1, 9.0, 2.0, 1.0),
+        payload(3, 10.0, 1.0, 1.0),
+        payload(2, 10.0, 1.0, 1.0),
+        payload(4, 8.0, 0.5, 1.0),
+        payload(5, 10.0, 1.0, 0.01),
+    ]
+    cavs = collect_cav_intents(
+        records, self_actor_id=1, now_s=10.25, minimum_probability=0.05
+    )
+    assert len(cavs) == 1
+    assert cavs[0].sequence == 3
+
+
+def test_codec_roundtrip_preserves_transport_metadata():
+    intent = build_ego_cav_intent(
+        actor_id=3, position_xy=(1, 2), heading_rad=0.2, speed_mps=4,
+        claim=_claim(), generated_at_s=7.0, valid_for_s=0.4,
+        sequence=12, probability=0.8,
+    )
+    back = cav_intent_from_payload(cav_intent_to_payload(intent))
+    assert back is not None
+    assert back.generated_at_s == 7.0
+    assert back.valid_until_s == 7.4
+    assert back.sequence == 12
+    assert back.probability == 0.8
+
+
 def test_sample_cav_path_interpolates_and_clamps():
     intent = CavIntent(
         actor_id=1, position_xy=(0, 0), claim=_claim(),

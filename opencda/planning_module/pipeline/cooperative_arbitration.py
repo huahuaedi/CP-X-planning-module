@@ -136,6 +136,10 @@ class CavIntent:
     speed_mps: float = 0.0
     planned_path: Tuple[Tuple[float, float, float, float], ...] = ()
     cooperative: bool = True
+    generated_at_s: float = 0.0
+    valid_until_s: float = float("inf")
+    sequence: int = 0
+    probability: float = 1.0
 
 
 @dataclass(frozen=True)

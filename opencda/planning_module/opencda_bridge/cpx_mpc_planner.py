@@ -221,7 +221,8 @@ class CPXMPCPlannerBridge:
         # This CAV's own broadcast for nearby CP-X CAVs to read (its planned
         # trajectory + ResourceClaim + pose). Read peer-to-peer through
         # v2x_manager.cav_nearby; see _publish_cav_intent / _collect_cav_intents.
-        self.last_cav_intent = None
+        self.last_cav_intent_payload = None
+        self._cav_intent_sequence = 0
         self._warned = False
         self._diagnostic_hd_map_matcher = DiagnosticHDMapMatcher()
         self._diagnostic_local_lane_frame: dict[str, object] = {}
@@ -3517,10 +3518,11 @@ class CPXMPCPlannerBridge:
         ego_speed_mps: float, sim_time_s: float,
     ) -> None:
         """Store this CAV's broadcast (planned trajectory + claim + pose) on
-        ``self.last_cav_intent`` for nearby CP-X CAVs to read this tick."""
+        ``self.last_cav_intent_payload`` for the V2X adapter to transport."""
 
         from opencda.planning_module.pipeline.cav_intent_codec import (
             build_ego_cav_intent,
+            cav_intent_to_payload,
         )
 
         states = getattr(self.mpc, "_last_x_solution", None)
@@ -3528,7 +3530,8 @@ class CPXMPCPlannerBridge:
             [] if states is None
             else [[float(s[0]), float(s[1]), float(s[2]), float(s[3])] for s in states]
         )
-        self.last_cav_intent = build_ego_cav_intent(
+        self._cav_intent_sequence += 1
+        intent = build_ego_cav_intent(
             actor_id=int(getattr(self.vehicle_manager.vehicle, "id", -1)),
             position_xy=(float(ego_location.x), float(ego_location.y)),
             heading_rad=float(ego_yaw_rad),
@@ -3536,17 +3539,20 @@ class CPXMPCPlannerBridge:
             claim=self._ego_cav_claim(sim_time_s=float(sim_time_s)),
             planned_states=planned,
             dt_s=float(self.mpc.dt_s),
+            generated_at_s=float(sim_time_s),
+            valid_for_s=float(self.config.get("cav_intent_valid_for_s", 0.5)),
+            sequence=int(self._cav_intent_sequence),
         )
+        self.last_cav_intent_payload = cav_intent_to_payload(intent)
 
     def _collect_cav_intents(self) -> list:
         """CavIntent list for every nearby CP-X CAV.
 
-        OpenCDA's ``v2x_manager.cav_nearby`` maps cav id -> its
-        VehicleManager (populated by v2x_manager.search()). Prefer the cav's
-        own published ``last_cav_intent`` (its planned trajectory + claim);
-        fall back to reading its maneuver-commitment + live transform on the
-        first tick before it has solved. Cavs on OpenCDA's BehaviorAgent
-        (no ``cpx_planner``) go to the obstacle path -- not returned here.
+        The simulator adapter currently exposes nearby peers through
+        ``v2x_manager.cav_nearby``.  Only their serialized intent payload is
+        consumed here; peer CARLA pose and planner internals are deliberately
+        not read.  The same payload boundary can therefore be replaced by a
+        real V2X transport without changing planning logic.
         """
 
         if not self._cav_conflict_enabled:
@@ -3555,62 +3561,24 @@ class CPXMPCPlannerBridge:
         cav_nearby = dict(getattr(v2x_manager, "cav_nearby", {}) or {})
         if not cav_nearby:
             return []
-        from dataclasses import replace as _replace
-        from opencda.planning_module.pipeline.cooperative_arbitration import (
-            CavIntent,
-            ResourceClaim,
-        )
+        from opencda.planning_module.pipeline.cav_intent_codec import collect_cav_intents
 
-        out: list = []
+        records = []
         for cav_id, cav_manager in cav_nearby.items():
             cav_bridge = getattr(cav_manager, "cpx_planner", None)
-            cav_vehicle = getattr(cav_manager, "vehicle", None)
-            if cav_bridge is None or cav_vehicle is None:
+            if cav_bridge is None:
                 continue
-            try:
-                actor_id = int(getattr(cav_vehicle, "id", cav_id))
-            except (TypeError, ValueError):
-                continue
-            published = getattr(cav_bridge, "last_cav_intent", None)
-            try:
-                tf = cav_vehicle.get_transform()
-                vel = cav_vehicle.get_velocity()
-            except Exception:
-                tf = vel = None
-            if isinstance(published, CavIntent) and published.claim is not None:
-                # Refresh the pose to this tick; keep the shared plan + claim.
-                if tf is not None and vel is not None:
-                    published = _replace(
-                        published,
-                        position_xy=(float(tf.location.x), float(tf.location.y)),
-                        heading_rad=math.radians(float(tf.rotation.yaw)),
-                        speed_mps=math.sqrt(vel.x ** 2 + vel.y ** 2 + vel.z ** 2),
-                    )
-                out.append(published)
-                continue
-            if tf is None or vel is None:
-                continue
-            cav_lc = getattr(
-                getattr(cav_bridge, "maneuver_manager", None), "lane_change", None
-            )
-            committed_at_s = float(getattr(cav_lc, "committed_at_s", 0.0))
-            if not math.isfinite(committed_at_s):
-                committed_at_s = 0.0
-            active = bool(getattr(cav_lc, "active", False)) or str(
-                getattr(cav_lc, "phase", "")
-            ) in ("executing", "target_lane_stabilization")
-            out.append(CavIntent(
-                actor_id=actor_id,
-                position_xy=(float(tf.location.x), float(tf.location.y)),
-                claim=ResourceClaim(
-                    kind="lane_change", resource_id="lane_change",
-                    committed_at_s=float(committed_at_s), active=bool(active),
-                ),
-                heading_rad=math.radians(float(tf.rotation.yaw)),
-                speed_mps=math.sqrt(vel.x ** 2 + vel.y ** 2 + vel.z ** 2),
-                planned_path=(), cooperative=True,
-            ))
-        return out
+            payload = getattr(cav_bridge, "last_cav_intent_payload", None)
+            if payload is not None:
+                records.append(payload)
+        return collect_cav_intents(
+            records,
+            self_actor_id=int(getattr(self.vehicle_manager.vehicle, "id", -1)),
+            now_s=float(self._sim_time_s()),
+            minimum_probability=float(
+                self.config.get("cav_intent_minimum_probability", 0.05)
+            ),
+        )
 
     def _cav_corridor_rows(self, ego_location: Any):
         """Convert the last conflict corridor (Stage C) into linear QP rows
@@ -3654,325 +3622,6 @@ class CPXMPCPlannerBridge:
             committed_at_s=float(committed_at_s),
             active=bool(active),
         )
-
-    def _cooperative_lane_change_yield_reason(
-        self,
-        *,
-        ego_location: carla.Location,
-        ego_yaw_rad: float,
-    ) -> str:
-        """Hold in lane if a nearby CPX-controlled peer is already mid-lane-change.
-
-        Both CAVs independently deciding to change lanes at the same moment
-        near each other is exactly the situation that produced the
-        multi-CAV mutual-interference gridlock diagnosed in Construction_Zone
-        testing. Serialize on physical order instead: whichever CAV is
-        already committed to a lane change goes first; a trailing peer holds
-        lane_follow until that commitment clears (state resets to IDLE, which
-        stops being broadcast as active -- see ManeuverCommitment.active).
-
-        Thin wrapper around the shared cooperative_arbitration module: any
-        active peer lane-change conflicts with ego's own (resource_id is a
-        constant, not the specific lane, since two CAVs changing lanes near
-        each other at the same time is the thing being serialized,
-        regardless of which lanes are involved).
-        """
-        if not bool(
-            self.config.get("cooperative_lane_change_yield_enabled", True)
-        ):
-            return ""
-        v2x_manager = getattr(self.vehicle_manager, "v2x_manager", None)
-        cav_intents = dict(getattr(v2x_manager, "cav_intents", {}) or {})
-        cav_nearby = dict(getattr(v2x_manager, "cav_nearby", {}) or {})
-        if not cav_intents or not cav_nearby:
-            return ""
-        from opencda.planning_module.pipeline.cooperative_arbitration import (
-            ResourceClaim,
-            should_yield,
-        )
-
-        peers: list[tuple[int, ResourceClaim, tuple[float, float]]] = []
-        for peer_id, message in cav_intents.items():
-            if not isinstance(message, Mapping):
-                continue
-            decision = str(message.get("maneuver_commitment_decision", ""))
-            if decision not in ("lane_change_left", "lane_change_right"):
-                continue
-            peer_manager = cav_nearby.get(str(peer_id))
-            peer_vehicle = getattr(peer_manager, "vehicle", None)
-            if peer_vehicle is None:
-                continue
-            try:
-                peer_location = peer_vehicle.get_location()
-            except Exception:
-                continue
-            try:
-                peer_actor_id = int(peer_id)
-            except (TypeError, ValueError):
-                continue
-            peers.append((
-                peer_actor_id,
-                ResourceClaim(
-                    kind="lane_change",
-                    resource_id="lane_change",
-                    committed_at_s=float(
-                        message.get("maneuver_commitment_committed_at_s", 0.0) or 0.0
-                    ),
-                    active=bool(message.get("maneuver_commitment_active", False)),
-                ),
-                (float(peer_location.x), float(peer_location.y)),
-            ))
-        if not peers:
-            return ""
-        my_claim = ResourceClaim(
-            kind="lane_change",
-            resource_id="lane_change",
-            committed_at_s=float(self._sim_time_s()),
-            active=True,
-        )
-        my_actor_id = int(getattr(self.vehicle_manager.vehicle, "id", -1))
-        reason = should_yield(
-            my_claim=my_claim,
-            my_actor_id=my_actor_id,
-            my_position_xy=(float(ego_location.x), float(ego_location.y)),
-            my_heading_rad=float(ego_yaw_rad),
-            peers=peers,
-            range_m=float(
-                self.config.get("cooperative_lane_change_yield_range_m", 40.0)
-            ),
-        )
-        return str(reason) if reason else ""
-
-    def _cooperative_wait_speed_cap_mps(
-        self,
-        *,
-        ego_location: carla.Location,
-        ego_speed_mps: float,
-        cooperative_lane_change_yield_reason: str,
-    ) -> Optional[float]:
-        """Cap speed while queued behind a peer's lane change.
-
-        ``_cooperative_lane_change_yield_reason`` already holds ego's own
-        lane change back until the peer clears -- necessary but not
-        sufficient. That peer is normally in an ADJACENT lane, outside
-        ego's own-lane ``_front_gap_m`` search cone, so the ordinary
-        following-cap in speed_planner.py never sees it and has no reason
-        to slow down for it. Left unconstrained, ego keeps accelerating
-        toward its full cruise target while waiting, closes the real gap
-        to the peer it intends to merge behind, and by the time its own
-        turn opens up the gap has fallen under trajectory_risk.py's
-        min_front_gap_m -- so the now-authorized lane change gets denied
-        by target_lane_prediction_risk and is missed once the route's own
-        lane-change requirement lapses (diagnosed via Interactive_Lane_
-        Change telemetry: gap fell from ~8.3m to ~6.5m across the wait
-        window). This does not touch that prediction-risk check at all;
-        it just stops ego from closing the gap in the first place while
-        it has nowhere to go yet.
-
-        The trigger distance is deliberately larger than trajectory_risk.
-        py's own min_front_gap_m (8.0m default): reusing that exact value
-        here gave this cap zero lead time -- telemetry showed the yield
-        reason (and therefore this function) only ever starts firing once
-        the gap has *already* dropped to ~7.9m, one tick past the hard
-        floor, so there was never a tick left where capping ego's speed
-        could still have prevented the gap sliding on down to ~6.5-6.9m
-        and tripping target_lane_prediction_risk. A separate, wider
-        trigger (cooperative_wait_trigger_gap_m, default 15.0m) gives the
-        cap several seconds of runway to hold ego at the peer's speed
-        before the hard threshold is anywhere close.
-        """
-        if not cooperative_lane_change_yield_reason:
-            return None
-        match = re.search(r"peer=(-?\d+)", cooperative_lane_change_yield_reason)
-        if match is None:
-            return None
-        peer_id = match.group(1)
-        v2x_manager = getattr(self.vehicle_manager, "v2x_manager", None)
-        cav_nearby = dict(getattr(v2x_manager, "cav_nearby", {}) or {})
-        peer_manager = cav_nearby.get(str(peer_id))
-        peer_vehicle = getattr(peer_manager, "vehicle", None)
-        if peer_vehicle is None:
-            return None
-        try:
-            peer_location = peer_vehicle.get_location()
-            peer_velocity = peer_vehicle.get_velocity()
-        except Exception:
-            return None
-        peer_speed_mps = math.sqrt(
-            float(peer_velocity.x) ** 2
-            + float(peer_velocity.y) ** 2
-            + float(peer_velocity.z) ** 2
-        )
-        distance_m = math.hypot(
-            float(peer_location.x) - float(ego_location.x),
-            float(peer_location.y) - float(ego_location.y),
-        )
-        # Both floors below are flat distances that don't scale with
-        # cruise speed -- also give them the same reaction-time margin
-        # regardless of configured cruise speed, matching min_front_gap_m's
-        # own speed scaling in planner_input_adapter.py. Scaled off the
-        # *configured* cruise target (self.target_speed_mps), not ego's
-        # live instantaneous speed -- this wait window happens while ego
-        # is still mid-acceleration toward that target, so scaling off
-        # the live speed barely moved either floor at the moment it
-        # mattered (confirmed via telemetry: identical denial, identical
-        # distances down to the decimal, before and after that version).
-        min_gap_m = max(
-            0.5,
-            float(self.target_speed_mps) * float(self.min_front_gap_time_s),
-            float(self.config.get("cooperative_wait_min_gap_m", 8.0)),
-        )
-        trigger_gap_m = max(
-            float(min_gap_m),
-            float(self.target_speed_mps)
-            * float(self.config.get("cooperative_wait_trigger_time_s", 15.0 / 11.18)),
-            float(self.config.get("cooperative_wait_trigger_gap_m", 15.0)),
-        )
-        if float(distance_m) >= float(trigger_gap_m):
-            return None
-        # min(ego_speed, peer_speed) was the original cap here, but it does
-        # nothing when both CAVs are ramping up toward the same cruise
-        # target in near lockstep from a similar start (confirmed via
-        # telemetry at 20 m/s cruise: peer's speed tracked ego's own climb
-        # tick-for-tick, ~7->11 m/s over the same 2s window, so "cap at
-        # peer's speed" never actually differed from where ego was already
-        # headed -- three separate threshold-tuning attempts on the
-        # trigger/min-gap distances above produced bit-identical
-        # trajectories because the actual constraining value never
-        # changed). Reuse the same IDM model used for ordinary front-
-        # vehicle following instead: it reacts to the actual gap being
-        # smaller than the desired safe spacing even when closing speed is
-        # ~0, which a plain speed-match can't express.
-        from opencda.planning_module.behavior_planner.car_follow import (
-            idm_acceleration as _cooperative_wait_idm_acceleration,
-        )
-
-        idm_accel = _cooperative_wait_idm_acceleration(
-            v=float(ego_speed_mps),
-            v_lead=max(0.0, float(peer_speed_mps)),
-            gap_m=max(0.1, float(distance_m)),
-            v_desired=max(0.1, float(self.target_speed_mps)),
-            a_max=max(
-                0.05,
-                float(self.config.get("following_idm_max_acceleration_mps2", 2.0)),
-            ),
-            b_comfort=max(
-                0.05,
-                float(
-                    self.config.get(
-                        "following_idm_comfort_deceleration_mps2", 3.0
-                    )
-                ),
-            ),
-            time_headway_s=max(
-                0.05, float(self.config.get("following_time_headway_s", 1.5))
-            ),
-            min_gap_m=float(min_gap_m),
-            delta=max(
-                1.0, float(self.config.get("following_idm_acceleration_exponent", 4.0))
-            ),
-        )
-        cap_horizon_s = max(
-            0.05, float(self.config.get("cooperative_wait_cap_horizon_s", 1.0))
-        )
-        return max(0.0, float(ego_speed_mps) + float(idm_accel) * float(cap_horizon_s))
-
-    def _cooperative_avoidance_lane_yield_reason(
-        self,
-        *,
-        target_lane_id: int,
-        ego_location: carla.Location,
-        ego_yaw_rad: float,
-    ) -> str:
-        """Hold back if a peer CAV already claimed this exact avoidance lane.
-
-        Construction_Zone testing with every CAV controlled surfaced a
-        multi-CAV gridlock: several CAVs converge on the same one or two
-        usable bypass lanes at once, so each one's lane_safety_scores for
-        that lane stays low (correctly -- a peer really is right there) and
-        nobody ever moves, forever, since nothing breaks the symmetry.
-        Rather than blind the safety scorer to peer CAVs (a peer stopped in
-        your target lane is a real hazard, CAV or not), arbitrate who is
-        even allowed to attempt this specific lane: whichever CAV has been
-        blocked by its obstacle the longest goes first (a reasonable stand-in
-        for "committed first", since local-avoidance commitment itself is
-        decided in the same step this reads); the rest hold in place and
-        re-check every tick, so as soon as the leader clears the lane (moves
-        through, or its own commitment resets) the next one in line takes
-        its turn instead of everyone staying wedged forever.
-        """
-        if not bool(
-            self.config.get("cooperative_avoidance_lane_yield_enabled", True)
-        ):
-            return ""
-        v2x_manager = getattr(self.vehicle_manager, "v2x_manager", None)
-        cav_intents = dict(getattr(v2x_manager, "cav_intents", {}) or {})
-        cav_nearby = dict(getattr(v2x_manager, "cav_nearby", {}) or {})
-        if not cav_intents or not cav_nearby:
-            return ""
-        from opencda.planning_module.pipeline.cooperative_arbitration import (
-            ResourceClaim,
-            should_yield,
-        )
-
-        resource_id = str(int(target_lane_id))
-        peers: list[tuple[int, ResourceClaim, tuple[float, float]]] = []
-        for peer_id, message in cav_intents.items():
-            if not isinstance(message, Mapping):
-                continue
-            if not bool(message.get("static_obstacle_local_avoidance_active", False)):
-                continue
-            peer_target_lane_id = message.get("static_obstacle_local_target_lane_id", "")
-            if str(peer_target_lane_id) != resource_id:
-                continue
-            peer_manager = cav_nearby.get(str(peer_id))
-            peer_vehicle = getattr(peer_manager, "vehicle", None)
-            if peer_vehicle is None:
-                continue
-            try:
-                peer_location = peer_vehicle.get_location()
-            except Exception:
-                continue
-            try:
-                peer_actor_id = int(peer_id)
-            except (TypeError, ValueError):
-                continue
-            peers.append((
-                peer_actor_id,
-                ResourceClaim(
-                    kind="avoidance_lane",
-                    resource_id=resource_id,
-                    committed_at_s=float(
-                        message.get("static_obstacle_candidate_since_s", 0.0) or 0.0
-                    ),
-                    active=True,
-                    require_ahead=False,
-                ),
-                (float(peer_location.x), float(peer_location.y)),
-            ))
-        if not peers:
-            return ""
-        my_claim = ResourceClaim(
-            kind="avoidance_lane",
-            resource_id=resource_id,
-            committed_at_s=float(
-                self.pipeline.static_obstacle.candidate_since_s
-            ),
-            active=True,
-            require_ahead=False,
-        )
-        my_actor_id = int(getattr(self.vehicle_manager.vehicle, "id", -1))
-        reason = should_yield(
-            my_claim=my_claim,
-            my_actor_id=my_actor_id,
-            my_position_xy=(float(ego_location.x), float(ego_location.y)),
-            my_heading_rad=float(ego_yaw_rad),
-            peers=peers,
-            range_m=float(
-                self.config.get("cooperative_avoidance_lane_yield_range_m", 40.0)
-            ),
-        )
-        return str(reason) if reason else ""
 
     def _validate_route_tracking_lane_change_reference(
         self,

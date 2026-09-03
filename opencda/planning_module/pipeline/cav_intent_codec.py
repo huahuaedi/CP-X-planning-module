@@ -65,6 +65,10 @@ def build_ego_cav_intent(
     t0_s: float = 0.0,
     max_samples: int = 30,
     cooperative: bool = True,
+    generated_at_s: float = 0.0,
+    valid_for_s: float = 0.5,
+    sequence: int = 0,
+    probability: float = 1.0,
 ) -> CavIntent:
     """Assemble the ego's broadcast.
 
@@ -93,6 +97,10 @@ def build_ego_cav_intent(
         speed_mps=max(0.0, float(speed_mps)),
         planned_path=tuple(path),
         cooperative=bool(cooperative),
+        generated_at_s=float(generated_at_s),
+        valid_until_s=float(generated_at_s) + max(0.0, float(valid_for_s)),
+        sequence=max(0, int(sequence)),
+        probability=min(1.0, max(0.0, float(probability))),
     )
 
 
@@ -109,6 +117,10 @@ def cav_intent_to_payload(intent: CavIntent) -> dict:
         "heading_rad": float(intent.heading_rad),
         "speed_mps": float(intent.speed_mps),
         "cooperative": bool(intent.cooperative),
+        "generated_at_s": float(intent.generated_at_s),
+        "valid_until_s": float(intent.valid_until_s),
+        "sequence": int(intent.sequence),
+        "probability": float(intent.probability),
         "claim": {
             "kind": str(c.kind),
             "resource_id": str(c.resource_id),
@@ -166,6 +178,12 @@ def cav_intent_from_payload(payload: Mapping[str, Any]) -> Optional[CavIntent]:
         speed_mps=_f(payload, "speed_mps", "speed", "v"),
         planned_path=tuple(path),
         cooperative=bool(payload.get("cooperative", True)),
+        generated_at_s=_f(payload, "generated_at_s", "timestamp_s"),
+        valid_until_s=_f(payload, "valid_until_s", default=float("inf")),
+        sequence=max(0, int(_f(payload, "sequence", default=0.0))),
+        probability=min(1.0, max(0.0, _f(
+            payload, "probability", "confidence", default=1.0
+        ))),
     )
 
 
@@ -174,16 +192,20 @@ def collect_cav_intents(
     *,
     self_actor_id: int,
     intent_key: str = "cooperative_intent",
+    now_s: Optional[float] = None,
+    minimum_probability: float = 0.0,
 ) -> List[CavIntent]:
     """Extract cav intents from a CP-message-shaped iterable.
 
     Each record is one other vehicle; its cooperative intent is either the
     record itself (already payload-shaped) or a nested dict under
     ``intent_key``. Records for ``self_actor_id``, and records without a
-    parseable intent, are dropped.
+    parseable intent, expired intents, and intents below the configured
+    probability floor are dropped.  If several records exist for one actor,
+    only the newest sequence is returned.
     """
 
-    out: List[CavIntent] = []
+    newest_by_actor = {}
     for rec in list(records or []):
         if not isinstance(rec, Mapping):
             continue
@@ -196,9 +218,20 @@ def collect_cav_intents(
         if isinstance(nested, Mapping) and "actor_id" not in payload and _actor_id(rec) is not None:
             payload = {**payload, "actor_id": _actor_id(rec)}
         intent = cav_intent_from_payload(payload)
-        if intent is not None:
-            out.append(intent)
-    return out
+        if intent is None:
+            continue
+        if now_s is not None and float(intent.valid_until_s) < float(now_s):
+            continue
+        if float(intent.probability) < max(0.0, float(minimum_probability)):
+            continue
+        previous = newest_by_actor.get(int(intent.actor_id))
+        if previous is None or (
+            int(intent.sequence), float(intent.generated_at_s)
+        ) > (
+            int(previous.sequence), float(previous.generated_at_s)
+        ):
+            newest_by_actor[int(intent.actor_id)] = intent
+    return [newest_by_actor[k] for k in sorted(newest_by_actor)]
 
 
 # --------------------------------------------------------------------------- #
