@@ -67,6 +67,10 @@ from opencda.planning_module.pipeline.reference_publication_stage import (
     ReferencePublicationStage,
 )
 from opencda.planning_module.pipeline.mpc_entry_stage import MPCEntryStage
+from opencda.planning_module.pipeline.mpc_execution_stage import (
+    MPCExecutionRequest,
+    MPCExecutionStage,
+)
 from opencda.planning_module.pipeline.perception_stage import PerceptionStage
 from opencda.planning_module.pipeline.execution_pipeline import PlanningPipeline
 from opencda.planning_module.pipeline.static_obstacle_stage import StaticObstacleStage
@@ -304,41 +308,6 @@ class CPXMPCPlannerBridge:
         )
         self.full_allow_opportunistic_lane_change = bool(
             self.config.get("full_allow_opportunistic_lane_change", False)
-        )
-        self.full_lane_follow_max_destination_lateral_m = max(
-            0.0,
-            float(self.config.get("full_lane_follow_max_destination_lateral_m", 1.2)),
-        )
-        self.full_lane_follow_max_reference_first_lateral_m = max(
-            0.0,
-            float(self.config.get("full_lane_follow_max_reference_first_lateral_m", 0.65)),
-        )
-        self.full_stop_max_destination_lateral_m = max(
-            0.0,
-            float(self.config.get("full_stop_max_destination_lateral_m", 1.0)),
-        )
-        self.full_stop_max_reference_first_lateral_m = max(
-            0.0,
-            float(self.config.get("full_stop_max_reference_first_lateral_m", 0.55)),
-        )
-        # The lateral-only guard below lets a persistent physical heading
-        # bias go uncorrected for many ticks: each tick's lateral offset is
-        # individually small enough to stay under the lateral thresholds
-        # above, but a several-degree heading error against the true lane
-        # tangent (from compute_ego_lane_offset) integrates into lateral
-        # drift at low speed (v*sin(heading_error)) over a few seconds,
-        # eventually crossing the lateral threshold anyway -- just late,
-        # after the vehicle has drifted toward an adjacent lane and often
-        # after the maneuver window (e.g. an approaching intersection stop)
-        # has already closed. Checking heading directly forces the same
-        # already-working true-waypoint rebuild before that drift compounds.
-        self.full_lane_follow_max_heading_error_deg = max(
-            0.0,
-            float(self.config.get("full_lane_follow_max_heading_error_deg", 4.0)),
-        )
-        self.full_stop_max_heading_error_deg = max(
-            0.0,
-            float(self.config.get("full_stop_max_heading_error_deg", 4.0)),
         )
         self.full_mpc_reference_stabilizer_enabled = bool(
             self.config.get("full_mpc_reference_stabilizer_enabled", True)
@@ -1016,6 +985,7 @@ class CPXMPCPlannerBridge:
         reference_publication_stage = ReferencePublicationStage(
             reference_pipeline=self.reference_pipeline,
             reference_provider=self._stable_reference_line_provider,
+            config=self.config,
         )
         mpc_entry_stage = MPCEntryStage(self.config)
         static_obstacle_stage = StaticObstacleStage({
@@ -1191,6 +1161,11 @@ class CPXMPCPlannerBridge:
                     1.0,
                 )
             ),
+        )
+        self.pipeline.mpc_execution = MPCExecutionStage(
+            mpc=self.mpc,
+            control_buffer=self.control_buffer,
+            minimum_replan_speed_mps=float(self.full_control_buffer_min_speed_mps),
         )
         self.cp_message_path = str(
             self.config.get(
@@ -1863,6 +1838,11 @@ class CPXMPCPlannerBridge:
             candidate_reason=str(reference_debug.get(
                 "candidate_pipeline_selected_reason", ""
             )),
+            heading_error_rad=(
+                math.radians(float(reference_debug["behavior_lane_heading_error_deg"]))
+                if reference_debug.get("behavior_lane_heading_error_deg", "") != ""
+                else float("nan")
+            ),
         )
         destination_state = publication_result.mutable_destination()
         lane_center_reference = publication_result.mutable_samples()
@@ -1927,10 +1907,6 @@ class CPXMPCPlannerBridge:
             ego_yaw_rad=float(ego_yaw_rad),
             mode_transition_reason=str(mode_transition_guard_reason),
         )
-        control_context_key = str(mpc_control_context.key)
-        reference_anchor_relative_m = (
-            mpc_control_context.reference_anchor_relative_m
-        )
         # MPC constrains jerk between the previous control input and the new
         # acceleration sequence. Seed that constraint with the acceleration
         # command actually sent last tick, not the measured vehicle response.
@@ -1938,269 +1914,73 @@ class CPXMPCPlannerBridge:
         # after the speed target has recovered, otherwise forcing every new
         # solve to continue braking until the vehicle is almost stationary.
         mpc_jerk_seed_accel_mps2 = float(self._last_accel_mps2)
-        if str(candidate_hard_gate_reason):
-            self.control_buffer.reset(reason="control_buffer_reference_hard_veto")
-        elif bool(stationary_traffic_stop_hold):
-            self.control_buffer.update_from_solution(
-                u_solution=[[0.0, 0.0]],
-                plan_time_s=float(sim_time_s),
-                dt_s=float(self.mpc.dt_s),
-                context_key=str(control_context_key),
-                reference_anchor_relative_m=reference_anchor_relative_m,
-            )
-        failed_replan_buffer_reused = False
-        failed_replan_maneuver_steer_held = False
-        try:
-            if str(candidate_hard_gate_reason):
-                raise RuntimeError(str(candidate_hard_gate_reason))
-            force_replan = bool(
-                not stationary_traffic_stop_hold
-                and mpc_control_context.force_replan
-            )
-            low_speed_buffer_replan = self.pipeline.low_speed_mpc_replan_required(
-                ego_speed_mps=float(ego_speed_mps),
+        road_envelope_payload_world = (
+            self._current_route_tracking_lane_change_envelope_payload_world()
+        )
+        if road_envelope_payload_world is None:
+            road_envelope_payload_world = self._rolling_turn_envelope_payload_world(
                 behavior_decision=str(behavior_decision.maneuver),
-                behavior_fsm_state=str(behavior_decision.phase),
-                stop_goal_active=bool(mpc_stop_goal_active),
-                minimum_speed_mps=float(self.full_control_buffer_min_speed_mps),
+                reference_samples=lane_center_reference,
             )
-            force_replan = bool(force_replan) or bool(low_speed_buffer_replan)
-            mpc_replan_executed = bool(
-                self.control_buffer.should_replan(
-                    sim_time_s=float(sim_time_s),
-                    force_replan=bool(force_replan),
-                    context_key=str(control_context_key),
-                    reference_anchor_relative_m=reference_anchor_relative_m,
-                    ego_speed_mps=float(ego_speed_mps),
-                    target_speed_mps=float(speed_ref_mps),
-                    speed_error_crossing_deadband_mps=float(
-                        self.config.get(
-                            "control_buffer_speed_crossing_deadband_mps",
-                            0.15,
-                        )
+        execution_result = self.pipeline.execute_mpc(
+            MPCExecutionRequest(
+                sim_time_s=float(sim_time_s),
+                current_state=current_state,
+                destination_state=destination_state,
+                reference_samples=lane_center_reference,
+                object_snapshots=self._mpc_object_snapshots_with_prediction(
+                    mpc_object_snapshots,
+                    prediction_trajectories=reference_debug.get(
+                        "prediction_trajectories", {}
                     ),
-                )
-            )
-            if bool(mpc_replan_executed):
-                road_envelope_payload_world = (
-                    self._current_route_tracking_lane_change_envelope_payload_world()
-                )
-                if road_envelope_payload_world is None:
-                    road_envelope_payload_world = (
-                        self._rolling_turn_envelope_payload_world(
-                            behavior_decision=str(
-                                behavior_decision.maneuver
-                            ),
-                            reference_samples=lane_center_reference,
-                        )
-                    )
-                self.mpc.plan_trajectory(
-                    current_state=current_state,
-                    destination_state=destination_state,
-                    object_snapshots=self._mpc_object_snapshots_with_prediction(
-                        mpc_object_snapshots,
-                        prediction_trajectories=reference_debug.get(
-                            "prediction_trajectories", {}
-                        ),
-                    ),
-                    current_acceleration_mps2=float(mpc_jerk_seed_accel_mps2),
-                    current_steering_rad=float(self._last_steer_rad),
-                    lane_center_reference_samples=lane_center_reference,
-                    stop_goal_active=bool(mpc_stop_goal_active),
-                    road_envelope_payload_world=road_envelope_payload_world,
-                )
-                mpc_status = str(getattr(self.mpc, "_last_status", "")).strip().lower()
-                if mpc_status and mpc_status not in {"solved", "solved inaccurate"}:
-                    raise RuntimeError(f"MPC status={mpc_status}")
-                u_solution = getattr(self.mpc, "_last_u_solution", None)
-                if u_solution is None or len(u_solution) == 0:
-                    raise RuntimeError("MPC did not expose a control solution")
-                x_solution = getattr(self.mpc, "_last_x_solution", None)
-                predicted_speed_sequence_mps = (
-                    None
-                    if x_solution is None or len(x_solution) == 0
-                    # Column 2 is speed; the (x, y) world-origin offset
-                    # baked into _last_x_solution doesn't touch it.
-                    else [float(state[2]) for state in x_solution]
-                )
-                self.control_buffer.update_from_solution(
-                    u_solution=u_solution,
-                    plan_time_s=float(sim_time_s),
-                    dt_s=float(self.mpc.dt_s),
-                    context_key=str(control_context_key),
-                    reference_anchor_relative_m=reference_anchor_relative_m,
-                    predicted_speed_sequence_mps=predicted_speed_sequence_mps,
-                    target_speed_mps=float(speed_ref_mps),
-                )
-                accel_mps2 = float(u_solution[0, 0])
-                steer_rad = float(u_solution[0, 1])
-            else:
-                buffered = self.control_buffer.sample(
-                    sim_time_s=float(sim_time_s),
-                    context_key=str(control_context_key),
-                    reference_anchor_relative_m=reference_anchor_relative_m,
-                )
-                if buffered is None:
-                    raise RuntimeError("MPC control buffer empty")
-                accel_mps2, steer_rad, _buffer_reason = buffered
-                mpc_status = (
-                    "stop_hold_direct"
-                    if bool(stationary_traffic_stop_hold)
-                    else "buffer_reuse"
-                )
-            self._set_actuator_context(
+                ),
+                current_acceleration_mps2=float(mpc_jerk_seed_accel_mps2),
+                current_steering_rad=float(self._last_steer_rad),
                 ego_speed_mps=float(ego_speed_mps),
                 target_speed_mps=float(speed_ref_mps),
                 stop_goal_active=bool(mpc_stop_goal_active),
-            )
-            # Nominal actuation is produced once, below, from the optimized
-            # velocity/steering command.  Do not also execute the legacy
-            # acceleration-to-pedals mapper on the same successful solution.
-            control = None
-            if bool(stationary_traffic_stop_hold):
-                hold_brake = min(
-                    1.0,
-                    max(
-                        0.0,
-                        float(
-                            self.config.get(
-                                "normal_stop_mpc_suspend_brake",
-                                0.08,
-                            )
-                        ),
-                    ),
-                )
-                control = self.carla.VehicleControl(
-                    throttle=0.0,
-                    brake=float(hold_brake),
-                    steer=float(getattr(control, "steer", 0.0)),
-                )
-                accel_mps2 = float(self._accel_from_control(control))
-                steer_rad = float(self._steer_rad_from_control(control))
-            fallback_reason = ""
-        except Exception as exc:
-            mpc_replan_executed = True
-            hard_gate_active = str(exc).startswith("candidate_hard_gate:")
-            hard_gate_emergency_stop = _hard_gate_requires_emergency_stop(
-                fallback_reason=str(exc),
-                behavior_decision=str(behavior_decision.maneuver),
-                stop_goal_active=bool(mpc_stop_goal_active),
-            )
-            if bool(hard_gate_active):
-                mpc_replan_executed = False
-            fallback_reason = str(exc)
-            if bool(hard_gate_emergency_stop):
-                control = self._emergency_stop_control()
-                accel_mps2 = float(self._last_accel_mps2)
-                steer_rad = 0.0
-            else:
-                normalized_behavior = str(
-                    behavior_decision.maneuver
-                ).strip().lower()
-                maneuver_tracking_active = normalized_behavior in {
-                    "intersection_turn_left",
-                    "intersection_turn_right",
-                    "lane_change_left",
-                    "lane_change_right",
-                }
-                buffered_after_failure = (
-                    self.control_buffer.sample(
-                        sim_time_s=float(sim_time_s),
-                        context_key=str(control_context_key),
-                        reference_anchor_relative_m=reference_anchor_relative_m,
-                    )
-                    if (
-                        not bool(hard_gate_active)
-                        and not bool(mpc_stop_goal_active)
-                    )
-                    else None
-                )
-                if buffered_after_failure is not None:
-                    (
-                        accel_mps2,
-                        steer_rad,
-                        _failed_replan_buffer_reason,
-                    ) = buffered_after_failure
-                    self._set_actuator_context(
-                        ego_speed_mps=float(ego_speed_mps),
-                        target_speed_mps=float(speed_ref_mps),
-                        stop_goal_active=False,
-                    )
-                    control = self._control_from_mpc(
-                        float(accel_mps2), float(steer_rad)
-                    )
-                    self._last_accel_mps2 = float(accel_mps2)
-                    self._last_steer_rad = float(steer_rad)
-                    failed_replan_buffer_reused = True
-                else:
-                    previous_valid_steer_rad = float(self._last_steer_rad)
-                    control = self._fallback_control(
-                        ego_transform=ego_transform,
-                        ego_speed_mps=ego_speed_mps,
-                        destination_state=destination_state,
-                        stop_goal_active=mpc_stop_goal_active,
-                    )
-                    accel_mps2 = self._last_accel_mps2
-                    steer_rad = self._last_steer_rad
-                    if bool(maneuver_tracking_active):
-                        # A failed maneuver solve must not transfer lateral
-                        # ownership to the destination-point fallback.  Hold
-                        # the last accepted steering direction only briefly.
-                        # Once the optimized buffer has already expired,
-                        # repeatedly holding the full turn command can drive
-                        # the vehicle off-road forever (the diagnosed Town06
-                        # vegetation collision). Decay it toward neutral so a
-                        # prolonged solver outage is fail-passive laterally.
-                        failed_steer_decay = (
-                            max(
-                                0.0,
-                                min(
-                                    1.0,
-                                    float(
-                                        self.config.get(
-                                            "turn_failed_replan_steer_decay",
-                                            0.65,
-                                        )
-                                    ),
-                                ),
-                            )
-                            if normalized_behavior in {
-                                "intersection_turn_left",
-                                "intersection_turn_right",
-                            }
-                            else 1.0
-                        )
-                        steer_rad = (
-                            float(previous_valid_steer_rad)
-                            * float(failed_steer_decay)
-                        )
-                        self._set_actuator_context(
-                            ego_speed_mps=float(ego_speed_mps),
-                            target_speed_mps=float(speed_ref_mps),
-                            stop_goal_active=False,
-                        )
-                        control = self._control_from_mpc(
-                            float(accel_mps2), float(steer_rad)
-                        )
-                        self._last_steer_rad = float(steer_rad)
-                        failed_replan_maneuver_steer_held = True
-            if bool(hard_gate_active) and str(
-                behavior_decision.maneuver
-            ) == "emergency_brake":
-                mpc_status = "emergency_brake_direct"
-            else:
-                mpc_status = (
-                    "candidate_hard_gate"
-                    if bool(hard_gate_active)
-                    else "buffer_reuse_after_failed_replan"
-                    if bool(failed_replan_buffer_reused)
-                    else "maneuver_steer_hold_after_failed_replan"
-                    if bool(failed_replan_maneuver_steer_held)
-                    else str(getattr(self.mpc, "_last_status", str(exc)))
-                )
-            if not self._warned:
-                print(f"[CP-X OpenCDA Bridge] MPC fallback active: {fallback_reason}")
-                self._warned = True
+                behavior_maneuver=str(behavior_decision.maneuver),
+                behavior_phase=str(behavior_decision.phase),
+                hard_gate_reason=str(candidate_hard_gate_reason),
+                stationary_stop_hold=bool(stationary_traffic_stop_hold),
+                control_context=mpc_control_context,
+                road_envelope_payload_world=road_envelope_payload_world,
+                speed_crossing_deadband_mps=float(self.config.get(
+                    "control_buffer_speed_crossing_deadband_mps", 0.15,
+                )),
+            ),
+            normal_stop_control=lambda: self.carla.VehicleControl(
+                throttle=0.0,
+                brake=min(1.0, max(0.0, float(self.config.get(
+                    "normal_stop_mpc_suspend_brake", 0.08,
+                )))),
+                steer=0.0,
+            ),
+            safe_stop_control=lambda: self.carla.VehicleControl(
+                throttle=0.0, brake=0.3, steer=0.0,
+            ),
+            emergency_stop_control=self._emergency_stop_control,
+        )
+        accel_mps2 = float(execution_result.acceleration_mps2)
+        steer_rad = float(execution_result.steering_rad)
+        control = execution_result.control
+        mpc_status = str(execution_result.status)
+        fallback_reason = str(execution_result.fallback_reason)
+        mpc_replan_executed = bool(execution_result.replan_executed)
+        failed_replan_buffer_reused = bool(
+            execution_result.failed_replan_buffer_reused
+        )
+        self._set_actuator_context(
+            ego_speed_mps=float(ego_speed_mps),
+            target_speed_mps=float(speed_ref_mps),
+            stop_goal_active=bool(mpc_stop_goal_active),
+        )
+        if control is not None:
+            accel_mps2 = float(self._accel_from_control(control))
+            steer_rad = float(self._steer_rad_from_control(control))
+        if fallback_reason and not self._warned:
+            print("[CP-X OpenCDA Bridge] MPC fallback active: " + fallback_reason)
+            self._warned = True
         mpc_feedback_record_reason = self.mpc_feedback.record_result(
             decision=str(behavior_decision.maneuver),
             target_lane_id=int(behavior_decision.target_lane_id),
@@ -5125,73 +4905,8 @@ class CPXMPCPlannerBridge:
 
         boundary_recovery_active = bool(
             self.config.get("boundary_recovery_enabled", False)
-        ) and bool(
-            getattr(
-                scenario_decision,
-                "boundary_recovery_active",
-                False,
-            )
+            and scenario_decision.boundary_recovery_active
         )
-        if bool(boundary_recovery_active):
-            (
-                generated_recovery,
-                recovery_reference,
-                recovery_conditioning_reason,
-            ) = self._stable_reference_line_provider.boundary_recovery_reference(
-                ego_location=ego_location,
-                ego_yaw_rad=float(ego_yaw_rad),
-                current_lane_id=int(current_lane_id),
-                base_reference_samples=local_lane_center_reference,
-                target_speed_mps=float(speed_plan.target_speed_mps),
-                horizon_steps=int(self.mpc.horizon_steps),
-                dt_s=float(self.mpc.dt_s),
-                max_curvature_1pm=float(
-                    self.config.get(
-                        "boundary_recovery_max_curvature_1pm",
-                        self.config.get(
-                            "reference_vehicle_max_curvature_1pm",
-                            0.22,
-                        ),
-                    )
-                ),
-            )
-            if recovery_reference:
-                local_lane_center_reference = list(recovery_reference)
-                terminal = local_lane_center_reference[-1]
-                nominal_destination_state = [
-                    float(terminal.get("x_ref_m", terminal.get("x", ego_location.x))),
-                    float(terminal.get("y_ref_m", terminal.get("y", ego_location.y))),
-                    float(speed_plan.target_speed_mps),
-                    float(terminal.get("heading_rad", ego_yaw_rad)),
-                    int(terminal.get("lane_id", current_lane_id) or current_lane_id),
-                ]
-                reference_debug.update({
-                    "reference_source": "ego_anchored_boundary_recovery",
-                    "final_reference_geometry_source": (
-                        "ego_anchored_boundary_recovery"
-                    ),
-                    "stage": "boundary_recovery_reference",
-                    "intent_mode": "boundary_recovery",
-                    "boundary_recovery_active": True,
-                    "boundary_recovery_generation_reason": str(
-                        generated_recovery.reason
-                    ),
-                    "boundary_recovery_conditioning_reason": str(
-                        recovery_conditioning_reason
-                    ),
-                })
-            else:
-                reference_debug.update({
-                    "boundary_recovery_active": True,
-                    "boundary_recovery_generation_reason": str(
-                        generated_recovery.reason
-                    ),
-                    "candidate_pipeline_selected_status": "infeasible",
-                    "candidate_pipeline_selected_reason": (
-                        "boundary_recovery_reference_generation_failed:"
-                        + str(generated_recovery.reason)
-                    ),
-                })
         # MPC is downstream of candidate selection. Its objective profile must
         # describe the maneuver that will actually execute, not the behavior
         # proposal that existed before candidate arbitration.
@@ -5325,37 +5040,6 @@ class CPXMPCPlannerBridge:
                         post_turn_snapshot.build_reason
                     )
 
-        committed_lane_change_reference_active = bool(
-            str(decision) in {"lane_change_left", "lane_change_right"}
-            and self._stable_reference_line_provider.snapshot(LANE_CHANGE).mutable_samples()
-        )
-        lateral_guard_reason = ""
-        if (
-            not bool(committed_lane_change_reference_active)
-            and not bool(boundary_recovery_active)
-        ):
-            lateral_guard_reason = self._full_reference_lateral_guard_reason(
-                decision=str(decision),
-                lc_state=str(lc_state),
-                stop_goal_active=bool(stop_goal_active),
-                destination_state=nominal_destination_state,
-                lane_center_reference=local_lane_center_reference,
-                ego_location=ego_location,
-                ego_yaw_rad=float(ego_yaw_rad),
-                heading_error_rad=(
-                    float(behavior_lane_heading_error_rad)
-                    if bool(behavior_lane_alignment_valid)
-                    else float("nan")
-                ),
-            )
-        if str(lateral_guard_reason):
-            # This guard is diagnostic only. Geometry ownership remains with
-            # the already conditioned behavior/AD-map reference. Replacing it
-            # for a few frames produced a 0.9 m destination jump and then
-            # switched straight back, which made an otherwise valid MPC QP
-            # infeasible at lane-change completion.
-            reference_debug["lateral_guard_validation"] = "warning"
-        reference_debug["reference_lateral_guard_reason"] = str(lateral_guard_reason)
         reference_debug["opencda_style_reference_conditioning_reason"] = ""
         # ReferenceLineProvider is the sole geometry owner. ManeuverManager
         # owns lifecycle only and cannot replace a contract-approved path.
@@ -8287,108 +7971,6 @@ class CPXMPCPlannerBridge:
         self._last_accel_mps2 = float(getattr(self.mpc.constraints, "min_acceleration_mps2", -3.0))
         self._last_steer_rad = 0.0
         return carla.VehicleControl(throttle=0.0, brake=1.0, steer=0.0)
-
-    def _full_reference_lateral_guard_reason(
-        self,
-        *,
-        decision: str,
-        lc_state: str,
-        stop_goal_active: bool,
-        destination_state: Sequence[float] | None,
-        lane_center_reference: Sequence[Mapping[str, object]] | None,
-        ego_location: carla.Location,
-        ego_yaw_rad: float,
-        heading_error_rad: float = float("nan"),
-    ) -> str:
-        normalized_decision = str(decision or "").strip().lower()
-        normalized_lc_state = str(lc_state or "").strip().upper()
-        lane_follow_like = (
-            normalized_decision == "lane_follow"
-            and normalized_lc_state in {"", "IDLE", "LANE_KEEP"}
-        )
-        stop_like = bool(stop_goal_active) or normalized_decision in {
-            "stop_at_intersection",
-            "stop_sign",
-        }
-        if not bool(lane_follow_like or stop_like):
-            return ""
-
-        max_destination_lateral_m = (
-            float(self.full_stop_max_destination_lateral_m)
-            if bool(stop_like)
-            else float(self.full_lane_follow_max_destination_lateral_m)
-        )
-        max_reference_first_lateral_m = (
-            float(self.full_stop_max_reference_first_lateral_m)
-            if bool(stop_like)
-            else float(self.full_lane_follow_max_reference_first_lateral_m)
-        )
-        reasons: list[str] = []
-        if destination_state is not None and len(destination_state) >= 2:
-            _, destination_lateral_m = self._body_frame_xy(
-                origin_x_m=float(ego_location.x),
-                origin_y_m=float(ego_location.y),
-                heading_rad=float(ego_yaw_rad),
-                target_x_m=float(destination_state[0]),
-                target_y_m=float(destination_state[1]),
-            )
-            if abs(float(destination_lateral_m)) > float(max_destination_lateral_m):
-                reasons.append(f"dest_lat={destination_lateral_m:.2f}")
-
-        if lane_center_reference:
-            first = dict(list(lane_center_reference)[0])
-            _, reference_lateral_m = self._body_frame_xy(
-                origin_x_m=float(ego_location.x),
-                origin_y_m=float(ego_location.y),
-                heading_rad=float(ego_yaw_rad),
-                target_x_m=float(first.get("x_ref_m", first.get("x", ego_location.x))),
-                target_y_m=float(first.get("y_ref_m", first.get("y", ego_location.y))),
-            )
-            if abs(float(reference_lateral_m)) > float(max_reference_first_lateral_m):
-                reasons.append(f"ref_lat={reference_lateral_m:.2f}")
-
-        if math.isfinite(float(heading_error_rad)):
-            max_heading_error_deg = (
-                float(self.full_stop_max_heading_error_deg)
-                if bool(stop_like)
-                else float(self.full_lane_follow_max_heading_error_deg)
-            )
-            heading_error_deg = math.degrees(float(heading_error_rad))
-            if abs(float(heading_error_deg)) > float(max_heading_error_deg):
-                reasons.append(f"heading={heading_error_deg:.2f}")
-
-        if not reasons:
-            return ""
-        mode = "stop" if bool(stop_like) else "lane_follow"
-        return f"{mode}_lateral_guard:" + ":".join(reasons)
-
-
-    def _fallback_control(
-        self,
-        ego_transform: carla.Transform,
-        ego_speed_mps: float,
-        destination_state: Sequence[float],
-        stop_goal_active: bool,
-    ) -> carla.VehicleControl:
-        if stop_goal_active:
-            self._last_accel_mps2 = float(self.mpc.constraints.min_acceleration_mps2)
-            self._last_steer_rad = 0.0
-            return carla.VehicleControl(throttle=0.0, brake=0.8, steer=0.0)
-
-        dx = float(destination_state[0]) - float(ego_transform.location.x)
-        dy = float(destination_state[1]) - float(ego_transform.location.y)
-        target_yaw = math.atan2(dy, dx)
-        yaw_error = self._wrap_angle(target_yaw - math.radians(float(ego_transform.rotation.yaw)))
-        max_steer = max(1e-6, float(self.mpc.constraints.max_steer_rad))
-        steer_rad = min(max_steer, max(-max_steer, 0.7 * yaw_error))
-        speed_error = float(self.target_speed_mps) - float(ego_speed_mps)
-        accel = min(
-            float(self.mpc.constraints.max_acceleration_mps2),
-            max(float(self.mpc.constraints.min_acceleration_mps2), 0.6 * speed_error),
-        )
-        self._last_accel_mps2 = float(accel)
-        self._last_steer_rad = float(steer_rad)
-        return self._control_from_mpc(accel, steer_rad)
 
     @staticmethod
     def _wrap_angle(angle_rad: float) -> float:

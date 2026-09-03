@@ -24,6 +24,7 @@ class PlanningPipeline:
         destination_speed: Any,
         reference_publication: Any,
         mpc_entry: Any,
+        mpc_execution: Any = None,
         fallback: Any = None,
     ) -> None:
         self._runtime_input = runtime_input
@@ -36,6 +37,7 @@ class PlanningPipeline:
         self.destination_speed = destination_speed
         self.reference_publication = reference_publication
         self.mpc_entry = mpc_entry
+        self.mpc_execution = mpc_execution
         self.fallback = fallback
 
     def begin_tick(
@@ -143,8 +145,10 @@ class PlanningPipeline:
     def prepare_mpc_control_context(self, **kwargs):
         return self.mpc_entry.prepare_control_context(**kwargs)
 
-    def low_speed_mpc_replan_required(self, **kwargs):
-        return self.mpc_entry.low_speed_replan_required(**kwargs)
+    def execute_mpc(self, request, **kwargs):
+        if self.mpc_execution is None:
+            raise RuntimeError("MPC execution stage is not configured")
+        return self.mpc_execution.run(request, **kwargs)
 
     def apply_control_safety(self, **kwargs):
         return self.control_safety.run(**kwargs)

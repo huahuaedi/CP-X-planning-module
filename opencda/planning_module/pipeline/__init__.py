@@ -39,6 +39,11 @@ from .execution_pipeline import PlanningPipeline
 from .mpc_feedback import BehaviorMPCFeedback
 from .mpc_command_extractor import MPCCommandExtractor, MPCTrackingCommand
 from .mpc_entry_stage import MPCEntryStage, MPCEntryStageResult
+from .mpc_execution_stage import (
+    MPCExecutionRequest,
+    MPCExecutionResult,
+    MPCExecutionStage,
+)
 from .maneuver_manager import LaneChangeLifecycle, ManeuverManager, TurnLifecycle
 from .nominal_trajectory import (
     NominalTarget,
