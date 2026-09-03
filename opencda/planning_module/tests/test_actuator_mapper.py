@@ -90,6 +90,30 @@ def test_calibrated_brake_round_trips_to_requested_acceleration():
     assert abs(recovered + 1.4) < 1.0e-9
 
 
+def test_high_brake_pedal_inverse_is_clamped_to_the_vehicle_limit():
+    # The fallback / bounded-stop path sets the brake pedal directly near
+    # 1.0. Inverting it with the forward pedal-mapping gain would report an
+    # impossible decel (~-14 m/s^2) that then poisons the next MPC jerk seed.
+    mapper = CarlaActuatorMapper({})
+    recovered = mapper.acceleration_from_command(
+        throttle=0.0,
+        brake=1.0,
+        max_acceleration_mps2=3.0,
+        min_acceleration_mps2=-3.0,
+        ego_speed_mps=8.0,
+        target_speed_mps=6.0,
+        stop_goal_active=False,
+    )
+    assert recovered == -3.0
+    # a moderate pedal still inverts linearly (unclamped)
+    mid = mapper.acceleration_from_command(
+        throttle=0.0, brake=0.1,
+        max_acceleration_mps2=3.0, min_acceleration_mps2=-3.0,
+        ego_speed_mps=8.0, target_speed_mps=6.0, stop_goal_active=False,
+    )
+    assert -3.0 < mid < 0.0
+
+
 def test_measured_acceleration_uses_speed_delta_and_filter():
     mapper = CarlaActuatorMapper({"actuator_measured_accel_alpha": 1.0})
     assert mapper.update_measurement(speed_mps=1.0, timestamp_s=2.0) == 0.0

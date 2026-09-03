@@ -285,7 +285,16 @@ class CarlaActuatorMapper:
                 if bool(stop_goal_active)
                 else self.tracking_brake_decel_per_unit_mps2
             )
-            return -float(brake_value) * float(brake_scale)
+            # ``*_brake_decel_per_unit_mps2`` is the FORWARD pedal-mapping
+            # gain (small pedal per m/s^2), tuned for the [0, ~0.22] pedal
+            # band a normal decel command produces. On the fallback /
+            # bounded-stop path the brake pedal is set directly near 1.0, so
+            # inverting it with that gain reports a physically impossible
+            # decel (e.g. -14 m/s^2). Clamp to the vehicle's own limit --
+            # this value also seeds the next MPC solve's jerk constraint, so
+            # a value outside [min_acceleration_mps2, 0] makes that solve
+            # infeasible.
+            return max(-max_brake, -float(brake_value) * float(brake_scale))
         effective_throttle = min(1.0, max(0.0, float(throttle)))
         if (
             self.enabled
