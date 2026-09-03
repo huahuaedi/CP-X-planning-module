@@ -11,6 +11,7 @@ solve, no bridge, no CARLA.
 
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import yaml
@@ -20,6 +21,7 @@ from pipeline.cav_conflict_pipeline import resolve_conflicts
 from pipeline.conflict_classifier import ClassifierParams
 from pipeline.cooperative_arbitration import CavIntent, ResourceClaim
 from pipeline.mpc_corridor_constraints import corridor_rows
+from pipeline.execution_pipeline import PlanningPipeline
 from pipeline.spatiotemporal_corridor import CorridorParams
 
 # Ego reference: straight +y, 0..60 m.
@@ -31,7 +33,7 @@ def _mpc(corridor_enabled):
         (Path(__file__).resolve().parents[1] / "MPC" / "mpc.yaml").read_text()
     )
     cfg["mpc"].setdefault("cost", {})["corridor"] = {
-        "enabled": bool(corridor_enabled), "w_slack": 20000.0, "max_slack_m": 1.0,
+        "enabled": bool(corridor_enabled), "w_slack": 20000.0, "max_slack_m": 0.0,
     }
     return MPC(cfg["mpc"], cfg.get("road", {}))
 
@@ -123,6 +125,54 @@ class CavConflictIntegrationTests(unittest.TestCase):
         free = _solve_progress(_mpc(corridor_enabled=True), (0.0, 0.0), 9.0, None)
         # ego holds back behind the cav's projected station (starts at y=12)
         self.assertLess(capped, free - 1.0)
+
+    def test_runtime_pipeline_sends_longitudinal_and_homotopy_rows_to_mpc(self):
+        mpc = _mpc(corridor_enabled=True)
+        cav_path = tuple(
+            (mpc.dt_s * k, 3.4 - 0.12 * k, 12.0 + 0.9 * k, 9.0)
+            for k in range(mpc.horizon_steps + 1)
+        )
+        cav = CavIntent(
+            actor_id=2, position_xy=(3.4, 12.0),
+            claim=ResourceClaim(
+                kind="lane_change", resource_id="lane_change",
+                committed_at_s=20.0, active=True,
+            ),
+            heading_rad=np.pi / 2.0, speed_mps=9.0, planned_path=cav_path,
+        )
+        result = PlanningPipeline.resolve_cav_interaction(
+            reference_samples=REF,
+            ego_location=SimpleNamespace(x=0.0, y=0.0),
+            ego_yaw_rad=np.pi / 2.0,
+            ego_speed_mps=9.0,
+            actor_id=1,
+            claim=ResourceClaim(
+                kind="lane_change", resource_id="lane_change",
+                committed_at_s=10.0, active=True,
+            ),
+            obstacle_snapshots=[{
+                "id": "lead", "x": 0.0, "y": 15.0, "v": 2.0,
+                "psi": np.pi / 2.0,
+                "predicted_trajectory": [
+                    {"x": 0.0, "y": 15.0 + 0.2 * k}
+                    for k in range(mpc.horizon_steps + 1)
+                ],
+            }],
+            cav_intents=[cav], latch_state={},
+            horizon_steps=mpc.horizon_steps, dt_s=mpc.dt_s,
+        )
+        self.assertGreater(result.diagnostics["longitudinal_qp_row_count"], 0)
+        self.assertEqual(
+            result.diagnostics["homotopy_qp_row_count"], mpc.horizon_steps
+        )
+        self.assertEqual(
+            len(result.mpc_rows), result.diagnostics["total_qp_row_count"]
+        )
+        groups = {row.slack_group for row in result.mpc_rows}
+        self.assertEqual(groups, {"corridor", "cav_homotopy"})
+
+        _solve_progress(mpc, (0.0, 0.0), 9.0, result.mpc_rows)
+        self.assertEqual(mpc._last_status, "solved")
 
 
 if __name__ == "__main__":

@@ -215,8 +215,6 @@ class CPXMPCPlannerBridge:
             self.config.get("cav_conflict_enabled", False)
         )
         self._cav_latch: dict[str, Any] = {}
-        self._last_cav_corridor = None
-        self._last_cav_corridor_reference: list = []
         self._last_cav_diagnostics: dict[str, Any] = {}
         # This CAV's own broadcast for nearby CP-X CAVs to read (its planned
         # trajectory + ResourceClaim + pose). Read peer-to-peer through
@@ -866,6 +864,7 @@ class CPXMPCPlannerBridge:
 
         mpc_cfg, road_cfg = self._load_mpc_config()
         self.mpc = MPC(mpc_cfg=mpc_cfg, road_cfg=road_cfg)
+        cav_constraint_rows = ()
         if self._cav_conflict_enabled:
             # One switch: cav_conflict_enabled also binds the Stage-C corridor
             # in the QP (else it is computed but ignored). mpc.yaml's
@@ -1811,10 +1810,7 @@ class CPXMPCPlannerBridge:
                 dt_s=float(self.mpc.dt_s),
             )
             self._cav_latch = dict(cav_result.latch_state or {})
-            self._last_cav_corridor = cav_result.corridor
-            self._last_cav_corridor_reference = [
-                dict(sample) for sample in lane_center_reference
-            ]
+            cav_constraint_rows = tuple(cav_result.mpc_rows or ())
             self._last_cav_diagnostics = dict(cav_result.diagnostics or {})
             reference_debug["cav_conflict_diagnostics"] = dict(
                 self._last_cav_diagnostics
@@ -1845,7 +1841,7 @@ class CPXMPCPlannerBridge:
                 speed_crossing_deadband_mps=float(self.config.get(
                     "control_buffer_speed_crossing_deadband_mps", 0.15,
                 )),
-                corridor_rows=self._cav_corridor_rows(ego_location),
+                corridor_rows=cav_constraint_rows,
             ),
             normal_stop_control=lambda: self.carla.VehicleControl(
                 throttle=0.0,
@@ -3578,24 +3574,6 @@ class CPXMPCPlannerBridge:
                 self.config.get("cav_intent_minimum_probability", 0.05)
             ),
         )
-
-    def _cav_corridor_rows(self, ego_location: Any):
-        """Convert the last conflict corridor (Stage C) into linear QP rows
-        (Stage D) in the MPC's ego-origin frame. Empty when CAV is off or no
-        corridor was produced this tick."""
-
-        corridor = getattr(self, "_last_cav_corridor", None)
-        if not self._cav_conflict_enabled or corridor is None:
-            return ()
-        from opencda.planning_module.pipeline.mpc_corridor_constraints import (
-            corridor_rows,
-        )
-
-        return tuple(corridor_rows(
-            corridor,
-            self._last_cav_corridor_reference,
-            ego_origin_xy=(float(ego_location.x), float(ego_location.y)),
-        ))
 
     def _ego_cav_claim(self, *, sim_time_s: float):
         """Ego's own cooperative ResourceClaim, active while it is committed

@@ -1,6 +1,7 @@
 import math
 
-from pipeline.mpc_corridor_constraints import corridor_rows
+from pipeline.cooperative_arbitration import ConflictAssignment
+from pipeline.mpc_corridor_constraints import corridor_rows, homotopy_keepout_rows
 from pipeline.spatiotemporal_corridor import Corridor
 
 _BIG = 1.0e9
@@ -35,3 +36,34 @@ def test_origin_offset_is_folded_into_the_frame():
     rows = corridor_rows(cor, REF, ego_origin_xy=(10.0, 0.0))
     assert len(rows) == 1
     assert math.isclose(rows[0].upper, 30.0, abs_tol=1e-6)
+
+
+def test_homotopy_half_space_uses_the_mpc_linear_row_schema():
+    assignment = ConflictAssignment(
+        cav_actor_id=2, role="proceed", homotopy_side="left",
+        cav_wins=False, reason="",
+    )
+    rows = homotopy_keepout_rows(
+        [assignment], {2: [(10.0, 0.0), (12.0, 0.0)]},
+        ego_heading_rad=0.0, d_safe_m=2.0,
+    )
+    assert len(rows) == 1  # MPC constrains stages 1..N; stage zero is fixed.
+    row = rows[0]
+    assert row.stage == 1
+    assert math.isclose(row.a_x, 0.0, abs_tol=1e-9)
+    assert math.isclose(row.a_y, 1.0, abs_tol=1e-9)
+    assert math.isclose(row.lower, 2.0, abs_tol=1e-9)
+    assert row.upper >= _BIG
+
+
+def test_homotopy_row_is_shifted_into_ego_origin_frame():
+    assignment = ConflictAssignment(
+        cav_actor_id=3, role="proceed", homotopy_side="right",
+        cav_wins=False, reason="",
+    )
+    rows = homotopy_keepout_rows(
+        [assignment], {3: [(5.0, 12.0), (5.0, 13.0)]},
+        ego_heading_rad=0.0, ego_origin_xy=(5.0, 10.0), d_safe_m=1.0,
+    )
+    # Right normal is (0,-1); peer stage-1 is y_shift=3, so -y >= -2.
+    assert math.isclose(rows[0].lower, -2.0, abs_tol=1e-9)

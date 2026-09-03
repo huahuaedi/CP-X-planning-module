@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional
 
@@ -216,7 +217,7 @@ class PlanningPipeline:
     ):
         """Resolve cooperation against the candidate selected for execution."""
 
-        return resolve_cav_conflicts(
+        result = resolve_cav_conflicts(
             reference_samples=reference_samples,
             ego_snapshot={
                 "x": float(ego_location.x), "y": float(ego_location.y),
@@ -232,6 +233,44 @@ class PlanningPipeline:
                 horizon_steps=max(1, int(horizon_steps)), dt_s=float(dt_s)
             ),
         )
+        from .cav_intent_codec import sample_cav_path_at
+        from .mpc_corridor_constraints import corridor_rows, homotopy_keepout_rows
+
+        steps = max(1, int(horizon_steps))
+        step_s = max(1.0e-3, float(dt_s))
+        tracks = {}
+        for intent in list(cav_intents or []):
+            points = []
+            for stage in range(steps + 1):
+                sampled = sample_cav_path_at(intent, float(stage) * step_s)
+                if sampled is None:
+                    distance_m = float(intent.speed_mps) * float(stage) * step_s
+                    sampled = (
+                        float(intent.position_xy[0])
+                        + distance_m * math.cos(float(intent.heading_rad)),
+                        float(intent.position_xy[1])
+                        + distance_m * math.sin(float(intent.heading_rad)),
+                        float(intent.speed_mps),
+                    )
+                points.append((float(sampled[0]), float(sampled[1])))
+            tracks[int(intent.actor_id)] = points
+        origin = (float(ego_location.x), float(ego_location.y))
+        longitudinal_rows = corridor_rows(
+            result.corridor, reference_samples, ego_origin_xy=origin
+        )
+        lateral_rows = homotopy_keepout_rows(
+            result.assignments,
+            tracks,
+            ego_heading_rad=float(ego_yaw_rad),
+            ego_origin_xy=origin,
+        )
+        result.mpc_rows = list(longitudinal_rows) + list(lateral_rows)
+        result.diagnostics.update({
+            "longitudinal_qp_row_count": len(longitudinal_rows),
+            "homotopy_qp_row_count": len(lateral_rows),
+            "total_qp_row_count": len(result.mpc_rows),
+        })
+        return result
 
     def prepare_route_lane_change(self, **kwargs):
         return self.behavior.prepare_route_lane_change(**kwargs)

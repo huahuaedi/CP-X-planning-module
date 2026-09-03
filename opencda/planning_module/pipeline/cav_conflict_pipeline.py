@@ -51,6 +51,7 @@ class ConflictResolution:
     assignments: List[ConflictAssignment]
     corridor: Corridor
     latch_state: Dict[str, ArbitrationLatchEntry]
+    mpc_rows: List[Any] = field(default_factory=list)
     diagnostics: Dict[str, Any] = field(default_factory=dict)
 
 

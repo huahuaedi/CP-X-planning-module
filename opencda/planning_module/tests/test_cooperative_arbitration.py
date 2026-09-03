@@ -5,6 +5,7 @@ from opencda.planning_module.pipeline.cooperative_arbitration import (
     CavIntent,
     ResourceClaim,
     assign_conflict_roles,
+    lateral_side,
 )
 
 
@@ -54,6 +55,21 @@ class ConflictRoleAssignmentTest(unittest.TestCase):
         a, _ = self._assign([_cav(2, (12.0, 0.0), committed_at_s=20.0)])
         self.assertEqual(a[0].role, "proceed")
         self.assertFalse(a[0].cav_wins)
+
+    def test_side_is_latched_with_role(self):
+        a1, latch = self._assign(
+            [_cav(2, (12.0, 2.0), committed_at_s=10.2)], hysteresis_ticks=3
+        )
+        self.assertEqual(a1[0].homotopy_side, "right")
+        a2, _ = self._assign(
+            [_cav(2, (12.0, -2.0), committed_at_s=10.2)],
+            latch=latch, hysteresis_ticks=3,
+        )
+        self.assertEqual(a2[0].homotopy_side, "right")
+
+    def test_lateral_side_helper(self):
+        self.assertEqual(lateral_side((0.0, 0.0), 0.0, (5.0, 2.0)), "left")
+        self.assertEqual(lateral_side((0.0, 0.0), 0.0, (5.0, -2.0)), "right")
 
     def test_non_cooperative_cav_is_not_assigned(self):
         a, _ = self._assign(

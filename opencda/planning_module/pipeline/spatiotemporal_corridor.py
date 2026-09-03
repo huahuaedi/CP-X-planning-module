@@ -9,13 +9,14 @@ as linear constraints:
 * FOLLOW / LEAD_BRAKE / CUT_IN  -> s_hi capped a RSS gap behind the agent.
 * CROSSING / ONCOMING, ego yields -> s_hi capped just short of the
   conflict point while the agent is near it.
-* CROSSING / ONCOMING, ego proceeds -> no upper bound from that agent.
+* CROSSING / ONCOMING, ego proceeds -> no longitudinal upper bound; the
+  Stage-D latched homotopy half-space still separates the trajectories.
 * MERGE, ego opens the gap (role make_gap) -> s_hi capped a gap behind
   the cav's projected station (ego takes the slot behind).
 * MERGE / anything, ego proceeds -> no bound.
 
-Lateral motion is left to candidate generation and the road-boundary /
-spatial-envelope term; this module is longitudinal only.
+Lateral motion is left to the road-boundary / spatial-envelope term and
+Stage-D homotopy half-spaces; this module is longitudinal only.
 
 Pure. Consumes ConflictTag (Stage A), optional ConflictAssignment
 (Stage B), the agent's projected station over time, and RSSParams.

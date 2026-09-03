@@ -147,7 +147,7 @@ class MPCRepulsivePotentialSpec:
 
 
 def _row_attr(row: Any, name: str, default: float = 0.0) -> float:
-    """Read ``stage``/``a_x``/``a_y``/``lower``/``upper`` from a corridor row
+    """Read ``stage``/``a_x``/``a_y``/``lower``/``upper`` from a linear row
     that is either an object (``pipeline.mpc_corridor_constraints.LinearRow``)
     or a plain mapping -- keeps mpc.py free of a pipeline import."""
 
@@ -3226,12 +3226,11 @@ class MPC:
             for k in range(1, self.horizon_steps + 1):
                 add_quadratic(index.corridor_slack_index(k), tiny_reg)
 
-        # --- Objective + constraints: Stage-D spatiotemporal corridor ---
-        # Per stage k a soft longitudinal band on the ego position in the
-        # ego-origin frame:  lower - s <= a_x x_k + a_y y_k <= upper + s,
-        # s >= 0, cost w * s^2. Rows come from
-        # pipeline.mpc_corridor_constraints.corridor_rows (t_k = reference
-        # tangent, band already shifted by the ego's own station).
+        # --- Objective + constraints: Stage-D spatiotemporal rows ---
+        # Per stage k, longitudinal corridor bands and lateral homotopy
+        # half-spaces share one LinearRow contract in the ego-origin frame:
+        # lower - s <= a_x x_k + a_y y_k <= upper + s, s >= 0,
+        # with cost w*s^2. An infinite upper or lower expresses a half-space.
         if corridor_term_active:
             w_corr = float(self.corridor_slack_weight)
             corr_slack_upper = (

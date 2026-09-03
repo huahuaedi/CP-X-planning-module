@@ -5,11 +5,18 @@ the ego-origin plane as coefficients on ``(x_k, y_k)`` plus a
 ``[lower, upper]`` band. ``mpc.py`` maps stage ``k`` -> its state-variable
 columns and attaches a slack column per row.
 
+Two row producers share the same ``LinearRow`` contract understood by MPC:
+
 ``corridor_rows`` produces one longitudinal band per stage:
       s_lo(k) - sigma <= t_k . (x_k, y_k) <= s_hi(k) + sigma
   where ``t_k`` is the unit tangent of the ego reference at stage ``k``'s
   linearization station (so ``t_k . p`` is arc-length along the path,
   first-order).
+
+``homotopy_keepout_rows`` produces one lateral half-space per assigned CAV
+and stage: ``n . (p_ego - p_cav) >= d_safe``.  Expressing it as a lower-only
+``LinearRow`` is important: the row then reaches the existing MPC matrix
+builder instead of relying on a second, incompatible row schema.
 
 Pure. No numpy dependency.
 """
@@ -122,4 +129,47 @@ def corridor_rows(
                 tag=(corridor.binding[k] if k < len(corridor.binding) else ""),
             )
         )
+    return rows
+
+
+def homotopy_keepout_rows(
+    assignments: Sequence[Any],
+    cav_positions_by_stage: Mapping[int, Sequence[XY]],
+    ego_heading_rad: float,
+    ego_origin_xy: XY = (0.0, 0.0),
+    *,
+    d_safe_m: float = 3.0,
+    slack_group: str = "cav_homotopy",
+) -> List[LinearRow]:
+    """Encode latched pass sides as lower-only MPC ``LinearRow`` values."""
+
+    ox, oy = float(ego_origin_xy[0]), float(ego_origin_xy[1])
+    ch, sh = math.cos(float(ego_heading_rad)), math.sin(float(ego_heading_rad))
+    rows: List[LinearRow] = []
+    for assignment in list(assignments or []):
+        # yield/make_gap already own a longitudinal constraint. Adding a
+        # lateral pass-side simultaneously would ask ego to both stay behind
+        # and pass the peer, producing contradictory geometry.
+        if str(getattr(assignment, "role", "") or "") != "proceed":
+            continue
+        side = str(getattr(assignment, "homotopy_side", "") or "")
+        if side not in ("left", "right"):
+            continue
+        actor_id = int(getattr(assignment, "cav_actor_id", -1))
+        track = list(cav_positions_by_stage.get(actor_id, ()) or ())
+        nx, ny = (-sh, ch) if side == "left" else (sh, -ch)
+        for stage, point in enumerate(track):
+            if stage <= 0 or len(point) < 2:
+                continue
+            px = float(point[0]) - ox
+            py = float(point[1]) - oy
+            rows.append(LinearRow(
+                stage=int(stage),
+                a_x=float(nx),
+                a_y=float(ny),
+                lower=float(nx * px + ny * py + max(0.0, float(d_safe_m))),
+                upper=_BIG,
+                slack_group=str(slack_group),
+                tag=str(actor_id),
+            ))
     return rows
