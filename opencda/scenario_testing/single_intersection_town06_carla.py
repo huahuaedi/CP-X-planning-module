@@ -18,6 +18,33 @@ from opencda.scenario_testing.evaluations.evaluate_manager import \
     EvaluationManager
 from opencda.scenario_testing.utils.yaml_utils import add_current_time
 
+try:  # optional: prediction-knowledge ablation (scripted crossers + trace record)
+    from opencda.scenario_testing.scripted_actor import spawn_scripted_actors
+    from opencda.planning_module.pipeline.prediction_ablation import TraceRecorder
+except Exception:  # pragma: no cover - keep base scenarios importable
+    spawn_scripted_actors = None
+    TraceRecorder = None
+
+
+def _carla_lane_id(carla_map, location):
+    try:
+        wp = carla_map.get_waypoint(location, project_to_road=True)
+        return int(wp.lane_id) if wp is not None else None
+    except Exception:
+        return None
+
+
+def _actor_ground_truth(vehicle, carla_map):
+    tf = vehicle.get_transform()
+    vel = vehicle.get_velocity()
+    return {
+        "x": float(tf.location.x),
+        "y": float(tf.location.y),
+        "v": float(math.sqrt(vel.x ** 2 + vel.y ** 2 + vel.z ** 2)),
+        "psi": math.radians(float(tf.rotation.yaw)),
+        "lane_id": _carla_lane_id(carla_map, tf.location),
+    }
+
 
 def _spectator_view_mode():
     """Return the requested OpenCDA spectator camera mode."""
@@ -164,10 +191,64 @@ def run_scenario(opt, scenario_params):
         termination_reason = "max_ticks_reached"
         cav_collision_counts = [0 for _ in single_cav_list]
         cav_collision_active = [False for _ in single_cav_list]
+
+        # --- prediction-knowledge ablation: scripted crossers + trace record --
+        carla_map = scenario_manager.world.get_map()
+        fixed_dt_s = float(
+            scenario_params.get("world", {}).get("fixed_delta_seconds", 0.05)
+        )
+        scripted_actor_list = []
+        scripted_cfgs = list(scenario_cfg.get("scripted_actors", []) or [])
+        if scripted_cfgs and spawn_scripted_actors is not None:
+            scripted_actor_list = spawn_scripted_actors(
+                scenario_manager.world, scripted_cfgs
+            )
+        ablation_cfg = scenario_cfg.get("prediction_ablation", {}) or {}
+        trace_recorder = None
+        if bool(ablation_cfg.get("record", False)) and TraceRecorder is not None:
+            trace_path = str(ablation_cfg.get(
+                "trace_path",
+                "opencda/planning_module/opencda_bridge/oracle_traces/"
+                "single_intersection_town06_carla.jsonl",
+            ))
+            if not os.path.isabs(trace_path):
+                trace_path = os.path.join(
+                    os.path.dirname(os.path.dirname(os.path.dirname(
+                        os.path.realpath(__file__)
+                    ))),
+                    trace_path,
+                )
+            trace_recorder = TraceRecorder(trace_path)
+            print("[prediction ablation] recording ground-truth traces -> %s"
+                  % trace_path)
+
         # run steps
         for tick_index in range(max_ticks):
             completed_ticks = int(tick_index) + 1
             scenario_manager.tick()
+            for scripted in scripted_actor_list:
+                scripted.step(fixed_dt_s)
+            if trace_recorder is not None:
+                # Match the bridge clock exactly: it reads sim time from
+                # ``world.get_snapshot().timestamp.elapsed_seconds``.
+                try:
+                    world_time_s = float(
+                        scenario_manager.world.get_snapshot()
+                        .timestamp.elapsed_seconds
+                    )
+                except Exception:
+                    world_time_s = float(tick_index) * fixed_dt_s
+                gt_actors = {}
+                for scripted in scripted_actor_list:
+                    gt_actors[str(scripted.vehicle.id)] = _actor_ground_truth(
+                        scripted.vehicle, carla_map
+                    )
+                for bg in bg_veh_list:
+                    gt_actors[str(bg.id)] = _actor_ground_truth(bg, carla_map)
+                trace_recorder.record(
+                    sim_time_s=world_time_s,
+                    actors=gt_actors,
+                )
             for walker in list(scripted_walkers):
                 direction = list(
                     cooperative_vru_cfg.get("direction", [1.0, 0.0, 0.0])
@@ -338,6 +419,18 @@ def run_scenario(opt, scenario_params):
                     "opencda/planning_module/opencda_bridge/debug_intersection",
                 )
             )
+            # Mirror cpx_mpc_planner._resolved_debug_output_dir(): the
+            # prediction-ablation blind/oracle runs get the mode appended so
+            # run_status.json lands next to that run's debug CSV.
+            _pred_mode = str(
+                scenario_params.get("vehicle_base", {})
+                .get("planner", {})
+                .get("prediction_mode", "cv")
+            ).strip().lower()
+            if _pred_mode and _pred_mode != "cv" and not debug_output_dir.endswith(
+                "_" + _pred_mode
+            ):
+                debug_output_dir = debug_output_dir + "_" + _pred_mode
             if not os.path.isabs(debug_output_dir):
                 debug_output_dir = os.path.join(
                     os.path.dirname(os.path.dirname(os.path.dirname(
@@ -409,6 +502,20 @@ def run_scenario(opt, scenario_params):
 
         if scenario_manager is not None:
             scenario_manager.close()
+
+        try:
+            _rec = locals().get("trace_recorder")
+            if _rec is not None:
+                _rec.close()
+                print("[prediction ablation] trace rows written: %d"
+                      % _rec.rows_written)
+        except Exception:
+            pass
+        for scripted in (locals().get("scripted_actor_list", []) or []):
+            try:
+                scripted.vehicle.destroy()
+            except Exception:
+                pass
 
         for v in single_cav_list:
             v.destroy()

@@ -1,0 +1,94 @@
+base_config: single_intersection_town06_carla.yaml
+
+description: |-
+  Prediction-knowledge ablation base + oracle-recording run.
+
+  Ego drives the southbound Town06 arterial (x ~= 6.31, y: 125 -> -60) as in
+  single_intersection_town06_carla, EXCEPT:
+    * all CARLA Traffic-Manager background traffic is removed, so the only
+      interacting object is one deterministic, ego-blind crossing vehicle
+      (opencda/scenario_testing/scripted_actor.py);
+    * traffic-light response is disabled, so the junction conflict is a pure
+      prediction/yield problem, not a signal stop;
+    * the AD-map (dij) global planner is used (the base's `astar` is no longer
+      accepted by cpx_mpc_planner);
+    * the prediction stage runs in `cv` mode and every tick dumps the
+      ground-truth state of every non-ego vehicle to
+      prediction_ablation.trace_path -- that file is the oracle replayed by
+      cpx_intersection_cross_traffic_oracle.yaml.
+
+  RUN ORDER (append -v 0.9.12 for CARLA 0.9.12+):
+    1. python opencda.py -t cpx_intersection_cross_traffic          # record
+    2. python opencda.py -t cpx_intersection_cross_traffic_blind    # no pred
+    3. python opencda.py -t cpx_intersection_cross_traffic_oracle   # full pred
+    4. python opencda/scenario_testing/compare_prediction_ablation.py
+
+  Debug dirs: cv -> debug_intersection_cross/, blind/oracle get the mode
+  auto-appended (debug_intersection_cross_blind/ , _oracle/).
+
+  TUNE THE CROSSER (scenario.scripted_actors[0]): pick a real Town06 cross
+  street that meets the ego arterial between y=125 and y=-60, set `path` to
+  its centerline across the junction, and set `start_tick` so the crosser
+  reaches x~=6.3 when ego reaches that junction's y. Verify once with the
+  recording run's debug CSV (nearest_ttc_* should dip near the junction).
+
+# Only the scripted crosser interacts with ego.
+carla_traffic_manager:
+  vehicle_list: []
+  range: ~
+
+vehicle_base:
+  behavior:
+    ignore_traffic_light: true
+  planner:
+    global_planner_mode: dij
+    global_planner_xodr_path: Global_Planner/maps/Town06.xodr
+    global_planner_strict: false
+    functional_test_ignore_dynamic_objects: false
+    ignore_traffic_control: true
+    route_replan_enabled: false
+    max_mpc_obstacles: 4
+    prediction_lane_following_enabled: true
+    debug_output_dir: opencda/planning_module/opencda_bridge/debug_intersection_cross
+    # cv | blind | oracle  -- the _blind / _oracle variants override this key.
+    prediction_mode: cv
+
+scenario:
+  max_ticks: 4000
+  destination_tolerance_m: 3.0
+  single_cav_list:
+    # OmegaConf.merge replaces this list wholesale; vehicle_base.planner still
+    # supplies every unlisted planner key (same convention as
+    # cpx_single_left_lane_turn_blocked.yaml). Deliberately no per-cav
+    # `prediction_mode` / `global_planner_mode` here so the variants only need
+    # to touch vehicle_base.
+    - name: cav1
+      spawn_position: [6.31, 125.03, 0.3, 0, -92, 0]
+      destination: [6.31, -60.0, 0.3]
+      v2x:
+        communication_range: 60
+      behavior:
+        local_planner:
+          debug_trajectory: true
+          debug: true
+      planner:
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_intersection_cross
+  # Deterministic ego-blind crossing vehicle. PLACEHOLDER geometry -- retune
+  # `path` / `speed_mps` / `start_tick` to your chosen Town06 junction.
+  scripted_actors:
+    - blueprint: vehicle.tesla.model3
+      # west -> east across the arterial at (placeholder) junction y = 45.
+      path:
+        - [-18.0, 45.0]
+        - [-6.0, 45.0]
+        - [6.31, 45.0]
+        - [18.0, 45.0]
+        - [30.0, 45.0]
+      speed_mps: 6.0
+      z: 0.3
+      # ticks to wait before the crosser starts moving; tune so it is at
+      # x ~= 6.3 when ego passes y ~= 45.
+      start_tick: 60
+  prediction_ablation:
+    record: true
+    trace_path: opencda/planning_module/opencda_bridge/oracle_traces/intersection_cross.jsonl

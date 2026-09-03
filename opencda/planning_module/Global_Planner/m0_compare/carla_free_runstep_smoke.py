@@ -57,8 +57,19 @@ def _fake_vehicle_manager(ego_xy, yaw_rad, sim_time_s=0.0):
         ),
         get_location=lambda: carla.Location(ex, ey, 0.0),
     )
+    # OpenCDA longitudinal PID stand-in: planning owns steering, OpenCDA owns
+    # the target-velocity -> throttle/brake conversion.
+    controller = SimpleNamespace(
+        current_speed=0.0,
+        max_throttle=1.0,
+        max_brake=1.0,
+        lon_run_step=lambda target_kmh, _c=[0.0]: max(
+            -1.0, min(1.0, 0.05 * (float(target_kmh) - _c[0]))
+        ),
+    )
     return SimpleNamespace(
         vehicle=vehicle,
+        controller=controller,
         carla_map=None,
         localizer=SimpleNamespace(
             get_ego_pos=lambda: carla.Transform(

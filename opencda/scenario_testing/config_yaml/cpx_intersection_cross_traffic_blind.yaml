@@ -1,0 +1,14 @@
+base_config: cpx_intersection_cross_traffic.yaml
+
+description: |-
+  Prediction-knowledge ablation -- BLIND arm. Ego knows where every vehicle
+  is but assumes none of them move ("no predicted trajectory"). Debug output
+  auto-suffixed to debug_intersection_cross_blind/.
+
+vehicle_base:
+  planner:
+    prediction_mode: blind
+
+scenario:
+  prediction_ablation:
+    record: false

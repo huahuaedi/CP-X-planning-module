@@ -1,0 +1,20 @@
+base_config: cpx_intersection_cross_traffic.yaml
+
+description: |-
+  Prediction-knowledge ablation -- ORACLE arm. Every other vehicle's future
+  is replaced with its recorded ground-truth trajectory (+ a maneuver-intent
+  label) from the recording run. Requires intersection_cross.jsonl to exist
+  (run `cpx_intersection_cross_traffic` first). Debug output auto-suffixed to
+  debug_intersection_cross_oracle/.
+
+vehicle_base:
+  planner:
+    prediction_mode: oracle
+    oracle_trace_path: opencda/planning_module/opencda_bridge/oracle_traces/intersection_cross.jsonl
+    # If a tracked obstacle can't be matched to any recorded actor, fall back
+    # to the pipeline's constant-velocity rollout (true = freeze instead).
+    oracle_freeze_unmatched: false
+
+scenario:
+  prediction_ablation:
+    record: false
