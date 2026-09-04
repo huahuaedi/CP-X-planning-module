@@ -244,6 +244,9 @@ class PlannerDiagnosticsStage:
             "cav_multimodal_agent_count": int(
                 cav_diag.get("multimodal_agent_count", 0) or 0
             ),
+            "cav_credible_mode_veto_count": int(
+                cav_diag.get("credible_mode_veto_count", 0) or 0
+            ),
             "cav_trajectory_sources": ";".join(
                 f"{k}={v}"
                 for k, v in sorted(

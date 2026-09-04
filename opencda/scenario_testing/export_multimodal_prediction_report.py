@@ -14,7 +14,7 @@ DEBUG = ROOT / "opencda" / "planning_module" / "opencda_bridge"
 ARMS = {
     "CV": DEBUG / "debug_prediction_cv_ego",
     "Primary only": DEBUG / "debug_prediction_primary_ego",
-    "Multimodal": DEBUG / "debug_multimodal_ego",
+    "Multimodal": DEBUG / "debug_multimodal_ego_synthetic_multimodal",
 }
 OUTPUT = ROOT / "artifacts" / "multimodal_prediction_report"
 
@@ -72,6 +72,10 @@ def _metrics(rows):
         ),
         "multimodal_ticks": sum(
             _number(row, "cav_multimodal_agent_count", 0.0) > 0.0 for row in rows
+        ),
+        "credible_veto_ticks": sum(
+            _number(row, "cav_credible_mode_veto_count", 0.0) > 0.0
+            for row in rows
         ),
         "constraint_ticks": sum(
             _number(row, "cav_total_qp_row_count", 0.0) > 0.0 for row in rows

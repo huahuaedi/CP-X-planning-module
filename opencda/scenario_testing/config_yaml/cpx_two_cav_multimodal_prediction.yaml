@@ -6,6 +6,18 @@ description: |-
   receives synthetic keep-lane/brake/lane-change hypotheses with probabilities
   0.55/0.25/0.20 through the normal PredictionFrame interface.
 
+# Keep the prediction ablation physically controlled: only the two CAVs are
+# present and neither may start an opportunistic overtake.  The front CAV's
+# destination slowdown is therefore the sole interaction stimulus.
+carla_traffic_manager:
+  vehicle_list: []
+
+vehicle_base:
+  behavior:
+    overtake_allowed: false
+  planner:
+    full_allow_opportunistic_lane_change: false
+
 cpx_mature:
   max_ticks: 900
   destination_tolerance_m: 4.0
@@ -45,4 +57,6 @@ scenario:
         target_speed_mps: 10.0
         prediction_mode: synthetic_multimodal
         prediction_mode_min_probability: 0.05
+        prediction_credible_probability_min: 0.15
+        prediction_credible_ttc_s: 2.0
         debug_output_dir: opencda/planning_module/opencda_bridge/debug_multimodal_ego

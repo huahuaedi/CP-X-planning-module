@@ -144,6 +144,25 @@ def test_connected_cav_replaces_same_actor_perception_track():
     assert set(r.diagnostics["tags"]) == {"2"}
 
 
+def test_pose_only_cav_intent_does_not_replace_prediction_modes():
+    crossing = [{"x": 30.0, "y": -6.0 + k} for k in range(20)]
+    pose_only = _cav(2, (30.0, -6.0), committed_at_s=4.0, path=())
+    perception = {
+        "id": 2, "x": 30.0, "y": -6.0, "v": 8.0,
+        "psi": math.pi / 2.0,
+    }
+    result = resolve_conflicts(
+        reference_samples=REF, ego_snapshot=EGO, my_actor_id=1,
+        obstacle_snapshots=[perception], cav_intents=[pose_only],
+        prediction_modes={
+            "2": [{"path": crossing, "probability": 1.0}],
+        },
+    )
+    assert result.diagnostics["tags"]["2"] == CROSSING
+    assert result.diagnostics["shared_plan_cav_count"] == 0
+    assert result.diagnostics["trajectory_source_counts"]["prediction"] == 1
+
+
 def test_prediction_modes_map_feeds_a_non_connected_agents_future():
     # Only the agent's *future* (from the prediction module, passed as a
     # length-1 mode) makes it a crossing conflict; its current pose alone

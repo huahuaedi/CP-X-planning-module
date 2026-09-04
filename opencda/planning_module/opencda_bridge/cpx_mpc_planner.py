@@ -633,6 +633,7 @@ class CPXMPCPlannerBridge:
             "cav_homotopy_qp_row_count",
             "cav_total_qp_row_count",
             "cav_multimodal_agent_count",
+            "cav_credible_mode_veto_count",
             "cav_trajectory_sources",
             "cav_prediction_validation_actor_id",
             "cav_prediction_validation_horizon_s",

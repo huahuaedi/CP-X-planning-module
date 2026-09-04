@@ -115,11 +115,15 @@ def resolve_conflicts(
     credible_mode_ttc_s: float = 2.0,
 ) -> ConflictResolution:
     cavs = list(cav_intents or [])
-    cav_agents = [_cav_to_agent_snapshot(c) for c in cavs]
+    # Only a peer carrying an actual shared plan owns future-trajectory data.
+    # A pose/claim-only intent remains available to Stage B but must not erase
+    # the prediction module's hypotheses for the same physical actor.
+    shared_plan_cavs = [c for c in cavs if c.planned_path]
+    cav_agents = [_cav_to_agent_snapshot(c) for c in shared_plan_cavs]
     # A connected vehicle normally also appears in perception.  Its shared
     # trajectory is the richer representation, so replace (rather than add
     # to) the perception track for the same actor.
-    cav_ids = {str(c.actor_id) for c in cavs}
+    cav_ids = {str(c.actor_id) for c in shared_plan_cavs}
     raw_obstacles = list(obstacle_snapshots or [])
     modes_by_id = dict(prediction_modes or {})
     perception_agents: List[Mapping[str, Any]] = []
