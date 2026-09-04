@@ -168,6 +168,23 @@ class CavConflictIntegrationTests(unittest.TestCase):
         self.assertEqual(
             len(result.mpc_rows), result.diagnostics["total_qp_row_count"]
         )
+        self.assertEqual(result.diagnostics["shared_plan_cav_count"], 1)
+        self.assertEqual(
+            result.diagnostics["shared_plan_sample_count"], len(cav_path)
+        )
+        self.assertEqual(result.diagnostics["prediction_validation_actor_id"], 2)
+        self.assertAlmostEqual(
+            result.diagnostics["prediction_validation_horizon_s"], 1.0
+        )
+        validation_stage = int(round(1.0 / mpc.dt_s))
+        self.assertAlmostEqual(
+            result.diagnostics["prediction_validation_x_m"],
+            cav_path[validation_stage][1],
+        )
+        self.assertAlmostEqual(
+            result.diagnostics["prediction_validation_y_m"],
+            cav_path[validation_stage][2],
+        )
         groups = {row.slack_group for row in result.mpc_rows}
         self.assertEqual(groups, {"corridor", "cav_homotopy"})
 

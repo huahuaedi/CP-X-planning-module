@@ -155,6 +155,8 @@ def resolve_conflicts(
         "conflict_agent_count": len(all_agents),
         "deduplicated_agent_count": len(raw_obstacles) + len(cav_agents) - len(all_agents),
         "cav_count": len(cavs),
+        "shared_plan_cav_count": sum(1 for c in cavs if c.planned_path),
+        "shared_plan_sample_count": sum(len(c.planned_path) for c in cavs),
         "non_ignore_count": sum(1 for t in tags if t.tag != IGNORE),
         "tags": {t.agent_id: t.tag for t in tags},
         "roles": {str(a.cav_actor_id): a.role for a in assignments},

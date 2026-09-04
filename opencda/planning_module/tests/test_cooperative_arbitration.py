@@ -16,6 +16,29 @@ def _claim(kind="lane_change", committed_at_s=10.0, active=True, require_ahead=T
     )
 
 
+def test_bilateral_lane_change_claims_produce_complementary_roles():
+    front = _cav(actor_id=10, committed_at_s=2.0, xy=(10.0, 0.0))
+    rear = _cav(actor_id=20, committed_at_s=4.0, xy=(0.0, 0.0))
+    front_roles, _ = assign_conflict_roles(
+        my_claim=_claim(committed_at_s=2.0, require_ahead=False),
+        my_actor_id=10,
+        my_position_xy=front.position_xy,
+        my_heading_rad=0.0,
+        cavs=[rear],
+        latch_state={},
+    )
+    rear_roles, _ = assign_conflict_roles(
+        my_claim=_claim(committed_at_s=4.0, require_ahead=False),
+        my_actor_id=20,
+        my_position_xy=rear.position_xy,
+        my_heading_rad=0.0,
+        cavs=[front],
+        latch_state={},
+    )
+    assert [role.role for role in front_roles] == ["proceed"]
+    assert [role.role for role in rear_roles] == ["make_gap"]
+
+
 def _cav(actor_id, xy, committed_at_s, *, kind="lane_change", active=True,
           cooperative=True):
     return CavIntent(

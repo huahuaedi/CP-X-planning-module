@@ -270,6 +270,19 @@ class PlanningPipeline:
             "homotopy_qp_row_count": len(lateral_rows),
             "total_qp_row_count": len(result.mpc_rows),
         })
+        if cav_intents:
+            validation_intent = sorted(cav_intents, key=lambda value: value.actor_id)[0]
+            validation_horizon_s = min(1.0, float(steps) * step_s)
+            validation_stage = min(
+                steps, max(0, int(round(validation_horizon_s / step_s)))
+            )
+            validation_xy = tracks[int(validation_intent.actor_id)][validation_stage]
+            result.diagnostics.update({
+                "prediction_validation_actor_id": int(validation_intent.actor_id),
+                "prediction_validation_horizon_s": float(validation_horizon_s),
+                "prediction_validation_x_m": float(validation_xy[0]),
+                "prediction_validation_y_m": float(validation_xy[1]),
+            })
         return result
 
     def prepare_route_lane_change(self, **kwargs):

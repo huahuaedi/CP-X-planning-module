@@ -613,12 +613,18 @@ class CPXMPCPlannerBridge:
             "cav_conflict_summary",
             "cav_corridor_binding",
             "cav_intent_count",
+            "cav_shared_plan_count",
+            "cav_shared_plan_sample_count",
             "cav_conflict_agent_count",
             "cav_non_ignore_count",
             "cav_deduplicated_agent_count",
             "cav_longitudinal_qp_row_count",
             "cav_homotopy_qp_row_count",
             "cav_total_qp_row_count",
+            "cav_prediction_validation_actor_id",
+            "cav_prediction_validation_horizon_s",
+            "cav_prediction_validation_x_m",
+            "cav_prediction_validation_y_m",
             "local_object_count",
             "traffic_signal_state",
             "traffic_signal_raw_state",
@@ -3605,6 +3611,10 @@ class CPXMPCPlannerBridge:
             resource_id="lane_change",
             committed_at_s=float(committed_at_s),
             active=bool(active),
+            # Lane-change resource ownership is bilateral: the winner must
+            # also see a conflicting claimant behind it so both peers derive
+            # complementary proceed/make-gap roles from the same claims.
+            require_ahead=False,
         )
 
     def _validate_route_tracking_lane_change_reference(

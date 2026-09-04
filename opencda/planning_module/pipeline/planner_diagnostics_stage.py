@@ -219,6 +219,12 @@ class PlannerDiagnosticsStage:
                 str(b) for b in cav_diag.get("corridor_binding", [])
             ),
             "cav_intent_count": int(cav_diag.get("cav_count", 0) or 0),
+            "cav_shared_plan_count": int(
+                cav_diag.get("shared_plan_cav_count", 0) or 0
+            ),
+            "cav_shared_plan_sample_count": int(
+                cav_diag.get("shared_plan_sample_count", 0) or 0
+            ),
             "cav_conflict_agent_count": int(
                 cav_diag.get("conflict_agent_count", 0) or 0
             ),
@@ -234,6 +240,18 @@ class PlannerDiagnosticsStage:
             ),
             "cav_total_qp_row_count": int(
                 cav_diag.get("total_qp_row_count", 0) or 0
+            ),
+            "cav_prediction_validation_actor_id": cav_diag.get(
+                "prediction_validation_actor_id", ""
+            ),
+            "cav_prediction_validation_horizon_s": cav_diag.get(
+                "prediction_validation_horizon_s", ""
+            ),
+            "cav_prediction_validation_x_m": cav_diag.get(
+                "prediction_validation_x_m", ""
+            ),
+            "cav_prediction_validation_y_m": cav_diag.get(
+                "prediction_validation_y_m", ""
             ),
             **self._perception_diagnostics(),
             "v2x_nearby_count": len(getattr(self.vehicle_manager.v2x_manager, "cav_nearby", {}) or {}),
