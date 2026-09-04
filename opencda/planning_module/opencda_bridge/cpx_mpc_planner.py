@@ -222,6 +222,9 @@ class CPXMPCPlannerBridge:
         # v2x_manager.cav_nearby; see _publish_cav_intent / _collect_cav_intents.
         self.last_cav_intent_payload = None
         self._cav_intent_sequence = 0
+        self._cav_intent_broadcast_enabled = bool(
+            self.config.get("cav_intent_broadcast_enabled", True)
+        )
         from opencda.planning_module.pipeline.cooperative_claim_manager import (
             CooperativeClaimManager,
         )
@@ -1922,7 +1925,7 @@ class CPXMPCPlannerBridge:
         if fallback_reason and not self._warned:
             print("[CP-X OpenCDA Bridge] MPC fallback active: " + fallback_reason)
             self._warned = True
-        if self._cav_conflict_enabled:
+        if self._cav_conflict_enabled and self._cav_intent_broadcast_enabled:
             self._publish_cav_intent(
                 ego_location=ego_location,
                 ego_yaw_rad=float(ego_yaw_rad),
@@ -3337,8 +3340,8 @@ class CPXMPCPlannerBridge:
                 claim=cav_claim,
                 obstacle_snapshots=self._interaction_obstacle_snapshots(
                     object_snapshots,
-                    prediction_trajectories=(
-                        reference_debug.get("prediction_trajectories", {}) or {}
+                    predicted_objects=(
+                        planner_input_frame.prediction.predicted_objects
                     ),
                 ),
                 cav_intents=self._collect_cav_intents(),
@@ -3346,6 +3349,9 @@ class CPXMPCPlannerBridge:
                 tag_state=self._cav_tag_state,
                 horizon_steps=int(self.mpc.horizon_steps),
                 dt_s=float(self.mpc.dt_s),
+                mode_probability_floor=float(self.config.get(
+                    "prediction_mode_min_probability", 0.05
+                )),
             )
             self._cav_latch = dict(cav_result.latch_state or {})
             self._cav_tag_state = dict(cav_result.tag_state or {})
@@ -3441,8 +3447,12 @@ class CPXMPCPlannerBridge:
                     ego_location=ego_location,
                     ego_yaw_rad=float(ego_yaw_rad),
                     object_snapshots=object_snapshots,
-                    prediction_trajectories=dict(
-                        planner_input_frame.prediction.obstacle_future_trajectories
+                    prediction_trajectories=(
+                        planner_input_frame.prediction.hypothesis_trajectories(
+                            minimum_probability=float(self.config.get(
+                                "prediction_mode_min_probability", 0.05
+                            ))
+                        )
                     ),
                     current_acceleration_mps2=float(self._last_accel_mps2),
                     current_steering_rad=float(self._last_steer_rad),
@@ -4266,6 +4276,12 @@ class CPXMPCPlannerBridge:
             oracle_store=self._oracle_trace_store,
             freeze_unmatched_oracle=bool(
                 self.config.get("oracle_freeze_unmatched", False)
+            ),
+            synthetic_actor_ids=tuple(
+                int(value)
+                for value in list(
+                    self.config.get("synthetic_prediction_actor_ids", []) or []
+                )
             ),
         )
         self._prediction_snapshot_transform_cached = True
@@ -5098,33 +5114,33 @@ class CPXMPCPlannerBridge:
         self,
         object_snapshots: Sequence[Mapping[str, Any]],
         *,
-        prediction_trajectories: Mapping[str, Sequence[Mapping[str, object]]],
+        predicted_objects: Mapping[str, Any],
     ) -> list[dict[str, Any]]:
         """Attach the prediction module's future to each non-connected road
         user before Stage A/C.
 
         Fusion priority: a connected vehicle with a fresh broadcast plan is
         handled by ``_collect_cav_intents`` (its shared trajectory wins);
-        every other agent gets the prediction module's trajectory here as a
-        single ``PredictedMode`` (probability 1.0). The list shape leaves a
-        real multi-modal predictor as a drop-in -- see
-        ``pipeline.prediction_modes``.
+        every other agent gets every retained prediction hypothesis here.
         """
 
         from opencda.planning_module.pipeline.prediction import obstacle_track_id
-        from opencda.planning_module.pipeline.prediction_modes import single_mode
-
-        preds = dict(prediction_trajectories or {})
+        preds = dict(predicted_objects or {})
         out: list[dict[str, Any]] = []
         for snapshot in list(object_snapshots or []):
             if not isinstance(snapshot, Mapping):
                 continue
             updated = dict(snapshot)
-            points = preds.get(obstacle_track_id(snapshot))
-            if points and "predicted_modes" not in updated:
-                updated["predicted_modes"] = list(
-                    single_mode(list(points), probability=1.0)
-                )
+            predicted = preds.get(obstacle_track_id(snapshot))
+            hypotheses = tuple(getattr(predicted, "hypotheses", ()) or ())
+            if hypotheses and "predicted_modes" not in updated:
+                updated["predicted_modes"] = [
+                    {
+                        "path": hypothesis.mutable_points(),
+                        "probability": float(hypothesis.probability),
+                    }
+                    for hypothesis in hypotheses
+                ]
                 updated.setdefault("trajectory_source", "prediction")
             out.append(updated)
         return out

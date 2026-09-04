@@ -214,7 +214,7 @@ class PlanningPipeline:
         *, reference_samples, ego_location, ego_yaw_rad, ego_speed_mps,
         actor_id, claim, obstacle_snapshots, cav_intents, latch_state,
         tag_state=None,
-        horizon_steps, dt_s,
+        horizon_steps, dt_s, mode_probability_floor=0.05,
     ):
         """Resolve cooperation against the candidate selected for execution."""
 
@@ -233,6 +233,7 @@ class PlanningPipeline:
             corridor_params=CorridorParams(
                 horizon_steps=max(1, int(horizon_steps)), dt_s=float(dt_s)
             ),
+            mode_probability_floor=float(mode_probability_floor),
         )
         from .cav_intent_codec import sample_cav_path_at
         from .mpc_corridor_constraints import corridor_rows, homotopy_keepout_rows

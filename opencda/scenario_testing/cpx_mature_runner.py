@@ -95,6 +95,42 @@ def run_mature_scenario(opt, scenario_params, *, script_name):
             application=["single"],
             map_helper=map_helper,
         )
+        multimodal_cfg = dict(
+            scenario_params.get("cpx_mature", {}).get(
+                "synthetic_multimodal_prediction", {}
+            ) or {}
+        )
+        if bool(multimodal_cfg.get("enabled", False)):
+            ego_index = int(multimodal_cfg.get("ego_cav_index", 1))
+            target_index = int(multimodal_cfg.get("target_cav_index", 0))
+            if (
+                0 <= ego_index < len(single_cav_list)
+                and 0 <= target_index < len(single_cav_list)
+                and ego_index != target_index
+            ):
+                ego_planner = getattr(single_cav_list[ego_index], "cpx_planner", None)
+                target_planner = getattr(
+                    single_cav_list[target_index], "cpx_planner", None
+                )
+                target_actor_id = int(single_cav_list[target_index].vehicle.id)
+                if ego_planner is not None:
+                    mode_override = str(
+                        multimodal_cfg.get("prediction_mode", "") or ""
+                    ).strip().lower()
+                    if mode_override:
+                        ego_planner._prediction_mode = mode_override
+                    ego_planner.config["synthetic_prediction_actor_ids"] = [
+                        target_actor_id
+                    ]
+                    ego_planner._prediction_snapshot_transform_cached = False
+                    ego_planner._prediction_snapshot_transform_fn = None
+                if target_planner is not None:
+                    target_planner._cav_intent_broadcast_enabled = False
+                print(
+                    "[CP-X multimodal] ego cav[%d] predicts cav[%d] actor=%d; "
+                    "target planned_path broadcast disabled."
+                    % (ego_index, target_index, target_actor_id)
+                )
         _, bg_veh_list = scenario_manager.create_traffic_carla()
 
         eval_manager = EvaluationManager(

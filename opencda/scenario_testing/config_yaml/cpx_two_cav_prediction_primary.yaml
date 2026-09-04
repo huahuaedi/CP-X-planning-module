@@ -1,0 +1,29 @@
+base_config: cpx_two_cav_multimodal_prediction.yaml
+
+cpx_mature:
+  synthetic_multimodal_prediction:
+    enabled: true
+    ego_cav_index: 1
+    target_cav_index: 0
+    prediction_mode: synthetic_multimodal
+
+scenario:
+  single_cav_list:
+    - name: predicted_vehicle
+      spawn_position: [-300.0, 8.3, 0.3, 0, 0, 0]
+      destination: [-70.0, 8.3, 0.3]
+      v2x: {enabled: true, communication_range: 80}
+      behavior: {local_planner: {debug_trajectory: true, debug: true}}
+      planner:
+        target_speed_mps: 8.0
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_prediction_primary_target
+    - name: prediction_ego
+      spawn_position: [-325.0, 8.3, 0.3, 0, 0, 0]
+      destination: [-70.0, 8.3, 0.3]
+      v2x: {enabled: true, communication_range: 80}
+      behavior: {local_planner: {debug_trajectory: true, debug: true}}
+      planner:
+        target_speed_mps: 10.0
+        prediction_mode: synthetic_multimodal
+        prediction_mode_min_probability: 0.30
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_prediction_primary_ego

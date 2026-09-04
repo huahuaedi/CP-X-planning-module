@@ -105,6 +105,7 @@ def resolve_conflicts(
     rss_params: RSSParams = RSSParams(),
     arbitration_range_m: float = 40.0,
     hysteresis_ticks: int = 3,
+    mode_probability_floor: float = 0.05,
 ) -> ConflictResolution:
     cavs = list(cav_intents or [])
     cav_agents = [_cav_to_agent_snapshot(c) for c in cavs]
@@ -126,7 +127,29 @@ def resolve_conflicts(
             a = {**a, "predicted_modes": list(as_modes(modes_by_id[aid]))}
             a.setdefault("trajectory_source", "prediction")
         perception_agents.append(a)
-    all_agents: List[Mapping[str, Any]] = perception_agents + cav_agents
+    physical_agents: List[Mapping[str, Any]] = perception_agents + cav_agents
+    all_agents: List[Mapping[str, Any]] = []
+    retained_mode_count = 0
+    for agent in physical_agents:
+        modes = as_modes(agent.get("predicted_modes"))
+        retained = [
+            mode for mode in modes
+            if float(mode.probability) >= max(0.0, float(mode_probability_floor))
+        ]
+        if len(retained) <= 1:
+            all_agents.append(agent)
+            retained_mode_count += len(retained)
+            continue
+        actor_id = _agent_id(agent)
+        for index, mode in enumerate(retained):
+            expanded = dict(agent)
+            expanded.pop("predicted_modes", None)
+            expanded["predicted_trajectory"] = list(mode.path)
+            expanded["id"] = "%s::mode%d" % (actor_id, int(index))
+            expanded["physical_actor_id"] = actor_id
+            expanded["mode_probability"] = float(mode.probability)
+            all_agents.append(expanded)
+            retained_mode_count += 1
 
     # Stage A -----------------------------------------------------------------
     tags = classify_conflicts(
@@ -192,14 +215,18 @@ def resolve_conflicts(
         source_counts[_source(agent)] = source_counts.get(_source(agent), 0) + 1
 
     diagnostics = {
-        "conflict_agent_count": len(all_agents),
-        "deduplicated_agent_count": len(raw_obstacles) + len(cav_agents) - len(all_agents),
+        "conflict_agent_count": len(physical_agents),
+        "mode_conflict_count": len(all_agents),
+        "deduplicated_agent_count": (
+            len(raw_obstacles) + len(cav_agents) - len(physical_agents)
+        ),
         "cav_count": len(cavs),
         "shared_plan_cav_count": sum(1 for c in cavs if c.planned_path),
         "shared_plan_sample_count": sum(len(c.planned_path) for c in cavs),
         "multimodal_agent_count": sum(
-            1 for a in all_agents if len(as_modes(a.get("predicted_modes"))) > 1
+            1 for a in physical_agents if len(as_modes(a.get("predicted_modes"))) > 1
         ),
+        "retained_prediction_mode_count": int(retained_mode_count),
         "trajectory_source_counts": source_counts,
         "ego_claim_phase": (
             "none" if my_claim is None else str(my_claim.phase)

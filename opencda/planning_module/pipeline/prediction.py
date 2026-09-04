@@ -130,6 +130,23 @@ class PredictionFrame:
     def risk_for_lane(self, lane_id: int) -> Dict[str, object]:
         return dict(self.lane_prediction_risks.get(int(lane_id), {}))
 
+    def hypothesis_trajectories(
+        self, minimum_probability: float = 0.0
+    ) -> Dict[str, List[dict]]:
+        """Flatten all retained hypotheses for candidate-level risk checks."""
+
+        threshold = max(0.0, float(minimum_probability))
+        trajectories = {}
+        for track_id, predicted in self.predicted_objects.items():
+            for index, hypothesis in enumerate(predicted.hypotheses):
+                if float(hypothesis.probability) < threshold:
+                    continue
+                key = "%s::mode%d::p%.3f" % (
+                    str(track_id), int(index), float(hypothesis.probability)
+                )
+                trajectories[key] = hypothesis.mutable_points()
+        return trajectories
+
 
 def build_prediction_frame(
     *,

@@ -1,0 +1,48 @@
+base_config: cpx_two_cav_merge_conflict.yaml
+
+description: |-
+  Multimodal prediction integration fixture. CAV1 remains physically driven
+  by CP-X, but its true MPC planned_path is hidden from CAV2. CAV2 instead
+  receives synthetic keep-lane/brake/lane-change hypotheses with probabilities
+  0.55/0.25/0.20 through the normal PredictionFrame interface.
+
+cpx_mature:
+  max_ticks: 900
+  destination_tolerance_m: 4.0
+  completion_mode: all_cavs
+  synthetic_multimodal_prediction:
+    enabled: true
+    ego_cav_index: 1
+    target_cav_index: 0
+
+scenario:
+  single_cav_list:
+    - name: predicted_vehicle
+      spawn_position: [-300.0, 8.3, 0.3, 0, 0, 0]
+      destination: [-70.0, 8.3, 0.3]
+      v2x:
+        enabled: true
+        communication_range: 80
+      behavior:
+        local_planner:
+          debug_trajectory: true
+          debug: true
+      planner:
+        target_speed_mps: 8.0
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_multimodal_target
+
+    - name: prediction_ego
+      spawn_position: [-325.0, 8.3, 0.3, 0, 0, 0]
+      destination: [-70.0, 8.3, 0.3]
+      v2x:
+        enabled: true
+        communication_range: 80
+      behavior:
+        local_planner:
+          debug_trajectory: true
+          debug: true
+      planner:
+        target_speed_mps: 10.0
+        prediction_mode: synthetic_multimodal
+        prediction_mode_min_probability: 0.05
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_multimodal_ego

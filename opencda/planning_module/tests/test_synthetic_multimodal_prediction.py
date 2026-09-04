@@ -1,0 +1,34 @@
+from pipeline.prediction import build_prediction_frame
+from pipeline.prediction_ablation import synthetic_multimodal_snapshot_transform
+
+
+def test_synthetic_transform_targets_one_actor_and_normalizes_probabilities():
+    transform = synthetic_multimodal_snapshot_transform(
+        horizon_s=2.0, dt_s=0.2, actor_ids=[7]
+    )
+    untouched = transform({"id": 8, "x": 0, "y": 0, "v": 5}, 1.0)
+    assert "trajectory_hypotheses" not in untouched
+    transformed = transform({"id": 7, "x": 0, "y": 0, "v": 5, "psi": 0}, 1.0)
+    modes = transformed["trajectory_hypotheses"]
+    assert [mode["maneuver"] for mode in modes] == [
+        "lane_keep", "brake", "lane_change_left"
+    ]
+    assert abs(sum(mode["probability"] for mode in modes) - 1.0) < 1.0e-9
+    assert modes[1]["points"][-1]["x"] < modes[0]["points"][-1]["x"]
+    assert modes[2]["points"][-1]["y"] > 3.0
+
+
+def test_prediction_frame_preserves_all_synthetic_hypotheses():
+    transform = synthetic_multimodal_snapshot_transform(
+        horizon_s=2.0, dt_s=0.2, actor_ids=[7]
+    )
+    frame = build_prediction_frame(
+        ego_snapshot={"x": -10, "y": 0, "v": 8, "psi": 0},
+        obstacle_snapshots=[{"id": 7, "x": 0, "y": 0, "v": 5, "psi": 0}],
+        lane_assignments={"7": 1}, available_lane_ids=[1],
+        horizon_s=2.0, dt_s=0.2, min_front_gap_m=5.0,
+        min_rear_gap_m=5.0, min_ttc_s=2.0, snapshot_transform=transform,
+    )
+    assert len(frame.predicted_objects["7"].hypotheses) == 3
+    assert len(frame.hypothesis_trajectories(0.05)) == 3
+    assert len(frame.hypothesis_trajectories(0.30)) == 1

@@ -96,6 +96,67 @@ def frozen_snapshot_transform(
     return _transform
 
 
+def synthetic_multimodal_snapshot_transform(
+    *, horizon_s: float, dt_s: float, actor_ids: Sequence[int] = (),
+) -> SnapshotTransform:
+    """Inject keep-lane/brake/lane-change hypotheses for selected actors."""
+
+    selected = {str(int(value)) for value in list(actor_ids or ())}
+    step_s = max(1.0e-3, float(dt_s))
+    count = max(2, int(math.ceil(max(step_s, float(horizon_s)) / step_s)) + 1)
+
+    def _transform(snapshot: dict, timestamp_s: float) -> dict:
+        out = dict(snapshot)
+        actor_id = next((
+            str(snapshot[key])
+            for key in ("track_id", "object_id", "vehicle_id", "actor_id", "id")
+            if snapshot.get(key) is not None
+        ), "")
+        if selected and actor_id not in selected:
+            return out
+        x0, y0 = _snapshot_xy(snapshot)
+        v0 = max(0.0, _snapshot_speed(snapshot))
+        heading = _snapshot_heading(snapshot)
+        tx, ty = math.cos(heading), math.sin(heading)
+        nx, ny = -ty, tx
+
+        def _points(kind: str) -> list[dict]:
+            rows = []
+            for index in range(count):
+                time_s = float(index) * step_s
+                speed = max(0.0, v0 - 2.0 * time_s) if kind == "brake" else v0
+                distance = (
+                    min(v0 * time_s, v0 * time_s - time_s ** 2)
+                    if kind == "brake" else v0 * time_s
+                )
+                distance = max(0.0, distance)
+                u = min(1.0, time_s / max(1.0, 0.75 * float(horizon_s)))
+                smooth = 10.0 * u ** 3 - 15.0 * u ** 4 + 6.0 * u ** 5
+                lateral = 3.5 * smooth if kind == "lane_change_left" else 0.0
+                rows.append({
+                    "t": time_s,
+                    "x": x0 + distance * tx + lateral * nx,
+                    "y": y0 + distance * ty + lateral * ny,
+                    "v": speed,
+                    "psi": heading,
+                })
+            return rows
+
+        out["trajectory_hypotheses"] = [
+            {"maneuver": "lane_keep", "probability": 0.55,
+             "position_sigma_m": 0.6, "points": _points("lane_keep")},
+            {"maneuver": "brake", "probability": 0.25,
+             "position_sigma_m": 0.8, "points": _points("brake")},
+            {"maneuver": "lane_change_left", "probability": 0.20,
+             "position_sigma_m": 1.0, "points": _points("lane_change_left")},
+        ]
+        out["prediction_source"] = "synthetic_multimodal"
+        out["prediction_timestamp_s"] = float(timestamp_s)
+        return out
+
+    return _transform
+
+
 # --------------------------------------------------------------------------- #
 # oracle: replay recorded ground-truth futures
 # --------------------------------------------------------------------------- #
@@ -274,6 +335,7 @@ def build_snapshot_transform(
     dt_s: float,
     oracle_store: Optional[OracleTraceStore] = None,
     freeze_unmatched_oracle: bool = False,
+    synthetic_actor_ids: Sequence[int] = (),
 ) -> Optional[SnapshotTransform]:
     """Factory used by the bridge: map a config mode string to a transform.
 
@@ -296,6 +358,11 @@ def build_snapshot_transform(
             horizon_s=float(horizon_s),
             dt_s=float(dt_s),
             freeze_unmatched=bool(freeze_unmatched_oracle),
+        )
+    if mode in {"synthetic_multimodal", "multimodal"}:
+        return synthetic_multimodal_snapshot_transform(
+            horizon_s=float(horizon_s), dt_s=float(dt_s),
+            actor_ids=synthetic_actor_ids,
         )
     raise ValueError(f"unknown prediction_mode: {prediction_mode!r}")
 

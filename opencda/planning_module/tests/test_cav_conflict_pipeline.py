@@ -161,7 +161,7 @@ def test_prediction_modes_map_feeds_a_non_connected_agents_future():
     assert r.diagnostics["trajectory_source_counts"].get("prediction") == 1
 
 
-def test_highest_probability_mode_is_the_one_used():
+def test_all_modes_above_probability_floor_are_used():
     stay = [{"x": 30.0, "y": -6.0}] * 20                     # off to the side
     cross = [{"x": 30.0, "y": -6.0 + 1.0 * k} for k in range(20)]
     base = {"id": "npc", "x": 30.0, "y": -6.0, "v": 8.0, "psi": math.pi / 2.0}
@@ -183,7 +183,15 @@ def test_highest_probability_mode_is_the_one_used():
             {"path": cross, "probability": 0.2}]}],
         cav_intents=[],
     )
-    assert all(h >= _BIG for h in r_stay.corridor.s_hi)      # low-prob crosser ignored
+    assert any(h < _BIG for h in r_stay.corridor.s_hi)       # p=0.2 crosser retained
+    r_filtered = resolve_conflicts(
+        reference_samples=REF, ego_snapshot=EGO, my_actor_id=1, my_claim=None,
+        obstacle_snapshots=[{**base, "predicted_modes": [
+            {"path": stay, "probability": 0.8},
+            {"path": cross, "probability": 0.2}]}],
+        cav_intents=[], mode_probability_floor=0.3,
+    )
+    assert all(h >= _BIG for h in r_filtered.corridor.s_hi)
 
 
 def test_connected_cav_snapshot_carries_a_single_broadcast_mode():
