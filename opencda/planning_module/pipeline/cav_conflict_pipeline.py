@@ -161,6 +161,9 @@ def resolve_conflicts(
         "shared_plan_cav_count": sum(1 for c in cavs if c.planned_path),
         "shared_plan_sample_count": sum(len(c.planned_path) for c in cavs),
         "non_ignore_count": sum(1 for t in tags if t.tag != IGNORE),
+        "speed_owned_follow_count": sum(
+            1 for t in tags if t.tag in ("FOLLOW", "LEAD_BRAKE")
+        ),
         "tags": {t.agent_id: t.tag for t in tags},
         "roles": {str(a.cav_actor_id): a.role for a in assignments},
         "corridor_feasible": bool(corridor.feasible),

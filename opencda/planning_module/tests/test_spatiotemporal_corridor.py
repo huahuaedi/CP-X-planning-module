@@ -42,14 +42,12 @@ def test_no_conflicts_leaves_corridor_open():
     assert all(l <= -_BIG for l in cor.s_lo)
 
 
-def test_follow_caps_s_hi_behind_the_lead():
+def test_follow_leaves_corridor_open_for_speed_planner():
     # lead sits at x=40 the whole horizon
     lead = {"x": 40.0, "v": 6.0, **_track([(40.0, 0.1)] * 21)}
     cor = build_longitudinal_corridor(REF, EGO, [(lead, _tag("lead", FOLLOW), None)], P)
-    # RSS gap for ego 10 / lead 6 is well under 40 m -> s_hi < 40, finite
-    assert cor.s_hi[10] < 40.0
-    assert cor.s_hi[10] > 0.0
-    assert cor.binding[10] == "lead"
+    assert all(value >= _BIG for value in cor.s_hi)
+    assert not any(cor.binding)
     assert cor.feasible
 
 
@@ -92,14 +90,9 @@ def test_merge_proceed_adds_no_bound():
     assert all(h >= _BIG for h in cor.s_hi)
 
 
-def test_infeasible_corridor_is_flagged():
-    # a lead already behind the ego forces s_hi negative -> s_lo(-BIG) < s_hi ok,
-    # but two conflicting caps: lead very close ahead + a hard crossing cap
+def test_close_follow_does_not_create_a_second_stop_controller():
     lead = {"x": 3.0, "v": 0.0, **_track([(3.0, 0.1)] * 21)}
     cor = build_longitudinal_corridor(
         REF, {"x": 0.0, "v": 12.0}, [(lead, _tag("lead", FOLLOW), None)], P
     )
-    # s_hi ~ 3 - (RSS gap for 12 vs 0 ~ 30) = negative; s_lo is -BIG so still
-    # "feasible" as a box, but s_hi is well below where ego can be -> Stage D
-    # slacks it. Just assert the cap is negative and flagged consistently.
-    assert cor.s_hi[0] < 0.0
+    assert all(value >= _BIG for value in cor.s_hi)

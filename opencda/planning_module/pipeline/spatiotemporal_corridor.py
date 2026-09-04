@@ -6,7 +6,8 @@ as linear constraints:
 
     s_lo(t_k) <= s_ego(t_k) <= s_hi(t_k)     for k = 0 .. N
 
-* FOLLOW / LEAD_BRAKE / CUT_IN  -> s_hi capped a RSS gap behind the agent.
+* FOLLOW / LEAD_BRAKE            -> no row; SpeedPlanner/IDM is sole owner.
+* CUT_IN                          -> s_hi capped a RSS gap behind the agent.
 * CROSSING / ONCOMING, ego yields -> s_hi capped just short of the
   conflict point while the agent is near it.
 * CROSSING / ONCOMING, ego proceeds -> no longitudinal upper bound; the
@@ -127,12 +128,15 @@ def build_longitudinal_corridor(
         gap = longitudinal_safe_distance(ego_v, agent_v, rss) + p.follow_extra_buffer_m
         station = _agent_station_series(agent, poly, n + 1)
 
+        # Ordinary car-following has exactly one longitudinal owner:
+        # SpeedPlanner/IDM.  Mirroring FOLLOW/LEAD_BRAKE here used the same
+        # peer a second time as a geometric QP bound.  On a lane-change
+        # reference that tangent row coupled longitudinal following into the
+        # lateral solution and pulled the vehicle away from lane centre.
         if tag.tag in (FOLLOW, LEAD_BRAKE):
-            for k in range(n + 1):
-                if k < len(station):
-                    _cap(k, station[k] - gap, tag.agent_id)
+            continue
 
-        elif tag.tag == CUT_IN:
+        if tag.tag == CUT_IN:
             # A cooperative cav that lost the arbitration (role proceed) is
             # expected to yield to ego, so ego takes no bound from it.
             if proceed:

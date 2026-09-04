@@ -151,10 +151,10 @@ class CavConflictIntegrationTests(unittest.TestCase):
                 committed_at_s=10.0, active=True,
             ),
             obstacle_snapshots=[{
-                "id": "lead", "x": 0.0, "y": 15.0, "v": 2.0,
-                "psi": np.pi / 2.0,
+                "id": "crossing", "x": -8.0, "y": 18.0, "v": 7.0,
+                "psi": 0.0,
                 "predicted_trajectory": [
-                    {"x": 0.0, "y": 15.0 + 0.2 * k}
+                    {"x": -8.0 + 0.7 * k, "y": 18.0}
                     for k in range(mpc.horizon_steps + 1)
                 ],
             }],

@@ -27,7 +27,7 @@ def _cav(actor_id, xy, committed_at_s, *, path=(), speed=9.0, heading=0.0,
     )
 
 
-def test_end_to_end_follow_only_no_claim():
+def test_end_to_end_follow_is_delegated_to_speed_planner():
     lead = {"id": "lead", "x": 40.0, "y": 0.1, "v": 6.0,
             "predicted_trajectory": [{"x": 40.0, "y": 0.1}] * 21}
     r = resolve_conflicts(
@@ -36,7 +36,8 @@ def test_end_to_end_follow_only_no_claim():
     )
     assert r.diagnostics["tags"]["lead"] == FOLLOW
     assert r.assignments == []                       # no claim -> no Stage B
-    assert r.corridor.s_hi[10] < 40.0
+    assert all(value >= _BIG for value in r.corridor.s_hi)
+    assert r.diagnostics["speed_owned_follow_count"] == 1
     assert r.corridor.feasible
 
 
