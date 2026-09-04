@@ -198,6 +198,7 @@ class PlannerDiagnosticsStage:
         steer_rad = context["steer_rad"]
         stop_target_forward_m_debug = context["stop_target_forward_m_debug"]
         cp_summary = dict(getattr(self.cp_provider, "last_publish_summary", {}) or {})
+        cav_diag = dict(getattr(self, "_last_cav_diagnostics", {}) or {})
         diagnostics = {
             "sim_time_s": float(self._sim_time_s()),
             "vehicle_id": int(getattr(self.vehicle_manager.vehicle, "id", -1)),
@@ -213,14 +214,26 @@ class PlannerDiagnosticsStage:
             "mpc_object_count": len(mpc_object_snapshots),
             "local_object_count": len(local_object_snapshots),
             "prediction_mode": str(self._prediction_mode),
-            "cav_conflict_summary": _cav_conflict_summary(
-                getattr(self, "_last_cav_diagnostics", {})
-            ),
+            "cav_conflict_summary": _cav_conflict_summary(cav_diag),
             "cav_corridor_binding": ",".join(
-                str(b) for b in
-                dict(getattr(self, "_last_cav_diagnostics", {})).get(
-                    "corridor_binding", []
-                )
+                str(b) for b in cav_diag.get("corridor_binding", [])
+            ),
+            "cav_intent_count": int(cav_diag.get("cav_count", 0) or 0),
+            "cav_conflict_agent_count": int(
+                cav_diag.get("conflict_agent_count", 0) or 0
+            ),
+            "cav_non_ignore_count": int(cav_diag.get("non_ignore_count", 0) or 0),
+            "cav_deduplicated_agent_count": int(
+                cav_diag.get("deduplicated_agent_count", 0) or 0
+            ),
+            "cav_longitudinal_qp_row_count": int(
+                cav_diag.get("longitudinal_qp_row_count", 0) or 0
+            ),
+            "cav_homotopy_qp_row_count": int(
+                cav_diag.get("homotopy_qp_row_count", 0) or 0
+            ),
+            "cav_total_qp_row_count": int(
+                cav_diag.get("total_qp_row_count", 0) or 0
             ),
             **self._perception_diagnostics(),
             "v2x_nearby_count": len(getattr(self.vehicle_manager.v2x_manager, "cav_nearby", {}) or {}),
