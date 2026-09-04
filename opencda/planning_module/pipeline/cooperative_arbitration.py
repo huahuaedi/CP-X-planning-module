@@ -21,6 +21,12 @@ from dataclasses import dataclass
 from typing import Dict, Mapping, Optional, Sequence, Tuple
 
 
+CLAIM_PROPOSED = "proposed"
+CLAIM_COMMITTED = "committed"
+CLAIM_RELEASED = "released"
+_ACTIVE_CLAIM_PHASES = frozenset({CLAIM_PROPOSED, CLAIM_COMMITTED})
+
+
 @dataclass(frozen=True)
 class ResourceClaim:
     """One CAV's claim on a shared resource.
@@ -38,6 +44,19 @@ class ResourceClaim:
     committed_at_s: float
     active: bool
     require_ahead: bool = True
+    phase: str = CLAIM_COMMITTED
+
+    @property
+    def participates(self) -> bool:
+        """Whether this claim participates in distributed arbitration."""
+
+        return bool(
+            self.active and str(self.phase).strip().lower() in _ACTIVE_CLAIM_PHASES
+        )
+
+    @property
+    def committed(self) -> bool:
+        return bool(self.participates and str(self.phase).lower() == CLAIM_COMMITTED)
 
 
 # --------------------------------------------------------------------------- #
@@ -119,6 +138,11 @@ def _raw_cav_wins(
     my_claim: ResourceClaim, my_actor_id: int,
     cav_claim: ResourceClaim, cav_actor_id: int,
 ) -> bool:
+    # A physically committed maneuver cannot be pre-empted by a proposal.
+    # This ordering is evaluated identically by both peers, then timestamp/id
+    # resolves contenders in the same lifecycle phase.
+    if bool(cav_claim.committed) != bool(my_claim.committed):
+        return bool(cav_claim.committed)
     return float(cav_claim.committed_at_s) < float(my_claim.committed_at_s) or (
         float(cav_claim.committed_at_s) == float(my_claim.committed_at_s)
         and int(cav_actor_id) < int(my_actor_id)
@@ -163,7 +187,7 @@ def assign_conflict_roles(
         if not bool(getattr(cav, "cooperative", True)):
             continue
         pclaim = cav.claim
-        if not bool(pclaim.active):
+        if not bool(pclaim.participates):
             continue
         if str(pclaim.kind) != str(my_claim.kind):
             continue

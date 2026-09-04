@@ -127,6 +127,7 @@ def cav_intent_to_payload(intent: CavIntent) -> dict:
             "committed_at_s": float(c.committed_at_s),
             "active": bool(c.active),
             "require_ahead": bool(c.require_ahead),
+            "phase": str(c.phase),
         },
         "planned_path": [
             [float(t), float(x), float(y), float(v)]
@@ -162,6 +163,9 @@ def cav_intent_from_payload(payload: Mapping[str, Any]) -> Optional[CavIntent]:
         committed_at_s=_f(raw_claim, "committed_at_s"),
         active=bool(raw_claim.get("active", False)),
         require_ahead=bool(raw_claim.get("require_ahead", True)),
+        # Schema-v1 senders had only ``active``; an active legacy claim was
+        # already a committed maneuver, so this default is backward-compatible.
+        phase=str(raw_claim.get("phase", "committed") or "committed"),
     )
     path: List[Tuple[float, float, float, float]] = []
     for s in list(payload.get("planned_path", []) or []):

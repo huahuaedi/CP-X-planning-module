@@ -42,6 +42,7 @@ from opencda.planning_module.pipeline.spatiotemporal_corridor import (
     CorridorParams,
     build_longitudinal_corridor,
 )
+from opencda.planning_module.pipeline.prediction_modes import as_modes, single_mode
 from opencda.planning_module.pipeline.rss import RSSParams
 
 
@@ -57,7 +58,11 @@ class ConflictResolution:
 
 
 def _cav_to_agent_snapshot(cav: CavIntent) -> dict:
-    return {
+    track = [
+        {"x": float(x), "y": float(y), "t": float(t), "v": float(v)}
+        for (t, x, y, v) in cav.planned_path
+    ]
+    snapshot = {
         "id": int(cav.actor_id),
         "vehicle_id": int(cav.actor_id),
         "x": float(cav.position_xy[0]),
@@ -65,11 +70,16 @@ def _cav_to_agent_snapshot(cav: CavIntent) -> dict:
         "v": float(cav.speed_mps),
         "psi": float(cav.heading_rad),
         "cooperative": bool(cav.cooperative),
-        "predicted_trajectory": [
-            {"x": float(x), "y": float(y), "t": float(t)}
-            for (t, x, y, _v) in cav.planned_path
-        ],
+        "predicted_trajectory": track,
+        "trajectory_source": "broadcast" if track else "current_pose",
     }
+    if track:
+        # One mode today (the committed broadcast plan). A real multi-modal
+        # predictor drops in here as extra PredictedMode entries.
+        snapshot["predicted_modes"] = list(single_mode(
+            track, probability=max(0.0, min(1.0, float(cav.probability)))
+        ))
+    return snapshot
 
 
 def _agent_id(agent: Mapping[str, Any]) -> str:
@@ -115,7 +125,7 @@ def resolve_conflicts(
     # Stage B (only cooperative cavs, only when ego holds an active claim) ---
     assignments: List[ConflictAssignment] = []
     new_latch: Dict[str, ArbitrationLatchEntry] = dict(latch_state or {})
-    if my_claim is not None and bool(my_claim.active):
+    if my_claim is not None and bool(my_claim.participates):
         conflicting_cavs = []
         for c in cavs:
             if not bool(c.cooperative):
@@ -160,6 +170,12 @@ def resolve_conflicts(
         "cav_count": len(cavs),
         "shared_plan_cav_count": sum(1 for c in cavs if c.planned_path),
         "shared_plan_sample_count": sum(len(c.planned_path) for c in cavs),
+        "ego_claim_phase": (
+            "none" if my_claim is None else str(my_claim.phase)
+        ),
+        "peer_claim_phases": {
+            str(c.actor_id): str(c.claim.phase) for c in cavs
+        },
         "non_ignore_count": sum(1 for t in tags if t.tag != IGNORE),
         "speed_owned_follow_count": sum(
             1 for t in tags if t.tag in ("FOLLOW", "LEAD_BRAKE")

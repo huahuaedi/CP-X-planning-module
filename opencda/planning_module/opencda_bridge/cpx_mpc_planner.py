@@ -3618,6 +3618,7 @@ class CPXMPCPlannerBridge:
             # also see a conflicting claimant behind it so both peers derive
             # complementary proceed/make-gap roles from the same claims.
             require_ahead=False,
+            phase="committed" if active else "released",
         )
 
     def _validate_route_tracking_lane_change_reference(

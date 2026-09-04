@@ -41,6 +41,7 @@ def test_codec_roundtrip():
     assert back.position_xy == (12.0, -1.5)
     assert back.claim.committed_at_s == 6.0
     assert back.claim.kind == "lane_change"
+    assert back.claim.phase == "committed"
     assert len(back.planned_path) == 2
 
 

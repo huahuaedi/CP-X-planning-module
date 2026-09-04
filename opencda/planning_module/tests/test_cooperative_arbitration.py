@@ -9,10 +9,11 @@ from opencda.planning_module.pipeline.cooperative_arbitration import (
 )
 
 
-def _claim(kind="lane_change", committed_at_s=10.0, active=True, require_ahead=True):
+def _claim(kind="lane_change", committed_at_s=10.0, active=True,
+           require_ahead=True, phase="committed"):
     return ResourceClaim(
         kind=kind, resource_id=kind, committed_at_s=committed_at_s,
-        active=active, require_ahead=require_ahead,
+        active=active, require_ahead=require_ahead, phase=phase,
     )
 
 
@@ -78,6 +79,40 @@ class ConflictRoleAssignmentTest(unittest.TestCase):
         a, _ = self._assign([_cav(2, (12.0, 0.0), committed_at_s=20.0)])
         self.assertEqual(a[0].role, "proceed")
         self.assertFalse(a[0].cav_wins)
+
+    def test_committed_claim_wins_over_earlier_proposal(self):
+        proposed = CavIntent(
+            actor_id=2, position_xy=(12.0, 0.0),
+            claim=_claim(committed_at_s=1.0, phase="proposed"),
+        )
+        roles, _ = assign_conflict_roles(
+            my_claim=_claim(committed_at_s=10.0, phase="committed"),
+            my_actor_id=5, my_position_xy=(0.0, 0.0),
+            my_heading_rad=0.0, cavs=[proposed],
+        )
+        self.assertEqual(roles[0].role, "proceed")
+        self.assertFalse(roles[0].cav_wins)
+
+    def test_two_proposals_use_timestamp_then_actor_id(self):
+        peer = CavIntent(
+            actor_id=2, position_xy=(12.0, 0.0),
+            claim=_claim(committed_at_s=10.0, phase="proposed"),
+        )
+        roles, _ = assign_conflict_roles(
+            my_claim=_claim(committed_at_s=10.0, phase="proposed"),
+            my_actor_id=5, my_position_xy=(0.0, 0.0),
+            my_heading_rad=0.0, cavs=[peer],
+        )
+        self.assertEqual(roles[0].role, "make_gap")
+        self.assertTrue(roles[0].cav_wins)
+
+    def test_released_claim_does_not_participate(self):
+        peer = CavIntent(
+            actor_id=2, position_xy=(12.0, 0.0),
+            claim=_claim(phase="released"),
+        )
+        roles, _ = self._assign([peer])
+        self.assertEqual(roles, [])
 
     def test_side_is_latched_with_role(self):
         a1, latch = self._assign(
