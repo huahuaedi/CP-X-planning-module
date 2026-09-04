@@ -19,6 +19,13 @@ except Exception:  # pragma: no cover - optional debug dependency
 
 _HUD_TEXT_COLOR = (235, 235, 235)
 _HUD_ALERT_COLOR = (255, 120, 60)
+_CAV_COLORS = (
+    (55, 170, 255),
+    (255, 105, 95),
+    (255, 200, 70),
+    (175, 110, 255),
+    (70, 220, 155),
+)
 
 # Display-layer heuristics only (not enforcement thresholds -- nothing in
 # the planning pipeline compares against these). Picked to flag a jump a
@@ -80,6 +87,9 @@ class OpenCDADebugViewer:
         )
         self.capture_frame_index = 0
         self.capture_saved_index = 0
+        self.topdown_height_m = max(
+            65.0, float(os.environ.get("OPENCDA_TOPDOWN_HEIGHT_M", "90.0"))
+        )
         if self.capture_dir is not None:
             self.capture_dir.mkdir(parents=True, exist_ok=True)
 
@@ -97,7 +107,7 @@ class OpenCDADebugViewer:
         blueprint.set_attribute("fov", str(float(fov_deg)))
 
         topdown_transform = carla_module.Transform(
-            carla_module.Location(x=0.0, y=0.0, z=65.0),
+            carla_module.Location(x=0.0, y=0.0, z=self.topdown_height_m),
             carla_module.Rotation(pitch=-90.0, yaw=0.0, roll=0.0),
         )
         chase_transform = carla_module.Transform(
@@ -206,7 +216,7 @@ class OpenCDADebugViewer:
             ego_x = float(ego_transform.location.x)
             ego_y = float(ego_transform.location.y)
             ego_yaw = math.radians(float(ego_transform.rotation.yaw))
-            horizontal_span_m = 2.0 * 65.0 * math.tan(math.radians(90.0) * 0.5)
+            horizontal_span_m = 2.0 * self.topdown_height_m * math.tan(math.radians(90.0) * 0.5)
             vertical_span_m = horizontal_span_m * float(self.height_px) / max(1.0, float(self.width_px))
             px_per_m_x = float(self.width_px) / max(1.0, horizontal_span_m)
             px_per_m_y = float(self.height_px) / max(1.0, vertical_span_m)
@@ -238,12 +248,21 @@ class OpenCDADebugViewer:
             mpc_points = self._project_points(cpx_debug.get("mpc_trajectory_points", []), project)
 
             self._draw_dotted_polyline(surface, mpc_points, color=(45, 185, 75), radius_px=3, dot_spacing_px=9)
-
-            self._draw_stable_route_minimap(
+            self._draw_peer_prediction_paths(
                 surface=surface,
-                route_points=cpx_debug.get("global_route_points", []),
-                ego_xy=(ego_x, ego_y),
+                paths=cpx_debug.get("cav_shared_planned_paths", {}),
+                vehicle_managers=vehicle_managers,
+                project=project,
             )
+
+            # The global-route inset obscures vehicles and adds no useful
+            # cooperative-planning evidence. Retain it for single-CAV debug.
+            if len(vehicle_managers) == 1:
+                self._draw_stable_route_minimap(
+                    surface=surface,
+                    route_points=cpx_debug.get("global_route_points", []),
+                    ego_xy=(ego_x, ego_y),
+                )
         except Exception:
             return
 
@@ -254,7 +273,7 @@ class OpenCDADebugViewer:
         vehicle_managers: Sequence[Any],
         project: Any,
     ) -> None:
-        """Mark every managed CAV with an oriented red footprint and label."""
+        """Mark every managed CAV with a stable color, footprint and ID."""
 
         for index, vehicle_manager in enumerate(list(vehicle_managers or [])):
             vehicle = getattr(vehicle_manager, "vehicle", None)
@@ -295,9 +314,44 @@ class OpenCDADebugViewer:
                 if len(corners) != 4:
                     continue
 
-                pygame.draw.polygon(surface, (245, 45, 45), corners, width=3)
+                color = _CAV_COLORS[index % len(_CAV_COLORS)]
+                pygame.draw.polygon(surface, color, corners, width=3)
+                center_px = project((center_x, center_y))
+                if center_px is not None and self.font is not None:
+                    label = self.font.render(
+                        f"CAV{index + 1} id={getattr(vehicle, 'id', '?')}",
+                        True,
+                        color,
+                    )
+                    surface.blit(label, (center_px[0] + 7, center_px[1] - 18))
             except (AttributeError, RuntimeError, TypeError, ValueError):
                 continue
+
+    def _draw_peer_prediction_paths(
+        self,
+        *,
+        surface: Any,
+        paths: Any,
+        vehicle_managers: Sequence[Any],
+        project: Any,
+    ) -> None:
+        """Draw peer trajectories received by CAV1, not inferred actor motion."""
+
+        actor_colors = {
+            str(getattr(getattr(manager, "vehicle", None), "id", "")):
+            _CAV_COLORS[index % len(_CAV_COLORS)]
+            for index, manager in enumerate(list(vehicle_managers or []))
+        }
+        for actor_id, points in dict(paths or {}).items():
+            projected = self._project_points(points, project)
+            color = actor_colors.get(str(actor_id), (255, 255, 255))
+            self._draw_dotted_polyline(
+                surface,
+                projected,
+                color=color,
+                radius_px=2,
+                dot_spacing_px=7,
+            )
 
     def _draw_stable_route_minimap(
         self,

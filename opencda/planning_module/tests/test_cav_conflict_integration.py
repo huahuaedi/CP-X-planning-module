@@ -185,6 +185,10 @@ class CavConflictIntegrationTests(unittest.TestCase):
             result.diagnostics["prediction_validation_y_m"],
             cav_path[validation_stage][2],
         )
+        self.assertEqual(
+            result.diagnostics["shared_planned_paths"]["2"][0],
+            (cav_path[0][1], cav_path[0][2]),
+        )
         groups = {row.slack_group for row in result.mpc_rows}
         self.assertEqual(groups, {"corridor", "cav_homotopy"})
 

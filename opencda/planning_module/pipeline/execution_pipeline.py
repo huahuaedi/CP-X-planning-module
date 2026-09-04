@@ -270,6 +270,14 @@ class PlanningPipeline:
             "longitudinal_qp_row_count": len(longitudinal_rows),
             "homotopy_qp_row_count": len(lateral_rows),
             "total_qp_row_count": len(result.mpc_rows),
+            "shared_planned_paths": {
+                str(intent.actor_id): [
+                    (float(sample[1]), float(sample[2]))
+                    for sample in intent.planned_path
+                ]
+                for intent in list(cav_intents or [])
+                if intent.planned_path
+            },
         })
         if cav_intents:
             validation_intent = sorted(cav_intents, key=lambda value: value.actor_id)[0]

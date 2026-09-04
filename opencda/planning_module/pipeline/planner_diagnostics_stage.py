@@ -253,6 +253,11 @@ class PlannerDiagnosticsStage:
             "cav_prediction_validation_y_m": cav_diag.get(
                 "prediction_validation_y_m", ""
             ),
+            # Viewer-only structured payload; CSV serialization deliberately
+            # ignores fields outside the stable scalar schema.
+            "cav_shared_planned_paths": dict(
+                cav_diag.get("shared_planned_paths", {}) or {}
+            ),
             **self._perception_diagnostics(),
             "v2x_nearby_count": len(getattr(self.vehicle_manager.v2x_manager, "cav_nearby", {}) or {}),
             "cp_provider_summary": dict(cp_summary),
