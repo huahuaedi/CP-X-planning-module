@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 import os
 import queue
+import json
+from pathlib import Path
 from typing import Any, Sequence
 
 import numpy as np
@@ -71,6 +73,15 @@ class OpenCDADebugViewer:
         self.sensors = []
         self._stable_route_points: list[list[float]] = []
         self._stable_route_bounds: tuple[float, float, float, float] | None = None
+        capture_dir = str(os.environ.get("OPENCDA_VIDEO_FRAMES_DIR", "")).strip()
+        self.capture_dir = Path(capture_dir).resolve() if capture_dir else None
+        self.capture_stride = max(
+            1, int(os.environ.get("OPENCDA_VIDEO_FRAME_STRIDE", "1"))
+        )
+        self.capture_frame_index = 0
+        self.capture_saved_index = 0
+        if self.capture_dir is not None:
+            self.capture_dir.mkdir(parents=True, exist_ok=True)
 
         pygame.init()
         pygame.font.init()
@@ -157,6 +168,16 @@ class OpenCDADebugViewer:
         pygame.draw.line(self.display, (70, 70, 70), (0, self.height_px), (self.width_px * 2, self.height_px), 1)
         self._draw_hud_lines(self._build_hud_lines(vehicle_managers), hud_rect)
         pygame.display.flip()
+        if (
+            self.capture_dir is not None
+            and self.capture_frame_index % self.capture_stride == 0
+        ):
+            pygame.image.save(
+                self.display,
+                str(self.capture_dir / f"frame_{self.capture_saved_index:06d}.png"),
+            )
+            self.capture_saved_index += 1
+        self.capture_frame_index += 1
 
     @staticmethod
     def _latest_image(image_queue: "queue.Queue[Any]"):
@@ -472,6 +493,17 @@ class OpenCDADebugViewer:
             self.display.blit(surface, (x, y))
 
     def destroy(self) -> None:
+        if self.capture_dir is not None:
+            try:
+                (self.capture_dir / "capture_manifest.json").write_text(
+                    json.dumps({
+                        "frame_count": int(self.capture_saved_index),
+                        "frame_stride": int(self.capture_stride),
+                    }, indent=2),
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
         for sensor in list(self.sensors):
             try:
                 sensor.stop()

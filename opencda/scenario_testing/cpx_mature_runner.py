@@ -45,6 +45,18 @@ def _distance_to_destination(vehicle, destination):
     return math.hypot(float(loc.x) - float(destination[0]), float(loc.y) - float(destination[1]))
 
 
+def _destinations_reached(vehicle_managers, vehicle_configs, tolerance_m):
+    """Return true only when every configured CAV reached its own goal."""
+
+    if not vehicle_managers or len(vehicle_managers) != len(vehicle_configs):
+        return False
+    return all(
+        _distance_to_destination(manager.vehicle, config["destination"])
+        <= float(tolerance_m)
+        for manager, config in zip(vehicle_managers, vehicle_configs)
+    )
+
+
 def _scenario_manager_kwargs(scenario_params):
     mature_cfg = scenario_params.get("cpx_mature", {})
     map_mode = str(mature_cfg.get("map_mode", "town")).strip().lower()
@@ -103,13 +115,22 @@ def run_mature_scenario(opt, scenario_params, *, script_name):
         runtime_cfg = scenario_params.get("cpx_mature", {})
         max_ticks = int(runtime_cfg.get("max_ticks", 1200))
         destination_tolerance_m = float(runtime_cfg.get("destination_tolerance_m", 8.0))
-        destination = scenario_params["scenario"]["single_cav_list"][0]["destination"]
+        vehicle_configs = scenario_params["scenario"]["single_cav_list"]
+        completion_mode = str(runtime_cfg.get("completion_mode", "first_cav"))
         spectator = scenario_manager.world.get_spectator()
         for _ in range(max(1, max_ticks)):
             scenario_manager.tick()
             ego_vehicle = single_cav_list[0].vehicle
             _set_spectator_transform(spectator, ego_vehicle)
-            if _distance_to_destination(ego_vehicle, destination) <= destination_tolerance_m:
+            if completion_mode == "all_cavs":
+                reached_destination = _destinations_reached(
+                    single_cav_list, vehicle_configs, destination_tolerance_m
+                )
+            else:
+                reached_destination = _distance_to_destination(
+                    ego_vehicle, vehicle_configs[0]["destination"]
+                ) <= destination_tolerance_m
+            if reached_destination:
                 print("CP-X mature scenario reached the configured destination.")
                 break
             for single_cav in single_cav_list:

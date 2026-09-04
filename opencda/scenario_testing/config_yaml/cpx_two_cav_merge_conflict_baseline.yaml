@@ -1,13 +1,14 @@
 base_config: cpx_two_cav_merge_conflict.yaml
 
 description: |-
-  Baseline for cpx_two_cav_merge_conflict: identical two-CAV car-following
-  approach with the multi-CAV interaction pipeline OFF
-  (cav_conflict_enabled: false). cav2 then plans against cav1 as an ordinary
-  current-pose obstacle in the exponential repulsive potential -- no
-  classify / predicted-station corridor / QP keep-out rows.
+  Physical-control baseline for cpx_two_cav_merge_conflict. It inherits the
+  same CAV spawns, slow traffic vehicle, destinations and lane-change policy;
+  only the prediction-aware cooperative conflict pipeline is OFF
+  (cav_conflict_enabled: false). Peers therefore create no role assignment,
+  predicted-station corridor, or QP homotopy half-space.
 
-  Run both and diff with opencda/scenario_testing/compare_cav_interaction.py.
+  Run both and export evidence with
+  opencda/scenario_testing/export_cav_interaction_report.py.
 
 vehicle_base:
   planner:
@@ -19,7 +20,7 @@ scenario:
   single_cav_list:
     - name: cav1
       spawn_position: [-300.0, 8.3, 0.3, 0, 0, 0]
-      destination: [-90.0, 8.3, 0.3]
+      destination: [-70.0, 8.3, 0.3]
       v2x:
         enabled: true
         communication_range: 80
@@ -28,12 +29,12 @@ scenario:
           debug_trajectory: true
           debug: true
       planner:
-        target_speed_mps: 3.0
+        target_speed_mps: 8.0
         debug_output_dir: opencda/planning_module/opencda_bridge/debug_two_cav_merge_off_cav1
 
     - name: cav2
-      spawn_position: [-358.0, 8.3, 0.3, 0, 0, 0]
-      destination: [-90.0, 8.3, 0.3]
+      spawn_position: [-325.0, 8.3, 0.3, 0, 0, 0]
+      destination: [-70.0, 8.3, 0.3]
       v2x:
         enabled: true
         communication_range: 80
@@ -42,5 +43,5 @@ scenario:
           debug_trajectory: true
           debug: true
       planner:
-        target_speed_mps: 14.0
+        target_speed_mps: 10.0
         debug_output_dir: opencda/planning_module/opencda_bridge/debug_two_cav_merge_off_cav2
