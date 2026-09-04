@@ -97,6 +97,7 @@ def resolve_conflicts(
     my_claim: Optional[ResourceClaim] = None,
     obstacle_snapshots: Sequence[Mapping[str, Any]] = (),
     cav_intents: Sequence[CavIntent] = (),
+    prediction_modes: Optional[Mapping[str, Sequence[Any]]] = None,
     latch_state: Optional[Mapping[str, ArbitrationLatchEntry]] = None,
     tag_state: Optional[Mapping[str, str]] = None,
     classifier_params: ClassifierParams = ClassifierParams(),
@@ -112,7 +113,19 @@ def resolve_conflicts(
     # to) the perception track for the same actor.
     cav_ids = {str(c.actor_id) for c in cavs}
     raw_obstacles = list(obstacle_snapshots or [])
-    perception_agents = [a for a in raw_obstacles if _agent_id(a) not in cav_ids]
+    modes_by_id = dict(prediction_modes or {})
+    perception_agents: List[Mapping[str, Any]] = []
+    for a in raw_obstacles:
+        aid = _agent_id(a)
+        if aid in cav_ids:
+            continue
+        # Fusion priority: a fresh broadcast plan (handled above as a CAV
+        # agent) wins; every other road user gets the prediction module's
+        # trajectory here, as a length-1 mode list today.
+        if "predicted_modes" not in a and aid in modes_by_id:
+            a = {**a, "predicted_modes": list(as_modes(modes_by_id[aid]))}
+            a.setdefault("trajectory_source", "prediction")
+        perception_agents.append(a)
     all_agents: List[Mapping[str, Any]] = perception_agents + cav_agents
 
     # Stage A -----------------------------------------------------------------
@@ -164,12 +177,30 @@ def resolve_conflicts(
         reference_samples, ego_snapshot, items, corridor_params, rss_params
     )
 
+    def _source(agent: Mapping[str, Any]) -> str:
+        src = str(agent.get("trajectory_source", "") or "")
+        if src:
+            return src
+        if as_modes(agent.get("predicted_modes")):
+            return "prediction"
+        if agent.get("predicted_trajectory") or agent.get("future_trajectory"):
+            return "prediction"
+        return "current_pose"
+
+    source_counts: Dict[str, int] = {}
+    for agent in all_agents:
+        source_counts[_source(agent)] = source_counts.get(_source(agent), 0) + 1
+
     diagnostics = {
         "conflict_agent_count": len(all_agents),
         "deduplicated_agent_count": len(raw_obstacles) + len(cav_agents) - len(all_agents),
         "cav_count": len(cavs),
         "shared_plan_cav_count": sum(1 for c in cavs if c.planned_path),
         "shared_plan_sample_count": sum(len(c.planned_path) for c in cavs),
+        "multimodal_agent_count": sum(
+            1 for a in all_agents if len(as_modes(a.get("predicted_modes"))) > 1
+        ),
+        "trajectory_source_counts": source_counts,
         "ego_claim_phase": (
             "none" if my_claim is None else str(my_claim.phase)
         ),

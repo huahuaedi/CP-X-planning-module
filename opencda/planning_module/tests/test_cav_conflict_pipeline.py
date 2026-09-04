@@ -41,6 +41,23 @@ def test_end_to_end_follow_is_delegated_to_speed_planner():
     assert r.corridor.feasible
 
 
+def test_cooperative_make_gap_overrides_generic_follow_handoff():
+    path = [(20.0 + 0.6 * k, 0.1) for k in range(21)]
+    peer = _cav(2, (20.0, 0.1), committed_at_s=1.0, path=path, speed=6.0)
+    ego_claim = ResourceClaim(
+        kind="lane_change", resource_id="lane_change",
+        committed_at_s=2.0, active=True, require_ahead=False,
+        phase="proposed",
+    )
+    result = resolve_conflicts(
+        reference_samples=REF, ego_snapshot=EGO, my_actor_id=5,
+        my_claim=ego_claim, obstacle_snapshots=[], cav_intents=[peer],
+    )
+    assert result.diagnostics["tags"]["2"] == FOLLOW
+    assert result.diagnostics["roles"]["2"] == "make_gap"
+    assert any(value < _BIG for value in result.corridor.s_hi)
+
+
 def test_ignored_agent_never_reaches_the_corridor():
     adj = {"id": "adj", "x": 3.0, "y": 3.6, "v": 10.0, "psi": 0.0}
     r = resolve_conflicts(
@@ -125,3 +142,56 @@ def test_connected_cav_replaces_same_actor_perception_track():
     assert r.diagnostics["conflict_agent_count"] == 1
     assert r.diagnostics["deduplicated_agent_count"] == 1
     assert set(r.diagnostics["tags"]) == {"2"}
+
+
+def test_prediction_modes_map_feeds_a_non_connected_agents_future():
+    # Only the agent's *future* (from the prediction module, passed as a
+    # length-1 mode) makes it a crossing conflict; its current pose alone
+    # would not.
+    crossing = [{"x": 30.0, "y": -6.0 + 1.0 * k} for k in range(20)]
+    agent = {"id": "npc", "x": 30.0, "y": -6.0, "v": 8.0, "psi": math.pi / 2.0}
+    r = resolve_conflicts(
+        reference_samples=REF, ego_snapshot=EGO, my_actor_id=1, my_claim=None,
+        obstacle_snapshots=[agent],
+        prediction_modes={"npc": [{"path": crossing, "probability": 1.0}]},
+        cav_intents=[],
+    )
+    assert r.diagnostics["tags"]["npc"] == CROSSING
+    assert any(h < _BIG for h in r.corridor.s_hi)
+    assert r.diagnostics["trajectory_source_counts"].get("prediction") == 1
+
+
+def test_highest_probability_mode_is_the_one_used():
+    stay = [{"x": 30.0, "y": -6.0}] * 20                     # off to the side
+    cross = [{"x": 30.0, "y": -6.0 + 1.0 * k} for k in range(20)]
+    base = {"id": "npc", "x": 30.0, "y": -6.0, "v": 8.0, "psi": math.pi / 2.0}
+
+    r_cross = resolve_conflicts(
+        reference_samples=REF, ego_snapshot=EGO, my_actor_id=1, my_claim=None,
+        obstacle_snapshots=[{**base, "predicted_modes": [
+            {"path": stay, "probability": 0.2},
+            {"path": cross, "probability": 0.8}]}],
+        cav_intents=[],
+    )
+    assert any(h < _BIG for h in r_cross.corridor.s_hi)      # used the cross mode
+    assert r_cross.diagnostics["multimodal_agent_count"] == 1
+
+    r_stay = resolve_conflicts(
+        reference_samples=REF, ego_snapshot=EGO, my_actor_id=1, my_claim=None,
+        obstacle_snapshots=[{**base, "predicted_modes": [
+            {"path": stay, "probability": 0.8},
+            {"path": cross, "probability": 0.2}]}],
+        cav_intents=[],
+    )
+    assert all(h >= _BIG for h in r_stay.corridor.s_hi)      # low-prob crosser ignored
+
+
+def test_connected_cav_snapshot_carries_a_single_broadcast_mode():
+    from pipeline.cav_conflict_pipeline import _cav_to_agent_snapshot
+    from pipeline.prediction_modes import as_modes
+    path = [(20.0 + k, 0.0) for k in range(10)]
+    snap = _cav_to_agent_snapshot(_cav(2, (20.0, 0.0), committed_at_s=4.0, path=path))
+    modes = as_modes(snap["predicted_modes"])
+    assert len(modes) == 1
+    assert modes[0].probability == 1.0
+    assert snap["trajectory_source"] == "broadcast"

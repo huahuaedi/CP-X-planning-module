@@ -128,6 +128,16 @@ def build_longitudinal_corridor(
         gap = longitudinal_safe_distance(ego_v, agent_v, rss) + p.follow_extra_buffer_m
         station = _agent_station_series(agent, poly, n + 1)
 
+        # A negotiated make-gap role is not ordinary following: it is the
+        # cooperative longitudinal contract and therefore owns a corridor
+        # cap regardless of whether Stage A labelled the peer FOLLOW or
+        # MERGE.  Apply it before the generic FOLLOW/IDM hand-off.
+        if role == "make_gap":
+            for k in range(n + 1):
+                if k < len(station):
+                    _cap(k, station[k] - gap, tag.agent_id)
+            continue
+
         # Ordinary car-following has exactly one longitudinal owner:
         # SpeedPlanner/IDM.  Mirroring FOLLOW/LEAD_BRAKE here used the same
         # peer a second time as a geometric QP bound.  On a lane-change
@@ -157,11 +167,7 @@ def build_longitudinal_corridor(
                 _cap(k, float(tag.conflict_s_m) - p.conflict_stop_buffer_m, tag.agent_id)
 
         elif tag.tag == MERGE:
-            if role != "make_gap":
-                continue
-            for k in range(n + 1):
-                if k < len(station):
-                    _cap(k, station[k] - gap, tag.agent_id)
+            continue
 
     cor.clamp_and_check()
     return cor

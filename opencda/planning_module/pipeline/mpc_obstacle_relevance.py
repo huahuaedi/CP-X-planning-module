@@ -41,7 +41,23 @@ def _f(m: Mapping[str, Any], *keys: str, default: float = 0.0) -> float:
 
 
 def _obstacle_track_xy(snapshot: Snapshot) -> List[XY]:
-    """Predicted (x, y) samples for one obstacle, or its current position."""
+    """Predicted (x, y) samples for one obstacle, or its current position.
+
+    Order of preference: the highest-probability entry of a multi-modal
+    ``predicted_modes`` list, then a bare ``predicted_trajectory`` /
+    ``future_trajectory``, then the current pose.
+    """
+
+    from opencda.planning_module.pipeline.prediction_modes import (
+        mode_xy,
+        primary_mode,
+    )
+
+    mode = primary_mode(snapshot.get("predicted_modes"))
+    if mode is not None:
+        pts = mode_xy(mode.path)
+        if pts:
+            return pts
 
     for key in ("predicted_trajectory", "future_trajectory"):
         raw = snapshot.get(key)

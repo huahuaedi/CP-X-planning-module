@@ -77,6 +77,7 @@ class CandidateArbitrationRequest:
     scenario_stop_required: bool
     speed_plan: Any
     turn_prepare_speed_suppressed: bool
+    cooperative_lane_change_deferred: bool = False
 
 
 @dataclass(frozen=True)
@@ -210,7 +211,12 @@ class CandidateSelectionStage:
         """Build, select and finalize candidates through one stage boundary."""
 
         authorization = request.lane_change_authorization
-        behavior_lane_change = str(request.selected_decision) in {
+        selected_decision = str(request.selected_decision)
+        if bool(request.cooperative_lane_change_deferred) and selected_decision in {
+            "lane_change_left", "lane_change_right",
+        }:
+            selected_decision = "lane_follow"
+        behavior_lane_change = selected_decision in {
             "lane_change_left", "lane_change_right",
         }
         opportunistic_authorized = bool(
@@ -229,12 +235,12 @@ class CandidateSelectionStage:
         direction = (
             str(authorization.direction or "")
             if bool(authorization.allowed)
-            else "left" if str(request.selected_decision) == "lane_change_left"
-            else "right" if str(request.selected_decision) == "lane_change_right"
+            else "left" if selected_decision == "lane_change_left"
+            else "right" if selected_decision == "lane_change_right"
             else ""
         )
         intents = self.build_intents(
-            selected_decision=str(request.selected_decision),
+            selected_decision=str(selected_decision),
             selected_target_lane_id=int(request.selected_target_lane_id),
             current_lane_id=int(request.current_lane_id),
             target_speed_mps=float(request.target_speed_mps),
@@ -245,7 +251,10 @@ class CandidateSelectionStage:
                 request.stop_goal_active or request.scenario_stop_required
             ),
             traffic_stop_active=bool(request.traffic_stop_active),
-            lane_change_authorized=bool(lane_change_authorized),
+            lane_change_authorized=bool(
+                lane_change_authorized
+                and not bool(request.cooperative_lane_change_deferred)
+            ),
             lane_change_target_lane_id=int(target_lane_id),
             stop_target=request.stop_target,
             lane_change_authorization_source=(
@@ -265,9 +274,11 @@ class CandidateSelectionStage:
         required_decision = (
             "lane_change_left"
             if request.route_required and bool(authorization.allowed)
+            and not bool(request.cooperative_lane_change_deferred)
             and str(authorization.direction).strip().lower() == "left"
             else "lane_change_right"
             if request.route_required and bool(authorization.allowed)
+            and not bool(request.cooperative_lane_change_deferred)
             and str(authorization.direction).strip().lower() == "right"
             else ""
         )
@@ -276,7 +287,7 @@ class CandidateSelectionStage:
                 intents=intents,
                 reference_context=request.reference_context,
                 baseline_lane_change_state=str(request.baseline_lane_change_state),
-                baseline_decision=str(request.selected_decision),
+                baseline_decision=str(selected_decision),
                 baseline_target_lane_id=int(request.selected_target_lane_id),
                 baseline_speed_mps=float(request.target_speed_mps),
                 baseline_reference=request.reference_context.baseline_reference,

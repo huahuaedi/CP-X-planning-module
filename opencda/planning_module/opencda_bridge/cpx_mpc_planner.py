@@ -222,6 +222,13 @@ class CPXMPCPlannerBridge:
         # v2x_manager.cav_nearby; see _publish_cav_intent / _collect_cav_intents.
         self.last_cav_intent_payload = None
         self._cav_intent_sequence = 0
+        from opencda.planning_module.pipeline.cooperative_claim_manager import (
+            CooperativeClaimManager,
+        )
+        self._cooperative_claim_manager = CooperativeClaimManager(
+            enabled=bool(self._cav_conflict_enabled),
+            proposal_dwell_s=float(self.config.get("cav_proposal_dwell_s", 0.25)),
+        )
         self._warned = False
         self._diagnostic_hd_map_matcher = DiagnosticHDMapMatcher()
         self._diagnostic_local_lane_frame: dict[str, object] = {}
@@ -622,6 +629,8 @@ class CPXMPCPlannerBridge:
             "cav_longitudinal_qp_row_count",
             "cav_homotopy_qp_row_count",
             "cav_total_qp_row_count",
+            "cav_multimodal_agent_count",
+            "cav_trajectory_sources",
             "cav_prediction_validation_actor_id",
             "cav_prediction_validation_horizon_s",
             "cav_prediction_validation_x_m",
@@ -1808,24 +1817,9 @@ class CPXMPCPlannerBridge:
                 behavior_decision=str(behavior_decision.maneuver),
                 reference_samples=lane_center_reference,
             )
+        cav_result = reference_debug.pop("_cav_resolution", None)
         cav_constraint_rows = ()
-        if self._cav_conflict_enabled:
-            cav_result = self.pipeline.resolve_cav_interaction(
-                reference_samples=lane_center_reference,
-                ego_location=ego_location,
-                ego_yaw_rad=float(ego_yaw_rad),
-                ego_speed_mps=float(ego_speed_mps),
-                actor_id=int(getattr(self.vehicle_manager.vehicle, "id", -1)),
-                claim=self._ego_cav_claim(sim_time_s=float(sim_time_s)),
-                obstacle_snapshots=object_snapshots,
-                cav_intents=self._collect_cav_intents(),
-                latch_state=self._cav_latch,
-                tag_state=self._cav_tag_state,
-                horizon_steps=int(self.mpc.horizon_steps),
-                dt_s=float(self.mpc.dt_s),
-            )
-            self._cav_latch = dict(cav_result.latch_state or {})
-            self._cav_tag_state = dict(cav_result.tag_state or {})
+        if cav_result is not None:
             cav_constraint_rows = tuple(cav_result.mpc_rows or ())
             self._last_cav_diagnostics = dict(cav_result.diagnostics or {})
             reference_debug["cav_conflict_diagnostics"] = dict(
@@ -3319,6 +3313,55 @@ class CPXMPCPlannerBridge:
             "route_replan_succeeded": bool(route_replan_succeeded),
             "route_replan_reason": str(route_replan_reason),
         })
+        # Cooperative arbitration precedes physical maneuver commitment.
+        # The first proposal tick is deliberately deferred so both peers can
+        # exchange the same proposed claims before either installs a locked
+        # lane-change reference.  This is also the sole CAV resolution call
+        # for the tick; its corridor rows are reused by MPC below.
+        cav_result = None
+        cooperative_lane_change_deferred = False
+        if self._cav_conflict_enabled:
+            lane_change = self.maneuver_manager.lane_change
+            cav_claim = self._cooperative_claim_manager.claim(
+                decision=str(decision), target_lane_id=int(target_lane_id),
+                sim_time_s=float(sim_time_s),
+                maneuver_active=bool(lane_change.active),
+                committed_at_s=float(lane_change.committed_at_s),
+            )
+            cav_result = self.pipeline.resolve_cav_interaction(
+                reference_samples=local_lane_center_reference,
+                ego_location=ego_location,
+                ego_yaw_rad=float(ego_yaw_rad),
+                ego_speed_mps=float(ego_speed_mps),
+                actor_id=int(getattr(self.vehicle_manager.vehicle, "id", -1)),
+                claim=cav_claim,
+                obstacle_snapshots=self._interaction_obstacle_snapshots(
+                    object_snapshots,
+                    prediction_trajectories=(
+                        reference_debug.get("prediction_trajectories", {}) or {}
+                    ),
+                ),
+                cav_intents=self._collect_cav_intents(),
+                latch_state=self._cav_latch,
+                tag_state=self._cav_tag_state,
+                horizon_steps=int(self.mpc.horizon_steps),
+                dt_s=float(self.mpc.dt_s),
+            )
+            self._cav_latch = dict(cav_result.latch_state or {})
+            self._cav_tag_state = dict(cav_result.tag_state or {})
+            cooperative_lane_change_deferred = (
+                self._cooperative_claim_manager.defer_candidate(
+                    sim_time_s=float(sim_time_s),
+                    assignments=cav_result.assignments,
+                )
+            )
+            reference_debug["cav_conflict_diagnostics"] = dict(
+                cav_result.diagnostics or {}
+            )
+            reference_debug["cav_candidate_deferred"] = bool(
+                cooperative_lane_change_deferred
+            )
+            reference_debug["_cav_resolution"] = cav_result
         if bool(self.full_candidate_pipeline_enabled):
             candidate_reference_context = CandidateReferenceBuildContext(
                 map_planner=self.reference_map,
@@ -3410,6 +3453,9 @@ class CPXMPCPlannerBridge:
                     speed_plan=speed_plan,
                     turn_prepare_speed_suppressed=bool(
                         turn_prepare_speed_suppressed_by_lane_change
+                    ),
+                    cooperative_lane_change_deferred=bool(
+                        cooperative_lane_change_deferred
                     ),
                 ),
                 sim_time_s=float(sim_time_s),
@@ -3598,27 +3644,26 @@ class CPXMPCPlannerBridge:
 
         if not self._cav_conflict_enabled:
             return None
-        from opencda.planning_module.pipeline.cooperative_arbitration import (
-            ResourceClaim,
-        )
-
         lane_change = getattr(self.maneuver_manager, "lane_change", None)
         active = bool(getattr(lane_change, "active", False)) or str(
             getattr(lane_change, "phase", "")
         ) in ("executing", "target_lane_stabilization")
-        committed_at_s = float(getattr(lane_change, "committed_at_s", 0.0))
-        if not math.isfinite(committed_at_s):
-            committed_at_s = float(sim_time_s)
-        return ResourceClaim(
-            kind="lane_change",
-            resource_id="lane_change",
-            committed_at_s=float(committed_at_s),
-            active=bool(active),
-            # Lane-change resource ownership is bilateral: the winner must
-            # also see a conflicting claimant behind it so both peers derive
-            # complementary proceed/make-gap roles from the same claims.
-            require_ahead=False,
-            phase="committed" if active else "released",
+        if active:
+            return self._cooperative_claim_manager.claim(
+                decision="lane_change_left",
+                target_lane_id=int(getattr(lane_change, "target_lane_id", 0) or 0),
+                sim_time_s=float(sim_time_s), maneuver_active=True,
+                committed_at_s=float(
+                    getattr(lane_change, "committed_at_s", 0.0)
+                ),
+            )
+        claim = self._cooperative_claim_manager.current_claim
+        if claim is not None:
+            return claim
+        return self._cooperative_claim_manager.claim(
+            decision="lane_follow", target_lane_id=0,
+            sim_time_s=float(sim_time_s), maneuver_active=False,
+            committed_at_s=0.0,
         )
 
     def _validate_route_tracking_lane_change_reference(
@@ -5048,6 +5093,41 @@ class CPXMPCPlannerBridge:
                 getattr(manager, "camera_num", 0) or 0
             ),
         }
+
+    def _interaction_obstacle_snapshots(
+        self,
+        object_snapshots: Sequence[Mapping[str, Any]],
+        *,
+        prediction_trajectories: Mapping[str, Sequence[Mapping[str, object]]],
+    ) -> list[dict[str, Any]]:
+        """Attach the prediction module's future to each non-connected road
+        user before Stage A/C.
+
+        Fusion priority: a connected vehicle with a fresh broadcast plan is
+        handled by ``_collect_cav_intents`` (its shared trajectory wins);
+        every other agent gets the prediction module's trajectory here as a
+        single ``PredictedMode`` (probability 1.0). The list shape leaves a
+        real multi-modal predictor as a drop-in -- see
+        ``pipeline.prediction_modes``.
+        """
+
+        from opencda.planning_module.pipeline.prediction import obstacle_track_id
+        from opencda.planning_module.pipeline.prediction_modes import single_mode
+
+        preds = dict(prediction_trajectories or {})
+        out: list[dict[str, Any]] = []
+        for snapshot in list(object_snapshots or []):
+            if not isinstance(snapshot, Mapping):
+                continue
+            updated = dict(snapshot)
+            points = preds.get(obstacle_track_id(snapshot))
+            if points and "predicted_modes" not in updated:
+                updated["predicted_modes"] = list(
+                    single_mode(list(points), probability=1.0)
+                )
+                updated.setdefault("trajectory_source", "prediction")
+            out.append(updated)
+        return out
 
     def _mpc_object_snapshots_with_prediction(
         self,

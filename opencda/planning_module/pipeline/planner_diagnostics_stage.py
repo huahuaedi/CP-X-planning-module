@@ -241,6 +241,15 @@ class PlannerDiagnosticsStage:
             "cav_total_qp_row_count": int(
                 cav_diag.get("total_qp_row_count", 0) or 0
             ),
+            "cav_multimodal_agent_count": int(
+                cav_diag.get("multimodal_agent_count", 0) or 0
+            ),
+            "cav_trajectory_sources": ";".join(
+                f"{k}={v}"
+                for k, v in sorted(
+                    dict(cav_diag.get("trajectory_source_counts", {}) or {}).items()
+                )
+            ),
             "cav_prediction_validation_actor_id": cav_diag.get(
                 "prediction_validation_actor_id", ""
             ),
