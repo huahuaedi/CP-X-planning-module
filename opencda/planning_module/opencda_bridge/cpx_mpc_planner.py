@@ -215,6 +215,7 @@ class CPXMPCPlannerBridge:
             self.config.get("cav_conflict_enabled", False)
         )
         self._cav_latch: dict[str, Any] = {}
+        self._cav_tag_state: dict[str, str] = {}
         self._last_cav_diagnostics: dict[str, Any] = {}
         # This CAV's own broadcast for nearby CP-X CAVs to read (its planned
         # trajectory + ResourceClaim + pose). Read peer-to-peer through
@@ -1819,10 +1820,12 @@ class CPXMPCPlannerBridge:
                 obstacle_snapshots=object_snapshots,
                 cav_intents=self._collect_cav_intents(),
                 latch_state=self._cav_latch,
+                tag_state=self._cav_tag_state,
                 horizon_steps=int(self.mpc.horizon_steps),
                 dt_s=float(self.mpc.dt_s),
             )
             self._cav_latch = dict(cav_result.latch_state or {})
+            self._cav_tag_state = dict(cav_result.tag_state or {})
             cav_constraint_rows = tuple(cav_result.mpc_rows or ())
             self._last_cav_diagnostics = dict(cav_result.diagnostics or {})
             reference_debug["cav_conflict_diagnostics"] = dict(

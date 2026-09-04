@@ -67,6 +67,25 @@ def test_perpendicular_crosser_is_crossing():
     assert t.tag == CROSSING
 
 
+def test_crossing_heading_uses_schmitt_hysteresis():
+    agent = {"id": "x", "x": 20.0, "y": 0.1, "v": 8.0}
+    enter = classify_conflicts(
+        REF, EGO, [{**agent, "psi": math.radians(54.0)}], P,
+        previous_tags={"x": FOLLOW},
+    )[0]
+    held = classify_conflicts(
+        REF, EGO, [{**agent, "psi": math.radians(46.0)}], P,
+        previous_tags={"x": CROSSING},
+    )[0]
+    exited = classify_conflicts(
+        REF, EGO, [{**agent, "psi": math.radians(40.0)}], P,
+        previous_tags={"x": CROSSING},
+    )[0]
+    assert enter.tag == FOLLOW
+    assert held.tag == CROSSING
+    assert exited.tag == FOLLOW
+
+
 def test_oncoming_vehicle_is_oncoming():
     pts = [(40.0 - 1.2 * k, 0.2) for k in range(20)]
     t = _one({"id": "onc", "x": 40.0, "y": 0.2, "v": 12.0, "psi": math.pi,

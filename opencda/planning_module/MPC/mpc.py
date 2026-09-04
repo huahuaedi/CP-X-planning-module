@@ -389,9 +389,13 @@ class MPC:
         self.corridor_slack_weight = max(
             0.0, float(corridor_cfg.get("w_slack", 1.0e4))
         )
-        self.corridor_max_slack_m = max(
-            0.0, float(corridor_cfg.get("max_slack_m", 3.0))
-        )
+        configured_corridor_slack_m = float(corridor_cfg.get("max_slack_m", 3.0))
+        if configured_corridor_slack_m < 0.0:
+            raise ValueError("cost.corridor.max_slack_m must be non-negative")
+        # Configuration contract: 0 means an unbounded non-negative slack,
+        # not a hard zero-slack constraint.  This keeps conflict rows soft
+        # and the QP feasible; a positive value imposes a finite upper bound.
+        self.corridor_max_slack_m = configured_corridor_slack_m
         self.safety_cost = MPCSafetyCostSpec(
             # Attractive weight (legacy fallback: cost.w_safe).
             w_safe=max(0.0, float(attractive_cfg.get("w_attractive", cost_cfg.get("w_safe", 0.7)))),
@@ -3233,6 +3237,8 @@ class MPC:
         # with cost w*s^2. An infinite upper or lower expresses a half-space.
         if corridor_term_active:
             w_corr = float(self.corridor_slack_weight)
+            # See constructor contract: zero is the explicit "unbounded"
+            # sentinel.  Do not replace this branch with a literal 0 bound.
             corr_slack_upper = (
                 float(self.corridor_max_slack_m)
                 if self.corridor_max_slack_m > 0.0 else np.inf

@@ -51,6 +51,7 @@ class ConflictResolution:
     assignments: List[ConflictAssignment]
     corridor: Corridor
     latch_state: Dict[str, ArbitrationLatchEntry]
+    tag_state: Dict[str, str] = field(default_factory=dict)
     mpc_rows: List[Any] = field(default_factory=list)
     diagnostics: Dict[str, Any] = field(default_factory=dict)
 
@@ -87,6 +88,7 @@ def resolve_conflicts(
     obstacle_snapshots: Sequence[Mapping[str, Any]] = (),
     cav_intents: Sequence[CavIntent] = (),
     latch_state: Optional[Mapping[str, ArbitrationLatchEntry]] = None,
+    tag_state: Optional[Mapping[str, str]] = None,
     classifier_params: ClassifierParams = ClassifierParams(),
     corridor_params: CorridorParams = CorridorParams(),
     rss_params: RSSParams = RSSParams(),
@@ -105,7 +107,8 @@ def resolve_conflicts(
 
     # Stage A -----------------------------------------------------------------
     tags = classify_conflicts(
-        reference_samples, ego_snapshot, all_agents, classifier_params
+        reference_samples, ego_snapshot, all_agents, classifier_params,
+        previous_tags=tag_state,
     )
     tag_by_id = {t.agent_id: t for t in tags}
 
@@ -166,5 +169,7 @@ def resolve_conflicts(
     }
     return ConflictResolution(
         tags=tags, assignments=assignments, corridor=corridor,
-        latch_state=new_latch, diagnostics=diagnostics,
+        latch_state=new_latch,
+        tag_state={tag.agent_id: tag.tag for tag in tags},
+        diagnostics=diagnostics,
     )

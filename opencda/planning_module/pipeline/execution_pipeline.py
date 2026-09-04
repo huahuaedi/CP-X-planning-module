@@ -213,6 +213,7 @@ class PlanningPipeline:
     def resolve_cav_interaction(
         *, reference_samples, ego_location, ego_yaw_rad, ego_speed_mps,
         actor_id, claim, obstacle_snapshots, cav_intents, latch_state,
+        tag_state=None,
         horizon_steps, dt_s,
     ):
         """Resolve cooperation against the candidate selected for execution."""
@@ -225,7 +226,7 @@ class PlanningPipeline:
             },
             my_actor_id=int(actor_id), my_claim=claim,
             obstacle_snapshots=obstacle_snapshots, cav_intents=cav_intents,
-            latch_state=latch_state,
+            latch_state=latch_state, tag_state=tag_state,
             classifier_params=ClassifierParams(
                 horizon_steps=max(1, int(horizon_steps)), dt_s=float(dt_s)
             ),

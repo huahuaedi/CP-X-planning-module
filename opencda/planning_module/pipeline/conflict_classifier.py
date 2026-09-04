@@ -50,6 +50,7 @@ class ClassifierParams:
     ignore_longitudinal_ahead_m: float = 45.0
     ignore_longitudinal_behind_m: float = 6.0
     crossing_heading_rad: float = math.radians(50.0)
+    crossing_heading_hysteresis_rad: float = math.radians(8.0)
     oncoming_heading_rad: float = math.radians(130.0)
     decel_threshold_mps2: float = -0.8
 
@@ -110,6 +111,7 @@ def classify_conflicts(
     ego_snapshot: Mapping[str, Any],
     agent_snapshots: Sequence[Mapping[str, Any]],
     p: ClassifierParams = ClassifierParams(),
+    previous_tags: Optional[Mapping[str, str]] = None,
 ) -> List[ConflictTag]:
     """Tag every agent. ``ego_snapshot`` needs x/y/v(/psi); each agent needs
     x/y/v(/psi) and optionally ``predicted_trajectory``."""
@@ -131,6 +133,7 @@ def classify_conflicts(
 
     for a in list(agent_snapshots or []):
         aid = _agent_id(a)
+        previous_tag = str((previous_tags or {}).get(aid, ""))
         coop = bool(a.get("cooperative", False))
         track = [
             (float(x), float(y)) for (x, y) in _obstacle_track_xy(a)
@@ -173,7 +176,12 @@ def classify_conflicts(
             tag, reason = IGNORE, f"min_lat={min_lat:.1f}>=gate"
         elif d_head >= p.oncoming_heading_rad:
             tag, reason = ONCOMING, f"dhead={math.degrees(d_head):.0f}"
-        elif d_head >= p.crossing_heading_rad:
+        elif d_head >= (
+            p.crossing_heading_rad
+            - p.crossing_heading_hysteresis_rad
+            if previous_tag == CROSSING
+            else p.crossing_heading_rad + p.crossing_heading_hysteresis_rad
+        ):
             tag, reason = CROSSING, f"dhead={math.degrees(d_head):.0f}"
         elif len(signed_lat) >= 2 and signed_lat[0] * signed_lat[-1] < 0 and min_lat < p.lane_half_width_m:
             tag, reason = CROSSING, "path_crossed"
