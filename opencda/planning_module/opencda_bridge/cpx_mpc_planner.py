@@ -3352,6 +3352,12 @@ class CPXMPCPlannerBridge:
                 mode_probability_floor=float(self.config.get(
                     "prediction_mode_min_probability", 0.05
                 )),
+                credible_mode_probability_min=float(self.config.get(
+                    "prediction_credible_probability_min", 0.15
+                )),
+                credible_mode_ttc_s=float(self.config.get(
+                    "prediction_credible_ttc_s", 2.0
+                )),
             )
             self._cav_latch = dict(cav_result.latch_state or {})
             self._cav_tag_state = dict(cav_result.tag_state or {})

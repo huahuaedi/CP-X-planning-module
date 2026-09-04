@@ -1,5 +1,6 @@
 from pipeline.prediction import build_prediction_frame
 from pipeline.prediction_ablation import synthetic_multimodal_snapshot_transform
+from utility.planning_context import PredictionContext
 
 
 def test_synthetic_transform_targets_one_actor_and_normalizes_probabilities():
@@ -32,3 +33,7 @@ def test_prediction_frame_preserves_all_synthetic_hypotheses():
     assert len(frame.predicted_objects["7"].hypotheses) == 3
     assert len(frame.hypothesis_trajectories(0.05)) == 3
     assert len(frame.hypothesis_trajectories(0.30)) == 1
+
+    context = PredictionContext(predicted_objects=dict(frame.predicted_objects))
+    assert len(context.hypothesis_trajectories(0.05)) == 3
+    assert len(context.hypothesis_trajectories(0.30)) == 1

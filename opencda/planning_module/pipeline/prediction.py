@@ -16,6 +16,7 @@ from behavior_planner.trajectory_risk import (
     lane_prediction_risk,
     obstacle_future_trajectory,
 )
+from utility.planning_context import flatten_prediction_hypotheses
 
 
 def obstacle_track_id(snapshot: Mapping[str, object]) -> str:
@@ -134,18 +135,9 @@ class PredictionFrame:
         self, minimum_probability: float = 0.0
     ) -> Dict[str, List[dict]]:
         """Flatten all retained hypotheses for candidate-level risk checks."""
-
-        threshold = max(0.0, float(minimum_probability))
-        trajectories = {}
-        for track_id, predicted in self.predicted_objects.items():
-            for index, hypothesis in enumerate(predicted.hypotheses):
-                if float(hypothesis.probability) < threshold:
-                    continue
-                key = "%s::mode%d::p%.3f" % (
-                    str(track_id), int(index), float(hypothesis.probability)
-                )
-                trajectories[key] = hypothesis.mutable_points()
-        return trajectories
+        return dict(flatten_prediction_hypotheses(
+            self.predicted_objects, minimum_probability
+        ))
 
 
 def build_prediction_frame(

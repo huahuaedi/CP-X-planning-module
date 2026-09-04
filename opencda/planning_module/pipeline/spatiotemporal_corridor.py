@@ -75,6 +75,51 @@ class Corridor:
                     self.first_infeasible_stage = k
 
 
+def aggregate_mode_corridors(
+    mode_corridors: Sequence[Tuple[Corridor, float, bool, str]],
+    nominal_s: Sequence[float],
+) -> Corridor:
+    """Reduce probabilistic mode corridors to one MPC corridor.
+
+    Expected risk provides the normal bound.  A credible mode marked
+    dangerous may veto that expectation and impose its tighter bound.  The
+    result has exactly the same shape consumed by Stage D; modes therefore
+    never masquerade as several simultaneous physical vehicles.
+
+    Each item is ``(corridor, probability, dangerous_veto, mode_label)``.
+    ``nominal_s`` is the free-progress upper bound used in place of infinity
+    while taking the expectation.
+    """
+
+    n = len(list(nominal_s or ()))
+    out = Corridor(s_lo=[-_BIG] * n, s_hi=[_BIG] * n, binding=[""] * n)
+    retained = [item for item in mode_corridors if float(item[1]) > 0.0]
+    total_probability = sum(float(item[1]) for item in retained)
+    if n == 0 or total_probability <= 1.0e-9:
+        return out
+
+    for k in range(n):
+        neutral = float(nominal_s[k])
+        expected = 0.0
+        veto_cap = _BIG
+        veto_label = ""
+        for corridor, probability, dangerous, label in retained:
+            weight = float(probability) / total_probability
+            cap = corridor.s_hi[k] if k < len(corridor.s_hi) else _BIG
+            expected += weight * min(float(cap), neutral)
+            if bool(dangerous) and float(cap) < veto_cap:
+                veto_cap = float(cap)
+                veto_label = str(label)
+        cap = min(expected, veto_cap)
+        # A bound at/above nominal progress is inactive and need not add a QP
+        # row.  This preserves the exact clear-scene MPC behavior.
+        if veto_cap < _BIG or cap < neutral - 1.0e-6:
+            out.s_hi[k] = cap
+            out.binding[k] = veto_label or "multimodal_expected"
+    out.clamp_and_check()
+    return out
+
+
 def _f(m: Mapping[str, Any], *keys: str, default: float = 0.0) -> float:
     for k in keys:
         if k in m and m[k] is not None:
@@ -104,6 +149,7 @@ def build_longitudinal_corridor(
     items: Sequence[Tuple[Mapping[str, Any], ConflictTag, Optional[ConflictAssignment]]],
     p: CorridorParams = CorridorParams(),
     rss: RSSParams = RSSParams(),
+    include_follow_bounds: bool = False,
 ) -> Corridor:
     """``items`` is ``(agent_snapshot, tag, assignment|None)`` per agent."""
 
@@ -144,6 +190,10 @@ def build_longitudinal_corridor(
         # reference that tangent row coupled longitudinal following into the
         # lateral solution and pulled the vehicle away from lane centre.
         if tag.tag in (FOLLOW, LEAD_BRAKE):
+            if include_follow_bounds:
+                for k in range(n + 1):
+                    if k < len(station):
+                        _cap(k, station[k] - gap, tag.agent_id)
             continue
 
         if tag.tag == CUT_IN:

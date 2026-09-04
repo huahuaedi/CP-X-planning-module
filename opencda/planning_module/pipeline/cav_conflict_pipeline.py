@@ -40,9 +40,14 @@ from opencda.planning_module.pipeline.cooperative_arbitration import (
 from opencda.planning_module.pipeline.spatiotemporal_corridor import (
     Corridor,
     CorridorParams,
+    aggregate_mode_corridors,
     build_longitudinal_corridor,
 )
 from opencda.planning_module.pipeline.prediction_modes import as_modes, single_mode
+from opencda.planning_module.pipeline.mpc_obstacle_relevance import (
+    _point_to_polyline,
+    _polyline_xy,
+)
 from opencda.planning_module.pipeline.rss import RSSParams
 
 
@@ -106,6 +111,8 @@ def resolve_conflicts(
     arbitration_range_m: float = 40.0,
     hysteresis_ticks: int = 3,
     mode_probability_floor: float = 0.05,
+    credible_mode_probability_min: float = 0.15,
+    credible_mode_ttc_s: float = 2.0,
 ) -> ConflictResolution:
     cavs = list(cav_intents or [])
     cav_agents = [_cav_to_agent_snapshot(c) for c in cavs]
@@ -129,6 +136,7 @@ def resolve_conflicts(
         perception_agents.append(a)
     physical_agents: List[Mapping[str, Any]] = perception_agents + cav_agents
     all_agents: List[Mapping[str, Any]] = []
+    mode_groups: Dict[str, List[Tuple[Mapping[str, Any], float]]] = {}
     retained_mode_count = 0
     for agent in physical_agents:
         modes = as_modes(agent.get("predicted_modes"))
@@ -141,6 +149,7 @@ def resolve_conflicts(
             retained_mode_count += len(retained)
             continue
         actor_id = _agent_id(agent)
+        mode_groups[actor_id] = []
         for index, mode in enumerate(retained):
             expanded = dict(agent)
             expanded.pop("predicted_modes", None)
@@ -149,6 +158,7 @@ def resolve_conflicts(
             expanded["physical_actor_id"] = actor_id
             expanded["mode_probability"] = float(mode.probability)
             all_agents.append(expanded)
+            mode_groups[actor_id].append((expanded, float(mode.probability)))
             retained_mode_count += 1
 
     # Stage A -----------------------------------------------------------------
@@ -191,6 +201,8 @@ def resolve_conflicts(
     items: List[Tuple[Mapping[str, Any], ConflictTag, Optional[ConflictAssignment]]] = []
     for agent in all_agents:
         aid = _agent_id(agent)
+        if "::mode" in aid:
+            continue
         t = tag_by_id.get(aid)
         if t is None or t.tag == IGNORE:
             continue
@@ -199,6 +211,54 @@ def resolve_conflicts(
     corridor = build_longitudinal_corridor(
         reference_samples, ego_snapshot, items, corridor_params, rss_params
     )
+
+    # A physical actor with several possible futures must not appear to the
+    # optimizer as several simultaneous vehicles.  Build one corridor per
+    # mode, then reduce them to one probability-aware effective corridor.
+    poly = _polyline_xy(reference_samples)
+    ego_s0 = 0.0
+    if len(poly) >= 2:
+        ego_s0 = _point_to_polyline(
+            float(ego_snapshot.get("x", ego_snapshot.get("x_m", 0.0))),
+            float(ego_snapshot.get("y", ego_snapshot.get("y_m", 0.0))),
+            poly,
+        )[1]
+    ego_v = max(0.0, float(ego_snapshot.get(
+        "v", ego_snapshot.get("speed_mps", ego_snapshot.get("speed", 0.0))
+    )))
+    nominal_s = [
+        ego_s0 + ego_v * float(corridor_params.dt_s) * k
+        for k in range(len(corridor.s_hi))
+    ]
+    credible_veto_count = 0
+    for actor_id, group in mode_groups.items():
+        mode_corridors = []
+        for mode_agent, probability in group:
+            mode_id = _agent_id(mode_agent)
+            tag = tag_by_id.get(mode_id)
+            if tag is None:
+                continue
+            mode_items = [] if tag.tag == IGNORE else [(mode_agent, tag, None)]
+            mode_corridor = build_longitudinal_corridor(
+                reference_samples, ego_snapshot, mode_items,
+                corridor_params, rss_params, include_follow_bounds=True,
+            )
+            dangerous = bool(
+                float(probability) >= float(credible_mode_probability_min)
+                and tag.tag != IGNORE
+                and tag.conflict_t_s is not None
+                and float(tag.conflict_t_s) <= float(credible_mode_ttc_s)
+            )
+            credible_veto_count += int(dangerous)
+            mode_corridors.append((
+                mode_corridor, float(probability), dangerous, mode_id
+            ))
+        aggregate = aggregate_mode_corridors(mode_corridors, nominal_s)
+        for k, cap in enumerate(aggregate.s_hi):
+            if cap < corridor.s_hi[k]:
+                corridor.s_hi[k] = cap
+                corridor.binding[k] = aggregate.binding[k] or actor_id
+    corridor.clamp_and_check()
 
     def _source(agent: Mapping[str, Any]) -> str:
         src = str(agent.get("trajectory_source", "") or "")
@@ -227,6 +287,7 @@ def resolve_conflicts(
             1 for a in physical_agents if len(as_modes(a.get("predicted_modes"))) > 1
         ),
         "retained_prediction_mode_count": int(retained_mode_count),
+        "credible_mode_veto_count": int(credible_veto_count),
         "trajectory_source_counts": source_counts,
         "ego_claim_phase": (
             "none" if my_claim is None else str(my_claim.phase)

@@ -161,7 +161,7 @@ def test_prediction_modes_map_feeds_a_non_connected_agents_future():
     assert r.diagnostics["trajectory_source_counts"].get("prediction") == 1
 
 
-def test_all_modes_above_probability_floor_are_used():
+def test_multimodal_corridors_use_expected_risk_and_credible_veto():
     stay = [{"x": 30.0, "y": -6.0}] * 20                     # off to the side
     cross = [{"x": 30.0, "y": -6.0 + 1.0 * k} for k in range(20)]
     base = {"id": "npc", "x": 30.0, "y": -6.0, "v": 8.0, "psi": math.pi / 2.0}
@@ -175,6 +175,10 @@ def test_all_modes_above_probability_floor_are_used():
     )
     assert any(h < _BIG for h in r_cross.corridor.s_hi)      # used the cross mode
     assert r_cross.diagnostics["multimodal_agent_count"] == 1
+    assert r_cross.diagnostics["credible_mode_veto_count"] == 1
+    # The actor remains one physical conflict source; its modes are only
+    # temporary classifier inputs and reduce to one final corridor.
+    assert r_cross.diagnostics["conflict_agent_count"] == 1
 
     r_stay = resolve_conflicts(
         reference_samples=REF, ego_snapshot=EGO, my_actor_id=1, my_claim=None,
@@ -192,6 +196,22 @@ def test_all_modes_above_probability_floor_are_used():
         cav_intents=[], mode_probability_floor=0.3,
     )
     assert all(h >= _BIG for h in r_filtered.corridor.s_hi)
+
+
+def test_low_probability_distant_mode_does_not_bind_the_mpc_corridor():
+    stay = [{"x": 30.0, "y": -6.0}] * 20
+    distant_cross = [{"x": 60.0, "y": -6.0 + 1.0 * k} for k in range(20)]
+    base = {"id": "npc", "x": 30.0, "y": -6.0, "v": 8.0,
+            "psi": math.pi / 2.0, "predicted_modes": [
+                {"path": stay, "probability": 0.9},
+                {"path": distant_cross, "probability": 0.1},
+            ]}
+    result = resolve_conflicts(
+        reference_samples=REF, ego_snapshot=EGO, my_actor_id=1,
+        obstacle_snapshots=[base], cav_intents=[],
+    )
+    assert result.diagnostics["credible_mode_veto_count"] == 0
+    assert all(value >= _BIG for value in result.corridor.s_hi)
 
 
 def test_connected_cav_snapshot_carries_a_single_broadcast_mode():

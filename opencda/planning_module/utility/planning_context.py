@@ -26,6 +26,34 @@ def _to_int(value: object, default: int = 0) -> int:
         return int(default)
 
 
+def flatten_prediction_hypotheses(
+    predicted_objects: Mapping[str, object], minimum_probability: float = 0.0
+) -> Mapping[str, Sequence[Mapping[str, object]]]:
+    """Flatten the shared probabilistic-prediction contract for consumers."""
+
+    threshold = max(0.0, float(minimum_probability))
+    trajectories = {}
+    for track_id, predicted in dict(predicted_objects or {}).items():
+        hypotheses = getattr(predicted, "hypotheses", ())
+        if isinstance(predicted, Mapping):
+            hypotheses = predicted.get("hypotheses", hypotheses)
+        for index, hypothesis in enumerate(hypotheses or ()):
+            probability = getattr(hypothesis, "probability", 1.0)
+            points = getattr(hypothesis, "points", ())
+            if isinstance(hypothesis, Mapping):
+                probability = hypothesis.get("probability", probability)
+                points = hypothesis.get("points", hypothesis.get("path", points))
+            if float(probability) < threshold:
+                continue
+            mutable_points = getattr(hypothesis, "mutable_points", None)
+            if callable(mutable_points):
+                points = mutable_points()
+            trajectories["%s::mode%d::p%.3f" % (
+                str(track_id), int(index), float(probability)
+            )] = list(points or ())
+    return trajectories
+
+
 @dataclass(frozen=True)
 class EgoPlanningState:
     """Ego state used by planning layers."""
@@ -271,6 +299,20 @@ class PredictionContext:
     @property
     def predicted_object_count(self) -> int:
         return len(dict(self.obstacle_future_trajectories or {}))
+
+    def hypothesis_trajectories(
+        self, minimum_probability: float = 0.0
+    ) -> Mapping[str, Sequence[Mapping[str, object]]]:
+        """Return every retained prediction hypothesis after input adaptation.
+
+        ``PredictionFrame`` is converted into this context before planning.
+        Keeping the same query here prevents the adapter boundary from
+        silently discarding the multimodal contract.
+        """
+
+        return flatten_prediction_hypotheses(
+            self.predicted_objects, minimum_probability
+        )
 
 
 @dataclass(frozen=True)
