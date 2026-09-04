@@ -864,7 +864,6 @@ class CPXMPCPlannerBridge:
 
         mpc_cfg, road_cfg = self._load_mpc_config()
         self.mpc = MPC(mpc_cfg=mpc_cfg, road_cfg=road_cfg)
-        cav_constraint_rows = ()
         if self._cav_conflict_enabled:
             # One switch: cav_conflict_enabled also binds the Stage-C corridor
             # in the QP (else it is computed but ignored). mpc.yaml's
@@ -1795,6 +1794,7 @@ class CPXMPCPlannerBridge:
                 behavior_decision=str(behavior_decision.maneuver),
                 reference_samples=lane_center_reference,
             )
+        cav_constraint_rows = ()
         if self._cav_conflict_enabled:
             cav_result = self.pipeline.resolve_cav_interaction(
                 reference_samples=lane_center_reference,
