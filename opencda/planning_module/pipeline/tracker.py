@@ -52,6 +52,11 @@ class CPXObstacleTracker:
             normalized = dict(snapshot)
             key = self._track_key(normalized)
             previous = self._tracks.get(str(key))
+            self._recover_missing_kinematics(
+                previous=previous,
+                current=normalized,
+                timestamp_s=float(timestamp_s),
+            )
             valid, reason = self._valid_transition(
                 previous=previous,
                 current=normalized,
@@ -177,9 +182,45 @@ class CPXObstacleTracker:
             return False, "position_jump_gate"
         prev_speed = _speed_mps(prev_snapshot)
         acceleration = (float(speed) - float(prev_speed)) / float(dt_s)
-        if self.max_acceleration_mps2 > 0.0 and abs(float(acceleration)) > float(self.max_acceleration_mps2):
+        if (
+            current.get("kinematics_source") != "position_finite_difference"
+            and self.max_acceleration_mps2 > 0.0
+            and abs(float(acceleration)) > float(self.max_acceleration_mps2)
+        ):
             return False, "acceleration_gate"
         return True, "valid_transition"
+
+    @staticmethod
+    def _recover_missing_kinematics(
+        *,
+        previous: Optional[Mapping[str, object]],
+        current: Dict[str, object],
+        timestamp_s: float,
+    ) -> None:
+        """Recover velocity from consecutive positions when a provider omits it.
+
+        Some kinematic CARLA actors and real perception adapters provide a
+        valid pose but report zero/absent velocity. Treating those objects as
+        stationary destroys CUT_IN/CROSSING prediction. The tracker already
+        owns temporal state, so finite differencing belongs here rather than
+        in a scenario-specific adapter.
+        """
+
+        if previous is None or abs(_speed_mps(current)) > 0.05:
+            return
+        prior = dict(previous.get("snapshot", {}) or {})
+        prior_time_s = float(previous.get("timestamp_s", timestamp_s))
+        dt_s = float(timestamp_s) - prior_time_s
+        if dt_s <= 1.0e-4:
+            return
+        dx_m = _float(current, "x", "x_m") - _float(prior, "x", "x_m")
+        dy_m = _float(current, "y", "y_m") - _float(prior, "y", "y_m")
+        distance_m = math.hypot(dx_m, dy_m)
+        if distance_m <= 1.0e-4:
+            return
+        current["v"] = float(distance_m / dt_s)
+        current["psi"] = float(math.atan2(dy_m, dx_m))
+        current["kinematics_source"] = "position_finite_difference"
 
     @staticmethod
     def _track_key(snapshot: Mapping[str, object]) -> str:

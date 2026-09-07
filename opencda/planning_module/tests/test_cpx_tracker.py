@@ -1,9 +1,24 @@
+import math
 import unittest
 
 from opencda.planning_module.pipeline.tracker import CPXObstacleTracker
 
 
 class CPXObstacleTrackerTest(unittest.TestCase):
+    def test_recovers_missing_velocity_from_consecutive_positions(self):
+        tracker = CPXObstacleTracker(max_acceleration_mps2=12.0)
+        tracker.update(
+            obstacle_snapshots=[{"id": "cut", "x": 0.0, "y": 3.5, "v": 0.0}],
+            timestamp_s=1.0,
+        )
+        tracked = tracker.update(
+            obstacle_snapshots=[{"id": "cut", "x": 0.4, "y": 3.45, "v": 0.0}],
+            timestamp_s=1.05,
+        )[0]
+        self.assertAlmostEqual(float(tracked["v"]), math.hypot(0.4, 0.05) / 0.05)
+        self.assertLess(float(tracked["psi"]), 0.0)
+        self.assertEqual(tracked["kinematics_source"], "position_finite_difference")
+
     def test_rejected_observation_holds_previous_track_for_prediction(self):
         tracker = CPXObstacleTracker(
             max_stale_s=0.5,
