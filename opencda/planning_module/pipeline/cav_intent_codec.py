@@ -198,6 +198,7 @@ def collect_cav_intents(
     intent_key: str = "cooperative_intent",
     now_s: Optional[float] = None,
     minimum_probability: float = 0.0,
+    diagnostics: Optional[dict] = None,
 ) -> List[CavIntent]:
     """Extract cav intents from a CP-message-shaped iterable.
 
@@ -209,11 +210,15 @@ def collect_cav_intents(
     only the newest sequence is returned.
     """
 
+    record_list = list(records or [])
+    rejected = {"self": 0, "invalid": 0, "expired": 0, "probability": 0}
     newest_by_actor = {}
-    for rec in list(records or []):
+    for rec in record_list:
         if not isinstance(rec, Mapping):
+            rejected["invalid"] += 1
             continue
         if _actor_id(rec) == int(self_actor_id):
+            rejected["self"] += 1
             continue
         nested = rec.get(intent_key)
         payload = nested if isinstance(nested, Mapping) else rec
@@ -223,10 +228,13 @@ def collect_cav_intents(
             payload = {**payload, "actor_id": _actor_id(rec)}
         intent = cav_intent_from_payload(payload)
         if intent is None:
+            rejected["invalid"] += 1
             continue
         if now_s is not None and float(intent.valid_until_s) < float(now_s):
+            rejected["expired"] += 1
             continue
         if float(intent.probability) < max(0.0, float(minimum_probability)):
+            rejected["probability"] += 1
             continue
         previous = newest_by_actor.get(int(intent.actor_id))
         if previous is None or (
@@ -235,7 +243,14 @@ def collect_cav_intents(
             int(previous.sequence), float(previous.generated_at_s)
         ):
             newest_by_actor[int(intent.actor_id)] = intent
-    return [newest_by_actor[k] for k in sorted(newest_by_actor)]
+    accepted = [newest_by_actor[k] for k in sorted(newest_by_actor)]
+    if diagnostics is not None:
+        diagnostics.update({
+            "record_count": len(record_list),
+            "accepted_count": len(accepted),
+            "rejected": rejected,
+        })
+    return accepted
 
 
 # --------------------------------------------------------------------------- #

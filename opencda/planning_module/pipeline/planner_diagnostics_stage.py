@@ -229,6 +229,7 @@ class PlannerDiagnosticsStage:
                 str(b) for b in cav_diag.get("corridor_binding", [])
             ),
             "cav_intent_count": int(cav_diag.get("cav_count", 0) or 0),
+            "cav_transport": dict(cav_diag.get("transport", {}) or {}),
             "cav_shared_plan_count": int(
                 cav_diag.get("shared_plan_cav_count", 0) or 0
             ),

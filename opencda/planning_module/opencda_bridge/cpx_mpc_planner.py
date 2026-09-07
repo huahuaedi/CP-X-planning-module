@@ -217,6 +217,7 @@ class CPXMPCPlannerBridge:
         self._cav_latch: dict[str, Any] = {}
         self._cav_tag_state: dict[str, str] = {}
         self._last_cav_diagnostics: dict[str, Any] = {}
+        self._cav_transport_diagnostics: dict[str, Any] = {}
         # This CAV's own broadcast for nearby CP-X CAVs to read (its planned
         # trajectory + ResourceClaim + pose). Read peer-to-peer through
         # v2x_manager.cav_nearby; see _publish_cav_intent / _collect_cav_intents.
@@ -3374,6 +3375,9 @@ class CPXMPCPlannerBridge:
             )
             self._cav_latch = dict(cav_result.latch_state or {})
             self._cav_tag_state = dict(cav_result.tag_state or {})
+            cav_result.diagnostics["transport"] = dict(
+                self._cav_transport_diagnostics
+            )
             cooperative_lane_change_deferred = (
                 self._cooperative_claim_manager.defer_candidate(
                     sim_time_s=float(sim_time_s),
@@ -3657,14 +3661,21 @@ class CPXMPCPlannerBridge:
             payload = getattr(cav_bridge, "last_cav_intent_payload", None)
             if payload is not None:
                 records.append(payload)
-        return collect_cav_intents(
+        diagnostics = {
+            "nearby_count": len(cav_nearby),
+            "payload_count": len(records),
+        }
+        intents = collect_cav_intents(
             records,
             self_actor_id=int(getattr(self.vehicle_manager.vehicle, "id", -1)),
             now_s=float(self._sim_time_s()),
             minimum_probability=float(
                 self.config.get("cav_intent_minimum_probability", 0.05)
             ),
+            diagnostics=diagnostics,
         )
+        self._cav_transport_diagnostics = diagnostics
+        return intents
 
     def _ego_cav_claim(self, *, sim_time_s: float):
         """Ego's own cooperative ResourceClaim, active while it is committed

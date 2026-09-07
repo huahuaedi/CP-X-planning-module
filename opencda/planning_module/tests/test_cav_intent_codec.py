@@ -107,6 +107,25 @@ def test_collect_drops_expired_low_probability_and_keeps_newest_sequence():
     assert cavs[0].sequence == 3
 
 
+def test_collect_reports_transport_rejections():
+    valid = cav_intent_to_payload(build_ego_cav_intent(
+        actor_id=2, position_xy=(10, 0), heading_rad=0, speed_mps=5,
+        claim=_claim(), generated_at_s=10.0, valid_for_s=1.0,
+    ))
+    expired = dict(valid, actor_id=3, valid_until_s=9.0)
+    diagnostics = {}
+    cavs = collect_cav_intents(
+        [valid, expired, {}], self_actor_id=1, now_s=10.5,
+        diagnostics=diagnostics,
+    )
+    assert [intent.actor_id for intent in cavs] == [2]
+    assert diagnostics == {
+        "record_count": 3,
+        "accepted_count": 1,
+        "rejected": {"self": 0, "invalid": 1, "expired": 1, "probability": 0},
+    }
+
+
 def test_codec_roundtrip_preserves_transport_metadata():
     intent = build_ego_cav_intent(
         actor_id=3, position_xy=(1, 2), heading_rad=0.2, speed_mps=4,
