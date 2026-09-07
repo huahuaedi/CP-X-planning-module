@@ -33,6 +33,18 @@ def test_evaluator_does_not_call_missing_conflict_a_pass():
     assert result["verdict"] == "INVALID_SCENARIO"
 
 
+def test_evaluator_requires_requested_cooperative_role():
+    missing = analyze_conflict_run(
+        [_row(0)], expected_tags=["LEAD_BRAKE"], expected_roles=["make_gap"]
+    )
+    present = analyze_conflict_run(
+        [_row(0, cav_conflict_roles={"peer": "make_gap"})],
+        expected_tags=["LEAD_BRAKE"], expected_roles=["make_gap"],
+    )
+    assert missing["verdict"] == "INVALID_SCENARIO"
+    assert present["verdict"] == "PASS"
+
+
 def test_evaluator_distinguishes_collision_and_planner_failure():
     collision = analyze_conflict_run(
         [_row(0, collision_count=1)], expected_tags=["LEAD_BRAKE"]

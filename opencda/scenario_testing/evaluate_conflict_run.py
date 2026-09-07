@@ -48,6 +48,7 @@ def analyze_conflict_run(
     records: Sequence[Mapping[str, Any]],
     *,
     expected_tags: Sequence[str] = (),
+    expected_roles: Sequence[str] = (),
     require_constraint: bool = True,
 ) -> Dict[str, Any]:
     """Return deterministic metrics and an explicit run verdict."""
@@ -82,7 +83,11 @@ def analyze_conflict_run(
 
     expected = {str(tag).upper() for tag in expected_tags}
     observed = {str(tag).upper() for tag in tag_counts}
-    scenario_valid = bool(rows) and expected.issubset(observed)
+    expected_role_set = {str(role).lower() for role in expected_roles}
+    observed_roles = {str(role).lower() for role in role_counts}
+    scenario_valid = bool(rows) and expected.issubset(observed) and (
+        expected_role_set.issubset(observed_roles)
+    )
     constraint_valid = bool(constraint_indices) if require_constraint else True
     if not rows:
         verdict = "NO_DATA"
@@ -123,12 +128,14 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("debug_dir", type=Path)
     parser.add_argument("--expect-tag", action="append", default=[])
+    parser.add_argument("--expect-role", action="append", default=[])
     parser.add_argument("--allow-no-constraint", action="store_true")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     result = analyze_conflict_run(
         load_planner_records(args.debug_dir),
         expected_tags=args.expect_tag,
+        expected_roles=args.expect_role,
         require_constraint=not args.allow_no_constraint,
     )
     text = json.dumps(result, indent=2, sort_keys=True)
