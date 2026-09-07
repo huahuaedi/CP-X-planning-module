@@ -4,11 +4,15 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import math
 import subprocess
 from pathlib import Path
+
+try:
+    from opencda.scenario_testing.planner_debug_records import load_planner_records
+except ModuleNotFoundError:
+    from planner_debug_records import load_planner_records
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -30,11 +34,7 @@ def _f(row, key, default=math.nan):
 
 
 def _rows(path: Path):
-    csv_path = path / "opencda_planner_debug.csv"
-    if not csv_path.is_file():
-        return []
-    with csv_path.open(newline="", encoding="utf-8") as stream:
-        return list(csv.DictReader(stream))
+    return load_planner_records(path)
 
 
 def _joined_gap(first, second):

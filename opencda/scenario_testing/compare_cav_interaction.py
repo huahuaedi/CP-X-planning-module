@@ -14,11 +14,15 @@ Override dirs:
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import math
 from pathlib import Path
 from typing import Dict, List, Optional
+
+try:
+    from opencda.scenario_testing.planner_debug_records import load_planner_records
+except ModuleNotFoundError:
+    from planner_debug_records import load_planner_records
 
 _REPO = Path(__file__).resolve().parents[2]
 _DBG = _REPO / "opencda" / "planning_module" / "opencda_bridge"
@@ -50,22 +54,20 @@ def _truthy(row: dict, key: str) -> bool:
 
 
 def _rows(d: Path) -> List[dict]:
-    p = d / "opencda_planner_debug.csv"
-    if not p.is_file():
-        return []
-    with p.open(newline="", encoding="utf-8") as fh:
-        return list(csv.DictReader(fh))
+    return load_planner_records(d)
 
 
 def _status(d: Path) -> dict:
     p = d / "run_status.json"
-    csv_path = d / "opencda_planner_debug.csv"
+    record_path = d / "opencda_planner_debug.jsonl"
+    if not record_path.is_file():
+        record_path = d / "opencda_planner_debug.csv"
     if not p.is_file():
         return {}
     # An interrupted/new run truncates the CSV before its final status is
     # written.  Never combine that CSV with a status left by an older run.
     try:
-        if csv_path.is_file() and p.stat().st_mtime_ns < csv_path.stat().st_mtime_ns:
+        if record_path.is_file() and p.stat().st_mtime_ns < record_path.stat().st_mtime_ns:
             return {}
         value = json.loads(p.read_text(encoding="utf-8"))
         return value if isinstance(value, dict) else {}

@@ -2105,7 +2105,19 @@ class CPXMPCPlannerBridge:
         try:
             debug_dir = self._resolved_debug_output_dir()
             debug_dir.mkdir(parents=True, exist_ok=True)
-            if self._debug_writer is None:
+            configured_formats = self.config.get("debug_log_formats", ("jsonl",))
+            if isinstance(configured_formats, str):
+                configured_formats = (configured_formats,)
+            formats = {
+                str(item).strip().lower() for item in configured_formats or ()
+            }
+            unsupported = formats.difference({"csv", "jsonl"})
+            if unsupported:
+                raise ValueError(
+                    "unsupported debug_log_formats: %s"
+                    % ",".join(sorted(unsupported))
+                )
+            if "csv" in formats and self._debug_writer is None:
                 self._debug_csv_file = open(
                     debug_dir / "opencda_planner_debug.csv",
                     "w",
@@ -2118,16 +2130,16 @@ class CPXMPCPlannerBridge:
                     extrasaction="ignore",
                 )
                 self._debug_writer.writeheader()
+            if "jsonl" in formats and self._debug_jsonl_file is None:
                 self._debug_jsonl_file = open(
                     debug_dir / "opencda_planner_debug.jsonl",
                     "w",
                     encoding="utf-8",
                 )
-            # CSV keeps the curated stable schema; JSONL keeps the COMPLETE
-            # payload (every key), so no diagnostic field is ever lost.
-            row = {name: payload.get(name, "") for name in self._debug_fieldnames}
-            self._debug_writer.writerow(row)
-            self._debug_csv_file.flush()
+            if self._debug_writer is not None:
+                row = {name: payload.get(name, "") for name in self._debug_fieldnames}
+                self._debug_writer.writerow(row)
+                self._debug_csv_file.flush()
             if self._debug_jsonl_file is not None:
                 self._debug_jsonl_file.write(json.dumps(dict(payload), default=str) + "\n")
                 self._debug_jsonl_file.flush()

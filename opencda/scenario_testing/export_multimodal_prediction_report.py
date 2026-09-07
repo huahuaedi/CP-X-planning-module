@@ -3,10 +3,14 @@
 
 from __future__ import annotations
 
-import csv
 import json
 import math
 from pathlib import Path
+
+try:
+    from opencda.scenario_testing.planner_debug_records import load_planner_records
+except ModuleNotFoundError:
+    from planner_debug_records import load_planner_records
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -28,10 +32,7 @@ def _number(row, key, default=float("nan")):
 
 
 def _rows(path):
-    with (path / "opencda_planner_debug.csv").open(
-        newline="", encoding="utf-8"
-    ) as stream:
-        return list(csv.DictReader(stream))
+    return load_planner_records(path)
 
 
 def _series(rows, key):
@@ -84,10 +85,11 @@ def _metrics(rows):
 
 
 def main():
-    available = {
-        name: _rows(path) for name, path in ARMS.items()
-        if (path / "opencda_planner_debug.csv").is_file()
-    }
+    available = {}
+    for name, path in ARMS.items():
+        rows = _rows(path)
+        if rows:
+            available[name] = rows
     if not available:
         raise SystemExit("No experiment logs found; run the three scenarios first.")
     OUTPUT.mkdir(parents=True, exist_ok=True)

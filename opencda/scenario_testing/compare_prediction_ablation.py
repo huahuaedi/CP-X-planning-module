@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tabulate the prediction-knowledge ablation runs side by side.
 
-Reads ``opencda_planner_debug.csv`` (+ ``run_status.json`` when present) from
+Reads the canonical planner JSONL (or legacy CSV) plus ``run_status.json`` from
 each arm's debug directory and prints one metrics table.
 
     python opencda/scenario_testing/compare_prediction_ablation.py
@@ -18,12 +18,16 @@ With no --dir, looks for these under opencda/planning_module/opencda_bridge/:
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import math
 import os
 from pathlib import Path
 from typing import Dict, List, Optional
+
+try:
+    from opencda.scenario_testing.planner_debug_records import load_planner_records
+except ModuleNotFoundError:
+    from planner_debug_records import load_planner_records
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_BASE = _REPO_ROOT / "opencda" / "planning_module" / "opencda_bridge"
@@ -52,11 +56,7 @@ def _truthy(row: dict, key: str) -> bool:
 
 
 def _load_rows(debug_dir: Path) -> List[dict]:
-    csv_path = debug_dir / "opencda_planner_debug.csv"
-    if not csv_path.is_file():
-        return []
-    with csv_path.open(newline="", encoding="utf-8") as fh:
-        return list(csv.DictReader(fh))
+    return load_planner_records(debug_dir)
 
 
 def _run_status(debug_dir: Path) -> dict:
@@ -177,7 +177,7 @@ def main() -> int:
         for name, sub in _DEFAULT_ARMS.items():
             arms[name] = Path(args.base) / sub
 
-    present = {k: v for k, v in arms.items() if (v / "opencda_planner_debug.csv").is_file()}
+    present = {k: v for k, v in arms.items() if _load_rows(v)}
     if not present:
         print("no arm debug CSVs found. looked in:")
         for k, v in arms.items():
