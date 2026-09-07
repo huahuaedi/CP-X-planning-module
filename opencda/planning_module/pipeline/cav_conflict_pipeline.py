@@ -247,11 +247,16 @@ def resolve_conflicts(
                 reference_samples, ego_snapshot, mode_items,
                 corridor_params, rss_params, include_follow_bounds=True,
             )
+            first_risk_stage = next((
+                k for k, cap in enumerate(mode_corridor.s_hi)
+                if k < len(nominal_s) and float(cap) < float(nominal_s[k])
+            ), None)
             dangerous = bool(
                 float(probability) >= float(credible_mode_probability_min)
                 and tag.tag != IGNORE
-                and tag.conflict_t_s is not None
-                and float(tag.conflict_t_s) <= float(credible_mode_ttc_s)
+                and first_risk_stage is not None
+                and float(first_risk_stage) * float(corridor_params.dt_s)
+                <= float(credible_mode_ttc_s)
             )
             credible_veto_count += int(dangerous)
             mode_corridors.append((

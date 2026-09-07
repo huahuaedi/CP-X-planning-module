@@ -131,6 +131,11 @@ class ControlFinalizationStage:
                 nominal_velocity_mps=float(request.target_speed_mps),
                 stop_goal_active=bool(request.stop_goal_active),
                 emergency_stop=emergency,
+                mpc_safety_cap_mps=(
+                    float(tracking.target_velocity_mps)
+                    if bool(tracking.valid)
+                    else None
+                ),
             )
             control, acceleration, steering, platform_debug = (
                 apply_velocity_steering(
@@ -148,7 +153,11 @@ class ControlFinalizationStage:
                 "mpc_optimized_velocity_mps": float(tracking.target_velocity_mps),
                 "nominal_speed_ref_mps": float(request.target_speed_mps),
                 "pid_target_velocity_mps": float(platform_target),
-                "velocity_command_source": "speed_target_planner",
+                "velocity_command_source": (
+                    "mpc_optimized_velocity_preview"
+                    if bool(tracking.valid)
+                    else "speed_target_planner"
+                ),
                 "velocity_command_valid": bool(tracking.valid),
             })
         safety = self._safety.run(

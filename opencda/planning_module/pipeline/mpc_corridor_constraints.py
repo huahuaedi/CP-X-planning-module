@@ -98,6 +98,11 @@ def corridor_rows(
     rows: List[LinearRow] = []
     n_stages = len(corridor.s_hi)
     for k in range(n_stages):
+        # Stage zero is the measured initial condition, not a decision.  A
+        # newly observed violation cannot be repaired at t=0; constraining it
+        # only makes the QP inconsistent instead of braking future stages.
+        if k <= 0:
+            continue
         s_lo = float(corridor.s_lo[k])
         s_hi = float(corridor.s_hi[k])
         if s_lo <= -_BIG and s_hi >= _BIG:

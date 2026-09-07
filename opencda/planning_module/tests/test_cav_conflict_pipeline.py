@@ -186,7 +186,9 @@ def test_multimodal_corridors_use_expected_risk_and_credible_veto():
     base = {"id": "npc", "x": 30.0, "y": -6.0, "v": 8.0, "psi": math.pi / 2.0}
 
     r_cross = resolve_conflicts(
-        reference_samples=REF, ego_snapshot=EGO, my_actor_id=1, my_claim=None,
+        reference_samples=REF,
+        ego_snapshot={**EGO, "v": 15.0},
+        my_actor_id=1, my_claim=None,
         obstacle_snapshots=[{**base, "predicted_modes": [
             {"path": stay, "probability": 0.2},
             {"path": cross, "probability": 0.8}]}],
@@ -200,7 +202,9 @@ def test_multimodal_corridors_use_expected_risk_and_credible_veto():
     assert r_cross.diagnostics["conflict_agent_count"] == 1
 
     r_stay = resolve_conflicts(
-        reference_samples=REF, ego_snapshot=EGO, my_actor_id=1, my_claim=None,
+        reference_samples=REF,
+        ego_snapshot={**EGO, "v": 15.0},
+        my_actor_id=1, my_claim=None,
         obstacle_snapshots=[{**base, "predicted_modes": [
             {"path": stay, "probability": 0.8},
             {"path": cross, "probability": 0.2}]}],

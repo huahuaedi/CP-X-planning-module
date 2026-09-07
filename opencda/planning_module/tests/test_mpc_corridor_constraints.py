@@ -14,6 +14,16 @@ def test_open_corridor_yields_no_rows():
     assert corridor_rows(cor, REF) == []
 
 
+def test_current_state_stage_is_never_constrained():
+    cor = Corridor(
+        s_lo=[-_BIG, -_BIG],
+        s_hi=[-1.0, 5.0],
+        binding=["already_violated", "future"],
+    )
+    rows = corridor_rows(cor, REF)
+    assert [row.stage for row in rows] == [1]
+
+
 def test_s_hi_cap_becomes_an_upper_bound_along_the_tangent():
     cor = Corridor(s_lo=[-_BIG] * 5, s_hi=[_BIG, _BIG, 30.0, _BIG, _BIG],
                    binding=["", "", "lead", "", ""])
