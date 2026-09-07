@@ -1,0 +1,50 @@
+base_config: cpx_lane_change_2lanefree.yaml
+
+description: |-
+  Deterministic CUT_IN validation. One ego CAV follows the right lane while
+  an ego-blind scripted vehicle moves from the adjacent lane into its path.
+
+cpx_mature:
+  max_ticks: 700
+  destination_tolerance_m: 6.0
+
+carla_traffic_manager:
+  vehicle_list: []
+  range: ~
+
+vehicle_base:
+  behavior:
+    ignore_traffic_light: true
+    overtake_allowed: false
+  planner:
+    cav_conflict_enabled: true
+    following_idm_enabled: false
+    record_evaluation_metrics: true
+    # Preserve the scripted actor's measured lateral velocity. Lane-follow
+    # projection would erase the very cut-in this fixture is meant to test.
+    prediction_lane_following_enabled: false
+    debug_log_formats: [jsonl]
+
+scenario:
+  single_cav_list:
+    - name: cut_in_ego
+      spawn_position: [-300.0, 8.3, 0.3, 0, 0, 0]
+      destination: [-90.0, 8.3, 0.3]
+      v2x:
+        enabled: true
+        communication_range: 80
+      planner:
+        target_speed_mps: 10.0
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_conflict_cut_in
+  scripted_actors:
+    - blueprint: vehicle.tesla.model3
+      path:
+        - [-270.0, 4.8]
+        - [-255.0, 4.8]
+        - [-235.0, 8.3]
+        - [-90.0, 8.3]
+      speed_mps: 8.0
+      # Enter the lane while ego is 25--35 m behind; an earlier start lets the
+      # scripted car finish its cut-in outside the classifier's forward box.
+      start_tick: 60
+      z: 0.3

@@ -65,6 +65,7 @@ scenario:
         # Ablation: isolate prediction-corridor authority from the generic
         # reactive IDM owner. Production configurations keep IDM enabled.
         following_idm_enabled: false
+        record_evaluation_metrics: true
         prediction_mode_min_probability: 0.05
         prediction_credible_probability_min: 0.15
         prediction_credible_ttc_s: 2.0

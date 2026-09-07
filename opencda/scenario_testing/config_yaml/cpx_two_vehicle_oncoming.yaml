@@ -1,0 +1,44 @@
+base_config: cpx_lane_change_2lanefree.yaml
+
+description: |-
+  Deterministic ONCOMING validation on a shared lane. Ego must remain outside
+  the occupied conflict region until the scripted opposing vehicle clears.
+
+cpx_mature:
+  max_ticks: 700
+  destination_tolerance_m: 6.0
+
+carla_traffic_manager:
+  vehicle_list: []
+  range: ~
+
+vehicle_base:
+  behavior:
+    ignore_traffic_light: true
+    overtake_allowed: false
+  planner:
+    cav_conflict_enabled: true
+    following_idm_enabled: false
+    record_evaluation_metrics: true
+    prediction_lane_following_enabled: false
+    debug_log_formats: [jsonl]
+
+scenario:
+  single_cav_list:
+    - name: oncoming_ego
+      spawn_position: [-300.0, 8.3, 0.3, 0, 0, 0]
+      destination: [-90.0, 8.3, 0.3]
+      v2x:
+        enabled: true
+        communication_range: 100
+      planner:
+        target_speed_mps: 8.0
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_conflict_oncoming
+  scripted_actors:
+    - blueprint: vehicle.tesla.model3
+      path:
+        - [-215.0, 8.3]
+        - [-330.0, 8.3]
+      speed_mps: 7.0
+      start_tick: 0
+      z: 0.3

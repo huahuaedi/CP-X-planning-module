@@ -1,0 +1,45 @@
+base_config: cpx_lane_change_2lanefree.yaml
+
+description: |-
+  Deterministic CROSSING validation. The scripted actor crosses the ego path
+  near x=-245 m at a controlled time; no background traffic is present.
+
+cpx_mature:
+  max_ticks: 700
+  destination_tolerance_m: 6.0
+
+carla_traffic_manager:
+  vehicle_list: []
+  range: ~
+
+vehicle_base:
+  behavior:
+    ignore_traffic_light: true
+    overtake_allowed: false
+  planner:
+    cav_conflict_enabled: true
+    following_idm_enabled: false
+    record_evaluation_metrics: true
+    prediction_lane_following_enabled: false
+    debug_log_formats: [jsonl]
+
+scenario:
+  single_cav_list:
+    - name: crossing_ego
+      spawn_position: [-300.0, 8.3, 0.3, 0, 0, 0]
+      destination: [-90.0, 8.3, 0.3]
+      v2x:
+        enabled: true
+        communication_range: 80
+      planner:
+        target_speed_mps: 10.0
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_conflict_crossing
+  scripted_actors:
+    - blueprint: vehicle.tesla.model3
+      path:
+        - [-245.0, -10.0]
+        - [-245.0, 8.3]
+        - [-245.0, 22.0]
+      speed_mps: 6.0
+      start_tick: 60
+      z: 0.3

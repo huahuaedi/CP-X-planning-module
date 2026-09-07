@@ -11,6 +11,7 @@ import opencda.scenario_testing.utils.sim_api as sim_api
 from opencda.core.common.cav_world import CavWorld
 from opencda.planning_module.opencda_bridge.debug_viewer import OpenCDADebugViewer
 from opencda.scenario_testing.evaluations.evaluate_manager import EvaluationManager
+from opencda.scenario_testing.scripted_actor import spawn_scripted_actors
 from opencda.scenario_testing.utils.yaml_utils import add_current_time
 
 
@@ -94,6 +95,7 @@ def run_mature_scenario(opt, scenario_params, *, script_name):
     debug_viewer = None
     single_cav_list = []
     bg_veh_list = []
+    scripted_actor_list = []
     try:
         scenario_params = add_current_time(scenario_params)
         cav_world = CavWorld(opt.apply_ml)
@@ -149,6 +151,10 @@ def run_mature_scenario(opt, scenario_params, *, script_name):
                     % (ego_index, target_index, target_actor_id)
                 )
         _, bg_veh_list = scenario_manager.create_traffic_carla()
+        scripted_actor_list = spawn_scripted_actors(
+            scenario_manager.world,
+            scenario_params.get("scenario", {}).get("scripted_actors", []),
+        )
 
         eval_manager = EvaluationManager(
             scenario_manager.cav_world,
@@ -173,9 +179,14 @@ def run_mature_scenario(opt, scenario_params, *, script_name):
         scripted_brake_cfg = dict(
             runtime_cfg.get("scripted_target_brake", {}) or {}
         )
+        fixed_dt_s = float(
+            scenario_params.get("world", {}).get("fixed_delta_seconds", 0.05)
+        )
         spectator = scenario_manager.world.get_spectator()
         for tick_index in range(max(1, max_ticks)):
             scenario_manager.tick()
+            for scripted_actor in scripted_actor_list:
+                scripted_actor.step(fixed_dt_s)
             ego_vehicle = single_cav_list[0].vehicle
             _set_spectator_transform(spectator, ego_vehicle)
             if completion_mode == "all_cavs":
@@ -223,3 +234,5 @@ def run_mature_scenario(opt, scenario_params, *, script_name):
             vehicle_manager.destroy()
         for vehicle in bg_veh_list:
             vehicle.destroy()
+        for scripted_actor in scripted_actor_list:
+            scripted_actor.vehicle.destroy()
