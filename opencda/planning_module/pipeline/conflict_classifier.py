@@ -51,6 +51,10 @@ class ClassifierParams:
     ignore_longitudinal_behind_m: float = 6.0
     crossing_heading_rad: float = math.radians(50.0)
     crossing_heading_hysteresis_rad: float = math.radians(8.0)
+    # A lane change may cross the reference centreline at a shallow angle.
+    # Do not call that CROSSING solely because signed lateral offset changes
+    # sign; reserve path-crossing semantics for genuinely transverse motion.
+    path_crossing_min_heading_rad: float = math.radians(25.0)
     oncoming_heading_rad: float = math.radians(130.0)
     decel_threshold_mps2: float = -0.8
 
@@ -183,7 +187,12 @@ def classify_conflicts(
             else p.crossing_heading_rad + p.crossing_heading_hysteresis_rad
         ):
             tag, reason = CROSSING, f"dhead={math.degrees(d_head):.0f}"
-        elif len(signed_lat) >= 2 and signed_lat[0] * signed_lat[-1] < 0 and min_lat < p.lane_half_width_m:
+        elif (
+            len(signed_lat) >= 2
+            and signed_lat[0] * signed_lat[-1] < 0
+            and min_lat < p.lane_half_width_m
+            and d_head >= p.path_crossing_min_heading_rad
+        ):
             tag, reason = CROSSING, "path_crossed"
         else:
             entered = (

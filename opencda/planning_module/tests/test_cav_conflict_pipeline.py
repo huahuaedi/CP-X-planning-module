@@ -180,6 +180,22 @@ def test_prediction_modes_map_feeds_a_non_connected_agents_future():
     assert r.diagnostics["trajectory_source_counts"].get("prediction") == 1
 
 
+def test_single_prediction_mode_is_consumed_instead_of_current_pose_fallback():
+    # Current pose/velocity alone remains adjacent and would be IGNORE. The
+    # sole prediction hypothesis enters the lane and must drive Stage A.
+    cut_in = [{"x": 10.0 + k, "y": 3.6 - 0.18 * k} for k in range(20)]
+    agent = {"id": "npc", "x": 10.0, "y": 3.6, "v": 0.0, "psi": 0.0}
+    result = resolve_conflicts(
+        reference_samples=REF,
+        ego_snapshot=EGO,
+        my_actor_id=1,
+        obstacle_snapshots=[agent],
+        prediction_modes={"npc": [{"path": cut_in, "probability": 1.0}]},
+    )
+    assert result.diagnostics["tags"]["npc"] == "CUT_IN"
+    assert any(value < _BIG for value in result.corridor.s_hi)
+
+
 def test_multimodal_corridors_use_expected_risk_and_credible_veto():
     stay = [{"x": 30.0, "y": -6.0}] * 20                     # off to the side
     cross = [{"x": 30.0, "y": -6.0 + 1.0 * k} for k in range(20)]

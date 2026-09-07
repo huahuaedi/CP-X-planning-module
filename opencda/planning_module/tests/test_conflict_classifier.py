@@ -52,6 +52,14 @@ def test_cut_in_track_from_adjacent_lane_onto_path():
     assert t.tag == CUT_IN
 
 
+def test_shallow_lane_change_crossing_centerline_remains_cut_in():
+    pts = [(6 + 1.0 * k, 3.6 - 0.22 * k) for k in range(20)]
+    t = _one({"id": "cut", "x": 6.0, "y": 3.6, "v": 10.0,
+              "psi": math.radians(-10.0), **_track(pts)})
+    assert pts[-1][1] < 0.0
+    assert t.tag == CUT_IN
+
+
 def test_slow_converging_from_adjacent_lane_is_merge():
     pts = [(6 + 1.0 * k, 3.6 - 0.06 * k) for k in range(20)]  # y: 3.6 -> ~2.5
     t = _one({"id": "mrg", "x": 6.0, "y": 3.6, "v": 10.0, "psi": -0.02,

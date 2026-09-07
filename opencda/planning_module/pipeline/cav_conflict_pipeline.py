@@ -94,6 +94,23 @@ def _agent_id(agent: Mapping[str, Any]) -> str:
     ))
 
 
+def _prediction_evidence(agent: Mapping[str, Any]) -> dict:
+    modes = as_modes(agent.get("predicted_modes"))
+    path = list(modes[0].path) if modes else list(
+        agent.get("predicted_trajectory", ()) or ()
+    )
+    if not path:
+        return {"sample_count": 0}
+    last = path[-1]
+    if isinstance(last, Mapping):
+        return {
+            "sample_count": len(path),
+            "end_x": float(last.get("x", last.get("x_m", 0.0)) or 0.0),
+            "end_y": float(last.get("y", last.get("y_m", 0.0)) or 0.0),
+        }
+    return {"sample_count": len(path)}
+
+
 def resolve_conflicts(
     *,
     reference_samples: Sequence[Any],
@@ -148,9 +165,20 @@ def resolve_conflicts(
             mode for mode in modes
             if float(mode.probability) >= max(0.0, float(mode_probability_floor))
         ]
-        if len(retained) <= 1:
+        if len(retained) == 1:
+            # Stage A consumes ``predicted_trajectory``. Do not silently drop
+            # the prediction module's only hypothesis merely because no
+            # probabilistic aggregation is needed.
+            mode = retained[0]
+            agent = dict(agent)
+            agent.pop("predicted_modes", None)
+            agent["predicted_trajectory"] = list(mode.path)
+            agent["mode_probability"] = float(mode.probability)
             all_agents.append(agent)
-            retained_mode_count += len(retained)
+            retained_mode_count += 1
+            continue
+        if not retained:
+            all_agents.append(agent)
             continue
         actor_id = _agent_id(agent)
         mode_groups[actor_id] = []
@@ -318,6 +346,7 @@ def resolve_conflicts(
                 "psi": float(agent.get("psi", agent.get("heading_rad", 0.0)) or 0.0),
                 "trajectory_source": _source(agent),
                 "mode_count": len(as_modes(agent.get("predicted_modes"))),
+                "prediction": _prediction_evidence(agent),
             }
             for agent in physical_agents
         },
