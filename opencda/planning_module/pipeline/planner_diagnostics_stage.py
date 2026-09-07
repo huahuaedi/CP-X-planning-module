@@ -215,6 +215,16 @@ class PlannerDiagnosticsStage:
             "local_object_count": len(local_object_snapshots),
             "prediction_mode": str(self._prediction_mode),
             "cav_conflict_summary": _cav_conflict_summary(cav_diag),
+            # Structured JSONL evidence.  The compact summary remains only
+            # for legacy CSV readers; new evaluators must not parse prose.
+            "cav_conflict_tags": dict(cav_diag.get("tags", {}) or {}),
+            "cav_conflict_tag_reasons": dict(
+                cav_diag.get("tag_reasons", {}) or {}
+            ),
+            "cav_conflict_agent_states": dict(
+                cav_diag.get("agent_states", {}) or {}
+            ),
+            "cav_conflict_roles": dict(cav_diag.get("roles", {}) or {}),
             "cav_corridor_binding": ",".join(
                 str(b) for b in cav_diag.get("corridor_binding", [])
             ),

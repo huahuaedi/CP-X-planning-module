@@ -56,6 +56,10 @@ class CorridorParams:
     follow_extra_buffer_m: float = 2.0
     conflict_stop_buffer_m: float = 4.0
     crossing_clearance_time_s: float = 2.0   # cap s_hi within this of conflict_t
+    # Arbitration is an efficiency agreement, not permission to collide. If
+    # the peer's latest path puts it inside this imminent horizon, the safety
+    # corridor overrides a stale ``proceed`` role.
+    proceed_safety_override_ttc_s: float = 1.0
     ego_half_length_m: float = 2.45
 
 
@@ -170,6 +174,10 @@ def build_longitudinal_corridor(
     for agent, tag, assignment in list(items or []):
         role = str(getattr(assignment, "role", "") or "")
         proceed = role == "proceed"
+        imminent = (
+            tag.conflict_t_s is not None
+            and float(tag.conflict_t_s) <= float(p.proceed_safety_override_ttc_s)
+        )
         agent_v = max(0.0, _f(agent, "v", "speed", "speed_mps"))
         gap = longitudinal_safe_distance(ego_v, agent_v, rss) + p.follow_extra_buffer_m
         station = _agent_station_series(agent, poly, n + 1)
@@ -199,7 +207,7 @@ def build_longitudinal_corridor(
         if tag.tag == CUT_IN:
             # A cooperative cav that lost the arbitration (role proceed) is
             # expected to yield to ego, so ego takes no bound from it.
-            if proceed:
+            if proceed and not imminent:
                 continue
             start = 0
             if tag.conflict_t_s is not None:
@@ -209,7 +217,8 @@ def build_longitudinal_corridor(
                     _cap(k, station[k] - gap, tag.agent_id)
 
         elif tag.tag in (CROSSING, ONCOMING):
-            if proceed or tag.conflict_s_m is None or tag.conflict_t_s is None:
+            if ((proceed and not imminent)
+                    or tag.conflict_s_m is None or tag.conflict_t_s is None):
                 continue
             lo_k = max(0, int((tag.conflict_t_s - p.crossing_clearance_time_s) / dt))
             hi_k = min(n, int((tag.conflict_t_s + p.crossing_clearance_time_s) / dt))
@@ -217,7 +226,19 @@ def build_longitudinal_corridor(
                 _cap(k, float(tag.conflict_s_m) - p.conflict_stop_buffer_m, tag.agent_id)
 
         elif tag.tag == MERGE:
-            continue
+            # Without a valid cooperative assignment, MERGE still needs a
+            # safety owner.  Cap progress behind the predicted merge station;
+            # a later CUT_IN classification will naturally continue the same
+            # constraint.  Explicit proceed may skip it until safety becomes
+            # imminent.
+            if proceed and not imminent:
+                continue
+            start = 0
+            if tag.conflict_t_s is not None:
+                start = max(0, int(tag.conflict_t_s / dt))
+            for k in range(start, n + 1):
+                if k < len(station):
+                    _cap(k, station[k] - gap, tag.agent_id)
 
     cor.clamp_and_check()
     return cor

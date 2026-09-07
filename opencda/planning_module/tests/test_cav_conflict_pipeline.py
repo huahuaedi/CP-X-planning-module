@@ -246,3 +246,32 @@ def test_connected_cav_snapshot_carries_a_single_broadcast_mode():
     assert len(modes) == 1
     assert modes[0].probability == 1.0
     assert snap["trajectory_source"] == "broadcast"
+
+
+def test_multimodal_probability_boundaries_are_inclusive():
+    stay = [{"x": 30.0, "y": -6.0}] * 20
+    cross = [{"x": 30.0, "y": -6.0 + k} for k in range(20)]
+
+    def resolve(cross_probability, *, floor=0.05, credible=0.15):
+        return resolve_conflicts(
+            reference_samples=REF,
+            ego_snapshot={**EGO, "v": 15.0},
+            my_actor_id=1,
+            obstacle_snapshots=[{
+                "id": "npc", "x": 30.0, "y": -6.0, "v": 8.0,
+                "psi": math.pi / 2.0,
+                "predicted_modes": [
+                    {"path": stay, "probability": 1.0 - cross_probability},
+                    {"path": cross, "probability": cross_probability},
+                ],
+            }],
+            mode_probability_floor=floor,
+            credible_mode_probability_min=credible,
+        )
+
+    assert resolve(0.049).diagnostics["retained_prediction_mode_count"] == 1
+    assert resolve(0.050).diagnostics["retained_prediction_mode_count"] == 2
+    assert resolve(0.051).diagnostics["retained_prediction_mode_count"] == 2
+    assert resolve(0.149).diagnostics["credible_mode_veto_count"] == 0
+    assert resolve(0.150).diagnostics["credible_mode_veto_count"] == 1
+    assert resolve(0.151).diagnostics["credible_mode_veto_count"] == 1

@@ -309,6 +309,18 @@ def resolve_conflicts(
             1 for t in tags if t.tag in ("FOLLOW", "LEAD_BRAKE")
         ),
         "tags": {t.agent_id: t.tag for t in tags},
+        "tag_reasons": {t.agent_id: t.reason for t in tags},
+        "agent_states": {
+            _agent_id(agent): {
+                "x": float(agent.get("x", agent.get("x_m", 0.0)) or 0.0),
+                "y": float(agent.get("y", agent.get("y_m", 0.0)) or 0.0),
+                "v": float(agent.get("v", agent.get("speed_mps", 0.0)) or 0.0),
+                "psi": float(agent.get("psi", agent.get("heading_rad", 0.0)) or 0.0),
+                "trajectory_source": _source(agent),
+                "mode_count": len(as_modes(agent.get("predicted_modes"))),
+            }
+            for agent in physical_agents
+        },
         "roles": {str(a.cav_actor_id): a.role for a in assignments},
         "corridor_feasible": bool(corridor.feasible),
         "corridor_first_infeasible_stage": corridor.first_infeasible_stage,

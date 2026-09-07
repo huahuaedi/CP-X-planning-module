@@ -67,10 +67,20 @@ def test_crossing_yield_caps_s_hi_near_conflict_point_only_in_the_window():
 def test_crossing_proceed_adds_no_bound():
     cor = build_longitudinal_corridor(
         REF, EGO,
-        [({"x": 30.0, "v": 8.0}, _tag("x", CROSSING, s=30.0, t=1.0), _assign("proceed"))],
+        [({"x": 30.0, "v": 8.0}, _tag("x", CROSSING, s=30.0, t=1.5), _assign("proceed"))],
         P,
     )
     assert all(h >= _BIG for h in cor.s_hi)
+
+
+def test_imminent_crossing_overrides_stale_proceed_role():
+    cor = build_longitudinal_corridor(
+        REF, EGO,
+        [({"x": 18.0, "v": 8.0},
+          _tag("x", CROSSING, s=18.0, t=0.8), _assign("proceed"))],
+        P,
+    )
+    assert min(cor.s_hi) == 14.0
 
 
 def test_merge_make_gap_puts_ego_behind_cav():
@@ -88,6 +98,16 @@ def test_merge_proceed_adds_no_bound():
         REF, EGO, [(cav, _tag("cav", MERGE), _assign("proceed"))], P
     )
     assert all(h >= _BIG for h in cor.s_hi)
+
+
+def test_unassigned_merge_has_a_safety_corridor_owner():
+    cav = {"x": 18.0, "v": 8.0,
+           **_track([(18.0 + 0.8 * k, 2.5 - 0.1 * k) for k in range(21)])}
+    cor = build_longitudinal_corridor(
+        REF, EGO, [(cav, _tag("cav", MERGE, s=24.0, t=0.8), None)], P
+    )
+    assert cor.binding[8] == "cav"
+    assert cor.s_hi[8] < 18.0 + 0.8 * 8
 
 
 def test_close_follow_does_not_create_a_second_stop_controller():
