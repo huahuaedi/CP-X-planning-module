@@ -57,6 +57,23 @@ def _destinations_reached(vehicle_managers, vehicle_configs, tolerance_m):
     )
 
 
+def _apply_scripted_target_brake(control, *, tick, config, cav_index):
+    """Apply a deterministic experiment stimulus after normal planning."""
+
+    cfg = dict(config or {})
+    if not bool(cfg.get("enabled", False)):
+        return control
+    if int(cav_index) != int(cfg.get("target_cav_index", 0)):
+        return control
+    start = max(0, int(cfg.get("start_tick", 0)))
+    duration = max(0, int(cfg.get("duration_ticks", 0)))
+    if not (start <= int(tick) < start + duration):
+        return control
+    control.throttle = 0.0
+    control.brake = max(float(control.brake), float(cfg.get("brake", 0.65)))
+    return control
+
+
 def _scenario_manager_kwargs(scenario_params):
     mature_cfg = scenario_params.get("cpx_mature", {})
     map_mode = str(mature_cfg.get("map_mode", "town")).strip().lower()
@@ -153,8 +170,11 @@ def run_mature_scenario(opt, scenario_params, *, script_name):
         destination_tolerance_m = float(runtime_cfg.get("destination_tolerance_m", 8.0))
         vehicle_configs = scenario_params["scenario"]["single_cav_list"]
         completion_mode = str(runtime_cfg.get("completion_mode", "first_cav"))
+        scripted_brake_cfg = dict(
+            runtime_cfg.get("scripted_target_brake", {}) or {}
+        )
         spectator = scenario_manager.world.get_spectator()
-        for _ in range(max(1, max_ticks)):
+        for tick_index in range(max(1, max_ticks)):
             scenario_manager.tick()
             ego_vehicle = single_cav_list[0].vehicle
             _set_spectator_transform(spectator, ego_vehicle)
@@ -169,7 +189,7 @@ def run_mature_scenario(opt, scenario_params, *, script_name):
             if reached_destination:
                 print("CP-X mature scenario reached the configured destination.")
                 break
-            for single_cav in single_cav_list:
+            for cav_index, single_cav in enumerate(single_cav_list):
                 single_cav.update_info()
                 try:
                     control = single_cav.run_step()
@@ -178,6 +198,12 @@ def run_mature_scenario(opt, scenario_params, *, script_name):
                         print("CP-X mature scenario stopped by OpenCDA destination condition.")
                         return
                     raise
+                control = _apply_scripted_target_brake(
+                    control,
+                    tick=tick_index,
+                    config=scripted_brake_cfg,
+                    cav_index=cav_index,
+                )
                 single_cav.vehicle.apply_control(control)
             if debug_viewer is not None:
                 debug_viewer.render(single_cav_list)

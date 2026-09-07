@@ -10,8 +10,8 @@ cpx_mature:
 scenario:
   single_cav_list:
     - name: predicted_vehicle
-      spawn_position: [-300.0, 8.3, 0.3, 0, 0, 0]
-      destination: [-70.0, 8.3, 0.3]
+      spawn_position: [-270.0, 8.3, 0.3, 0, 0, 0]
+      destination: [20.0, 8.3, 0.3]
       v2x: {enabled: true, communication_range: 80}
       behavior: {local_planner: {debug_trajectory: true, debug: true}}
       planner:
@@ -19,11 +19,12 @@ scenario:
         debug_output_dir: opencda/planning_module/opencda_bridge/debug_prediction_cv_target
     - name: prediction_ego
       spawn_position: [-325.0, 8.3, 0.3, 0, 0, 0]
-      destination: [-70.0, 8.3, 0.3]
+      destination: [20.0, 8.3, 0.3]
       v2x: {enabled: true, communication_range: 80}
       behavior: {local_planner: {debug_trajectory: true, debug: true}}
       planner:
         target_speed_mps: 10.0
         prediction_mode: cv
+        following_idm_enabled: false
         prediction_mode_min_probability: 0.05
         debug_output_dir: opencda/planning_module/opencda_bridge/debug_prediction_cv_ego
