@@ -18,7 +18,10 @@ vehicle_base:
     overtake_allowed: false
   planner:
     cav_conflict_enabled: true
-    following_idm_enabled: false
+    # CUT_IN owns the transition corridor; after it settles to FOLLOW, the
+    # normal speed owner resumes safe car-following.
+    following_idm_enabled: true
+    full_allow_opportunistic_lane_change: false
     record_evaluation_metrics: true
     # Preserve the scripted actor's measured lateral velocity. Lane-follow
     # projection would erase the very cut-in this fixture is meant to test.
@@ -44,7 +47,8 @@ scenario:
         - [-235.0, 8.3]
         - [-90.0, 8.3]
       speed_mps: 8.0
-      # Enter the lane while ego is 25--35 m behind; an earlier start lets the
-      # scripted car finish its cut-in outside the classifier's forward box.
-      start_tick: 60
+      # Put the lateral crossing inside the ego MPC reference horizon. An
+      # earlier start completes the manoeuvre beyond the finite reference and
+      # only tests the later FOLLOW phase.
+      start_tick: 90
       z: 0.3

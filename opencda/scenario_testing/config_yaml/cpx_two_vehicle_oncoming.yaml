@@ -19,6 +19,7 @@ vehicle_base:
   planner:
     cav_conflict_enabled: true
     following_idm_enabled: false
+    full_allow_opportunistic_lane_change: false
     record_evaluation_metrics: true
     prediction_lane_following_enabled: false
     debug_log_formats: [jsonl]
@@ -38,7 +39,12 @@ scenario:
     - blueprint: vehicle.tesla.model3
       path:
         - [-215.0, 8.3]
-        - [-330.0, 8.3]
+        - [-250.0, 8.3]
+        # Leave the shared lane through the passing bay; a blind actor that
+        # continued through ego forever would make the scenario unsolvable by
+        # any stop/yield policy.
+        - [-265.0, 4.8]
+        - [-330.0, 4.8]
       speed_mps: 7.0
       start_tick: 0
       z: 0.3
