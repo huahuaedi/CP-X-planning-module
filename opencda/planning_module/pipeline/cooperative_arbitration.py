@@ -37,6 +37,12 @@ class ResourceClaim:
     with every other regardless of which lane is involved; a specific
     lane/junction id restricts conflicts to CAVs contending for the exact
     same resource.
+
+    ``s_begin_m`` and ``s_end_m``, when present, must use the shared
+    longitudinal coordinate of the claimed AD-map corridor.  A vehicle's
+    private route-progress coordinate is not comparable with another
+    vehicle's route and must not be stored here.  Missing intervals are
+    deliberately treated as overlapping (conservative compatibility).
     """
 
     kind: str

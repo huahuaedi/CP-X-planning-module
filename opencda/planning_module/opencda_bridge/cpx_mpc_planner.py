@@ -3344,6 +3344,7 @@ class CPXMPCPlannerBridge:
                 sim_time_s=float(sim_time_s),
                 maneuver_active=bool(lane_change.active),
                 committed_at_s=float(lane_change.committed_at_s),
+                source_corridor_id=int(current_lane_id),
             )
             cav_result = self.pipeline.resolve_cav_interaction(
                 reference_samples=local_lane_center_reference,
