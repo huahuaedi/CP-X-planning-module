@@ -30,6 +30,12 @@ class PlannerDiagnosticsStage:
     """Build diagnostics without participating in planning or control."""
 
     @staticmethod
+    def fieldnames(payload: Mapping[str, Any]) -> tuple[str, ...]:
+        """Return the stable serialization order for a built trace payload."""
+
+        return tuple(str(key) for key in payload.keys())
+
+    @staticmethod
     def build_reference_debug(owner: Any, context: Mapping[str, Any]) -> dict[str, Any]:
         """Assemble the read-only behavior/reference trace for one frame."""
 
