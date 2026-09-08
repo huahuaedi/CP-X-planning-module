@@ -45,6 +45,10 @@ class ResourceClaim:
     active: bool
     require_ahead: bool = True
     phase: str = CLAIM_COMMITTED
+    source_corridor_id: int = 0
+    target_corridor_id: int = 0
+    s_begin_m: Optional[float] = None
+    s_end_m: Optional[float] = None
 
     @property
     def participates(self) -> bool:
@@ -57,6 +61,42 @@ class ResourceClaim:
     @property
     def committed(self) -> bool:
         return bool(self.participates and str(self.phase).lower() == CLAIM_COMMITTED)
+
+    def conflicts_with(self, other: "ResourceClaim") -> bool:
+        """Return whether two active claims occupy the same spatial resource."""
+
+        if not self.participates or not other.participates:
+            return False
+        if str(self.kind) != str(other.kind):
+            return False
+        self_spatial = bool(self.source_corridor_id or self.target_corridor_id)
+        other_spatial = bool(other.source_corridor_id or other.target_corridor_id)
+        if not self_spatial or not other_spatial:
+            return str(self.resource_id) == str(other.resource_id)
+        if not _intervals_overlap(
+            self.s_begin_m, self.s_end_m, other.s_begin_m, other.s_end_m
+        ):
+            return False
+        same_target = bool(
+            self.target_corridor_id
+            and self.target_corridor_id == other.target_corridor_id
+        )
+        opposing_transition = bool(
+            self.source_corridor_id == other.target_corridor_id
+            and self.target_corridor_id == other.source_corridor_id
+        )
+        return same_target or opposing_transition
+
+
+def _intervals_overlap(
+    a_begin: Optional[float], a_end: Optional[float],
+    b_begin: Optional[float], b_end: Optional[float],
+) -> bool:
+    if None in (a_begin, a_end, b_begin, b_end):
+        return True
+    a_lo, a_hi = sorted((float(a_begin), float(a_end)))
+    b_lo, b_hi = sorted((float(b_begin), float(b_end)))
+    return max(a_lo, b_lo) <= min(a_hi, b_hi)
 
 
 # --------------------------------------------------------------------------- #
@@ -189,9 +229,7 @@ def assign_conflict_roles(
         pclaim = cav.claim
         if not bool(pclaim.participates):
             continue
-        if str(pclaim.kind) != str(my_claim.kind):
-            continue
-        if str(pclaim.resource_id) != str(my_claim.resource_id):
+        if not my_claim.conflicts_with(pclaim):
             continue
         px, py = float(cav.position_xy[0]), float(cav.position_xy[1])
         dx = px - float(my_position_xy[0])

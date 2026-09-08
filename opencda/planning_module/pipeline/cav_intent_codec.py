@@ -128,6 +128,10 @@ def cav_intent_to_payload(intent: CavIntent) -> dict:
             "active": bool(c.active),
             "require_ahead": bool(c.require_ahead),
             "phase": str(c.phase),
+            "source_corridor_id": int(c.source_corridor_id),
+            "target_corridor_id": int(c.target_corridor_id),
+            "s_begin_m": c.s_begin_m,
+            "s_end_m": c.s_end_m,
         },
         "planned_path": [
             [float(t), float(x), float(y), float(v)]
@@ -166,6 +170,12 @@ def cav_intent_from_payload(payload: Mapping[str, Any]) -> Optional[CavIntent]:
         # Schema-v1 senders had only ``active``; an active legacy claim was
         # already a committed maneuver, so this default is backward-compatible.
         phase=str(raw_claim.get("phase", "committed") or "committed"),
+        source_corridor_id=int(raw_claim.get("source_corridor_id", 0) or 0),
+        target_corridor_id=int(raw_claim.get("target_corridor_id", 0) or 0),
+        s_begin_m=(None if raw_claim.get("s_begin_m") is None
+                   else float(raw_claim.get("s_begin_m"))),
+        s_end_m=(None if raw_claim.get("s_end_m") is None
+                 else float(raw_claim.get("s_end_m"))),
     )
     path: List[Tuple[float, float, float, float]] = []
     for s in list(payload.get("planned_path", []) or []):
