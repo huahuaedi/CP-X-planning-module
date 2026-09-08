@@ -5,9 +5,9 @@ from __future__ import annotations
 from typing import Optional, Sequence, Tuple
 
 from .cooperative_arbitration import ResourceClaim
+from .cooperative_maneuver_proposal import CooperativeManeuverProposal
 
 
-_LANE_CHANGES = frozenset({"lane_change_left", "lane_change_right"})
 _DEFER_ROLES = frozenset({"yield", "make_gap"})
 
 
@@ -30,22 +30,17 @@ class CooperativeClaimManager:
         return self._last_claim
 
     def claim(
-        self, *, decision: str, target_lane_id: int, sim_time_s: float,
-        maneuver_active: bool, committed_at_s: float,
-        source_corridor_id: int = 0,
-        station_corridor_id: int = 0,
-        s_begin_m: Optional[float] = None,
-        s_end_m: Optional[float] = None,
+        self, *, proposal: CooperativeManeuverProposal, sim_time_s: float,
     ) -> Optional[ResourceClaim]:
         if not self._enabled:
             return None
-        if bool(maneuver_active):
+        if bool(proposal.committed):
             previous = self._last_claim
-            source_id = int(source_corridor_id)
-            target_id = int(target_lane_id)
-            begin_m = s_begin_m
-            end_m = s_end_m
-            station_id = int(station_corridor_id)
+            source_id = int(proposal.source_corridor_id)
+            target_id = int(proposal.target_corridor_id)
+            begin_m = proposal.s_begin_m
+            end_m = proposal.s_end_m
+            station_id = int(proposal.station_corridor_id)
             if previous is not None and previous.participates:
                 source_id = source_id or int(previous.source_corridor_id)
                 target_id = target_id or int(previous.target_corridor_id)
@@ -55,7 +50,7 @@ class CooperativeClaimManager:
                 if end_m is None:
                     end_m = previous.s_end_m
             self._proposal_key = None
-            timestamp = float(committed_at_s)
+            timestamp = float(proposal.committed_at_s)
             if timestamp <= 0.0:
                 timestamp = float(sim_time_s)
             self._last_claim = ResourceClaim(
@@ -70,8 +65,8 @@ class CooperativeClaimManager:
                 s_end_m=end_m,
             )
             return self._last_claim
-        normalized = str(decision).strip().lower()
-        if normalized not in _LANE_CHANGES or int(target_lane_id) == 0:
+        normalized = str(proposal.maneuver).strip().lower()
+        if not bool(proposal.requested):
             self._proposal_key = None
             self._last_claim = ResourceClaim(
                 kind="lane_change", resource_id="lane_change",
@@ -79,8 +74,8 @@ class CooperativeClaimManager:
                 require_ahead=False, phase="released",
             )
             return self._last_claim
-        source_id = int(source_corridor_id)
-        target_id = int(target_lane_id)
+        source_id = int(proposal.source_corridor_id)
+        target_id = int(proposal.target_corridor_id)
         key = (normalized, source_id, target_id)
         if key != self._proposal_key:
             self._proposal_key = key
@@ -92,9 +87,9 @@ class CooperativeClaimManager:
             require_ahead=False, phase="proposed",
             source_corridor_id=source_id,
             target_corridor_id=target_id,
-            station_corridor_id=int(station_corridor_id),
-            s_begin_m=s_begin_m,
-            s_end_m=s_end_m,
+            station_corridor_id=int(proposal.station_corridor_id),
+            s_begin_m=proposal.s_begin_m,
+            s_end_m=proposal.s_end_m,
         )
         return self._last_claim
 

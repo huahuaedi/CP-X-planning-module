@@ -209,6 +209,9 @@ class PlanningPipeline:
     def resolve_conflicts(self, request, **kwargs):
         return self.behavior.resolve_conflicts(request, **kwargs)
 
+    def propose_cooperative_maneuver(self, **kwargs):
+        return self.behavior.cooperative_proposal(**kwargs)
+
     @staticmethod
     def resolve_cav_interaction(
         *, reference_samples, ego_location, ego_yaw_rad, ego_speed_mps,

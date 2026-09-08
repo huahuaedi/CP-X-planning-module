@@ -3354,15 +3354,22 @@ class CPXMPCPlannerBridge:
                     self.config.get("cav_claim_lookahead_m", 50.0)
                 ),
             )
-            cav_claim = self._cooperative_claim_manager.claim(
-                decision=str(decision), target_lane_id=int(target_lane_id),
-                sim_time_s=float(sim_time_s),
+            cooperative_proposal = self.pipeline.propose_cooperative_maneuver(
+                maneuver=str(decision),
+                source_corridor_id=int(current_lane_id),
+                target_corridor_id=int(target_lane_id),
+                route_required=bool(route_lane_change_required),
                 maneuver_active=bool(lane_change.active),
                 committed_at_s=float(lane_change.committed_at_s),
-                source_corridor_id=int(current_lane_id),
-                station_corridor_id=int(claim_interval.corridor_id),
+                reason=str(behavior_override_reason),
+            ).with_station_interval(
+                corridor_id=int(claim_interval.corridor_id),
                 s_begin_m=claim_interval.s_begin_m,
                 s_end_m=claim_interval.s_end_m,
+            )
+            cav_claim = self._cooperative_claim_manager.claim(
+                proposal=cooperative_proposal,
+                sim_time_s=float(sim_time_s),
             )
             cav_result = self.pipeline.resolve_cav_interaction(
                 reference_samples=local_lane_center_reference,

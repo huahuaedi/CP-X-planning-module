@@ -8,6 +8,7 @@ from types import MappingProxyType
 from typing import Any, Mapping, Optional, Sequence
 
 from .behavior_decision import BehaviorDecision
+from .cooperative_maneuver_proposal import CooperativeManeuverProposal
 from .reference_line_provider import LANE_CHANGE
 from .candidate_evaluation import evaluate_behavior_candidates
 from .route_authorization import (
@@ -266,6 +267,12 @@ class BehaviorStage:
 
     def reset_route_lane_change_authorization(self) -> None:
         self._route_lane_change_latch.reset()
+
+    @staticmethod
+    def cooperative_proposal(**kwargs) -> CooperativeManeuverProposal:
+        """Expose the sole typed behavior-to-cooperation boundary."""
+
+        return CooperativeManeuverProposal.from_behavior(**kwargs)
 
     def produce_command_from_frame(
         self, request: BehaviorCommandFrameRequest, *, behavior_planner: Any,
