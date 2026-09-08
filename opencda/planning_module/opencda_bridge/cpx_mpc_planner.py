@@ -3679,33 +3679,18 @@ class CPXMPCPlannerBridge:
         return intents
 
     def _ego_cav_claim(self, *, sim_time_s: float):
-        """Ego's own cooperative ResourceClaim, active while it is committed
-        to a lateral maneuver -- else None (Stage B is skipped, Stage A/C
-        still handle plain obstacle conflicts)."""
+        """Return the claim produced by this tick's planning stage.
 
+        Intent publication is deliberately read-only.  Claim proposal,
+        commitment, and release are owned by ``CooperativeClaimManager`` at
+        the conflict-resolution call site; the V2X path must not advance or
+        reconstruct that lifecycle.
+        """
+
+        del sim_time_s
         if not self._cav_conflict_enabled:
             return None
-        lane_change = getattr(self.maneuver_manager, "lane_change", None)
-        active = bool(getattr(lane_change, "active", False)) or str(
-            getattr(lane_change, "phase", "")
-        ) in ("executing", "target_lane_stabilization")
-        if active:
-            return self._cooperative_claim_manager.claim(
-                decision="lane_change_left",
-                target_lane_id=int(getattr(lane_change, "target_lane_id", 0) or 0),
-                sim_time_s=float(sim_time_s), maneuver_active=True,
-                committed_at_s=float(
-                    getattr(lane_change, "committed_at_s", 0.0)
-                ),
-            )
-        claim = self._cooperative_claim_manager.current_claim
-        if claim is not None:
-            return claim
-        return self._cooperative_claim_manager.claim(
-            decision="lane_follow", target_lane_id=0,
-            sim_time_s=float(sim_time_s), maneuver_active=False,
-            committed_at_s=0.0,
-        )
+        return self._cooperative_claim_manager.current_claim
 
     def _validate_route_tracking_lane_change_reference(
         self,
