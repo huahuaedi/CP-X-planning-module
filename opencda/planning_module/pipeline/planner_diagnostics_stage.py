@@ -50,13 +50,6 @@ class PlannerDiagnosticsStage:
             ),
             "front_gap_obstacle_lane_id": int(c["front_obstacle_lane_id"]),
             "front_gap_obstacle_is_source_lane": bool(c["front_obstacle_is_source_lane"]),
-            "snapshot_repr_diag": str([
-                {k: v for k, v in dict(row).items() if k in (
-                    "track_id", "object_id", "vehicle_id", "actor_id", "id",
-                    "v", "speed_mps", "x", "y",
-                )}
-                for row in list(c["object_snapshots"] or ())
-            ]),
             "route_reference_allowed": bool(c["route_reference_allowed"]),
             "route_reference_gate_reason": str(c["route_reference_gate_reason"]),
             "route_lane_change_allowed": bool(c["route_lane_change_allowed"]),
@@ -123,10 +116,6 @@ class PlannerDiagnosticsStage:
             "traffic_stop_commit_distance_m": float(c["traffic_stop_commit_distance_m"]),
             "traffic_stop_approach_reason": str(c["traffic_stop_approach_reason"]),
             **dict(c["speed_plan"].as_debug_fields()),
-            "traffic_signal_state_raw": str(
-                c["planner_input_frame"].planning.traffic_control.signal_state
-            ),
-            "traffic_signal_state_filtered": str(c["filtered_traffic_state"]),
             "candidate_evaluation_summary": str(c["candidate_frame"].summary()),
             "candidate_selected_decision": str(c["candidate_frame"].selected.decision),
             "candidate_selected_lane_id": int(c["candidate_frame"].selected.target_lane_id),
@@ -731,7 +720,6 @@ class PlannerDiagnosticsStage:
             "front_gap_obstacle_is_source_lane": reference_debug.get(
                 "front_gap_obstacle_is_source_lane", ""
             ),
-            "snapshot_repr_diag": reference_debug.get("snapshot_repr_diag", ""),
             "speed_owner_requested_mps": reference_debug.get(
                 "speed_owner_requested_mps", ""
             ),

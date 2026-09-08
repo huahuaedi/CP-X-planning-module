@@ -95,7 +95,6 @@ vehicle_base:
     mpc_feedback_candidate_weight: 80.0
     control_buffer_enabled: true
     control_buffer_max_reuse_s: 0.35
-    opencda_style_reference_conditioning_enabled: false
     lane_follow_speed_recovery_enabled: false
     lane_follow_negative_accel_release_enabled: false
     overspeed_guard_enabled: false

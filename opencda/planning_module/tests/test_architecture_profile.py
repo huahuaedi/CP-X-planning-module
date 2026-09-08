@@ -8,7 +8,6 @@ class ArchitectureProfileTests(unittest.TestCase):
         config, profile = normalize_architecture_config(
             {
                 "mode": "full_cpx_mpc",
-                "opencda_style_reference_conditioning_enabled": True,
                 "low_speed_lateral_recovery_enabled": True,
                 "lane_follow_speed_recovery_enabled": True,
                 "lane_follow_negative_accel_release_enabled": True,
@@ -26,7 +25,6 @@ class ArchitectureProfileTests(unittest.TestCase):
         self.assertTrue(config["full_mpc_reference_stabilizer_enabled"])
         self.assertTrue(config["control_buffer_enabled"])
         self.assertTrue(config["safety_supervisor_enabled"])
-        self.assertFalse(config["opencda_style_reference_conditioning_enabled"])
         self.assertFalse(config["low_speed_lateral_recovery_enabled"])
         self.assertFalse(config["lane_follow_speed_recovery_enabled"])
         self.assertFalse(config["lane_follow_negative_accel_release_enabled"])
@@ -38,7 +36,7 @@ class ArchitectureProfileTests(unittest.TestCase):
         self.assertFalse(config["strict_reference_validator_veto_enabled"])
         self.assertFalse(config["boundary_recovery_enabled"])
         self.assertFalse(config["turn_road_boundary_speed_guard_enabled"])
-        self.assertEqual(len(profile.normalized_overrides), 10)
+        self.assertEqual(len(profile.normalized_overrides), 9)
 
     def test_removed_legacy_mode_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "unsupported"):

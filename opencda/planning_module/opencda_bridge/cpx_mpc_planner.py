@@ -791,7 +791,6 @@ class CPXMPCPlannerBridge:
             "route_upcoming_turn_distance_m",
             "route_upcoming_turn_reason",
             "turn_latch_reason",
-            "opencda_style_reference_conditioning_reason",
             "reference_lateral_guard_reason",
             "mpc_reference_stabilizer_reason",
             "final_reference_gate_valid",
@@ -3293,7 +3292,6 @@ class CPXMPCPlannerBridge:
             "front_gap_obstacle_speed_mps": front_gap_obstacle_speed_mps,
             "front_obstacle_lane_id": front_obstacle_lane_id,
             "front_obstacle_is_source_lane": front_obstacle_is_source_lane,
-            "object_snapshots": object_snapshots,
             "route_reference_allowed": route_reference_allowed,
             "route_reference_gate_reason": route_reference_gate_reason,
             "route_lane_change_allowed": route_lane_change_allowed,
@@ -3586,7 +3584,6 @@ class CPXMPCPlannerBridge:
         local_lane_center_reference = post_turn.mutable_samples()
         reference_debug = dict(post_turn.debug_fields)
 
-        reference_debug["opencda_style_reference_conditioning_reason"] = ""
         # ReferenceLineProvider is the sole geometry owner. ManeuverManager
         # owns lifecycle only and cannot replace a contract-approved path.
         self.nominal_trajectory_generator.update(

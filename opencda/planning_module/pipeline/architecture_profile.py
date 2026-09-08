@@ -40,7 +40,6 @@ class ArchitectureProfile:
 
 
 _FULL_PIPELINE_SINGLE_OWNER_FLAGS = {
-    "opencda_style_reference_conditioning_enabled": False,
     "low_speed_lateral_recovery_enabled": False,
     "lane_follow_speed_recovery_enabled": False,
     "lane_follow_negative_accel_release_enabled": False,

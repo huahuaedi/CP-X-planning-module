@@ -446,7 +446,7 @@ def export_report(input_csv: Path, output_dir: Path) -> None:
             "mpc_fallback_reason",
             "reference_lateral_guard_reason",
             "mpc_reference_stabilizer_reason",
-            "carla_route_progress_index",
+            "route_progress_index",
             "route_remaining_distance_m",
         ]
         if key in fieldnames
@@ -526,7 +526,7 @@ def export_report(input_csv: Path, output_dir: Path) -> None:
         {
             "metric": "Route progress",
             "value": f"{route_progress_m:.1f} m",
-            "interpretation": f"CARLA route index advanced to {pre_turn[-1].get('carla_route_progress_index', '')}.",
+            "interpretation": f"AD-map route index advanced to {pre_turn[-1].get('route_progress_index', '')}.",
         },
         {
             "metric": "Traffic-light stop episodes",
