@@ -53,6 +53,7 @@ class ResourceClaim:
     phase: str = CLAIM_COMMITTED
     source_corridor_id: int = 0
     target_corridor_id: int = 0
+    station_corridor_id: int = 0
     s_begin_m: Optional[float] = None
     s_end_m: Optional[float] = None
 
@@ -79,7 +80,11 @@ class ResourceClaim:
         other_spatial = bool(other.source_corridor_id or other.target_corridor_id)
         if not self_spatial or not other_spatial:
             return str(self.resource_id) == str(other.resource_id)
-        if not _intervals_overlap(
+        comparable_station = bool(
+            self.station_corridor_id
+            and self.station_corridor_id == other.station_corridor_id
+        )
+        if comparable_station and not _intervals_overlap(
             self.s_begin_m, self.s_end_m, other.s_begin_m, other.s_end_m
         ):
             return False

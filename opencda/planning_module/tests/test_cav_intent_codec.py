@@ -144,7 +144,8 @@ def test_codec_roundtrip_preserves_spatial_claim_contract():
     claim = ResourceClaim(
         kind="lane_change", resource_id="transition:10:20",
         committed_at_s=7.0, active=True, source_corridor_id=10,
-        target_corridor_id=20, s_begin_m=100.0, s_end_m=135.0,
+        target_corridor_id=20, station_corridor_id=20,
+        s_begin_m=100.0, s_end_m=135.0,
     )
     intent = build_ego_cav_intent(
         actor_id=3, position_xy=(1, 2), heading_rad=0.2,
@@ -154,6 +155,7 @@ def test_codec_roundtrip_preserves_spatial_claim_contract():
     assert decoded is not None
     assert decoded.claim.source_corridor_id == 10
     assert decoded.claim.target_corridor_id == 20
+    assert decoded.claim.station_corridor_id == 20
     assert decoded.claim.s_begin_m == 100.0
     assert decoded.claim.s_end_m == 135.0
 

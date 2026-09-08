@@ -36,6 +36,9 @@ from opencda.planning_module.pipeline.local_map_snapshot import (
     LocalMapSnapshot,
     build_local_map_snapshot,
 )
+from opencda.planning_module.pipeline.cooperative_claim_geometry import (
+    project_claim_interval,
+)
 from opencda.planning_module.pipeline.reference_line_provider import (
     LANE_CHANGE,
     LANE_FOLLOW,
@@ -3339,12 +3342,27 @@ class CPXMPCPlannerBridge:
         cooperative_lane_change_deferred = False
         if self._cav_conflict_enabled:
             lane_change = self.maneuver_manager.lane_change
+            claim_interval = project_claim_interval(
+                local_map=local_map_snapshot,
+                corridor_id=int(target_lane_id),
+                x_m=float(ego_location.x),
+                y_m=float(ego_location.y),
+                lookbehind_m=float(
+                    self.config.get("cav_claim_lookbehind_m", 10.0)
+                ),
+                lookahead_m=float(
+                    self.config.get("cav_claim_lookahead_m", 50.0)
+                ),
+            )
             cav_claim = self._cooperative_claim_manager.claim(
                 decision=str(decision), target_lane_id=int(target_lane_id),
                 sim_time_s=float(sim_time_s),
                 maneuver_active=bool(lane_change.active),
                 committed_at_s=float(lane_change.committed_at_s),
                 source_corridor_id=int(current_lane_id),
+                station_corridor_id=int(claim_interval.corridor_id),
+                s_begin_m=claim_interval.s_begin_m,
+                s_end_m=claim_interval.s_end_m,
             )
             cav_result = self.pipeline.resolve_cav_interaction(
                 reference_samples=local_lane_center_reference,

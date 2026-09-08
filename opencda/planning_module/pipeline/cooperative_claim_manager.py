@@ -33,6 +33,7 @@ class CooperativeClaimManager:
         self, *, decision: str, target_lane_id: int, sim_time_s: float,
         maneuver_active: bool, committed_at_s: float,
         source_corridor_id: int = 0,
+        station_corridor_id: int = 0,
         s_begin_m: Optional[float] = None,
         s_end_m: Optional[float] = None,
     ) -> Optional[ResourceClaim]:
@@ -44,9 +45,11 @@ class CooperativeClaimManager:
             target_id = int(target_lane_id)
             begin_m = s_begin_m
             end_m = s_end_m
+            station_id = int(station_corridor_id)
             if previous is not None and previous.participates:
                 source_id = source_id or int(previous.source_corridor_id)
                 target_id = target_id or int(previous.target_corridor_id)
+                station_id = station_id or int(previous.station_corridor_id)
                 if begin_m is None:
                     begin_m = previous.s_begin_m
                 if end_m is None:
@@ -62,6 +65,7 @@ class CooperativeClaimManager:
                 require_ahead=False, phase="committed",
                 source_corridor_id=source_id,
                 target_corridor_id=target_id,
+                station_corridor_id=station_id,
                 s_begin_m=begin_m,
                 s_end_m=end_m,
             )
@@ -88,6 +92,7 @@ class CooperativeClaimManager:
             require_ahead=False, phase="proposed",
             source_corridor_id=source_id,
             target_corridor_id=target_id,
+            station_corridor_id=int(station_corridor_id),
             s_begin_m=s_begin_m,
             s_end_m=s_end_m,
         )

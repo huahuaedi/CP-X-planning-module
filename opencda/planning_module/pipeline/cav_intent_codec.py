@@ -130,6 +130,7 @@ def cav_intent_to_payload(intent: CavIntent) -> dict:
             "phase": str(c.phase),
             "source_corridor_id": int(c.source_corridor_id),
             "target_corridor_id": int(c.target_corridor_id),
+            "station_corridor_id": int(c.station_corridor_id),
             "s_begin_m": c.s_begin_m,
             "s_end_m": c.s_end_m,
         },
@@ -172,6 +173,7 @@ def cav_intent_from_payload(payload: Mapping[str, Any]) -> Optional[CavIntent]:
         phase=str(raw_claim.get("phase", "committed") or "committed"),
         source_corridor_id=int(raw_claim.get("source_corridor_id", 0) or 0),
         target_corridor_id=int(raw_claim.get("target_corridor_id", 0) or 0),
+        station_corridor_id=int(raw_claim.get("station_corridor_id", 0) or 0),
         s_begin_m=(None if raw_claim.get("s_begin_m") is None
                    else float(raw_claim.get("s_begin_m"))),
         s_end_m=(None if raw_claim.get("s_end_m") is None

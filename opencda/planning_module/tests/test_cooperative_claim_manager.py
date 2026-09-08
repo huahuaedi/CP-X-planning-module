@@ -65,16 +65,19 @@ def test_proposal_contains_spatial_resource_without_resetting_its_clock():
     first = manager.claim(
         decision="lane_change_left", target_lane_id=20, sim_time_s=1.0,
         maneuver_active=False, committed_at_s=0.0,
-        source_corridor_id=10, s_begin_m=40.0, s_end_m=90.0,
+        source_corridor_id=10, station_corridor_id=20,
+        s_begin_m=40.0, s_end_m=90.0,
     )
     updated = manager.claim(
         decision="lane_change_left", target_lane_id=20, sim_time_s=1.2,
         maneuver_active=False, committed_at_s=0.0,
-        source_corridor_id=10, s_begin_m=42.0, s_end_m=92.0,
+        source_corridor_id=10, station_corridor_id=20,
+        s_begin_m=42.0, s_end_m=92.0,
     )
     assert updated.resource_id == "lane_change:10:20"
     assert updated.source_corridor_id == 10
     assert updated.target_corridor_id == 20
+    assert updated.station_corridor_id == 20
     assert updated.s_begin_m == 42.0
     assert updated.s_end_m == 92.0
     assert updated.committed_at_s == first.committed_at_s == 1.0
@@ -85,7 +88,8 @@ def test_committed_claim_preserves_proposed_spatial_resource_on_publish():
     manager.claim(
         decision="lane_change_right", target_lane_id=30, sim_time_s=2.0,
         maneuver_active=False, committed_at_s=0.0,
-        source_corridor_id=20, s_begin_m=100.0, s_end_m=150.0,
+        source_corridor_id=20, station_corridor_id=30,
+        s_begin_m=100.0, s_end_m=150.0,
     )
     committed = manager.claim(
         decision="lane_change_right", target_lane_id=30, sim_time_s=2.5,
@@ -94,5 +98,6 @@ def test_committed_claim_preserves_proposed_spatial_resource_on_publish():
     assert committed.phase == "committed"
     assert committed.source_corridor_id == 20
     assert committed.target_corridor_id == 30
+    assert committed.station_corridor_id == 30
     assert committed.s_begin_m == 100.0
     assert committed.s_end_m == 150.0

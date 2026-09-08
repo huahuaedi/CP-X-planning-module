@@ -21,21 +21,25 @@ def test_spatial_claims_require_corridor_and_station_overlap():
     ego = ResourceClaim(
         kind="lane_change", resource_id="transition", committed_at_s=1.0,
         active=True, source_corridor_id=10, target_corridor_id=20,
+        station_corridor_id=20,
         s_begin_m=100.0, s_end_m=130.0,
     )
     same_target = ResourceClaim(
         kind="lane_change", resource_id="other", committed_at_s=2.0,
         active=True, source_corridor_id=30, target_corridor_id=20,
+        station_corridor_id=20,
         s_begin_m=120.0, s_end_m=150.0,
     )
     lane_swap = ResourceClaim(
         kind="lane_change", resource_id="swap", committed_at_s=2.0,
         active=True, source_corridor_id=20, target_corridor_id=10,
+        station_corridor_id=10,
         s_begin_m=110.0, s_end_m=125.0,
     )
     far_away = ResourceClaim(
         kind="lane_change", resource_id="transition", committed_at_s=2.0,
         active=True, source_corridor_id=30, target_corridor_id=20,
+        station_corridor_id=20,
         s_begin_m=200.0, s_end_m=230.0,
     )
     assert ego.conflicts_with(same_target)
