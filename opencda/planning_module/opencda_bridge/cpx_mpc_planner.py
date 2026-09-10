@@ -3927,6 +3927,9 @@ class CPXMPCPlannerBridge:
                     self.config.get("synthetic_prediction_actor_ids", []) or []
                 )
             ),
+            synthetic_update_period_s=1.0 / max(
+                0.1, float(self.config.get("prediction_update_hz", 5.0))
+            ),
         )
         self._prediction_snapshot_transform_cached = True
         return self._prediction_snapshot_transform_fn

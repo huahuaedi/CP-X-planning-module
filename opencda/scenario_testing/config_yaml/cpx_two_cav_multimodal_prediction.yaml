@@ -62,6 +62,7 @@ scenario:
       planner:
         target_speed_mps: 10.0
         prediction_mode: synthetic_multimodal
+        prediction_update_hz: 5.0
         # Ablation: isolate prediction-corridor authority from the generic
         # reactive IDM owner. Production configurations keep IDM enabled.
         following_idm_enabled: false

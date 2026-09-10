@@ -37,3 +37,24 @@ def test_prediction_frame_preserves_all_synthetic_hypotheses():
     context = PredictionContext(predicted_objects=dict(frame.predicted_objects))
     assert len(context.hypothesis_trajectories(0.05)) == 3
     assert len(context.hypothesis_trajectories(0.30)) == 1
+
+
+def test_synthetic_prediction_revision_updates_at_configured_cadence():
+    transform = synthetic_multimodal_snapshot_transform(
+        horizon_s=2.0, dt_s=0.2, actor_ids=[7], update_period_s=0.2
+    )
+    initial = transform(
+        {"id": 7, "x": 0, "y": 0, "v": 5, "psi": 0}, 1.0
+    )
+    held = transform(
+        {"id": 7, "x": 0.25, "y": 0, "v": 5, "psi": 0}, 1.05
+    )
+    refreshed = transform(
+        {"id": 7, "x": 1.0, "y": 0, "v": 5, "psi": 0}, 1.20
+    )
+
+    assert initial["prediction_timestamp_s"] == 1.0
+    assert held["prediction_timestamp_s"] == 1.0
+    assert held["trajectory_hypotheses"] is initial["trajectory_hypotheses"]
+    assert refreshed["prediction_timestamp_s"] == 1.20
+    assert refreshed["trajectory_hypotheses"] is not initial["trajectory_hypotheses"]
