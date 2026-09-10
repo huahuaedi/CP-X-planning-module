@@ -25,6 +25,7 @@ Pure. Consumes ConflictTag (Stage A), optional ConflictAssignment
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, List, Mapping, Optional, Sequence, Tuple
 
@@ -211,6 +212,10 @@ def build_longitudinal_corridor(
         return cor
 
     ego_v = max(0.0, _f(ego_snapshot, "v", "speed", "speed_mps"))
+    ego_x = _f(ego_snapshot, "x", "x_m")
+    ego_y = _f(ego_snapshot, "y", "y_m")
+    ego_heading = _f(ego_snapshot, "psi", "heading_rad", "yaw")
+    ego_tx, ego_ty = math.cos(ego_heading), math.sin(ego_heading)
 
     def _cap(k: int, value: float, agent_id: str) -> None:
         if value < cor.s_hi[k]:
@@ -227,6 +232,10 @@ def build_longitudinal_corridor(
         agent_v = max(0.0, _f(agent, "v", "speed", "speed_mps"))
         gap = longitudinal_safe_distance(ego_v, agent_v, rss) + p.follow_extra_buffer_m
         station = _agent_station_series(agent, poly, n + 1)
+        agent_starts_behind = (
+            (_f(agent, "x", "x_m") - ego_x) * ego_tx
+            + (_f(agent, "y", "y_m") - ego_y) * ego_ty
+        ) < 0.0
 
         # A negotiated make-gap role is not ordinary following: it is the
         # cooperative longitudinal contract and therefore owns a corridor
@@ -251,6 +260,11 @@ def build_longitudinal_corridor(
             continue
 
         if tag.tag == CUT_IN:
+            # A rear vehicle owns its approach to the lead vehicle. Giving the
+            # lead vehicle an upper bound behind that rear vehicle reverses
+            # longitudinal ordering and lets the QP evade the cap laterally.
+            if agent_starts_behind:
+                continue
             # A cooperative cav that lost the arbitration (role proceed) is
             # expected to yield to ego, so ego takes no bound from it.
             if proceed and not imminent:
@@ -272,6 +286,8 @@ def build_longitudinal_corridor(
                 _cap(k, float(tag.conflict_s_m) - p.conflict_stop_buffer_m, tag.agent_id)
 
         elif tag.tag == MERGE:
+            if agent_starts_behind:
+                continue
             # Without a valid cooperative assignment, MERGE still needs a
             # safety owner.  Cap progress behind the predicted merge station;
             # a later CUT_IN classification will naturally continue the same

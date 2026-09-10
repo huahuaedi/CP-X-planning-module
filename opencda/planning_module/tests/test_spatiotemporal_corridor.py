@@ -121,6 +121,20 @@ def test_merge_proceed_adds_no_bound():
     assert all(h >= _BIG for h in cor.s_hi)
 
 
+def test_rear_merge_cannot_reverse_lead_vehicle_longitudinal_order():
+    rear = {
+        "x": -8.0, "y": 3.5, "v": 12.0,
+        "predicted_trajectory": [
+            {"x": -8.0 + 1.2 * k, "y": max(0.0, 3.5 - 0.3 * k)}
+            for k in range(21)
+        ],
+    }
+    cor = build_longitudinal_corridor(
+        REF, EGO, [(rear, _tag("rear", MERGE, s=12.0, t=1.5), None)], P
+    )
+    assert all(h >= _BIG for h in cor.s_hi)
+
+
 def test_unassigned_merge_has_a_safety_corridor_owner():
     cav = {"x": 18.0, "v": 8.0,
            **_track([(18.0 + 0.8 * k, 2.5 - 0.1 * k) for k in range(21)])}
