@@ -130,6 +130,8 @@ def resolve_conflicts(
     mode_probability_floor: float = 0.05,
     credible_mode_probability_min: float = 0.15,
     credible_mode_ttc_s: float = 2.0,
+    refresh_assignments: bool = True,
+    cached_assignments: Sequence[ConflictAssignment] = (),
 ) -> ConflictResolution:
     cavs = list(cav_intents or [])
     # Only a peer carrying an actual shared plan owns future-trajectory data.
@@ -203,7 +205,18 @@ def resolve_conflicts(
     # Stage B (only cooperative cavs, only when ego holds an active claim) ---
     assignments: List[ConflictAssignment] = []
     new_latch: Dict[str, ArbitrationLatchEntry] = dict(latch_state or {})
-    if my_claim is not None and bool(my_claim.participates):
+    current_tag_state = {tag.agent_id: tag.tag for tag in tags}
+    tag_changed = bool(
+        tag_state is not None and current_tag_state != dict(tag_state or {})
+    )
+    roles_refreshed = bool(refresh_assignments or tag_changed)
+    if not roles_refreshed:
+        live_ids = {int(c.actor_id) for c in cavs if bool(c.cooperative)}
+        assignments = [
+            assignment for assignment in cached_assignments or ()
+            if int(assignment.cav_actor_id) in live_ids
+        ]
+    elif my_claim is not None and bool(my_claim.participates):
         conflicting_cavs = []
         for c in cavs:
             if not bool(c.cooperative):
@@ -354,10 +367,16 @@ def resolve_conflicts(
         "corridor_feasible": bool(corridor.feasible),
         "corridor_first_infeasible_stage": corridor.first_infeasible_stage,
         "corridor_binding": [b for b in corridor.binding if b],
+        "coordination_roles_refreshed": bool(roles_refreshed),
+        "coordination_refresh_reason": (
+            "conflict_tag_changed" if tag_changed
+            else "scheduled_refresh" if refresh_assignments
+            else "cached_roles"
+        ),
     }
     return ConflictResolution(
         tags=tags, assignments=assignments, corridor=corridor,
         latch_state=new_latch,
-        tag_state={tag.agent_id: tag.tag for tag in tags},
+        tag_state=current_tag_state,
         diagnostics=diagnostics,
     )

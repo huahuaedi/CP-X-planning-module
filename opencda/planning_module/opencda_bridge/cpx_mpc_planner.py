@@ -219,8 +219,14 @@ class CPXMPCPlannerBridge:
         self._cav_conflict_enabled = bool(
             self.config.get("cav_conflict_enabled", False)
         )
-        self._cav_latch: dict[str, Any] = {}
-        self._cav_tag_state: dict[str, str] = {}
+        from opencda.planning_module.pipeline.cav_conflict_schedule import (
+            CAVConflictSchedule,
+        )
+        self._cav_schedule = CAVConflictSchedule(
+            coordination_period_s=float(
+                self.config.get("cav_coordination_period_s", 0.2)
+            )
+        )
         self._cav_transport_diagnostics: dict[str, Any] = {}
         # This CAV's own broadcast for nearby CP-X CAVs to read (its planned
         # trajectory + ResourceClaim + pose). Read peer-to-peer through
@@ -1380,8 +1386,18 @@ class CPXMPCPlannerBridge:
             )
         cav_result = cav_resolution
         cav_constraint_rows = ()
+        cav_constraint_revision = ""
         if cav_result is not None:
             cav_constraint_rows = tuple(cav_result.mpc_rows or ())
+            cav_diagnostics = dict(cav_result.diagnostics or {})
+            cav_constraint_revision = repr((
+                cav_diagnostics.get("coordination_revision", 0),
+                tuple(sorted(dict(cav_diagnostics.get("roles", {})).items())),
+                tuple(sorted(dict(cav_diagnostics.get("tags", {})).items())),
+                tuple(cav_diagnostics.get("corridor_binding", ()) or ()),
+                int(cav_diagnostics.get("credible_mode_veto_count", 0)),
+                bool(cav_diagnostics.get("corridor_feasible", True)),
+            ))
         execution_result = self.pipeline.execute_mpc(
             MPCExecutionRequest(
                 sim_time_s=float(sim_time_s),
@@ -1409,6 +1425,7 @@ class CPXMPCPlannerBridge:
                     "control_buffer_speed_crossing_deadband_mps", 0.15,
                 )),
                 corridor_rows=cav_constraint_rows,
+                constraint_revision=str(cav_constraint_revision),
             ),
             normal_stop_control=lambda: self.carla.VehicleControl(
                 throttle=0.0,
@@ -2930,6 +2947,15 @@ class CPXMPCPlannerBridge:
                 proposal=cooperative_proposal,
                 sim_time_s=float(sim_time_s),
             )
+            cav_intents = self._collect_cav_intents()
+            schedule = self._cav_schedule.decide(
+                sim_time_s=float(sim_time_s),
+                prediction_revision=str(
+                    planner_input_frame.prediction.revision
+                ),
+                claim=cav_claim, peers=cav_intents,
+                proposal=cooperative_proposal,
+            )
             cav_result = self.pipeline.resolve_cav_interaction(
                 reference_samples=conflict_reference.mutable_samples(),
                 constraint_reference_samples=local_lane_center_reference,
@@ -2944,9 +2970,9 @@ class CPXMPCPlannerBridge:
                         planner_input_frame.prediction.predicted_objects
                     ),
                 ),
-                cav_intents=self._collect_cav_intents(),
-                latch_state=self._cav_latch,
-                tag_state=self._cav_tag_state,
+                cav_intents=cav_intents,
+                latch_state=self._cav_schedule.latch_state,
+                tag_state=self._cav_schedule.tag_state,
                 horizon_steps=int(self.mpc.horizon_steps),
                 dt_s=float(self.mpc.dt_s),
                 mode_probability_floor=float(self.config.get(
@@ -2958,9 +2984,18 @@ class CPXMPCPlannerBridge:
                 credible_mode_ttc_s=float(self.config.get(
                     "prediction_credible_ttc_s", 2.0
                 )),
+                refresh_assignments=bool(schedule.refresh_roles),
+                cached_assignments=self._cav_schedule.assignments,
             )
-            self._cav_latch = dict(cav_result.latch_state or {})
-            self._cav_tag_state = dict(cav_result.tag_state or {})
+            self._cav_schedule.observe(
+                sim_time_s=float(sim_time_s), result=cav_result
+            )
+            cav_result.diagnostics["coordination_schedule_reason"] = str(
+                schedule.reason
+            )
+            cav_result.diagnostics["coordination_revision"] = int(
+                self._cav_schedule.revision
+            )
             cav_result.diagnostics["transport"] = dict(
                 self._cav_transport_diagnostics
             )

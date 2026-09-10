@@ -28,6 +28,7 @@ class MPCExecutionRequest:
     # Stage-D interaction corridor rows (pipeline.mpc_corridor_constraints);
     # empty for a single-vehicle tick.
     corridor_rows: Sequence[Any] = ()
+    constraint_revision: str = ""
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,7 @@ class MPCExecutionStage:
         )
         self._planned_acceleration_mps2 = None
         self._last_command_time_s = None
+        self._last_constraint_revision = ""
 
     def run(
         self,
@@ -120,7 +122,11 @@ class MPCExecutionStage:
                 sim_time_s=float(request.sim_time_s),
                 force_replan=bool(
                     not request.stationary_stop_hold
-                    and (bool(context.force_replan) or low_speed_replan)
+                    and (
+                        bool(context.force_replan) or low_speed_replan
+                        or str(request.constraint_revision)
+                        != str(self._last_constraint_revision)
+                    )
                 ),
                 context_key=context_key,
                 reference_anchor_relative_m=anchor,
@@ -163,6 +169,9 @@ class MPCExecutionStage:
                     reference_anchor_relative_m=anchor,
                     predicted_speed_sequence_mps=speeds,
                     target_speed_mps=float(request.target_speed_mps),
+                )
+                self._last_constraint_revision = str(
+                    request.constraint_revision
                 )
                 acceleration = float(solution[0, 0])
                 steering = float(solution[0, 1])

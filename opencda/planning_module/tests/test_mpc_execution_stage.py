@@ -14,12 +14,14 @@ class _Buffer:
         self.sample_value = sample
         self.reset_reason = ""
         self.updated = False
+        self.last_replan_request = {}
 
     def reset(self, *, reason):
         self.reset_reason = reason
 
     def should_replan(self, **kwargs):
-        return self.replan
+        self.last_replan_request = dict(kwargs)
+        return bool(self.replan or kwargs.get("force_replan", False))
 
     def update_from_solution(self, **kwargs):
         self.updated = True
@@ -87,6 +89,18 @@ def test_solved_plan_updates_buffer_and_returns_first_control():
     assert result.acceleration_mps2 == 0.4
     assert result.steering_rad == 0.1
     assert buffer.updated
+
+
+def test_constraint_revision_change_forces_immediate_resolve():
+    buffer = _Buffer(replan=False, sample=(0.0, 0.0, "cached"))
+    stage = MPCExecutionStage(mpc=_MPC(), control_buffer=buffer)
+    first = _run(stage, _request(constraint_revision="corridor:1"))
+    assert first.replan_executed
+    assert buffer.last_replan_request["force_replan"]
+    second = _run(stage, _request(
+        sim_time_s=1.05, constraint_revision="corridor:1"
+    ))
+    assert not second.replan_executed
 
 
 def test_failed_solve_reuses_only_valid_buffered_control():

@@ -130,6 +130,39 @@ class CPXObstacleTracker:
         lane_step_fn: Optional[Callable[[float, float, float], Any]] = None,
         snapshot_transform: Optional[Callable[[dict, float], Any]] = None,
     ) -> PredictionFrame:
+        source_revisions = []
+        for snapshot in self._latest_obstacles:
+            plan_revision = str(snapshot.get("plan_revision", "") or "")
+            prediction_timestamp = snapshot.get("prediction_timestamp_s")
+            has_external_prediction = bool(
+                snapshot.get("predicted_modes")
+                or snapshot.get("predicted_trajectory")
+                or snapshot.get("future_trajectory")
+            )
+            if plan_revision:
+                source_revisions.append(
+                    "%s:%s" % (str(snapshot.get("vehicle_id", "")), plan_revision)
+                )
+            elif has_external_prediction and prediction_timestamp is not None:
+                source_revisions.append(
+                    "%s:%.3f" % (
+                        str(snapshot.get("vehicle_id", "")),
+                        float(prediction_timestamp),
+                    )
+                )
+            else:
+                # Perception-model predictions legitimately change with each
+                # fresh tracker measurement, so they retain the tracker tick.
+                source_revisions.append(
+                    "%s:tracker:%.3f" % (
+                        str(snapshot.get("vehicle_id", "")),
+                        float(self._timestamp_s),
+                    )
+                )
+        prediction_revision = (
+            "sources:" + "|".join(sorted(source_revisions))
+            if source_revisions else "tracker:%.3f" % float(self._timestamp_s)
+        )
         return build_prediction_frame(
             ego_snapshot=ego_snapshot,
             obstacle_snapshots=self._latest_obstacles,
@@ -144,7 +177,7 @@ class CPXObstacleTracker:
             max_abs_acceleration_mps2=float(max_abs_acceleration_mps2),
             lane_step_fn=lane_step_fn,
             timestamp_s=float(self._timestamp_s),
-            revision=f"tracker:{float(self._timestamp_s):.3f}",
+            revision=str(prediction_revision),
             snapshot_transform=snapshot_transform,
         )
 

@@ -5,6 +5,32 @@ from opencda.planning_module.pipeline.tracker import CPXObstacleTracker
 
 
 class CPXObstacleTrackerTest(unittest.TestCase):
+    def test_external_prediction_revision_is_not_forged_from_planner_tick(self):
+        tracker = CPXObstacleTracker(max_acceleration_mps2=12.0)
+        snapshot = {
+            "vehicle_id": "peer", "x": 10.0, "y": 0.0,
+            "v": 2.0, "psi": 0.0,
+            "prediction_timestamp_s": 1.0,
+            "plan_revision": "peer-plan-7",
+            "predicted_trajectory": ({"x": 10.4, "y": 0.0, "t": 0.2},),
+        }
+        tracker.update(obstacle_snapshots=[snapshot], timestamp_s=1.0)
+        first = tracker.predict(
+            ego_snapshot={"x": 0.0, "y": 0.0, "v": 2.0, "psi": 0.0},
+            lane_assignments={"peer": 1}, available_lane_ids=[1],
+            horizon_s=2.0, dt_s=0.2, min_front_gap_m=4.0,
+            min_rear_gap_m=3.0, min_ttc_s=2.0,
+        )
+        tracker.update(obstacle_snapshots=[snapshot], timestamp_s=1.05)
+        second = tracker.predict(
+            ego_snapshot={"x": 0.1, "y": 0.0, "v": 2.0, "psi": 0.0},
+            lane_assignments={"peer": 1}, available_lane_ids=[1],
+            horizon_s=2.0, dt_s=0.2, min_front_gap_m=4.0,
+            min_rear_gap_m=3.0, min_ttc_s=2.0,
+        )
+        self.assertEqual(first.revision, second.revision)
+        self.assertIn("peer-plan-7", first.revision)
+
     def test_recovers_missing_velocity_from_consecutive_positions(self):
         tracker = CPXObstacleTracker(max_acceleration_mps2=12.0)
         tracker.update(
