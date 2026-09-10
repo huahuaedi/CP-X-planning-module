@@ -30,6 +30,25 @@ class CAVConflictSchedule:
     revision: int = 0
 
     @staticmethod
+    def constraint_revision(diagnostics: Mapping[str, Any]) -> str:
+        """Return only the constraint topology visible to the MPC.
+
+        Prediction refreshes and corridor rebasing update numeric row values
+        at the normal MPC cadence.  Their scheduling revision must not discard
+        an otherwise valid held control solution.
+        """
+        diag = dict(diagnostics or {})
+        return repr((
+            tuple(sorted(dict(diag.get("roles", {})).items())),
+            tuple(sorted(dict(diag.get("tags", {})).items())),
+            tuple(diag.get("corridor_binding", ()) or ()),
+            int(diag.get("credible_mode_veto_count", 0) or 0),
+            bool(diag.get("corridor_feasible", True)),
+            int(diag.get("longitudinal_qp_row_count", 0) or 0),
+            int(diag.get("homotopy_qp_row_count", 0) or 0),
+        ))
+
+    @staticmethod
     def _claim_signature(claim: Any) -> Tuple[Any, ...]:
         if claim is None:
             return ()

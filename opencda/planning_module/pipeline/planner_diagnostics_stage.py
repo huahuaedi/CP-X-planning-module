@@ -248,6 +248,21 @@ class PlannerDiagnosticsStage:
             "cav_total_qp_row_count": int(
                 cav_diag.get("total_qp_row_count", 0) or 0
             ),
+            "cav_coordination_revision": int(
+                cav_diag.get("coordination_revision", 0) or 0
+            ),
+            "cav_coordination_roles_refreshed": bool(
+                cav_diag.get("coordination_roles_refreshed", False)
+            ),
+            "cav_coordination_schedule_reason": str(
+                cav_diag.get("coordination_schedule_reason", "") or ""
+            ),
+            "cav_corridor_rebuilt": bool(
+                cav_diag.get("corridor_rebuilt", False)
+            ),
+            "cav_coordination_refresh_reason": str(
+                cav_diag.get("coordination_refresh_reason", "") or ""
+            ),
             "cav_multimodal_agent_count": int(
                 cav_diag.get("multimodal_agent_count", 0) or 0
             ),

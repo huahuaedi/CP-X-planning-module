@@ -3,6 +3,32 @@ from types import SimpleNamespace
 from pipeline.cav_conflict_schedule import CAVConflictSchedule
 
 
+def test_constraint_revision_ignores_scheduler_refresh_revision():
+    base = {
+        "roles": {7: "yield"}, "tags": {7: "FOLLOW"},
+        "corridor_binding": ["agent:7"], "corridor_feasible": True,
+        "longitudinal_qp_row_count": 6, "homotopy_qp_row_count": 0,
+        "coordination_revision": 1,
+    }
+    refreshed = dict(base, coordination_revision=99, corridor_rebuilt=True)
+    assert CAVConflictSchedule.constraint_revision(base) == (
+        CAVConflictSchedule.constraint_revision(refreshed)
+    )
+
+
+def test_constraint_revision_changes_with_constraint_topology():
+    base = {
+        "roles": {7: "yield"}, "tags": {7: "FOLLOW"},
+        "corridor_binding": ["agent:7"], "corridor_feasible": True,
+        "longitudinal_qp_row_count": 6, "homotopy_qp_row_count": 0,
+    }
+    assert CAVConflictSchedule.constraint_revision(base) != (
+        CAVConflictSchedule.constraint_revision(
+            dict(base, longitudinal_qp_row_count=7)
+        )
+    )
+
+
 def _proposal(target=20):
     return SimpleNamespace(
         maneuver="lane_change_left", target_corridor_id=target,

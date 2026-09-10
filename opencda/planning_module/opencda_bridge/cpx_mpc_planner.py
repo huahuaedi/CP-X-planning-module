@@ -1390,14 +1390,9 @@ class CPXMPCPlannerBridge:
         if cav_result is not None:
             cav_constraint_rows = tuple(cav_result.mpc_rows or ())
             cav_diagnostics = dict(cav_result.diagnostics or {})
-            cav_constraint_revision = repr((
-                cav_diagnostics.get("coordination_revision", 0),
-                tuple(sorted(dict(cav_diagnostics.get("roles", {})).items())),
-                tuple(sorted(dict(cav_diagnostics.get("tags", {})).items())),
-                tuple(cav_diagnostics.get("corridor_binding", ()) or ()),
-                int(cav_diagnostics.get("credible_mode_veto_count", 0)),
-                bool(cav_diagnostics.get("corridor_feasible", True)),
-            ))
+            cav_constraint_revision = self._cav_conflict_schedule.constraint_revision(
+                cav_diagnostics
+            )
         execution_result = self.pipeline.execute_mpc(
             MPCExecutionRequest(
                 sim_time_s=float(sim_time_s),
