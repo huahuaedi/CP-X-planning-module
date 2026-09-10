@@ -200,7 +200,6 @@ def build_longitudinal_corridor(
     items: Sequence[Tuple[Mapping[str, Any], ConflictTag, Optional[ConflictAssignment]]],
     p: CorridorParams = CorridorParams(),
     rss: RSSParams = RSSParams(),
-    include_follow_bounds: bool = False,
 ) -> Corridor:
     """``items`` is ``(agent_snapshot, tag, assignment|None)`` per agent."""
 
@@ -253,10 +252,6 @@ def build_longitudinal_corridor(
         # reference that tangent row coupled longitudinal following into the
         # lateral solution and pulled the vehicle away from lane centre.
         if tag.tag in (FOLLOW, LEAD_BRAKE):
-            if include_follow_bounds:
-                for k in range(n + 1):
-                    if k < len(station):
-                        _cap(k, station[k] - gap, tag.agent_id)
             continue
 
         if tag.tag == CUT_IN:

@@ -42,6 +42,23 @@ def test_end_to_end_follow_is_delegated_to_speed_planner():
     assert r.corridor.feasible
 
 
+def test_multimodal_follow_is_also_delegated_to_speed_planner():
+    modes = [
+        {"path": [{"x": 30.0 + 0.6 * k, "y": 0.1} for k in range(21)],
+         "probability": probability}
+        for probability in (0.55, 0.25, 0.20)
+    ]
+    result = resolve_conflicts(
+        reference_samples=REF, ego_snapshot=EGO, my_actor_id=1,
+        obstacle_snapshots=[{
+            "id": "lead", "x": 30.0, "y": 0.1, "v": 6.0,
+            "psi": 0.0, "predicted_modes": modes,
+        }],
+    )
+    assert set(result.diagnostics["tags"].values()) == {FOLLOW}
+    assert all(value >= _BIG for value in result.corridor.s_hi)
+
+
 def test_stage_c_reuses_rebased_corridor_between_scheduled_updates():
     cached = Corridor(
         s_lo=[-_BIG] * 21, s_hi=[18.0] * 21,

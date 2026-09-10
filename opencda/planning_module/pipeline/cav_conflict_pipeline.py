@@ -153,7 +153,7 @@ def _build_effective_corridor(
             mode_items = [] if tag.tag == IGNORE else [(mode_agent, tag, None)]
             mode_corridor = build_longitudinal_corridor(
                 reference_samples, ego_snapshot, mode_items,
-                corridor_params, rss_params, include_follow_bounds=True,
+                corridor_params, rss_params,
             )
             first_risk_stage = next((
                 k for k, cap in enumerate(mode_corridor.s_hi)

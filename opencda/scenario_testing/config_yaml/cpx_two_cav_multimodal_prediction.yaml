@@ -63,9 +63,9 @@ scenario:
         target_speed_mps: 10.0
         prediction_mode: synthetic_multimodal
         prediction_update_hz: 5.0
-        # Ablation: isolate prediction-corridor authority from the generic
-        # reactive IDM owner. Production configurations keep IDM enabled.
-        following_idm_enabled: false
+        # FOLLOW has one longitudinal owner: the standard SpeedPlanner/IDM.
+        # Prediction QP rows remain reserved for geometric conflicts.
+        following_idm_enabled: true
         record_evaluation_metrics: true
         prediction_mode_min_probability: 0.05
         prediction_credible_probability_min: 0.15
