@@ -30,6 +30,7 @@ class BehaviorReferenceResult:
     behavior_stage_result: Any
     reference_debug: Mapping[str, Any]
     speed_plan: Any
+    cav_resolution: Any = None
     failure_reason: str = ""
 
 
@@ -53,10 +54,10 @@ class BehaviorReferenceExecutionStage:
         self,
         request: BehaviorReferenceRequest,
         *,
-        planner: Callable[..., tuple],
+        planner: Callable[..., BehaviorReferenceResult],
     ) -> BehaviorReferenceResult:
         try:
-            destination, reference, behavior, debug, speed_plan = planner(
+            result = planner(
                 ego_location=request.ego_location,
                 ego_yaw_rad=float(request.ego_yaw_rad),
                 ego_speed_mps=float(request.ego_speed_mps),
@@ -65,13 +66,9 @@ class BehaviorReferenceExecutionStage:
                 stop_goal_active=bool(request.stop_goal_active),
                 cp_payload=request.cp_payload,
             )
-            return BehaviorReferenceResult(
-                destination_state=list(destination or []),
-                reference_samples=tuple(dict(item) for item in reference or ()),
-                behavior_stage_result=behavior,
-                reference_debug=dict(debug or {}),
-                speed_plan=speed_plan,
-            )
+            if not isinstance(result, BehaviorReferenceResult):
+                raise TypeError("planner must return BehaviorReferenceResult")
+            return result
         except Exception as exc:
             trace = traceback.format_exc(limit=8).strip()
             generated = self._reference_provider.lane_fallback_reference(
@@ -139,5 +136,6 @@ class BehaviorReferenceExecutionStage:
                 behavior_stage_result=behavior,
                 reference_debug=debug,
                 speed_plan=None,
+                cav_resolution=None,
                 failure_reason=str(exc),
             )

@@ -193,7 +193,8 @@ class PlannerDiagnosticsStage:
         steer_rad = context["steer_rad"]
         stop_target_forward_m_debug = context["stop_target_forward_m_debug"]
         cp_summary = dict(getattr(self.cp_provider, "last_publish_summary", {}) or {})
-        cav_diag = dict(getattr(self, "_last_cav_diagnostics", {}) or {})
+        cav_resolution = context.get("cav_resolution")
+        cav_diag = dict(getattr(cav_resolution, "diagnostics", {}) or {})
         diagnostics = {
             "sim_time_s": float(self._sim_time_s()),
             "vehicle_id": int(getattr(self.vehicle_manager.vehicle, "id", -1)),

@@ -222,7 +222,6 @@ class CPXMPCPlannerBridge:
         )
         self._cav_latch: dict[str, Any] = {}
         self._cav_tag_state: dict[str, str] = {}
-        self._last_cav_diagnostics: dict[str, Any] = {}
         self._cav_transport_diagnostics: dict[str, Any] = {}
         # This CAV's own broadcast for nearby CP-X CAVs to read (its planned
         # trajectory + ResourceClaim + pose). Read peer-to-peer through
@@ -1204,6 +1203,7 @@ class CPXMPCPlannerBridge:
         behavior_debug = behavior_stage_result.mutable_diagnostics()
         reference_debug = dict(behavior_reference.reference_debug)
         typed_speed_plan = behavior_reference.speed_plan
+        cav_resolution = behavior_reference.cav_resolution
         if behavior_reference.failure_reason and self.debug:
             print(
                 "[CP-X OpenCDA Bridge] behavior/reference pipeline failed: "
@@ -1380,14 +1380,10 @@ class CPXMPCPlannerBridge:
                 behavior_decision=str(behavior_decision.maneuver),
                 reference_samples=lane_center_reference,
             )
-        cav_result = reference_debug.pop("_cav_resolution", None)
+        cav_result = cav_resolution
         cav_constraint_rows = ()
         if cav_result is not None:
             cav_constraint_rows = tuple(cav_result.mpc_rows or ())
-            self._last_cav_diagnostics = dict(cav_result.diagnostics or {})
-            reference_debug["cav_conflict_diagnostics"] = dict(
-                self._last_cav_diagnostics
-            )
         execution_result = self.pipeline.execute_mpc(
             MPCExecutionRequest(
                 sim_time_s=float(sim_time_s),
@@ -1518,6 +1514,7 @@ class CPXMPCPlannerBridge:
                 "behavior_debug": behavior_debug,
                 "behavior_decision": behavior_decision,
                 "boundary_snapshot": boundary_snapshot,
+                "cav_resolution": cav_resolution,
                 "control": control,
                 "control_guard_reason": control_guard_reason,
                 "destination_forward_m": destination_forward_m,
@@ -2961,13 +2958,6 @@ class CPXMPCPlannerBridge:
                     assignments=cav_result.assignments,
                 )
             )
-            reference_debug["cav_conflict_diagnostics"] = dict(
-                cav_result.diagnostics or {}
-            )
-            reference_debug["cav_candidate_deferred"] = bool(
-                cooperative_lane_change_deferred
-            )
-            reference_debug["_cav_resolution"] = cav_result
         if bool(self.full_candidate_pipeline_enabled):
             candidate_reference_context = CandidateReferenceBuildContext(
                 map_planner=self.reference_map,
@@ -3145,10 +3135,15 @@ class CPXMPCPlannerBridge:
             reference_freeze_count=int(nominal_freeze_count),
             source=str(reference_debug.get("reference_source", "planning_tick")),
         )
-        return (
-            list(nominal_destination_state),
-            list(local_lane_center_reference),
-            self.pipeline.finalize_behavior_frame(
+        from opencda.planning_module.pipeline.behavior_reference_execution_stage import (
+            BehaviorReferenceResult,
+        )
+        return BehaviorReferenceResult(
+            destination_state=tuple(nominal_destination_state),
+            reference_samples=tuple(
+                dict(sample) for sample in local_lane_center_reference
+            ),
+            behavior_stage_result=self.pipeline.finalize_behavior_frame(
                 maneuver=str(decision),
                 phase=str(lc_state),
                 source_lane_id=int(current_lane_id),
@@ -3175,8 +3170,9 @@ class CPXMPCPlannerBridge:
                 ),
                 scenario_state=str(scenario_decision.state),
             ),
-            reference_debug,
-            speed_plan,
+            reference_debug=dict(reference_debug),
+            speed_plan=speed_plan,
+            cav_resolution=cav_result,
         )
 
     def _publish_cav_intent(

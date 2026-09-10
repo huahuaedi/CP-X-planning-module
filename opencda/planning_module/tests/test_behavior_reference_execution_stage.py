@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from pipeline.behavior_reference_execution_stage import (
     BehaviorReferenceExecutionStage,
     BehaviorReferenceRequest,
+    BehaviorReferenceResult,
 )
 
 
@@ -29,16 +30,18 @@ def test_success_returns_one_typed_result():
     behavior = SimpleNamespace(decision="lane_follow")
     result = stage.run(
         _request(),
-        planner=lambda **_kwargs: (
-            [3.0, 4.0, 5.0, 0.0, 12],
-            [{"x_ref_m": 1.0, "y_ref_m": 2.0}],
-            behavior,
-            {"reference_source": "lane"},
-            "speed-plan",
+        planner=lambda **_kwargs: BehaviorReferenceResult(
+            destination_state=(3.0, 4.0, 5.0, 0.0, 12),
+            reference_samples=({"x_ref_m": 1.0, "y_ref_m": 2.0},),
+            behavior_stage_result=behavior,
+            reference_debug={"reference_source": "lane"},
+            speed_plan="speed-plan",
+            cav_resolution="cav-resolution",
         ),
     )
     assert result.behavior_stage_result is behavior
     assert result.speed_plan == "speed-plan"
+    assert result.cav_resolution == "cav-resolution"
     assert result.failure_reason == ""
 
 
