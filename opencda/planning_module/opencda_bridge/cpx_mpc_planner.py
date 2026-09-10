@@ -2916,12 +2916,23 @@ class CPXMPCPlannerBridge:
                 s_begin_m=claim_interval.s_begin_m,
                 s_end_m=claim_interval.s_end_m,
             )
+            conflict_reference = self.pipeline.cooperative_conflict_reference(
+                proposal=cooperative_proposal,
+                local_map=local_map_snapshot,
+                current_state=current_state,
+                baseline_reference=local_lane_center_reference,
+                target_speed_mps=float(planned_speed_mps),
+                horizon_steps=int(self.mpc.horizon_steps),
+                dt_s=float(self.mpc.dt_s),
+                lane_width_m=float(getattr(self.mpc, "lane_width_m", 3.5)),
+            )
             cav_claim = self._cooperative_claim_manager.claim(
                 proposal=cooperative_proposal,
                 sim_time_s=float(sim_time_s),
             )
             cav_result = self.pipeline.resolve_cav_interaction(
-                reference_samples=local_lane_center_reference,
+                reference_samples=conflict_reference.mutable_samples(),
+                constraint_reference_samples=local_lane_center_reference,
                 ego_location=ego_location,
                 ego_yaw_rad=float(ego_yaw_rad),
                 ego_speed_mps=float(ego_speed_mps),
@@ -2952,6 +2963,12 @@ class CPXMPCPlannerBridge:
             self._cav_tag_state = dict(cav_result.tag_state or {})
             cav_result.diagnostics["transport"] = dict(
                 self._cav_transport_diagnostics
+            )
+            cav_result.diagnostics["conflict_reference_source"] = str(
+                conflict_reference.source
+            )
+            cav_result.diagnostics["conflict_reference_reason"] = str(
+                conflict_reference.reason
             )
             cooperative_lane_change_deferred = (
                 self._cooperative_claim_manager.defer_candidate(

@@ -100,6 +100,18 @@ class CandidateArbitrationResult:
         return list(self.destination_state)
 
 
+@dataclass(frozen=True)
+class CooperativeConflictReference:
+    """Candidate geometry used only to classify a proposed CAV maneuver."""
+
+    samples: tuple
+    source: str
+    reason: str = ""
+
+    def mutable_samples(self):
+        return [dict(sample) for sample in self.samples]
+
+
 class CandidateSelectionStage:
     """Own the complete candidate lifecycle for one planning tick."""
 
@@ -126,6 +138,79 @@ class CandidateSelectionStage:
         self._strict_ownership = bool(strict_ownership)
         self._target_speed_mps = float(target_speed_mps)
         self._lane_change_lifecycle = None
+
+    def cooperative_conflict_reference(
+        self, *, proposal: Any, local_map: Any, current_state: Sequence[float],
+        baseline_reference: Sequence[Mapping[str, Any]], target_speed_mps: float,
+        horizon_steps: int, dt_s: float, lane_width_m: float,
+    ) -> CooperativeConflictReference:
+        """Build the proposed lane-change geometry without committing it."""
+
+        baseline = tuple(dict(sample) for sample in baseline_reference or ())
+        if not bool(getattr(proposal, "requested", False)):
+            return CooperativeConflictReference(
+                samples=baseline, source="executed_reference",
+                reason="cooperative_maneuver_not_requested",
+            )
+        maneuver = str(getattr(proposal, "maneuver", ""))
+        if maneuver not in {"lane_change_left", "lane_change_right"}:
+            return CooperativeConflictReference(
+                samples=baseline, source="executed_reference",
+                reason="cooperative_maneuver_has_no_lateral_geometry",
+            )
+        source_lane_id = int(getattr(proposal, "source_corridor_id", 0))
+        target_lane_id = int(getattr(proposal, "target_corridor_id", 0))
+        duration_s = max(
+            float(dt_s),
+            float(self._config.get("candidate_lane_change_normal_duration_s", 4.0)),
+        )
+        geometry = self._evaluator.geometry_plan(
+            decision=maneuver,
+            ego_speed_mps=float(current_state[2]),
+            target_speed_mps=float(target_speed_mps),
+            lane_change_duration_s=float(duration_s),
+            dt_s=float(dt_s), lane_width_m=float(lane_width_m),
+            config=self._config,
+        )
+        target_reference, target_reason = self._provider.lane_change_target_reference(
+            local_map,
+            target_lane_id=int(target_lane_id),
+            target_speed_mps=float(target_speed_mps),
+        )
+        built = self._provider.lane_change_candidate(
+            local_map=local_map,
+            current_state=current_state,
+            current_lane_id=int(source_lane_id),
+            target_lane_id=int(target_lane_id),
+            target_reference=target_reference,
+            source_reference=baseline,
+            target_speed_mps=float(target_speed_mps),
+            geometry_speed_mps=float(geometry.geometry_speed_mps),
+            geometry_length_m=float(geometry.geometry_length_m),
+            transition_duration_s=float(duration_s),
+            spacing_m=float(geometry.step_m),
+            horizon_steps=int(horizon_steps),
+            lane_width_m=float(lane_width_m),
+            destination_state=(), trajectory_variant="normal",
+            duration_s=float(duration_s),
+            duration_reason="cooperative_candidate_preview",
+            authorization_source=(
+                "route" if bool(getattr(proposal, "route_required", False))
+                else "opportunistic"
+            ),
+            operational_curvature_limit_1pm=float(
+                geometry.operational_curvature_limit_1pm
+            ),
+        )
+        if not built.samples:
+            return CooperativeConflictReference(
+                samples=baseline, source="executed_reference",
+                reason="candidate_unavailable:%s" % str(target_reason),
+            )
+        return CooperativeConflictReference(
+            samples=tuple(built.samples), source="cooperative_candidate_reference",
+            reason=str(target_reason),
+        )
 
     def build_intents(
         self, *, selected_decision: str, selected_target_lane_id: int,

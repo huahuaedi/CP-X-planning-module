@@ -6,6 +6,7 @@ from pipeline.candidate_selection_stage import (
     CandidateSelectionStage,
 )
 from pipeline.candidate_evaluation import CandidateSelectionResult
+from pipeline.cooperative_maneuver_proposal import CooperativeManeuverProposal
 from pipeline.speed_planner import SpeedPlan
 
 
@@ -111,6 +112,68 @@ def test_arbitrate_owns_intent_selection_and_finalization():
     assert captured["selection"].reference_context is context
     assert result.decision == "lane_follow"
     assert result.mutable_destination_state()[0] == 2.0
+
+
+def test_cooperative_conflict_uses_uncommitted_candidate_geometry():
+    evaluator = SimpleNamespace(geometry_plan=lambda **_kwargs: SimpleNamespace(
+        geometry_speed_mps=7.0, geometry_length_m=28.0,
+        step_m=1.0, operational_curvature_limit_1pm=0.2,
+    ))
+    captured = {}
+    provider = SimpleNamespace(
+        lane_change_target_reference=lambda *_args, **_kwargs: (
+            ({"x_ref_m": 1.0, "y_ref_m": 3.5},), "target_ready"
+        ),
+        lane_change_candidate=lambda **kwargs: (
+            captured.update(kwargs) or SimpleNamespace(samples=(
+                {"x_ref_m": 0.0, "y_ref_m": 0.0},
+                {"x_ref_m": 10.0, "y_ref_m": 3.5},
+            ))
+        ),
+    )
+    stage = CandidateSelectionStage(
+        evaluator=evaluator, provider=provider, maneuver_manager=object(),
+        reference_pipeline=object(), fallback_manager=object(),
+        static_obstacle_stage=SimpleNamespace(target_lane_id=None), mpc=object(),
+        config={"candidate_lane_change_normal_duration_s": 4.0},
+        map_epoch="admap", normal_clearance_m=2.0, static_clearance_m=1.0,
+        risk_hysteresis_margin_m=0.2, strict_ownership=True,
+        target_speed_mps=8.0,
+    )
+    proposal = CooperativeManeuverProposal.from_behavior(
+        maneuver="lane_change_left", source_corridor_id=10,
+        target_corridor_id=20, route_required=False,
+        maneuver_active=False, committed_at_s=0.0,
+    )
+    result = stage.cooperative_conflict_reference(
+        proposal=proposal, local_map=object(),
+        current_state=(0.0, 0.0, 6.0, 0.0),
+        baseline_reference=({"x_ref_m": 0.0, "y_ref_m": 0.0},),
+        target_speed_mps=8.0, horizon_steps=10, dt_s=0.2,
+        lane_width_m=3.5,
+    )
+    assert result.source == "cooperative_candidate_reference"
+    assert len(result.samples) == 2
+    assert captured["current_lane_id"] == 10
+    assert captured["target_lane_id"] == 20
+
+
+def test_cooperative_conflict_keeps_executed_reference_without_request():
+    stage = _post_selection_stage()
+    proposal = CooperativeManeuverProposal.from_behavior(
+        maneuver="lane_follow", source_corridor_id=10,
+        target_corridor_id=10, route_required=False,
+        maneuver_active=False, committed_at_s=0.0,
+    )
+    result = stage.cooperative_conflict_reference(
+        proposal=proposal, local_map=None,
+        current_state=(0.0, 0.0, 6.0, 0.0),
+        baseline_reference=({"x_ref_m": 2.0, "y_ref_m": 0.0},),
+        target_speed_mps=8.0, horizon_steps=10, dt_s=0.2,
+        lane_width_m=3.5,
+    )
+    assert result.source == "executed_reference"
+    assert result.samples[0]["x_ref_m"] == 2.0
 
 
 def test_no_candidates_returns_typed_baseline_and_runs_completion_release():

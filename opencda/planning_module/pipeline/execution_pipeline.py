@@ -211,13 +211,14 @@ class PlanningPipeline:
 
     @staticmethod
     def resolve_cav_interaction(
-        *, reference_samples, ego_location, ego_yaw_rad, ego_speed_mps,
+        *, reference_samples, constraint_reference_samples=None,
+        ego_location, ego_yaw_rad, ego_speed_mps,
         actor_id, claim, obstacle_snapshots, cav_intents, latch_state,
         tag_state=None,
         horizon_steps, dt_s, mode_probability_floor=0.05,
         credible_mode_probability_min=0.15, credible_mode_ttc_s=2.0,
     ):
-        """Resolve cooperation against the candidate selected for execution."""
+        """Classify on proposal geometry and constrain the executable geometry."""
 
         result = resolve_cav_conflicts(
             reference_samples=reference_samples,
@@ -260,8 +261,13 @@ class PlanningPipeline:
                 points.append((float(sampled[0]), float(sampled[1])))
             tracks[int(intent.actor_id)] = points
         origin = (float(ego_location.x), float(ego_location.y))
+        qp_reference = (
+            reference_samples
+            if constraint_reference_samples is None
+            else constraint_reference_samples
+        )
         longitudinal_rows = corridor_rows(
-            result.corridor, reference_samples, ego_origin_xy=origin
+            result.corridor, qp_reference, ego_origin_xy=origin
         )
         lateral_rows = homotopy_keepout_rows(
             result.assignments,
@@ -483,3 +489,8 @@ class PlanningPipeline:
         if self.candidate_selection is None:
             raise RuntimeError("candidate selection stage is not configured")
         return self.candidate_selection.arbitrate(request, **kwargs)
+
+    def cooperative_conflict_reference(self, **kwargs):
+        if self.candidate_selection is None:
+            raise RuntimeError("candidate selection stage is not configured")
+        return self.candidate_selection.cooperative_conflict_reference(**kwargs)
