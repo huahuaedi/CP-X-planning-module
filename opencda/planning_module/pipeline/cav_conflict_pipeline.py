@@ -310,10 +310,8 @@ def resolve_conflicts(
     assign_by_id = {str(a.cav_actor_id): a for a in assignments}
 
     # Stage C ---------------------------------------------------------------
-    # Multimodal credible/TTC veto is a Stage-A safety check and therefore
-    # remains tick-rate until its risk state has its own cache signature.
     corridor_rebuilt = bool(
-        rebuild_corridor or tag_changed or roles_refreshed or mode_groups
+        rebuild_corridor or tag_changed or roles_refreshed
     )
     if corridor_rebuilt or cached_corridor is None:
         corridor, credible_veto_count = _build_effective_corridor(

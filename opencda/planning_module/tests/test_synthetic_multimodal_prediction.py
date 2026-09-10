@@ -58,3 +58,28 @@ def test_synthetic_prediction_revision_updates_at_configured_cadence():
     assert held["trajectory_hypotheses"] is initial["trajectory_hypotheses"]
     assert refreshed["prediction_timestamp_s"] == 1.20
     assert refreshed["trajectory_hypotheses"] is not initial["trajectory_hypotheses"]
+
+
+def test_prediction_frame_revision_follows_prediction_not_measurement_tick():
+    transform = synthetic_multimodal_snapshot_transform(
+        horizon_s=2.0, dt_s=0.2, actor_ids=[7], update_period_s=0.2
+    )
+
+    def frame(timestamp_s, x_m):
+        return build_prediction_frame(
+            ego_snapshot={"x": -10, "y": 0, "v": 8, "psi": 0},
+            obstacle_snapshots=[
+                {"id": 7, "x": x_m, "y": 0, "v": 5, "psi": 0}
+            ],
+            lane_assignments={"7": 1}, available_lane_ids=[1],
+            horizon_s=2.0, dt_s=0.2, min_front_gap_m=5.0,
+            min_rear_gap_m=5.0, min_ttc_s=2.0,
+            revision=f"measurement:{timestamp_s}",
+            timestamp_s=timestamp_s, snapshot_transform=transform,
+        )
+
+    initial = frame(1.0, 0.0)
+    held = frame(1.05, 0.25)
+    refreshed = frame(1.20, 1.0)
+    assert held.revision == initial.revision
+    assert refreshed.revision != initial.revision

@@ -233,6 +233,20 @@ def test_multimodal_corridors_use_expected_risk_and_credible_veto():
     # temporary classifier inputs and reduce to one final corridor.
     assert r_cross.diagnostics["conflict_agent_count"] == 1
 
+    cached = resolve_conflicts(
+        reference_samples=REF,
+        ego_snapshot={**EGO, "v": 15.0},
+        my_actor_id=1, my_claim=None,
+        obstacle_snapshots=[{**base, "predicted_modes": [
+            {"path": stay, "probability": 0.2},
+            {"path": cross, "probability": 0.8}]}],
+        cav_intents=[], tag_state=r_cross.tag_state,
+        refresh_assignments=False, rebuild_corridor=False,
+        cached_corridor=r_cross.corridor,
+    )
+    assert cached.corridor is r_cross.corridor
+    assert not cached.diagnostics["corridor_rebuilt"]
+
     r_stay = resolve_conflicts(
         reference_samples=REF,
         ego_snapshot={**EGO, "v": 15.0},

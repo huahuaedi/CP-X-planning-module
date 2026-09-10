@@ -140,6 +140,26 @@ class PredictionFrame:
         ))
 
 
+def _prediction_output_revision(
+    predicted_objects: Mapping[str, PredictedObject],
+    fallback_revision: str,
+    timestamp_s: float,
+) -> str:
+    """Version prediction outputs, not the faster perception measurements."""
+    tokens = []
+    for track_id, predicted in sorted(dict(predicted_objects or {}).items()):
+        source_revision = str(predicted.plan_revision or "").strip()
+        if source_revision:
+            tokens.append(f"{track_id}:plan:{source_revision}")
+        else:
+            tokens.append(
+                f"{track_id}:{predicted.source}:{float(predicted.timestamp_s):.3f}"
+            )
+    if tokens:
+        return "outputs:" + "|".join(tokens)
+    return str(fallback_revision or f"prediction:{float(timestamp_s):.3f}")
+
+
 def build_prediction_frame(
     *,
     ego_snapshot: Mapping[str, object],
@@ -250,7 +270,9 @@ def build_prediction_frame(
         predicted_objects=predicted_objects,
         lane_prediction_risks=lane_prediction_risks,
         timestamp_s=float(timestamp_s),
-        revision=str(revision or f"prediction:{float(timestamp_s):.3f}"),
+        revision=_prediction_output_revision(
+            predicted_objects, str(revision), float(timestamp_s)
+        ),
     )
 
 
