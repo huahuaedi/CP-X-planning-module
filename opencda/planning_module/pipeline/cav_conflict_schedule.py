@@ -52,10 +52,17 @@ class CAVConflictSchedule:
     def _claim_signature(claim: Any) -> Tuple[Any, ...]:
         if claim is None:
             return ()
+        participates = bool(getattr(claim, "participates", False))
+        if not participates:
+            return (
+                str(getattr(claim, "resource_id", "")),
+                str(getattr(claim, "phase", "")),
+                False,
+            )
         return (
             str(getattr(claim, "resource_id", "")),
             str(getattr(claim, "phase", "")),
-            bool(getattr(claim, "participates", False)),
+            True,
             round(float(getattr(claim, "committed_at_s", 0.0)), 3),
         )
 

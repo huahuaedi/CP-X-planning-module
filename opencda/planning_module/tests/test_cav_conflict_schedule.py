@@ -121,3 +121,34 @@ def test_claim_structure_change_forces_immediate_refresh():
     )
     assert decision.refresh_roles
     assert decision.reason == "coordination_structure_changed"
+
+
+def test_released_claim_timestamp_is_not_a_structure_change():
+    schedule = CAVConflictSchedule(coordination_period_s=0.2)
+
+    def released(timestamp_s):
+        return SimpleNamespace(
+            resource_id="lane_change", phase="released",
+            participates=False, committed_at_s=timestamp_s,
+        )
+
+    schedule.decide(
+        sim_time_s=1.0, prediction_revision="p1", claim=released(1.0),
+        peers=(), proposal=SimpleNamespace(
+            maneuver="lane_follow", target_corridor_id=10, committed=False,
+        ),
+    )
+    schedule.observe(
+        sim_time_s=1.0,
+        result=SimpleNamespace(
+            latch_state={}, tag_state={}, assignments=(),
+            diagnostics={"coordination_roles_refreshed": True},
+        ),
+    )
+    decision = schedule.decide(
+        sim_time_s=1.05, prediction_revision="p2", claim=released(1.05),
+        peers=(), proposal=SimpleNamespace(
+            maneuver="lane_follow", target_corridor_id=10, committed=False,
+        ),
+    )
+    assert not decision.refresh_roles
