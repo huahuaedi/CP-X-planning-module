@@ -21,6 +21,9 @@ class CAVConflictSchedule:
     latch_state: dict = field(default_factory=dict)
     tag_state: dict = field(default_factory=dict)
     assignments: tuple = ()
+    corridor: Any = None
+    corridor_reference: tuple = ()
+    corridor_time_s: float = 0.0
     _last_refresh_s: float = -float("inf")
     _last_input_revision: str = ""
     _has_observation: bool = False
@@ -39,13 +42,23 @@ class CAVConflictSchedule:
 
     @staticmethod
     def _peer_signature(peers: Sequence[Any]) -> Tuple[Any, ...]:
+        def path_signature(peer: Any) -> Tuple[Any, ...]:
+            path = tuple(getattr(peer, "planned_path", ()) or ())
+            if not path:
+                return ()
+            selected = (path[0], path[-1])
+            return tuple(
+                tuple(round(float(value), 3) for value in sample[:4])
+                for sample in selected
+            )
+
         return tuple(sorted(
             (
                 int(getattr(peer, "actor_id", -1)),
                 str(getattr(getattr(peer, "claim", None), "resource_id", "")),
                 str(getattr(getattr(peer, "claim", None), "phase", "")),
-                int(getattr(peer, "sequence", 0)),
                 len(tuple(getattr(peer, "planned_path", ()) or ())),
+                path_signature(peer),
             )
             for peer in peers or ()
         ))
@@ -76,11 +89,38 @@ class CAVConflictSchedule:
         self._last_input_revision = input_revision
         return CoordinationScheduleDecision(True, reason, str(self.revision + 1))
 
-    def observe(self, *, sim_time_s: float, result: Any) -> None:
+    def cached_corridor_for_tick(
+        self, *, sim_time_s: float, reference_samples: Sequence[Any],
+        ego_x_m: float, ego_y_m: float, dt_s: float,
+    ) -> Any:
+        if self.corridor is None:
+            return None
+        from .spatiotemporal_corridor import rebase_corridor
+        return rebase_corridor(
+            self.corridor,
+            source_reference=self.corridor_reference,
+            current_reference=reference_samples,
+            current_ego_xy=(float(ego_x_m), float(ego_y_m)),
+            age_s=max(0.0, float(sim_time_s) - float(self.corridor_time_s)),
+            dt_s=float(dt_s),
+        )
+
+    def observe(
+        self, *, sim_time_s: float, result: Any,
+        reference_samples: Sequence[Any] = (),
+    ) -> None:
         self.latch_state = dict(getattr(result, "latch_state", {}) or {})
         self.tag_state = dict(getattr(result, "tag_state", {}) or {})
         self.assignments = tuple(getattr(result, "assignments", ()) or ())
         self._has_observation = True
+        if bool(getattr(result, "diagnostics", {}).get(
+            "corridor_rebuilt", False
+        )):
+            self.corridor = getattr(result, "corridor", None)
+            self.corridor_reference = tuple(
+                dict(sample) for sample in reference_samples or ()
+            )
+            self.corridor_time_s = float(sim_time_s)
         if bool(getattr(result, "diagnostics", {}).get(
             "coordination_roles_refreshed", False
         )):

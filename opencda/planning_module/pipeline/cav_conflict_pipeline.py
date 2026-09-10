@@ -111,6 +111,71 @@ def _prediction_evidence(agent: Mapping[str, Any]) -> dict:
     return {"sample_count": len(path)}
 
 
+def _build_effective_corridor(
+    *, reference_samples, ego_snapshot, all_agents, mode_groups,
+    tag_by_id, assign_by_id, corridor_params, rss_params,
+    credible_mode_probability_min, credible_mode_ttc_s,
+):
+    items = []
+    for agent in all_agents:
+        aid = _agent_id(agent)
+        if "::mode" in aid:
+            continue
+        tag = tag_by_id.get(aid)
+        if tag is not None and tag.tag != IGNORE:
+            items.append((agent, tag, assign_by_id.get(aid)))
+    corridor = build_longitudinal_corridor(
+        reference_samples, ego_snapshot, items, corridor_params, rss_params
+    )
+    poly = _polyline_xy(reference_samples)
+    ego_s0 = (
+        _point_to_polyline(
+            float(ego_snapshot.get("x", ego_snapshot.get("x_m", 0.0))),
+            float(ego_snapshot.get("y", ego_snapshot.get("y_m", 0.0))), poly,
+        )[1]
+        if len(poly) >= 2 else 0.0
+    )
+    ego_v = max(0.0, float(ego_snapshot.get(
+        "v", ego_snapshot.get("speed_mps", ego_snapshot.get("speed", 0.0))
+    )))
+    nominal_s = [
+        ego_s0 + ego_v * float(corridor_params.dt_s) * k
+        for k in range(len(corridor.s_hi))
+    ]
+    credible_veto_count = 0
+    for actor_id, group in mode_groups.items():
+        mode_corridors = []
+        for mode_agent, probability in group:
+            mode_id = _agent_id(mode_agent)
+            tag = tag_by_id.get(mode_id)
+            if tag is None:
+                continue
+            mode_items = [] if tag.tag == IGNORE else [(mode_agent, tag, None)]
+            mode_corridor = build_longitudinal_corridor(
+                reference_samples, ego_snapshot, mode_items,
+                corridor_params, rss_params, include_follow_bounds=True,
+            )
+            first_risk_stage = next((
+                k for k, cap in enumerate(mode_corridor.s_hi)
+                if k < len(nominal_s) and float(cap) < float(nominal_s[k])
+            ), None)
+            dangerous = bool(
+                float(probability) >= float(credible_mode_probability_min)
+                and tag.tag != IGNORE and first_risk_stage is not None
+                and float(first_risk_stage) * float(corridor_params.dt_s)
+                <= float(credible_mode_ttc_s)
+            )
+            credible_veto_count += int(dangerous)
+            mode_corridors.append((mode_corridor, float(probability), dangerous, mode_id))
+        aggregate = aggregate_mode_corridors(mode_corridors, nominal_s)
+        for k, cap in enumerate(aggregate.s_hi):
+            if cap < corridor.s_hi[k]:
+                corridor.s_hi[k] = cap
+                corridor.binding[k] = aggregate.binding[k] or actor_id
+    corridor.clamp_and_check()
+    return corridor, credible_veto_count
+
+
 def resolve_conflicts(
     *,
     reference_samples: Sequence[Any],
@@ -132,6 +197,8 @@ def resolve_conflicts(
     credible_mode_ttc_s: float = 2.0,
     refresh_assignments: bool = True,
     cached_assignments: Sequence[ConflictAssignment] = (),
+    rebuild_corridor: bool = True,
+    cached_corridor: Optional[Corridor] = None,
 ) -> ConflictResolution:
     cavs = list(cav_intents or [])
     # Only a peer carrying an actual shared plan owns future-trajectory data.
@@ -243,72 +310,24 @@ def resolve_conflicts(
     assign_by_id = {str(a.cav_actor_id): a for a in assignments}
 
     # Stage C ---------------------------------------------------------------
-    items: List[Tuple[Mapping[str, Any], ConflictTag, Optional[ConflictAssignment]]] = []
-    for agent in all_agents:
-        aid = _agent_id(agent)
-        if "::mode" in aid:
-            continue
-        t = tag_by_id.get(aid)
-        if t is None or t.tag == IGNORE:
-            continue
-        items.append((agent, t, assign_by_id.get(aid)))
-
-    corridor = build_longitudinal_corridor(
-        reference_samples, ego_snapshot, items, corridor_params, rss_params
+    # Multimodal credible/TTC veto is a Stage-A safety check and therefore
+    # remains tick-rate until its risk state has its own cache signature.
+    corridor_rebuilt = bool(
+        rebuild_corridor or tag_changed or roles_refreshed or mode_groups
     )
-
-    # A physical actor with several possible futures must not appear to the
-    # optimizer as several simultaneous vehicles.  Build one corridor per
-    # mode, then reduce them to one probability-aware effective corridor.
-    poly = _polyline_xy(reference_samples)
-    ego_s0 = 0.0
-    if len(poly) >= 2:
-        ego_s0 = _point_to_polyline(
-            float(ego_snapshot.get("x", ego_snapshot.get("x_m", 0.0))),
-            float(ego_snapshot.get("y", ego_snapshot.get("y_m", 0.0))),
-            poly,
-        )[1]
-    ego_v = max(0.0, float(ego_snapshot.get(
-        "v", ego_snapshot.get("speed_mps", ego_snapshot.get("speed", 0.0))
-    )))
-    nominal_s = [
-        ego_s0 + ego_v * float(corridor_params.dt_s) * k
-        for k in range(len(corridor.s_hi))
-    ]
-    credible_veto_count = 0
-    for actor_id, group in mode_groups.items():
-        mode_corridors = []
-        for mode_agent, probability in group:
-            mode_id = _agent_id(mode_agent)
-            tag = tag_by_id.get(mode_id)
-            if tag is None:
-                continue
-            mode_items = [] if tag.tag == IGNORE else [(mode_agent, tag, None)]
-            mode_corridor = build_longitudinal_corridor(
-                reference_samples, ego_snapshot, mode_items,
-                corridor_params, rss_params, include_follow_bounds=True,
-            )
-            first_risk_stage = next((
-                k for k, cap in enumerate(mode_corridor.s_hi)
-                if k < len(nominal_s) and float(cap) < float(nominal_s[k])
-            ), None)
-            dangerous = bool(
-                float(probability) >= float(credible_mode_probability_min)
-                and tag.tag != IGNORE
-                and first_risk_stage is not None
-                and float(first_risk_stage) * float(corridor_params.dt_s)
-                <= float(credible_mode_ttc_s)
-            )
-            credible_veto_count += int(dangerous)
-            mode_corridors.append((
-                mode_corridor, float(probability), dangerous, mode_id
-            ))
-        aggregate = aggregate_mode_corridors(mode_corridors, nominal_s)
-        for k, cap in enumerate(aggregate.s_hi):
-            if cap < corridor.s_hi[k]:
-                corridor.s_hi[k] = cap
-                corridor.binding[k] = aggregate.binding[k] or actor_id
-    corridor.clamp_and_check()
+    if corridor_rebuilt or cached_corridor is None:
+        corridor, credible_veto_count = _build_effective_corridor(
+            reference_samples=reference_samples, ego_snapshot=ego_snapshot,
+            all_agents=all_agents, mode_groups=mode_groups,
+            tag_by_id=tag_by_id, assign_by_id=assign_by_id,
+            corridor_params=corridor_params, rss_params=rss_params,
+            credible_mode_probability_min=credible_mode_probability_min,
+            credible_mode_ttc_s=credible_mode_ttc_s,
+        )
+        corridor_rebuilt = True
+    else:
+        corridor = cached_corridor
+        credible_veto_count = 0
 
     def _source(agent: Mapping[str, Any]) -> str:
         src = str(agent.get("trajectory_source", "") or "")
@@ -373,6 +392,7 @@ def resolve_conflicts(
             else "scheduled_refresh" if refresh_assignments
             else "cached_roles"
         ),
+        "corridor_rebuilt": bool(corridor_rebuilt),
     }
     return ConflictResolution(
         tags=tags, assignments=assignments, corridor=corridor,

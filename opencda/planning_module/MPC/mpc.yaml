@@ -35,7 +35,7 @@ mpc:
   # Replan frequency [Hz].
   # Increase -> fresher plans and better reaction to moving objects, but more
   # compute cost. Decrease -> cheaper runtime, but plans can go stale.
-  trajectory_generation_frequency_hz: 4.0 #2
+  trajectory_generation_frequency_hz: 5.0
 
   constraints:
     # Steering bounds match the CARLA passenger-vehicle control envelope used

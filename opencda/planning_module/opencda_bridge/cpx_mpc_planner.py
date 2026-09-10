@@ -2956,6 +2956,12 @@ class CPXMPCPlannerBridge:
                 claim=cav_claim, peers=cav_intents,
                 proposal=cooperative_proposal,
             )
+            cached_corridor = self._cav_schedule.cached_corridor_for_tick(
+                sim_time_s=float(sim_time_s),
+                reference_samples=conflict_reference.mutable_samples(),
+                ego_x_m=float(ego_location.x), ego_y_m=float(ego_location.y),
+                dt_s=float(self.mpc.dt_s),
+            )
             cav_result = self.pipeline.resolve_cav_interaction(
                 reference_samples=conflict_reference.mutable_samples(),
                 constraint_reference_samples=local_lane_center_reference,
@@ -2986,9 +2992,12 @@ class CPXMPCPlannerBridge:
                 )),
                 refresh_assignments=bool(schedule.refresh_roles),
                 cached_assignments=self._cav_schedule.assignments,
+                rebuild_corridor=bool(schedule.refresh_roles),
+                cached_corridor=cached_corridor,
             )
             self._cav_schedule.observe(
-                sim_time_s=float(sim_time_s), result=cav_result
+                sim_time_s=float(sim_time_s), result=cav_result,
+                reference_samples=conflict_reference.mutable_samples(),
             )
             cav_result.diagnostics["coordination_schedule_reason"] = str(
                 schedule.reason

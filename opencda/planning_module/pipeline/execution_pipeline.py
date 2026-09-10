@@ -218,6 +218,7 @@ class PlanningPipeline:
         horizon_steps, dt_s, mode_probability_floor=0.05,
         credible_mode_probability_min=0.15, credible_mode_ttc_s=2.0,
         refresh_assignments=True, cached_assignments=(),
+        rebuild_corridor=True, cached_corridor=None,
     ):
         """Classify on proposal geometry and constrain the executable geometry."""
 
@@ -241,6 +242,8 @@ class PlanningPipeline:
             credible_mode_ttc_s=float(credible_mode_ttc_s),
             refresh_assignments=bool(refresh_assignments),
             cached_assignments=cached_assignments,
+            rebuild_corridor=bool(rebuild_corridor),
+            cached_corridor=cached_corridor,
         )
         from .cav_intent_codec import sample_cav_path_at
         from .mpc_corridor_constraints import corridor_rows, homotopy_keepout_rows

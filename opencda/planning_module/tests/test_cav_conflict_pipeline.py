@@ -3,6 +3,7 @@ import math
 from pipeline.cav_conflict_pipeline import resolve_conflicts
 from pipeline.conflict_classifier import CROSSING, FOLLOW, IGNORE, MERGE
 from pipeline.cooperative_arbitration import CavIntent, ResourceClaim
+from pipeline.spatiotemporal_corridor import Corridor
 
 REF = [{"x_ref_m": float(x), "y_ref_m": 0.0} for x in range(0, 121, 2)]
 EGO = {"x": 0.0, "y": 0.0, "v": 10.0, "psi": 0.0}
@@ -39,6 +40,21 @@ def test_end_to_end_follow_is_delegated_to_speed_planner():
     assert all(value >= _BIG for value in r.corridor.s_hi)
     assert r.diagnostics["speed_owned_follow_count"] == 1
     assert r.corridor.feasible
+
+
+def test_stage_c_reuses_rebased_corridor_between_scheduled_updates():
+    cached = Corridor(
+        s_lo=[-_BIG] * 21, s_hi=[18.0] * 21,
+        binding=["cached-peer"] * 21,
+    )
+    result = resolve_conflicts(
+        reference_samples=REF, ego_snapshot=EGO, my_actor_id=1,
+        my_claim=None, obstacle_snapshots=[], cav_intents=[],
+        tag_state={}, refresh_assignments=False, cached_assignments=(),
+        rebuild_corridor=False, cached_corridor=cached,
+    )
+    assert result.corridor is cached
+    assert not result.diagnostics["corridor_rebuilt"]
 
 
 def test_cooperative_make_gap_overrides_generic_follow_handoff():

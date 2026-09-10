@@ -6,8 +6,10 @@ from pipeline.conflict_classifier import (
 )
 from pipeline.cooperative_arbitration import ConflictAssignment
 from pipeline.spatiotemporal_corridor import (
+    Corridor,
     CorridorParams,
     build_longitudinal_corridor,
+    rebase_corridor,
 )
 
 REF = [{"x_ref_m": float(x), "y_ref_m": 0.0} for x in range(0, 121, 2)]
@@ -40,6 +42,25 @@ def test_no_conflicts_leaves_corridor_open():
     assert cor.feasible
     assert all(h >= _BIG for h in cor.s_hi)
     assert all(l <= -_BIG for l in cor.s_lo)
+
+
+def test_cached_corridor_advances_time_and_rebases_station_to_current_reference():
+    cached = Corridor(
+        s_lo=[-_BIG] * 5,
+        s_hi=[20.0 + k for k in range(5)],
+        binding=["peer"] * 5,
+    )
+    current_ref = [
+        {"x_ref_m": float(x), "y_ref_m": 0.0} for x in range(5, 126, 2)
+    ]
+    rebased = rebase_corridor(
+        cached, source_reference=REF, current_reference=current_ref,
+        current_ego_xy=(5.0, 0.0), age_s=0.2, dt_s=0.1,
+    )
+    # Two prediction stages elapsed; the rolling reference now starts at ego,
+    # so the old absolute cap is shifted back by ego's 5 m progress.
+    assert rebased.s_hi[0] == 17.0
+    assert rebased.binding[0] == "peer"
 
 
 def test_follow_leaves_corridor_open_for_speed_planner():

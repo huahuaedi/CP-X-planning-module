@@ -79,6 +79,52 @@ class Corridor:
                     self.first_infeasible_stage = k
 
 
+def rebase_corridor(
+    corridor: Corridor, *, source_reference: Sequence[Any],
+    current_reference: Sequence[Any], current_ego_xy: XY,
+    age_s: float, dt_s: float,
+) -> Corridor:
+    """Advance a cached corridor in time and align its station coordinates."""
+
+    source_poly = _polyline_xy(source_reference)
+    current_poly = _polyline_xy(current_reference)
+    if len(source_poly) < 2 or len(current_poly) < 2:
+        return Corridor(
+            s_lo=list(corridor.s_lo), s_hi=list(corridor.s_hi),
+            binding=list(corridor.binding), feasible=bool(corridor.feasible),
+            first_infeasible_stage=corridor.first_infeasible_stage,
+        )
+    ego_x, ego_y = float(current_ego_xy[0]), float(current_ego_xy[1])
+    source_ego_s = _point_to_polyline(ego_x, ego_y, source_poly)[1]
+    current_ego_s = _point_to_polyline(ego_x, ego_y, current_poly)[1]
+    station_shift = float(current_ego_s - source_ego_s)
+    stage_shift = max(0, int(float(age_s) / max(1.0e-3, float(dt_s))))
+    n = len(corridor.s_hi)
+
+    def shifted(values: Sequence[float], *, infinite_sign: int) -> List[float]:
+        out = []
+        for stage in range(n):
+            source_stage = min(n - 1, stage + stage_shift)
+            value = float(values[source_stage])
+            if abs(value) >= _BIG:
+                out.append(float(infinite_sign) * _BIG)
+            else:
+                out.append(value + station_shift)
+        return out
+
+    binding = [
+        str(corridor.binding[min(n - 1, stage + stage_shift)])
+        for stage in range(n)
+    ]
+    rebased = Corridor(
+        s_lo=shifted(corridor.s_lo, infinite_sign=-1),
+        s_hi=shifted(corridor.s_hi, infinite_sign=1),
+        binding=binding,
+    )
+    rebased.clamp_and_check()
+    return rebased
+
+
 def aggregate_mode_corridors(
     mode_corridors: Sequence[Tuple[Corridor, float, bool, str]],
     nominal_s: Sequence[float],
