@@ -102,32 +102,6 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
             buffer_m=1.5,
         )[0])
 
-    def test_functional_isolation_removes_only_non_ego_vehicle_actors_once(self):
-        ego = SimpleNamespace(id=10)
-        stale_a = Mock(id=20)
-        stale_b = Mock(id=30)
-
-        class _Actors(list):
-            def filter(self, pattern):
-                self.pattern = pattern
-                return self
-
-        actors = _Actors([ego, stale_a, stale_b])
-        ego.get_world = Mock(return_value=SimpleNamespace(get_actors=Mock(return_value=actors)))
-        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
-        bridge.functional_test_ignore_dynamic_objects = True
-        bridge._functional_test_world_actors_cleaned = False
-        bridge.vehicle_manager = SimpleNamespace(vehicle=ego)
-        bridge.debug = False
-
-        bridge._clean_functional_test_dynamic_actors_once()
-        bridge._clean_functional_test_dynamic_actors_once()
-
-        stale_a.destroy.assert_called_once_with()
-        stale_b.destroy.assert_called_once_with()
-        self.assertFalse(hasattr(ego, "destroy"))
-        self.assertTrue(bridge._functional_test_world_actors_cleaned)
-
     def test_static_obstacle_local_avoidance_selects_safest_adjacent_lane(self):
         selected = _select_static_obstacle_local_avoidance_lane(
             current_lane_id=2,

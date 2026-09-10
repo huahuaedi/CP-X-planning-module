@@ -209,7 +209,6 @@ class CPXMPCPlannerBridge:
         self.functional_test_ignore_dynamic_objects = bool(
             self.config.get("functional_test_ignore_dynamic_objects", False)
         )
-        self._functional_test_world_actors_cleaned = False
         self.debug = bool(self.config.get("debug", True))
         self.last_debug: dict[str, Any] = {}
         self._last_accel_mps2 = 0.0
@@ -1114,7 +1113,6 @@ class CPXMPCPlannerBridge:
             PlannerOutput,
         )
         latest_update = dict(getattr(self, "_latest_opencda_update", {}) or {})
-        self._clean_functional_test_dynamic_actors_once()
         if self.cp_provider is not None:
             try:
                 self.cp_provider.publish(
@@ -4643,43 +4641,6 @@ class CPXMPCPlannerBridge:
         road_cfg.setdefault("lane_width_m", float(self.config.get("lane_width_m", 3.5)))
         return mpc_cfg, road_cfg
 
-    def _clean_functional_test_dynamic_actors_once(self) -> None:
-        """Remove non-ego vehicles for an explicitly isolated functional run.
-
-        An interrupted CARLA scenario can leave actors in the shared world.
-        An empty traffic-manager list prevents new spawns but cannot remove
-        those stale actors, so planner-side filtering alone still permits a
-        physical collision.  This destructive cleanup is gated by the
-        scenario-only ``functional_test_ignore_dynamic_objects`` switch and
-        never runs in normal planning or traffic tests.
-        """
-        if (
-            not bool(self.functional_test_ignore_dynamic_objects)
-            or bool(self._functional_test_world_actors_cleaned)
-        ):
-            return
-        self._functional_test_world_actors_cleaned = True
-        ego_vehicle = getattr(self.vehicle_manager, "vehicle", None)
-        ego_id = getattr(ego_vehicle, "id", None)
-        try:
-            world = ego_vehicle.get_world()
-            actors = list(world.get_actors().filter("vehicle.*"))
-        except Exception:
-            return
-        removed = 0
-        for actor in actors:
-            if ego_id is not None and getattr(actor, "id", None) == ego_id:
-                continue
-            try:
-                actor.destroy()
-                removed += 1
-            except Exception:
-                continue
-        if self.debug:
-            print(
-                "[CP-X OpenCDA Bridge] Functional isolation removed "
-                f"{int(removed)} non-ego vehicle actor(s)."
-            )
 
     def _perception_diagnostics(self) -> dict[str, object]:
         manager = getattr(self.vehicle_manager, "perception_manager", None)
