@@ -83,9 +83,10 @@ def analyze_conflict_run(
 
     expected = {str(tag).upper() for tag in expected_tags}
     observed = {str(tag).upper() for tag in tag_counts}
+    conflict_observed = bool(observed.difference({"IGNORE"}))
     expected_role_set = {str(role).lower() for role in expected_roles}
     observed_roles = {str(role).lower() for role in role_counts}
-    scenario_valid = bool(rows) and expected.issubset(observed) and (
+    scenario_valid = bool(rows) and conflict_observed and expected.issubset(observed) and (
         expected_role_set.issubset(observed_roles)
     )
     constraint_valid = bool(constraint_indices) if require_constraint else True
@@ -105,6 +106,7 @@ def analyze_conflict_run(
     return {
         "verdict": verdict,
         "scenario_valid": scenario_valid,
+        "conflict_observed": conflict_observed,
         "constraint_response_valid": constraint_valid,
         "ticks": len(rows),
         "duration_s": round(times[-1] - times[0], 3) if len(times) > 1 else 0.0,

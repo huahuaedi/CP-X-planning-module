@@ -33,6 +33,14 @@ def test_evaluator_does_not_call_missing_conflict_a_pass():
     assert result["verdict"] == "INVALID_SCENARIO"
 
 
+def test_evaluator_rejects_ignore_only_run_without_expected_tag():
+    result = analyze_conflict_run(
+        [_row(0, tag="IGNORE", rows=0)], require_constraint=False
+    )
+    assert not result["conflict_observed"]
+    assert result["verdict"] == "INVALID_SCENARIO"
+
+
 def test_evaluator_requires_requested_cooperative_role():
     missing = analyze_conflict_run(
         [_row(0)], expected_tags=["LEAD_BRAKE"], expected_roles=["make_gap"]
