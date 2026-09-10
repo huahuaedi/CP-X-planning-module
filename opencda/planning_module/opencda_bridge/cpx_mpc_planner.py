@@ -1390,7 +1390,7 @@ class CPXMPCPlannerBridge:
         if cav_result is not None:
             cav_constraint_rows = tuple(cav_result.mpc_rows or ())
             cav_diagnostics = dict(cav_result.diagnostics or {})
-            cav_constraint_revision = self._cav_conflict_schedule.constraint_revision(
+            cav_constraint_revision = self._cav_schedule.constraint_revision(
                 cav_diagnostics
             )
         execution_result = self.pipeline.execute_mpc(
