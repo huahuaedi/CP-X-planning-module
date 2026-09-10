@@ -59,3 +59,18 @@ class CooperativeManeuverProposal:
             s_begin_m=s_begin_m,
             s_end_m=s_end_m,
         )
+
+    def with_commitment(
+        self, *, maneuver: str, target_corridor_id: int,
+        committed_at_s: float,
+    ) -> "CooperativeManeuverProposal":
+        """Attach the authoritative maneuver lifecycle without re-deciding it."""
+
+        return replace(
+            self,
+            maneuver=str(maneuver).strip().lower(),
+            target_corridor_id=int(target_corridor_id),
+            requested=True,
+            committed=True,
+            committed_at_s=float(committed_at_s),
+        )

@@ -257,6 +257,7 @@ class BehaviorCommandFrameResult:
     candidate_frame: Any
     nearest_front_obstacles_by_lane: Mapping[int, Mapping[str, object]]
     candidate_lane_ids: tuple
+    cooperative_proposal: CooperativeManeuverProposal
 
 
 class BehaviorStage:
@@ -269,10 +270,37 @@ class BehaviorStage:
         self._route_lane_change_latch.reset()
 
     @staticmethod
-    def cooperative_proposal(**kwargs) -> CooperativeManeuverProposal:
-        """Expose the sole typed behavior-to-cooperation boundary."""
+    def _cooperative_proposal_from_candidate(
+        *, authorization: Any, candidate_frame: Any, current_lane_id: int,
+        opportunistic_lane_change_allowed: bool,
+    ) -> CooperativeManeuverProposal:
+        """Preserve the pre-safety maneuver request for peer negotiation."""
 
-        return CooperativeManeuverProposal.from_behavior(**kwargs)
+        if bool(authorization.allowed):
+            maneuver = str(authorization.maneuver)
+            target_lane_id = int(authorization.target_lane_id)
+            route_required = bool(authorization.required_by_route)
+            reason = str(authorization.reason)
+        elif bool(opportunistic_lane_change_allowed):
+            selected = candidate_frame.selected
+            maneuver = str(selected.decision)
+            target_lane_id = int(selected.target_lane_id)
+            route_required = False
+            reason = str(selected.reason)
+        else:
+            maneuver = "lane_follow"
+            target_lane_id = int(current_lane_id)
+            route_required = False
+            reason = "lane_change_not_requested"
+        return CooperativeManeuverProposal.from_behavior(
+            maneuver=maneuver,
+            source_corridor_id=int(current_lane_id),
+            target_corridor_id=int(target_lane_id),
+            route_required=bool(route_required),
+            maneuver_active=False,
+            committed_at_s=0.0,
+            reason=str(reason),
+        )
 
     def produce_command_from_frame(
         self, request: BehaviorCommandFrameRequest, *, behavior_planner: Any,
@@ -369,6 +397,14 @@ class BehaviorStage:
             command=command, candidate_frame=candidate_frame,
             nearest_front_obstacles_by_lane=dict(nearest),
             candidate_lane_ids=tuple(candidate_lane_ids),
+            cooperative_proposal=self._cooperative_proposal_from_candidate(
+                authorization=authorization,
+                candidate_frame=candidate_frame,
+                current_lane_id=int(request.current_lane_id),
+                opportunistic_lane_change_allowed=bool(
+                    request.opportunistic_lane_change_allowed
+                ),
+            ),
         )
 
     @staticmethod

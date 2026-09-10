@@ -2633,6 +2633,7 @@ class CPXMPCPlannerBridge:
         )
         command_result = command_frame.command
         candidate_frame = command_frame.candidate_frame
+        cooperative_proposal = command_frame.cooperative_proposal
         nearest_front_obstacles_by_lane = dict(
             command_frame.nearest_front_obstacles_by_lane
         )
@@ -2888,9 +2889,19 @@ class CPXMPCPlannerBridge:
         cooperative_lane_change_deferred = False
         if self._cav_conflict_enabled:
             lane_change = self.maneuver_manager.lane_change
+            if bool(lane_change.active):
+                cooperative_proposal = cooperative_proposal.with_commitment(
+                    maneuver=(
+                        "lane_change_left"
+                        if str(lane_change.option) == "CHANGELANELEFT"
+                        else "lane_change_right"
+                    ),
+                    target_corridor_id=int(lane_change.target_lane_id),
+                    committed_at_s=float(lane_change.committed_at_s),
+                )
             claim_interval = project_claim_interval(
                 local_map=local_map_snapshot,
-                corridor_id=int(target_lane_id),
+                corridor_id=int(cooperative_proposal.target_corridor_id),
                 x_m=float(ego_location.x),
                 y_m=float(ego_location.y),
                 lookbehind_m=float(
@@ -2900,15 +2911,7 @@ class CPXMPCPlannerBridge:
                     self.config.get("cav_claim_lookahead_m", 50.0)
                 ),
             )
-            cooperative_proposal = self.pipeline.propose_cooperative_maneuver(
-                maneuver=str(decision),
-                source_corridor_id=int(current_lane_id),
-                target_corridor_id=int(target_lane_id),
-                route_required=bool(route_lane_change_required),
-                maneuver_active=bool(lane_change.active),
-                committed_at_s=float(lane_change.committed_at_s),
-                reason=str(behavior_override_reason),
-            ).with_station_interval(
+            cooperative_proposal = cooperative_proposal.with_station_interval(
                 corridor_id=int(claim_interval.corridor_id),
                 s_begin_m=claim_interval.s_begin_m,
                 s_end_m=claim_interval.s_end_m,
