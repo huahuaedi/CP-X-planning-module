@@ -25,7 +25,7 @@ class CAVConflictSchedule:
     corridor_reference: tuple = ()
     corridor_time_s: float = 0.0
     _last_refresh_s: float = -float("inf")
-    _last_input_revision: str = ""
+    _last_structure_revision: str = ""
     _has_observation: bool = False
     revision: int = 0
 
@@ -61,23 +61,15 @@ class CAVConflictSchedule:
 
     @staticmethod
     def _peer_signature(peers: Sequence[Any]) -> Tuple[Any, ...]:
-        def path_signature(peer: Any) -> Tuple[Any, ...]:
-            path = tuple(getattr(peer, "planned_path", ()) or ())
-            if not path:
-                return ()
-            selected = (path[0], path[-1])
-            return tuple(
-                tuple(round(float(value), 3) for value in sample[:4])
-                for sample in selected
-            )
-
+        # Trajectory samples are numeric prediction data and are consumed at
+        # the fixed coordination cadence. Only peer/claim topology is an
+        # asynchronous structural event.
         return tuple(sorted(
             (
                 int(getattr(peer, "actor_id", -1)),
                 str(getattr(getattr(peer, "claim", None), "resource_id", "")),
                 str(getattr(getattr(peer, "claim", None), "phase", "")),
-                len(tuple(getattr(peer, "planned_path", ()) or ())),
-                path_signature(peer),
+                bool(getattr(getattr(peer, "claim", None), "participates", False)),
             )
             for peer in peers or ()
         ))
@@ -86,8 +78,8 @@ class CAVConflictSchedule:
         self, *, sim_time_s: float, prediction_revision: str,
         claim: Any, peers: Sequence[Any], proposal: Any,
     ) -> CoordinationScheduleDecision:
-        input_revision = repr((
-            str(prediction_revision), self._claim_signature(claim),
+        structure_revision = repr((
+            self._claim_signature(claim),
             self._peer_signature(peers),
             str(getattr(proposal, "maneuver", "")),
             int(getattr(proposal, "target_corridor_id", 0)),
@@ -95,8 +87,8 @@ class CAVConflictSchedule:
         ))
         if not self._has_observation:
             reason = "coordination_cache_empty"
-        elif input_revision != self._last_input_revision:
-            reason = "coordination_input_revision_changed"
+        elif structure_revision != self._last_structure_revision:
+            reason = "coordination_structure_changed"
         elif float(sim_time_s) - float(self._last_refresh_s) + 1.0e-9 >= max(
             0.01, float(self.coordination_period_s)
         ):
@@ -105,7 +97,7 @@ class CAVConflictSchedule:
             return CoordinationScheduleDecision(
                 False, "coordination_cache_reused", str(self.revision)
             )
-        self._last_input_revision = input_revision
+        self._last_structure_revision = structure_revision
         return CoordinationScheduleDecision(True, reason, str(self.revision + 1))
 
     def cached_corridor_for_tick(

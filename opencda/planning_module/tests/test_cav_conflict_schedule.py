@@ -64,7 +64,7 @@ def test_coordination_runs_at_five_hz_between_unchanged_inputs():
     ).refresh_roles
 
 
-def test_prediction_revision_forces_immediate_role_refresh():
+def test_prediction_revision_is_sampled_at_coordination_cadence():
     schedule = CAVConflictSchedule(coordination_period_s=0.2)
     claim = SimpleNamespace(
         resource_id="lane_change:10:20", phase="proposed",
@@ -85,5 +85,39 @@ def test_prediction_revision_forces_immediate_role_refresh():
         sim_time_s=1.05, prediction_revision="p2", claim=claim,
         peers=(), proposal=_proposal(),
     )
+    assert not decision.refresh_roles
+    decision = schedule.decide(
+        sim_time_s=1.20, prediction_revision="p2", claim=claim,
+        peers=(), proposal=_proposal(),
+    )
     assert decision.refresh_roles
-    assert decision.reason == "coordination_input_revision_changed"
+    assert decision.reason == "coordination_period_elapsed"
+
+
+def test_claim_structure_change_forces_immediate_refresh():
+    schedule = CAVConflictSchedule(coordination_period_s=0.2)
+    claim = SimpleNamespace(
+        resource_id="lane_change:10:20", phase="proposed",
+        participates=True, committed_at_s=1.0,
+    )
+    schedule.decide(
+        sim_time_s=1.0, prediction_revision="p1", claim=claim,
+        peers=(), proposal=_proposal(),
+    )
+    schedule.observe(
+        sim_time_s=1.0,
+        result=SimpleNamespace(
+            latch_state={}, tag_state={}, assignments=(),
+            diagnostics={"coordination_roles_refreshed": True},
+        ),
+    )
+    committed = SimpleNamespace(
+        resource_id="lane_change:10:20", phase="committed",
+        participates=True, committed_at_s=1.0,
+    )
+    decision = schedule.decide(
+        sim_time_s=1.05, prediction_revision="p1", claim=committed,
+        peers=(), proposal=_proposal(),
+    )
+    assert decision.refresh_roles
+    assert decision.reason == "coordination_structure_changed"
