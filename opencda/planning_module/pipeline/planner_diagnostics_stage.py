@@ -91,6 +91,15 @@ class PlannerDiagnosticsStage:
             "route_lane_change_edge_completed": bool(
                 self.maneuver_manager.route_lane_change_edge_completed
             ),
+            "route_recovery_pending": bool(
+                self.maneuver_manager.route_recovery_pending
+            ),
+            "lane_change_authorization_source": str(
+                self.maneuver_manager.lane_change.authorization_source
+            ),
+            "lane_change_returns_to_route": bool(
+                self.maneuver_manager.lane_change.returns_to_route
+            ),
             "route_geometry_lane_change_direction": str(
                 c["route_geometry_lane_change_direction"] or ""
             ),
@@ -571,6 +580,12 @@ class PlannerDiagnosticsStage:
             ),
             "lane_change_commitment_release_reason": reference_debug.get(
                 "lane_change_commitment_release_reason", ""
+            ),
+            "route_recovery_pending": bool(
+                reference_debug.get("route_recovery_pending", False)
+            ),
+            "lane_change_returns_to_route": bool(
+                reference_debug.get("lane_change_returns_to_route", False)
             ),
             "lane_change_completion_reason": reference_debug.get(
                 "lane_change_completion_reason", ""

@@ -161,6 +161,7 @@ class BehaviorCandidateRequest:
     nearest_front_obstacles_by_lane: Mapping[int, Mapping[str, object]]
     desired_speed_mps: float
     progress_cost_weight: float
+    route_recovery_requested: bool = False
 
 
 @dataclass(frozen=True)
@@ -249,6 +250,7 @@ class BehaviorCommandFrameRequest:
     max_deceleration_mps2: float
     config: Mapping[str, object]
     runtime_config: Mapping[str, object]
+    route_recovery_requested: bool = False
 
 
 @dataclass(frozen=True)
@@ -375,6 +377,10 @@ class BehaviorStage:
             desired_speed_mps=float(request.target_speed_mps),
             progress_cost_weight=float(
                 request.config.get("candidate_progress_cost_weight", 4.0)
+            ),
+            route_recovery_requested=bool(
+                request.route_recovery_requested
+                and not bool(frame.map_lane.in_junction)
             ),
         ))
         preferred = (
@@ -863,6 +869,7 @@ class BehaviorStage:
             ),
             desired_speed_mps=float(request.desired_speed_mps),
             progress_cost_weight=float(request.progress_cost_weight),
+            route_recovery_requested=bool(request.route_recovery_requested),
         )
 
     @staticmethod

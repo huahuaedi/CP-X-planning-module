@@ -2732,6 +2732,9 @@ class CPXMPCPlannerBridge:
                 ),
                 config=self.config,
                 runtime_config=self.behavior_runtime_cfg,
+                route_recovery_requested=bool(
+                    self.maneuver_manager.route_recovery_pending
+                ),
             ),
             behavior_planner=self.behavior_planner,
             static_obstacle_stage=self.pipeline.static_obstacle,

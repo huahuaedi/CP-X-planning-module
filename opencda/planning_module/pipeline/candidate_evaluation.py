@@ -515,6 +515,11 @@ class CandidateTrajectoryEvaluator:
                     target_speed_mps=float(selected.intent.target_speed_mps),
                     completion_reference=completion_reference,
                     committed_at_s=float(sim_time_s),
+                    authorization_source=str(
+                        selected_debug.get(
+                            "lane_change_authorization_source", ""
+                        )
+                    ),
                 )
             lock_reason = "accepted_candidate_committed:%s:%s" % (
                 str(install_reason), str(completion_reason)
@@ -1079,6 +1084,7 @@ def evaluate_behavior_candidates(
     desired_speed_mps: float = 0.0,
     progress_cost_weight: float = 4.0,
     current_lane_unsafe_threshold: float = 0.5,
+    route_recovery_requested: bool = False,
 ) -> CandidateEvaluationFrame:
     """Evaluate lane-level behavior candidates for one planning tick."""
 
@@ -1191,6 +1197,22 @@ def evaluate_behavior_candidates(
             abs(int(candidate.target_lane_id) - int(source_lane_id)),
         ),
     )
+    route_candidate = next(
+        (
+            candidate
+            for candidate in feasible_candidates
+            if int(candidate.target_lane_id) == int(route_optimal_lane_id or 0)
+        ),
+        None,
+    )
+    route_recovery_candidate = bool(
+        route_recovery_requested
+        and route_candidate is not None
+        and int(route_candidate.target_lane_id) != int(source_lane_id)
+        and float(
+            lane_safety_scores.get(int(route_candidate.target_lane_id), 0.0)
+        ) > float(current_lane_unsafe_threshold)
+    )
     # A safe current lane is the stable default.  Route-required changes are
     # supplied explicitly by RouteAuthorization; this generic evaluator must
     # not turn a small route-deviation cost into an unsolicited lane change.
@@ -1207,7 +1229,9 @@ def evaluate_behavior_candidates(
         )
     )
     selected = (
-        ranked_candidate
+        route_candidate
+        if route_recovery_candidate
+        else ranked_candidate
         if bool(may_leave_source) or source_candidate is None
         else source_candidate
     )

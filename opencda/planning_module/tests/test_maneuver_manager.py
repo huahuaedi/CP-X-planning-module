@@ -34,6 +34,36 @@ class ManeuverManagerTests(unittest.TestCase):
         self.assertFalse(manager.lane_change.active)
         self.assertNotEqual(manager.lane_change.completed_option, "lane_change_right")
 
+    def test_opportunistic_lane_borrow_owns_one_return_to_route(self):
+        manager = ManeuverManager()
+        outbound = manager.begin_lane_change(
+            "lane_change_left", "executing", 1, 2, 7.0, [],
+            authorization_source="opportunistic",
+        )
+        self.assertFalse(outbound.returns_to_route)
+        self.assertTrue(manager.complete_lane_change("outbound_complete"))
+        self.assertTrue(manager.route_recovery_pending)
+
+        inbound = manager.begin_lane_change(
+            "lane_change_right", "executing", 2, 1, 7.0, [],
+            authorization_source="opportunistic",
+        )
+        self.assertTrue(inbound.returns_to_route)
+        self.assertTrue(manager.complete_lane_change("return_complete"))
+        self.assertFalse(manager.route_recovery_pending)
+
+    def test_abandoned_opportunistic_change_does_not_request_route_recovery(self):
+        manager = ManeuverManager()
+        manager.begin_lane_change(
+            "lane_change_left", "executing", 1, 2, 7.0, [],
+            authorization_source="opportunistic",
+        )
+
+        self.assertTrue(manager.abandon_lane_change(
+            "turn_took_ownership", suppress_recommit=True
+        ))
+        self.assertFalse(manager.route_recovery_pending)
+
     def test_geometric_completion_is_latched_during_handoff(self):
         manager = ManeuverManager()
         manager.begin_lane_change(

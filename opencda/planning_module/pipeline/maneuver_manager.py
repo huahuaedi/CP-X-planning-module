@@ -47,6 +47,8 @@ class LaneChangeLifecycle:
     transition_to_turn_step_m: float = 0.0
     required_target_lane_id: Optional[int] = None
     required_target_ad_lane_id: Optional[int] = None
+    authorization_source: str = ""
+    returns_to_route: bool = False
 
     @property
     def active(self):
@@ -68,6 +70,8 @@ class LaneChangeLifecycle:
         self.committed_at_s = -float("inf")
         self.transition_to_turn_arc_m = self.transition_to_turn_step_m = 0.0
         self.required_target_lane_id = self.required_target_ad_lane_id = None
+        self.authorization_source = ""
+        self.returns_to_route = False
 
 
 @dataclass
@@ -99,6 +103,7 @@ class ManeuverManager:
         self.last_release = {}
         self._route_lane_change_edge_id = ""
         self._completed_route_lane_change_edge_id = ""
+        self._route_recovery_pending = False
 
     def reset(self, reason="reset"):
         self.last_release = {"reason": str(reason), "outcome": "reset"}
@@ -106,6 +111,7 @@ class ManeuverManager:
         self.turn.reset()
         self._route_lane_change_edge_id = ""
         self._completed_route_lane_change_edge_id = ""
+        self._route_recovery_pending = False
 
     def observe_route_lane_change_edge(self, edge_id):
         """Track one immutable route edge and retire completion on advance."""
@@ -160,7 +166,7 @@ class ManeuverManager:
 
     def begin_lane_change(self, option, phase, source_lane_id, target_lane_id,
                           target_speed_mps, completion_reference,
-                          committed_at_s=None):
+                          committed_at_s=None, authorization_source=""):
         state = self.lane_change
         state.reset(preserve_completed_option=True)
         state.option, state.phase = str(option), str(phase or "executing")
@@ -170,7 +176,15 @@ class ManeuverManager:
         state.completion_reference = [dict(x) for x in completion_reference or []]
         if committed_at_s is not None:
             state.committed_at_s = float(committed_at_s)
+        state.authorization_source = str(authorization_source or "")
+        state.returns_to_route = bool(self._route_recovery_pending)
         return state
+
+    @property
+    def route_recovery_pending(self):
+        """Whether a completed opportunistic lane borrow must be undone."""
+
+        return bool(self._route_recovery_pending)
 
     def remember_required_lane_change(self, target_lane_id, target_ad_lane_id=None):
         self.lane_change.required_target_lane_id = int(target_lane_id)
@@ -506,8 +520,15 @@ class ManeuverManager:
     def _release_lane_change(self, outcome, reason, preserve_completed_option):
         if not self.lane_change.active:
             return False
+        authorization_source = str(self.lane_change.authorization_source)
+        returns_to_route = bool(self.lane_change.returns_to_route)
         self.last_release = {"reason": str(reason), "outcome": str(outcome),
                              "option": str(self.lane_change.option)}
         self.finish_lane_change_lifecycle(
             completed=(outcome == "complete" or bool(preserve_completed_option)))
+        if str(outcome) == "complete":
+            if returns_to_route:
+                self._route_recovery_pending = False
+            elif authorization_source == "opportunistic":
+                self._route_recovery_pending = True
         return True

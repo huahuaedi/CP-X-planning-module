@@ -157,6 +157,34 @@ class PlanningPipelineTests(unittest.TestCase):
 
         self.assertEqual(frame.selected.target_lane_id, 1)
 
+    def test_completed_lane_borrow_returns_to_safe_route_corridor(self):
+        frame = evaluate_behavior_candidates(
+            lane_safety_scores={1: 1.0, 2: 1.0},
+            lane_prediction_risks={1: {"risk": False}, 2: {"risk": False}},
+            ego_lane_id=2,
+            selected_lane_id=2,
+            available_lane_ids=[1, 2],
+            route_optimal_lane_id=1,
+            route_recovery_requested=True,
+        )
+
+        self.assertEqual(frame.selected.target_lane_id, 1)
+        self.assertEqual(frame.selected.decision, "lane_change_right")
+
+    def test_route_recovery_waits_until_route_corridor_is_safe(self):
+        frame = evaluate_behavior_candidates(
+            lane_safety_scores={1: 0.4, 2: 1.0},
+            lane_prediction_risks={1: {"risk": False}, 2: {"risk": False}},
+            ego_lane_id=2,
+            selected_lane_id=2,
+            available_lane_ids=[1, 2],
+            route_optimal_lane_id=1,
+            route_recovery_requested=True,
+        )
+
+        self.assertEqual(frame.selected.target_lane_id, 2)
+        self.assertEqual(frame.selected.decision, "lane_follow")
+
     def test_candidate_preferred_lane_feeds_behavior_fsm(self):
         planner = RuleBasedBehaviorPlanner(
             hysteresis_delta=0.05,
