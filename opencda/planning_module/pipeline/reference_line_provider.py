@@ -829,20 +829,34 @@ class ReferenceLineProvider(StableReferenceLineProvider):
         current_lane_id: int, target_speed_mps: float, horizon_steps: int,
         step_distance_m: float,
     ) -> Optional[BehaviorReferenceResult]:
-        """Build junction lane-follow geometry from frozen route topology."""
+        """Build lane-follow geometry from its single AD-map owner.
+
+        Outside a junction, behavior owns one longitudinal lane corridor.
+        Inside a junction, route topology owns the connector continuation.
+        The legacy reference generator is therefore never asked to infer a
+        lane-follow target from a future route lane.
+        """
 
         if (
             str(decision).strip().lower() != "lane_follow"
-            or not bool(in_junction)
             or local_map is None
             or not bool(getattr(local_map, "valid", False))
         ):
             return None
-        master, reason = self.reference_from_local_map(
-            local_map,
-            start_lane_id=int(current_lane_id),
-            target_speed_mps=float(target_speed_mps),
-        )
+        if bool(in_junction):
+            master, reason = self.reference_from_local_map(
+                local_map,
+                start_lane_id=int(current_lane_id),
+                target_speed_mps=float(target_speed_mps),
+            )
+            source = "local_map_route_corridor"
+        else:
+            master, reason = self._lane_follow_corridor_master(
+                local_map,
+                start_lane_id=int(current_lane_id),
+                target_speed_mps=float(target_speed_mps),
+            )
+            source = "local_map_behavior_corridor"
         if not master:
             return None
         window = self.window_from_reference(
@@ -867,8 +881,8 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             ),
             reference_freeze_count=0,
             diagnostics=MappingProxyType({
-                "reference_source": "local_map_route_corridor",
-                "final_reference_geometry_source": "local_map_route_corridor",
+                "reference_source": str(source),
+                "final_reference_geometry_source": str(source),
                 "local_route_reference_reason": str(reason),
             }),
             fallback_reason="",
