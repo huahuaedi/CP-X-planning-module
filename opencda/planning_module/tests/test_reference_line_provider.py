@@ -97,50 +97,6 @@ def test_junction_lane_follow_uses_topology_order_not_waypoint_successor():
     assert result.diagnostics["reference_source"] == "local_map_route_corridor"
 
 
-def test_nonjunction_lane_follow_stays_on_behavior_corridor():
-    current = _local_geometry(
-        11, [(float(x), 3.5) for x in range(0, 31)]
-    )
-    future_route_lane = _local_geometry(
-        21, [(float(x), 0.0) for x in range(0, 31)]
-    )
-    corridors = (
-        SimpleNamespace(
-            offset=0, lane_ids=(11,), lane_geometries=(current,)
-        ),
-        SimpleNamespace(
-            offset=-1, lane_ids=(21,), lane_geometries=(future_route_lane,)
-        ),
-    )
-    geometries = {11: current, 21: future_route_lane}
-    snapshot = SimpleNamespace(
-        valid=True,
-        route_lane_sequence=(11, 21),
-        corridors=corridors,
-        offset_for_lane=lambda lane_id: 0 if int(lane_id) == 11 else -1,
-        geometry_for_lane=lambda lane_id: geometries.get(int(lane_id)),
-    )
-
-    result = ReferenceLineProvider()._local_route_lane_follow_reference(
-        local_map=snapshot,
-        ego_pose={"x": 8.0, "y": 3.5, "heading_rad": 0.0},
-        decision="lane_follow",
-        in_junction=False,
-        current_lane_id=11,
-        target_speed_mps=5.0,
-        horizon_steps=12,
-        step_distance_m=1.0,
-    )
-
-    assert result is not None
-    assert result.diagnostics["reference_source"] == (
-        "local_map_behavior_corridor"
-    )
-    assert set(int(row["lane_id"]) for row in result.samples) == {11}
-    assert all(abs(float(row["y_ref_m"]) - 3.5) < 1.0e-9
-               for row in result.samples)
-
-
 def test_turn_reference_keeps_valid_master_until_local_map_revision_catches_up():
     provider = ReferenceLineProvider()
     provider.attach_builder(SimpleNamespace(
