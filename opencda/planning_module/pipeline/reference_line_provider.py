@@ -470,10 +470,29 @@ class ReferenceLineProvider(StableReferenceLineProvider):
                     offset = int(getattr(corridor, "offset", 0))
                     break
         if offset is not None:
-            master, reason = self.reference_for_corridor(
+            route_sequence = tuple(
+                int(item)
+                for item in tuple(
+                    getattr(local_map, "route_lane_sequence", ()) or ()
+                )
+            )
+            route_chain = []
+            if lane_id in route_sequence:
+                offset_lookup = getattr(local_map, "offset_for_lane", None)
+                for route_lane_id in route_sequence[
+                    route_sequence.index(lane_id):
+                ]:
+                    route_offset = (
+                        offset_lookup(route_lane_id)
+                        if callable(offset_lookup)
+                        else None
+                    )
+                    if route_offset is None or int(route_offset) != int(offset):
+                        break
+                    route_chain.append(int(route_lane_id))
+            master, reason = self.reference_for_lane_chain(
                 local_map,
-                offset=int(offset),
-                start_lane_id=lane_id,
+                lane_ids=route_chain or (lane_id,),
                 target_speed_mps=float(target_speed_mps),
             )
             if len(master) >= 2:
@@ -843,6 +862,7 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             or not bool(getattr(local_map, "valid", False))
         ):
             return None
+        direct_reference = None
         if bool(in_junction):
             master, reason = self.reference_from_local_map(
                 local_map,
@@ -851,24 +871,33 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             )
             source = "local_map_route_corridor"
         else:
-            master, reason = self._lane_follow_corridor_master(
+            direct_reference, reason = self.preturn_lane_reference(
                 local_map,
-                start_lane_id=int(current_lane_id),
+                lane_id=int(current_lane_id),
+                ego_x_m=float(ego_pose.get("x", 0.0)),
+                ego_y_m=float(ego_pose.get("y", 0.0)),
                 target_speed_mps=float(target_speed_mps),
+                first_forward_m=max(0.1, float(step_distance_m)),
+                spacing_m=max(0.1, float(step_distance_m)),
+                horizon_steps=max(2, int(horizon_steps) + 1),
             )
+            master = []
             source = "local_map_behavior_corridor"
-        if not master:
+        if direct_reference is not None:
+            rows = [dict(sample) for sample in direct_reference]
+        elif master:
+            window = self.window_from_reference(
+                master,
+                ego_x_m=float(ego_pose.get("x", 0.0)),
+                ego_y_m=float(ego_pose.get("y", 0.0)),
+                lower_s_m=0.0,
+                first_forward_m=max(0.1, float(step_distance_m)),
+                spacing_m=max(0.1, float(step_distance_m)),
+                count=max(2, int(horizon_steps) + 1),
+            )
+            rows = [dict(sample) for sample in window.samples]
+        else:
             return None
-        window = self.window_from_reference(
-            master,
-            ego_x_m=float(ego_pose.get("x", 0.0)),
-            ego_y_m=float(ego_pose.get("y", 0.0)),
-            lower_s_m=0.0,
-            first_forward_m=max(0.1, float(step_distance_m)),
-            spacing_m=max(0.1, float(step_distance_m)),
-            count=max(2, int(horizon_steps) + 1),
-        )
-        rows = [dict(sample) for sample in window.samples]
         if len(rows) < 2:
             return None
         terminal = rows[-1]
