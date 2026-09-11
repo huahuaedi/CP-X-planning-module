@@ -254,7 +254,15 @@ class EvaluationManager(object):
             actor_id = vm.vehicle.id
             lprint(log_file, 'Actor ID: %d' % actor_id)
 
-            loc_debug_helper = vm.agent.debug_helper
+            agent = getattr(vm, "agent", None)
+            loc_debug_helper = getattr(agent, "debug_helper", None)
+            if loc_debug_helper is None:
+                lprint(
+                    log_file,
+                    "Skipped: no OpenCDA BehaviorAgent kinematics helper "
+                    "(CP-X planner owns this vehicle).",
+                )
+                continue
             figure, perform_txt = loc_debug_helper.evaluate()
 
             # save plotting
