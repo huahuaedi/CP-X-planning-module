@@ -517,6 +517,58 @@ def test_publish_consumes_typed_planning_inputs_and_owns_acceptance():
     assert provider.snapshot(LANE_CHANGE).target_lane_id == 11
 
 
+def test_lane_change_publish_keeps_full_horizon_when_master_is_consumed():
+    provider = ReferenceLineProvider()
+    behavior = BehaviorDecision.from_mapping(
+        {
+            "decision": "lane_change_right",
+            "lc_state": "EXECUTE_LANE_CHANGE_RIGHT",
+            "current_lane_id": 10,
+            "target_lane_id": 11,
+            "target_speed_mps": 6.0,
+        },
+        default_speed_mps=6.0,
+    )
+    request = ReferenceLineRequest(
+        local_map=SimpleNamespace(ego_lane_id=10),
+        route_cursor=SimpleNamespace(segment_kind="lane_change"),
+        behavior=behavior,
+        route_revision="route-1",
+        map_epoch="town06",
+        ego_x_m=0.0,
+        ego_y_m=0.0,
+    )
+    provider.publish(
+        request,
+        _line(y_m=-1.0)[:5],
+        valid=True,
+        build_reason="lane_change_master",
+    )
+
+    result = provider.publish(
+        ReferenceLineRequest(
+            local_map=request.local_map,
+            route_cursor=request.route_cursor,
+            behavior=behavior,
+            route_revision="route-1",
+            map_epoch="town06",
+            ego_x_m=3.5,
+            ego_y_m=-1.0,
+        ),
+        _line(y_m=-1.0)[:12],
+        valid=True,
+        build_reason="committed_window",
+    )
+
+    assert result.accepted
+    assert len(result.samples) == 12
+    assert all(int(row["lane_id"]) == 11 for row in result.samples[-5:])
+    assert all(
+        float(second["x_ref_m"]) > float(first["x_ref_m"])
+        for first, second in zip(result.samples, result.samples[1:])
+    )
+
+
 def test_lane_follow_publish_windows_one_admap_master_across_ticks():
     geometries = {
         10: _local_geometry(10, [(float(x), 0.0) for x in range(0, 31)]),

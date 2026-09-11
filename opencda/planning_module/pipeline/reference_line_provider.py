@@ -496,6 +496,13 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             count=max(2, len(rows)),
         )
         published = [dict(row) for row in window.samples]
+        if mode == LANE_CHANGE:
+            published = self._complete_lane_change_window(
+                published,
+                count=max(2, len(rows)),
+                spacing_m=float(spacing_m),
+                target_lane_id=int(request.behavior.target_lane_id),
+            )
         if rows and published:
             for key in ("speed_ref_mps", "v_ref_mps", "speed_mps"):
                 if key not in rows[0]:
@@ -511,6 +518,63 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             reason="%s:%s" % (str(reason), str(window.reason)),
             geometry_revision=int(snapshot.geometry_revision),
         )
+
+    @staticmethod
+    def _complete_lane_change_window(
+        samples: Sequence[Mapping[str, object]],
+        *,
+        count: int,
+        spacing_m: float,
+        target_lane_id: int,
+    ) -> list[dict[str, object]]:
+        """Extend a consumed maneuver master along its target-lane tangent.
+
+        A lane-change lifecycle ends only after geometric completion has been
+        observed on the vehicle.  Until that event, every MPC publication
+        must retain a full horizon even when the immutable transition master
+        itself has nearly been consumed.
+        """
+
+        rows = [dict(sample) for sample in list(samples or [])]
+        if not rows:
+            return rows
+        step_m = max(0.05, float(spacing_m))
+        while len(rows) < max(2, int(count)):
+            previous = dict(rows[-1])
+            if len(rows) >= 2:
+                before = rows[-2]
+                dx_m = float(previous.get("x_ref_m", previous.get("x", 0.0))) - float(
+                    before.get("x_ref_m", before.get("x", 0.0))
+                )
+                dy_m = float(previous.get("y_ref_m", previous.get("y", 0.0))) - float(
+                    before.get("y_ref_m", before.get("y", 0.0))
+                )
+                heading_rad = (
+                    math.atan2(dy_m, dx_m)
+                    if math.hypot(dx_m, dy_m) > 1.0e-6
+                    else float(previous.get("heading_rad", 0.0))
+                )
+            else:
+                heading_rad = float(previous.get("heading_rad", 0.0))
+            x_m = float(previous.get("x_ref_m", previous.get("x", 0.0)))
+            y_m = float(previous.get("y_ref_m", previous.get("y", 0.0)))
+            station_m = float(
+                previous.get("s_ref_m", previous.get("progress_m", 0.0))
+            ) + step_m
+            padded = dict(previous)
+            padded.update({
+                "x_ref_m": x_m + step_m * math.cos(heading_rad),
+                "y_ref_m": y_m + step_m * math.sin(heading_rad),
+                "x": x_m + step_m * math.cos(heading_rad),
+                "y": y_m + step_m * math.sin(heading_rad),
+                "heading_rad": float(heading_rad),
+                "s_ref_m": float(station_m),
+                "progress_m": float(station_m),
+                "lane_id": int(target_lane_id),
+                "lane_change_progress": 1.0,
+            })
+            rows.append(padded)
+        return rows
 
     @staticmethod
     def _reference_spacing_m(
@@ -1818,19 +1882,12 @@ class ReferenceLineProvider(StableReferenceLineProvider):
         samples = window.mutable_samples() if hasattr(window, "mutable_samples") else [
             dict(sample) for sample in window.samples
         ]
-        while samples and len(samples) < int(count):
-            previous = dict(samples[-1])
-            heading_rad = float(previous.get("heading_rad", ego_heading_rad))
-            x_m = float(previous.get("x_ref_m", previous.get("x", ego_x_m)))
-            y_m = float(previous.get("y_ref_m", previous.get("y", ego_y_m)))
-            padded = dict(previous)
-            padded["x_ref_m"] = x_m + spacing_m * math.cos(heading_rad)
-            padded["y_ref_m"] = y_m + spacing_m * math.sin(heading_rad)
-            padded["x"] = float(padded["x_ref_m"])
-            padded["y"] = float(padded["y_ref_m"])
-            padded["lane_id"] = int(target_lane_id)
-            padded["lane_change_progress"] = 1.0
-            samples.append(padded)
+        samples = self._complete_lane_change_window(
+            samples,
+            count=int(count),
+            spacing_m=float(spacing_m),
+            target_lane_id=int(target_lane_id),
+        )
         for sample in samples:
             sample["speed_ref_mps"] = max(0.0, float(target_speed_mps))
             sample["v_ref_mps"] = max(0.0, float(target_speed_mps))

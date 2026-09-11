@@ -340,6 +340,19 @@ class RouteGeometrySegmentationTests(unittest.TestCase):
         self.assertEqual(segment.target_lane_id, 500144)
         self.assertEqual(geom.waypoint_for_lane_id(500144).ad_lane_id, 500144)
 
+    def test_route_lane_remains_authoritative_after_opportunistic_lane_change(self):
+        entries = self._entries(
+            [(1.0, 0.0, "LANEFOLLOW")] * 8
+        )
+        for waypoint, _option in entries:
+            waypoint.ad_lane_id = 101
+        geom = RouteGeometry.from_entries(entries)
+
+        decision = geom.decision_at(3.0, current_lane_id=202)
+
+        self.assertEqual(decision.optimal_lane_id, 101)
+        self.assertEqual(decision.next_macro_maneuver, "Continue Straight")
+
     def test_opposite_lane_change_directions_are_distinct_topology_segments(self):
         entries = self._entries(
             [(1.0, 0.0, "LANEFOLLOW")] * 2

@@ -501,7 +501,11 @@ class RouteGeometry:
             next_macro = "Continue Straight"
             macro_target_lane_id = 0
 
-        optimal_lane_id = int(current_lane_id or pose.lane_id or 0)
+        # The immutable route owns the target corridor.  The matcher-provided
+        # current lane is localization evidence only: using it as the default
+        # target silently rewrites the mission after an opportunistic lane
+        # change and prevents the vehicle from returning to its route.
+        optimal_lane_id = int(pose.lane_id or current_lane_id or 0)
         if segment is not None and segment.kind == LANE_CHANGE:
             optimal_lane_id = int(segment.target_lane_id or optimal_lane_id)
         elif macro_target_lane_id:

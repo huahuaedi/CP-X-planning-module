@@ -1295,6 +1295,7 @@ class CPXRouteManager:
         route_point_count = max(
             len(route_waypoints),
             len(self._fallback_route_points),
+            len(self._route_nodes()),
         )
         # Mission completion is a localization/goal fact.  It must not become
         # impossible merely because topology construction failed upstream.

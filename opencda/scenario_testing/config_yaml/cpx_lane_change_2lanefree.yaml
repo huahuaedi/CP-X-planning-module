@@ -26,7 +26,9 @@ description: |-
 cpx_mature:
   map_mode: 2lane_freeway_simplified
   max_ticks: 1200
-  destination_tolerance_m: 10.0
+  # Match RouteManager's mission-completion contract so the harness cannot
+  # terminate while planner diagnostics still report destination not reached.
+  destination_tolerance_m: 3.0
   run_opencda_evaluation: false
 
 # Only override what genuinely differs from cpx_profile_full_default.yaml:
