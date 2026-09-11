@@ -4,6 +4,7 @@ from omegaconf import OmegaConf
 
 from opencda.scenario_testing.cpx_mature_runner import (
     _configure_synthetic_multimodal_prediction,
+    _manager_reached_destination,
 )
 from opencda.scenario_testing.scripted_actor import ScriptedActor
 
@@ -60,6 +61,14 @@ class _Planner:
         self._prediction_snapshot_transform_cached = True
         self._prediction_snapshot_transform_fn = object()
         self._cav_intent_broadcast_enabled = True
+
+
+class _LocationVehicle:
+    def __init__(self, x, y):
+        self._location = type("Location", (), {"x": x, "y": y})()
+
+    def get_location(self):
+        return self._location
 
 
 class _Manager:
@@ -193,6 +202,30 @@ def test_runner_preserves_existing_cav_target_binding():
 
     assert ego.cpx_planner.config["synthetic_prediction_actor_ids"] == [21]
     assert target.cpx_planner._cav_intent_broadcast_enabled is False
+
+
+def test_runner_uses_active_route_completion_contract():
+    manager = type("Manager", (), {})()
+    manager.vehicle = _LocationVehicle(0.1, 0.0)
+    status = type(
+        "Status", (), {"route_found": True, "reached_destination": False}
+    )()
+    route_manager = type("RouteManager", (), {"last_status": status})()
+    manager.cpx_planner = type(
+        "Planner", (), {"route_manager": route_manager}
+    )()
+
+    assert not _manager_reached_destination(manager, [0.0, 0.0], 3.0)
+    status.reached_destination = True
+    assert _manager_reached_destination(manager, [100.0, 0.0], 3.0)
+
+
+def test_runner_keeps_euclidean_completion_for_non_cpx_manager():
+    manager = type("Manager", (), {})()
+    manager.vehicle = _LocationVehicle(1.0, 0.0)
+    manager.cpx_planner = None
+
+    assert _manager_reached_destination(manager, [0.0, 0.0], 3.0)
 
 
 def test_late_crossing_off_arm_changes_only_conflict_pipeline_and_output():

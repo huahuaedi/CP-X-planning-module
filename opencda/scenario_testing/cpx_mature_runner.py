@@ -47,14 +47,34 @@ def _distance_to_destination(vehicle, destination):
     return math.hypot(float(loc.x) - float(destination[0]), float(loc.y) - float(destination[1]))
 
 
+def _manager_reached_destination(manager, destination, tolerance_m):
+    """Use the active planner's route contract when it is available.
+
+    Euclidean goal distance and distance along the AD-map route differ on a
+    curve.  Ending the harness from the former while the planner still owns
+    the latter can truncate the final planning tick.  Non-CP-X managers keep
+    the ordinary Euclidean completion rule.
+    """
+
+    planner = getattr(manager, "cpx_planner", None)
+    route_manager = getattr(planner, "route_manager", None)
+    status = getattr(route_manager, "last_status", None)
+    if bool(getattr(status, "route_found", False)):
+        return bool(getattr(status, "reached_destination", False))
+    return _distance_to_destination(
+        manager.vehicle, destination
+    ) <= float(tolerance_m)
+
+
 def _destinations_reached(vehicle_managers, vehicle_configs, tolerance_m):
     """Return true only when every configured CAV reached its own goal."""
 
     if not vehicle_managers or len(vehicle_managers) != len(vehicle_configs):
         return False
     return all(
-        _distance_to_destination(manager.vehicle, config["destination"])
-        <= float(tolerance_m)
+        _manager_reached_destination(
+            manager, config["destination"], tolerance_m
+        )
         for manager, config in zip(vehicle_managers, vehicle_configs)
     )
 
@@ -334,9 +354,11 @@ def run_mature_scenario(opt, scenario_params, *, script_name):
                     single_cav_list, vehicle_configs, destination_tolerance_m
                 )
             else:
-                reached_destination = _distance_to_destination(
-                    ego_vehicle, vehicle_configs[0]["destination"]
-                ) <= destination_tolerance_m
+                reached_destination = _manager_reached_destination(
+                    single_cav_list[0],
+                    vehicle_configs[0]["destination"],
+                    destination_tolerance_m,
+                )
             if reached_destination:
                 print("CP-X mature scenario reached the configured destination.")
                 break
