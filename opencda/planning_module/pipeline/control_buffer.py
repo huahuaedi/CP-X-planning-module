@@ -16,6 +16,7 @@ class MPCControlBuffer:
         replan_period_s: float = 0.25,
         max_reuse_s: float = 0.35,
         max_reference_anchor_jump_m: float = 0.75,
+        max_reference_heading_jump_rad: float = 0.35,
         max_predicted_speed_error_mps: float = 0.75,
         max_target_speed_jump_mps: float = 1.0,
     ) -> None:
@@ -24,6 +25,9 @@ class MPCControlBuffer:
         self.max_reuse_s = max(0.0, float(max_reuse_s))
         self.max_reference_anchor_jump_m = max(
             0.0, float(max_reference_anchor_jump_m)
+        )
+        self.max_reference_heading_jump_rad = max(
+            0.0, float(max_reference_heading_jump_rad)
         )
         self.max_predicted_speed_error_mps = max(
             0.0, float(max_predicted_speed_error_mps)
@@ -37,10 +41,11 @@ class MPCControlBuffer:
         self._predicted_speed_sequence_mps: List[float] = []
         self._plan_target_speed_mps: Optional[float] = None
         self._context_key = ""
-        # Reference anchor expressed in the ego frame as (forward, lateral).
-        # A world-frame anchor advances with the vehicle and therefore cannot
-        # distinguish normal rolling-window progress from a geometry jump.
-        self._reference_anchor_relative_m: Optional[Tuple[float, float]] = None
+        # Reference pose expressed in the ego frame as
+        # (forward, lateral, heading_error).  Forward distance naturally
+        # changes when an immutable reference is windowed and is therefore
+        # not itself a geometry discontinuity; lateral/heading are.
+        self._reference_anchor_relative_m: Optional[Tuple[float, float, float]] = None
         self._last_reason = "control_buffer_empty"
         self._previous_speed_error_mps: Optional[float] = None
 
@@ -50,7 +55,7 @@ class MPCControlBuffer:
         sim_time_s: float,
         force_replan: bool = False,
         context_key: str = "",
-        reference_anchor_relative_m: Optional[Tuple[float, float]] = None,
+        reference_anchor_relative_m: Optional[Tuple[float, ...]] = None,
         ego_speed_mps: Optional[float] = None,
         target_speed_mps: Optional[float] = None,
         speed_error_crossing_deadband_mps: float = 0.15,
@@ -182,7 +187,7 @@ class MPCControlBuffer:
         plan_time_s: float,
         dt_s: float,
         context_key: str = "",
-        reference_anchor_relative_m: Optional[Tuple[float, float]] = None,
+        reference_anchor_relative_m: Optional[Tuple[float, ...]] = None,
         predicted_speed_sequence_mps: Optional[Any] = None,
         target_speed_mps: Optional[float] = None,
     ) -> None:
@@ -242,7 +247,7 @@ class MPCControlBuffer:
         *,
         sim_time_s: float,
         context_key: str = "",
-        reference_anchor_relative_m: Optional[Tuple[float, float]] = None,
+        reference_anchor_relative_m: Optional[Tuple[float, ...]] = None,
     ) -> Optional[Tuple[float, float, str]]:
         if self._plan_time_s is None or not self._sequence:
             self._last_reason = "control_buffer_empty"
@@ -306,24 +311,26 @@ class MPCControlBuffer:
 
     def _reference_anchor_jump_exceeded(
         self,
-        reference_anchor_relative_m: Optional[Tuple[float, float]],
+        reference_anchor_relative_m: Optional[Tuple[float, ...]],
     ) -> bool:
         current = self._finite_anchor(reference_anchor_relative_m)
         previous = self._reference_anchor_relative_m
         if current is None or previous is None:
             return bool(current is not None or previous is not None)
+        lateral_jump_m = abs(float(current[1]) - float(previous[1]))
+        heading_jump_rad = abs(math.atan2(
+            math.sin(float(current[2]) - float(previous[2])),
+            math.cos(float(current[2]) - float(previous[2])),
+        ))
         return bool(
-            math.hypot(
-                float(current[0]) - float(previous[0]),
-                float(current[1]) - float(previous[1]),
-            )
-            > float(self.max_reference_anchor_jump_m)
+            lateral_jump_m > float(self.max_reference_anchor_jump_m)
+            or heading_jump_rad > float(self.max_reference_heading_jump_rad)
         )
 
     @staticmethod
     def _finite_anchor(
-        value: Optional[Tuple[float, float]],
-    ) -> Optional[Tuple[float, float]]:
+        value: Optional[Tuple[float, ...]],
+    ) -> Optional[Tuple[float, float, float]]:
         if value is None:
             return None
         try:
@@ -331,9 +338,13 @@ class MPCControlBuffer:
             y_m = float(value[1])
         except (IndexError, TypeError, ValueError):
             return None
-        if not math.isfinite(x_m) or not math.isfinite(y_m):
+        try:
+            heading_rad = float(value[2])
+        except (IndexError, TypeError, ValueError):
+            heading_rad = 0.0
+        if not all(math.isfinite(item) for item in (x_m, y_m, heading_rad)):
             return None
-        return float(x_m), float(y_m)
+        return float(x_m), float(y_m), float(heading_rad)
 
     @property
     def last_reason(self) -> str:

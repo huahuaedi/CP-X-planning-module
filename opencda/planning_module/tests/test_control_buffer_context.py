@@ -60,6 +60,33 @@ class MPCControlBufferContextTests(unittest.TestCase):
             "control_buffer_reference_anchor_jump",
         )
 
+    def test_rolling_window_forward_progress_does_not_invalidate_buffer(self):
+        buffer = self._buffer()
+
+        self.assertFalse(buffer.should_replan(
+            sim_time_s=1.1,
+            context_key="lane_follow|LANE_KEEP|1",
+            reference_anchor_relative_m=(3.8, 2.0),
+        ))
+        self.assertIsNotNone(buffer.sample(
+            sim_time_s=1.1,
+            context_key="lane_follow|LANE_KEEP|1",
+            reference_anchor_relative_m=(3.8, 2.0),
+        ))
+
+    def test_relative_reference_heading_jump_invalidates_buffer(self):
+        buffer = self._buffer()
+
+        self.assertTrue(buffer.should_replan(
+            sim_time_s=1.1,
+            context_key="lane_follow|LANE_KEEP|1",
+            reference_anchor_relative_m=(5.0, 2.0, 0.5),
+        ))
+        self.assertEqual(
+            buffer.last_reason,
+            "control_buffer_reference_anchor_jump",
+        )
+
     def test_sample_rejects_stale_context_even_without_replan_check(self):
         buffer = self._buffer()
 

@@ -838,20 +838,32 @@ class CandidatePipelineTest(unittest.TestCase):
             road_boundary_margin_m=0.5,
         )
 
-        self.assertEqual(len(blocks), 2)
-        source_block, target_block = blocks
-        # Back edge anchored at the lock position (x=0), extending forward.
+        self.assertEqual(len(blocks), 1)
+        corridor_block = blocks[0]
+        # The first sample is a look-ahead anchor.  The configured pad must
+        # extend behind it so the ego remains inside on the commitment tick.
         self.assertAlmostEqual(
-            source_block.x_center_m - source_block.half_length_m, 0.0, places=6
+            corridor_block.x_center_m - corridor_block.half_length_m,
+            -3.0,
+            places=6,
         )
-        # Target block offset from source by exactly the lane width, same x.
-        self.assertAlmostEqual(target_block.y_center_m - source_block.y_center_m, 3.5, places=6)
-        self.assertAlmostEqual(target_block.x_center_m, source_block.x_center_m, places=6)
+        # Merge before erosion: one continuous centre-feasible corridor spans
+        # both lanes, including their shared lane marking at y=1.75.
+        self.assertAlmostEqual(corridor_block.y_center_m, 1.75, places=6)
         # half_length covers the full locked master-array span.
         full_length_m = (20 - 1) * 0.3
-        self.assertGreaterEqual(source_block.half_length_m, 0.5 * full_length_m)
-        # half_width reflects the lane half-width minus the boundary margin.
-        self.assertAlmostEqual(source_block.half_width_m, 1.75 - 0.5, places=6)
+        self.assertGreaterEqual(corridor_block.half_length_m, 0.5 * full_length_m)
+        # Only the two outer road edges receive the margin.
+        self.assertAlmostEqual(corridor_block.half_width_m, 3.5 - 0.5, places=6)
+        for lateral_m in (0.0, 1.75, 3.5):
+            signed_distance, _, _ = (
+                candidate_pipeline.road_envelope_block_signed_distance(
+                corridor_block,
+                x_m=corridor_block.x_center_m,
+                y_m=lateral_m,
+                )
+            )
+            self.assertLessEqual(signed_distance, 0.0)
 
     def test_lane_change_reference_uses_continuous_two_lane_corridor(self):
         source = [

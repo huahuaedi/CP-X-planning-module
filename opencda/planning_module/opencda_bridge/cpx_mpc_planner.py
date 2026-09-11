@@ -792,6 +792,12 @@ class CPXMPCPlannerBridge:
                     0.75,
                 )
             ),
+            max_reference_heading_jump_rad=float(
+                self.config.get(
+                    "control_buffer_max_reference_heading_jump_rad",
+                    0.35,
+                )
+            ),
             max_predicted_speed_error_mps=float(
                 self.config.get(
                     "control_buffer_max_predicted_speed_error_mps",

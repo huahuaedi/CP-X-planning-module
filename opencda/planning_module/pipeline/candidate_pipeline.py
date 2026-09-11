@@ -14,7 +14,11 @@ import json
 import math
 from typing import Callable, Dict, Mapping, Optional, Sequence
 
-from MPC.lane_keep import RoadEnvelopeBlock, normalize_lane_reference_sample
+from MPC.lane_keep import (
+    RoadEnvelopeBlock,
+    normalize_lane_reference_sample,
+    road_envelope_block_signed_distance,
+)
 from .reference_contract import ReferenceValidationResult
 from .reference_geometry import align_parallel_reference
 from .stage_contracts import ManeuverCommitment
@@ -1113,15 +1117,14 @@ def build_route_tracking_lane_change_envelope_blocks(
     length_pad_m: float = 3.0,
     min_half_width_m: float = 0.3,
 ) -> list[RoadEnvelopeBlock]:
-    """Build two static drivable-corridor blocks for a locked lane change.
+    """Build the static two-lane drivable corridor for one lane change.
 
-    One block anchors on the source lane, one on the target lane, both
-    computed once here (at lock time) and never moved again for the
-    duration of the maneuver. This is what lets a road-boundary constraint
-    built from these blocks stay satisfiable even as the *tracked
-    reference* switches from the source lane to the target lane mid-
-    maneuver -- unlike a single reference line, the union of these two
-    fixed blocks never jumps.
+    The source and target lanes share an internal lane marking.  Eroding
+    each lane separately by the ego/body margin creates an artificial gap
+    at that marking, exactly where a lane-changing vehicle must travel.
+    Instead, merge the adjacent lane cross-sections first and erode only the
+    two *outer* road edges.  The resulting block is continuous from source
+    centre to target centre and remains fixed for the commitment lifetime.
     """
 
     source = [dict(sample) for sample in list(source_reference or [])]
@@ -1147,29 +1150,62 @@ def build_route_tracking_lane_change_envelope_blocks(
         return []
 
     full_length_m = max(0.0, float(master_step_count) - 1.0) * max(0.0, float(step_distance_m))
-    half_length_m = 0.5 * full_length_m + max(0.0, float(length_pad_m))
-    half_length_m = max(1.0, float(half_length_m))
+    length_pad_m = max(0.0, float(length_pad_m))
     margin_m = max(0.0, float(road_boundary_margin_m))
 
-    blocks: list[RoadEnvelopeBlock] = []
-    for anchor in (source_anchor, target_anchor):
-        half_width_m = max(
-            float(min_half_width_m),
-            0.5 * (float(anchor.left_road_width_m) + float(anchor.right_road_width_m)) - margin_m,
-        )
-        heading_rad = float(anchor.heading_rad)
-        center_x_m = float(anchor.x_center_m) + half_length_m * math.cos(heading_rad)
-        center_y_m = float(anchor.y_center_m) + half_length_m * math.sin(heading_rad)
-        blocks.append(
-            RoadEnvelopeBlock(
-                x_center_m=float(center_x_m),
-                y_center_m=float(center_y_m),
-                heading_rad=float(heading_rad),
-                half_length_m=float(half_length_m),
-                half_width_m=float(half_width_m),
-            )
-        )
-    return blocks
+    heading_rad = float(source_anchor.heading_rad)
+    tangent_x = math.cos(heading_rad)
+    tangent_y = math.sin(heading_rad)
+    normal_x = -tangent_y
+    normal_y = tangent_x
+    target_dx_m = float(target_anchor.x_center_m) - float(source_anchor.x_center_m)
+    target_dy_m = float(target_anchor.y_center_m) - float(source_anchor.y_center_m)
+    target_along_m = target_dx_m * tangent_x + target_dy_m * tangent_y
+    target_lateral_m = target_dx_m * normal_x + target_dy_m * normal_y
+
+    # Cross-sections are expressed in the source frame.  Only the outermost
+    # edges receive the body/safety margin; the shared lane marking is not a
+    # road boundary and therefore must not constrain the vehicle centre.
+    raw_right_m = min(
+        -float(source_anchor.right_road_width_m),
+        float(target_lateral_m) - float(target_anchor.right_road_width_m),
+    )
+    raw_left_m = max(
+        float(source_anchor.left_road_width_m),
+        float(target_lateral_m) + float(target_anchor.left_road_width_m),
+    )
+    safe_right_m = float(raw_right_m) + margin_m
+    safe_left_m = float(raw_left_m) - margin_m
+    if safe_left_m <= safe_right_m:
+        return []
+    lateral_center_m = 0.5 * (safe_left_m + safe_right_m)
+    half_width_m = max(
+        float(min_half_width_m), 0.5 * (safe_left_m - safe_right_m)
+    )
+    # Candidate samples start at the first look-ahead point, not at the ego
+    # centre.  Pad both longitudinal ends so the first QP after commitment
+    # contains the current vehicle state as well as the full future master.
+    corridor_start_m = min(0.0, float(target_along_m)) - length_pad_m
+    corridor_end_m = max(
+        float(full_length_m), float(target_along_m) + float(full_length_m)
+    ) + length_pad_m
+    center_along_m = 0.5 * (corridor_start_m + corridor_end_m)
+    half_length_m = max(1.0, 0.5 * (corridor_end_m - corridor_start_m))
+    return [RoadEnvelopeBlock(
+        x_center_m=(
+            float(source_anchor.x_center_m)
+            + center_along_m * tangent_x
+            + lateral_center_m * normal_x
+        ),
+        y_center_m=(
+            float(source_anchor.y_center_m)
+            + center_along_m * tangent_y
+            + lateral_center_m * normal_y
+        ),
+        heading_rad=heading_rad,
+        half_length_m=float(half_length_m),
+        half_width_m=float(half_width_m),
+    )]
 
 
 def build_turn_reference_envelope_blocks(

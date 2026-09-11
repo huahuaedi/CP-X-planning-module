@@ -442,7 +442,13 @@ class CandidateTrajectoryEvaluator:
     ):
         """Commit and window an accepted lane-change candidate once."""
 
-        from .candidate_pipeline import predicted_lane_change_average_speed_mps
+        from .candidate_pipeline import (
+            build_route_tracking_lane_change_envelope_blocks,
+            predicted_lane_change_average_speed_mps,
+        )
+        from MPC.lane_keep import (
+            road_envelope_conservativeness_correction,
+        )
         from .reference_line_provider import LANE_CHANGE
 
         decision = str(selected.intent.decision)
@@ -507,7 +513,7 @@ class CandidateTrajectoryEvaluator:
                 ego_y_m=float(current_state[1]),
             )
             if installed:
-                maneuver_manager.begin_lane_change(
+                lifecycle = maneuver_manager.begin_lane_change(
                     option=route_option,
                     phase="executing",
                     source_lane_id=int(current_lane_id),
@@ -521,6 +527,53 @@ class CandidateTrajectoryEvaluator:
                         )
                     ),
                 )
+                # The accepted nominal trajectory already carries the
+                # station-aligned source and target centre points.  Build the
+                # continuous two-lane road envelope once at commitment; MPC
+                # consumes this immutable geometry on every execution tick.
+                boundary_width_m = max(
+                    0.1, float(getattr(mpc, "lane_width_m", 3.5))
+                )
+                source_boundary = []
+                target_boundary = []
+                for sample in selected_reference:
+                    if not all(key in sample for key in (
+                        "lane_change_source_x_m", "lane_change_source_y_m",
+                        "lane_change_target_x_m", "lane_change_target_y_m",
+                    )):
+                        continue
+                    common = {
+                        "heading_rad": float(sample.get("heading_rad", ego_yaw_rad)),
+                        "lane_width_m": boundary_width_m,
+                        "road_left_width_m": 0.5 * boundary_width_m,
+                        "road_right_width_m": 0.5 * boundary_width_m,
+                    }
+                    source_boundary.append(dict(common, **{
+                        "x_ref_m": float(sample["lane_change_source_x_m"]),
+                        "y_ref_m": float(sample["lane_change_source_y_m"]),
+                    }))
+                    target_boundary.append(dict(common, **{
+                        "x_ref_m": float(sample["lane_change_target_x_m"]),
+                        "y_ref_m": float(sample["lane_change_target_y_m"]),
+                    }))
+                envelope_blocks = build_route_tracking_lane_change_envelope_blocks(
+                    source_reference=source_boundary,
+                    target_reference=target_boundary,
+                    master_step_count=len(selected_reference),
+                    step_distance_m=max(0.1, float(geometry.step_m)),
+                    road_boundary_margin_m=float(
+                        getattr(mpc, "road_boundary_margin_m", 0.5)
+                    ),
+                    default_lane_width_m=boundary_width_m,
+                )
+                if envelope_blocks:
+                    lifecycle.envelope_blocks = envelope_blocks
+                    lifecycle.envelope_epsilon0 = (
+                        road_envelope_conservativeness_correction(
+                            envelope_blocks,
+                            rho=float(getattr(mpc, "road_envelope_rho", -8.0)),
+                        )
+                    )
             lock_reason = "accepted_candidate_committed:%s:%s" % (
                 str(install_reason), str(completion_reason)
             )

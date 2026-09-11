@@ -110,6 +110,10 @@ class MPCEntryStage:
             anchor = (
                 math.cos(ego_yaw_rad) * dx + math.sin(ego_yaw_rad) * dy,
                 -math.sin(ego_yaw_rad) * dx + math.cos(ego_yaw_rad) * dy,
+                math.atan2(
+                    math.sin(float(first.get("heading_rad", ego_yaw_rad)) - ego_yaw_rad),
+                    math.cos(float(first.get("heading_rad", ego_yaw_rad)) - ego_yaw_rad),
+                ),
             )
         force = bool(
             stop_goal_active
