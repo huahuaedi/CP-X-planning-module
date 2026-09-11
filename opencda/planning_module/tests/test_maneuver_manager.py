@@ -221,6 +221,26 @@ class ManeuverManagerTests(unittest.TestCase):
         self.assertFalse(manager.route_lane_change_edge_completed)
         self.assertEqual(manager.lane_change.completed_option, "")
 
+    def test_next_route_edge_cannot_replace_active_commitment_identity(self):
+        manager = ManeuverManager()
+        first_edge = "7:lane_change:10-11:right:500144-540156"
+        next_edge = "7:lane_change:30-31:right:540156-540155"
+        manager.observe_route_lane_change_edge(first_edge)
+        manager.begin_lane_change(
+            "lane_change_right", "executing", 500144, 540156, 7.0, []
+        )
+
+        observed = manager.observe_route_lane_change_edge(next_edge)
+
+        self.assertEqual(observed, first_edge)
+        self.assertEqual(manager.route_lane_change_edge_id, first_edge)
+        self.assertTrue(manager.complete_lane_change("contract_satisfied"))
+        self.assertEqual(manager.completed_route_lane_change_edge_id, first_edge)
+
+        manager.observe_route_lane_change_edge(next_edge)
+        self.assertEqual(manager.route_lane_change_edge_id, next_edge)
+        self.assertFalse(manager.route_lane_change_edge_completed)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -117,6 +117,12 @@ class ManeuverManager:
         """Track one immutable route edge and retire completion on advance."""
 
         edge_id = str(edge_id or "")
+        # RouteCursor can expose a following lateral edge while the current
+        # maneuver is still executing or stabilizing.  The active commitment
+        # owns its edge identity until completion; replacing it here makes
+        # finish_lane_change_lifecycle falsely mark the *next* edge complete.
+        if self.lane_change.active and self._route_lane_change_edge_id:
+            return str(self._route_lane_change_edge_id)
         if (
             self._completed_route_lane_change_edge_id
             and edge_id != self._completed_route_lane_change_edge_id
