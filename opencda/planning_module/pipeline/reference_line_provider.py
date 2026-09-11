@@ -434,7 +434,7 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             or getattr(local_map, "ego_lane_id", 0)
             or 0
         )
-        master, reason = self.reference_from_local_map(
+        master, reason = self._lane_follow_corridor_master(
             local_map,
             start_lane_id=start_lane_id,
             target_speed_mps=float(request.behavior.requested_speed_mps),
@@ -445,13 +445,57 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             str(build_reason), str(reason)
         )
 
+    def _lane_follow_corridor_master(
+        self, local_map: Any, *, start_lane_id: int,
+        target_speed_mps: float,
+    ) -> tuple[list[dict[str, object]], str]:
+        """Build lane-follow geometry without consuming future lateral route edges.
+
+        ``route_lane_sequence`` expresses topology and may already contain the
+        lane required by the *next* maneuver.  That lane authorizes behavior;
+        it must not move a lane-follow reference before the maneuver is
+        committed.  A local corridor contains only longitudinal successors,
+        so it is the correct geometry owner for this lifecycle.
+        """
+
+        lane_id = int(start_lane_id or 0)
+        offset = None
+        offset_for_lane = getattr(local_map, "offset_for_lane", None)
+        if callable(offset_for_lane):
+            offset = offset_for_lane(lane_id)
+        if offset is None:
+            for corridor in tuple(getattr(local_map, "corridors", ()) or ()):
+                lane_ids = tuple(getattr(corridor, "lane_ids", ()) or ())
+                if lane_id in {int(item) for item in lane_ids}:
+                    offset = int(getattr(corridor, "offset", 0))
+                    break
+        if offset is not None:
+            master, reason = self.reference_for_corridor(
+                local_map,
+                offset=int(offset),
+                start_lane_id=lane_id,
+                target_speed_mps=float(target_speed_mps),
+            )
+            if len(master) >= 2:
+                return master, reason
+
+        # Lightweight unit-test/map adapters may expose lane geometry without
+        # corridor metadata.  Falling back to this one physical lane preserves
+        # ownership; falling back to route_lane_sequence would reintroduce the
+        # lateral jump this method prevents.
+        return self.reference_for_lane(
+            local_map,
+            lane_id=lane_id,
+            target_speed_mps=float(target_speed_mps),
+        )
+
     def install_lane_follow_handoff(
         self, *, local_map: Any, target_lane_id: int, target_speed_mps: float,
         route_revision: str, map_epoch: str, ego_x_m: float, ego_y_m: float,
     ) -> tuple[bool, str]:
         """Install the completed maneuver corridor as lane-follow master."""
 
-        reference, build_reason = self.reference_from_local_map(
+        reference, build_reason = self._lane_follow_corridor_master(
             local_map,
             start_lane_id=int(target_lane_id),
             target_speed_mps=float(target_speed_mps),

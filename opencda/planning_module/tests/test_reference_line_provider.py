@@ -682,3 +682,56 @@ def test_lane_change_completion_installs_target_lane_follow_master():
     assert snapshot.target_lane_id == 11
     assert all(abs(float(row["y_ref_m"]) - 3.5) < 1.0e-6
                for row in snapshot.samples)
+
+
+def test_lane_follow_handoff_ignores_future_lateral_route_target():
+    current = _local_geometry(
+        11, [(float(x), 3.5) for x in range(0, 16)]
+    )
+    current_successor = _local_geometry(
+        12, [(float(x), 3.5) for x in range(15, 31)]
+    )
+    next_route_lane = _local_geometry(
+        21, [(float(x), 0.0) for x in range(0, 31)]
+    )
+    corridors = (
+        SimpleNamespace(
+            offset=0,
+            lane_ids=(11, 12),
+            lane_geometries=(current, current_successor),
+        ),
+        SimpleNamespace(
+            offset=-1,
+            lane_ids=(21,),
+            lane_geometries=(next_route_lane,),
+        ),
+    )
+    geometries = {11: current, 12: current_successor, 21: next_route_lane}
+    local_map = SimpleNamespace(
+        valid=True,
+        ego_lane_id=11,
+        # RouteCursor is allowed to expose the next required lane change, but
+        # behavior has not committed it yet.
+        route_lane_sequence=(11, 21),
+        corridors=corridors,
+        offset_for_lane=lambda lane_id: 0 if int(lane_id) in (11, 12) else -1,
+        geometry_for_lane=lambda lane_id: geometries.get(int(lane_id)),
+    )
+    provider = ReferenceLineProvider()
+
+    installed, reason = provider.install_lane_follow_handoff(
+        local_map=local_map,
+        target_lane_id=11,
+        target_speed_mps=6.0,
+        route_revision="route-1",
+        map_epoch="town05",
+        ego_x_m=5.0,
+        ego_y_m=3.5,
+    )
+
+    snapshot = provider.snapshot(LANE_FOLLOW)
+    assert installed
+    assert reason == "lane_follow_handoff_installed:target_lane=11"
+    assert set(int(row["lane_id"]) for row in snapshot.samples) == {11, 12}
+    assert all(abs(float(row["y_ref_m"]) - 3.5) < 1.0e-6
+               for row in snapshot.samples)
