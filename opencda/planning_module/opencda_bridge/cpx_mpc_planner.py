@@ -3716,19 +3716,10 @@ class CPXMPCPlannerBridge:
                 rho=float(rho),
             ),
             "rho": float(rho),
-            # This is recovery slack, not extra drivable width.  Keeping the
-            # 10k envelope penalty means MPC still prefers the body-safe tube,
-            # while the larger ceiling prevents a small tracking error at the
-            # turn apex from making the entire QP mathematically infeasible.
-            "max_slack_m": max(
-                0.10,
-                float(
-                    self.config.get(
-                        "turn_mpc_road_envelope_recovery_slack_m",
-                        1.5,
-                    )
-                ),
-            ),
+            # One geometry-safety contract for lane changes and turns: the
+            # envelope is a high-cost soft constraint, never a second hidden
+            # hard gate. Zero is MPC's explicit unbounded-slack sentinel.
+            "max_slack_m": 0.0,
         }
 
     def _lane_change_lifecycle(self):
