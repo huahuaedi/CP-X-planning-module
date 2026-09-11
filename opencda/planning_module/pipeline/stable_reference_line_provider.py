@@ -349,7 +349,8 @@ class StableReferenceLineProvider:
 
     def preturn_lane_reference(
             self, snapshot, *, lane_id, ego_x_m, ego_y_m,
-            target_speed_mps, first_forward_m, spacing_m, horizon_steps):
+            target_speed_mps, first_forward_m, spacing_m, horizon_steps,
+            topology_forward_limit_m=None):
         """Produce the current-lane-only reference before connector handoff."""
         master, reason = self.reference_for_lane(
             snapshot,
@@ -368,6 +369,38 @@ class StableReferenceLineProvider:
             count=int(horizon_steps),
         )
         reference = [dict(sample) for sample in window.samples]
+        # A stored AD-lane geometry can include samples beyond the route
+        # connector boundary.  PREPARE_TURN still belongs to the current lane;
+        # letting those samples enter its horizon makes MPC steer toward the
+        # turn before ReferenceLineProvider's explicit connector handoff.
+        # RouteCursor's distance to the next macro action is the topology
+        # boundary, so retain only physical lane samples before that boundary
+        # and let the terminal-tangent extension below fill the horizon.
+        if (
+            topology_forward_limit_m is not None
+            and math.isfinite(float(topology_forward_limit_m))
+            and len(reference) >= 2
+        ):
+            forward_limit_m = max(0.0, float(topology_forward_limit_m))
+            retained = []
+            travelled_m = 0.0
+            previous_x_m = float(ego_x_m)
+            previous_y_m = float(ego_y_m)
+            for sample in reference:
+                sample_x_m = float(sample["x_ref_m"])
+                sample_y_m = float(sample["y_ref_m"])
+                step_m = math.hypot(
+                    sample_x_m - previous_x_m,
+                    sample_y_m - previous_y_m,
+                )
+                if retained and travelled_m + step_m > forward_limit_m + 1.0e-6:
+                    break
+                retained.append(dict(sample))
+                travelled_m += float(step_m)
+                previous_x_m = sample_x_m
+                previous_y_m = sample_y_m
+            if len(retained) >= 2:
+                reference = retained
         # Do not cross a topology boundary just to fill the fixed MPC horizon.
         # Extend the terminal AD-map tangent while the connector is still
         # outside its fixed handoff arc.

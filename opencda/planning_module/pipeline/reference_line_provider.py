@@ -1046,6 +1046,7 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             first_forward_m=float(first_forward_m),
             spacing_m=float(first_forward_m),
             horizon_steps=int(request.horizon_steps),
+            topology_forward_limit_m=float(upcoming_turn_distance_m),
         )
         diagnostics = {"preturn_lane_reference_reason": str(lane_reason)}
         if reference:

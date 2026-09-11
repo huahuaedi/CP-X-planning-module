@@ -152,6 +152,49 @@ def test_single_lane_window_preserves_offset_to_snapshot_centerline():
     assert window.samples[0]["speed_ref_mps"] == 6.0
 
 
+def test_preturn_lane_stops_at_route_topology_boundary_then_extends_tangent():
+    snapshot = build_local_map_snapshot(
+        frame_id=1,
+        timestamp_s=1.0,
+        match={"valid": True, "ad_lane_id": 10},
+        local_graph={
+            "corridors": {0: [10]},
+            "lane_to_offset": {10: 0},
+            "route_lane_sequence": [10],
+            # The map lane contains geometry beyond the route connector.  It
+            # bends there, but PREPARE_TURN must not consume that bend before
+            # the explicit connector handoff.
+            "lane_centerlines": {
+                10: [
+                    {"x_m": 0.0, "y_m": 0.0},
+                    {"x_m": 10.0, "y_m": 0.0},
+                    {"x_m": 14.0, "y_m": 4.0},
+                ],
+            },
+        },
+    )
+
+    reference, reason = StableReferenceLineProvider().preturn_lane_reference(
+        snapshot,
+        lane_id=10,
+        ego_x_m=0.0,
+        ego_y_m=0.0,
+        target_speed_mps=6.0,
+        first_forward_m=2.0,
+        spacing_m=2.0,
+        horizon_steps=10,
+        topology_forward_limit_m=9.0,
+    )
+
+    assert reason == "preturn_lane:local_map_snapshot_lane:10"
+    assert len(reference) == 10
+    assert all(abs(float(sample["y_ref_m"])) < 1.0e-9 for sample in reference)
+    assert all(
+        sample.get("lane_transition_kind") == "current_ad_lane_terminal_tangent"
+        for sample in reference[4:]
+    )
+
+
 def test_lane_chain_joins_physical_adjacent_segment_to_route_successor():
     snapshot = build_local_map_snapshot(
         frame_id=1,
