@@ -82,18 +82,6 @@ class LaneChangeLifecycleStage:
             )
 
         phase = str(lifecycle.phase)
-        if phase == "target_lane_stabilization":
-            transition = self._maneuver.tick_lane_change_stabilization(
-                timeout_frames=max(1, int(self._config.get(
-                    "lane_change_stabilization_timeout_frames", 100
-                )))
-            )
-            if transition.action == "abandon":
-                self.reset_reference()
-                return (
-                    "lane_change_stabilization_timeout_to_lane_follow_recovery:"
-                    f"target_lane={target_lane_id}:map_lane={int(current_lane_id)}"
-                )
         progress = float(lifecycle.progress)
         if phase == "target_lane_stabilization" and math.isfinite(lateral_error):
             progress = min(1.0, max(0.0, 1.0 - abs(lateral_error) / lane_width_m))
@@ -132,6 +120,27 @@ class LaneChangeLifecycleStage:
             stabilization_heading_error_rad=heading_error,
         )
         if transition.action != "complete":
+            if phase == "target_lane_stabilization":
+                timeout = self._maneuver.tick_lane_change_stabilization(
+                    timeout_frames=max(1, int(self._config.get(
+                        "lane_change_stabilization_timeout_frames", 100
+                    ))),
+                    # Once the geometric contract has converged, the fixed
+                    # arc-length handoff is normal progress, not a failure.
+                    # Dropping its reference on a wall-clock timeout revives
+                    # the obsolete source-lane master.
+                    timeout_enabled=not bool(
+                        lifecycle.geometry_completion_latched
+                        or completion.complete
+                    ),
+                )
+                if timeout.action == "abandon":
+                    self.reset_reference()
+                    return (
+                        "lane_change_stabilization_timeout_to_lane_follow_recovery:"
+                        f"target_lane={target_lane_id}:"
+                        f"map_lane={int(current_lane_id)}"
+                    )
             return ""
         handoff_reason = self._install_lane_follow_handoff(
             local_map=local_map,

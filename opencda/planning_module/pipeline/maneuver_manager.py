@@ -374,12 +374,17 @@ class ManeuverManager:
             return LaneChangeTransition("hold", "handoff_geometry_not_ready")
         return LaneChangeTransition("start_stabilization", "handoff_ready")
 
-    def tick_lane_change_stabilization(self, *, timeout_frames):
+    def tick_lane_change_stabilization(
+        self, *, timeout_frames, timeout_enabled=True
+    ):
         state = self.lane_change
         if state.phase != "target_lane_stabilization":
             return LaneChangeTransition("hold", "not_stabilizing")
         state.stabilization_frames += 1
-        if state.stabilization_frames <= max(1, int(timeout_frames)):
+        if (
+            state.stabilization_frames <= max(1, int(timeout_frames))
+            or not bool(timeout_enabled)
+        ):
             return LaneChangeTransition("hold", "stabilizing")
         self.abandon_lane_change(
             "stabilization_timeout", suppress_recommit=True

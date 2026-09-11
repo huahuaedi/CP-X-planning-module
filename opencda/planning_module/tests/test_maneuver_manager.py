@@ -101,6 +101,23 @@ class ManeuverManagerTests(unittest.TestCase):
             "hold",
         )
 
+    def test_converged_stabilization_does_not_timeout_during_arc_handoff(self):
+        manager = ManeuverManager()
+        manager.begin_lane_change(
+            "lane_change_left", "executing", 1, 2, 7.0, []
+        )
+        manager.begin_lane_change_stabilization()
+
+        for _ in range(4):
+            transition = manager.tick_lane_change_stabilization(
+                timeout_frames=2,
+                timeout_enabled=False,
+            )
+
+        self.assertEqual(transition.action, "hold")
+        self.assertTrue(manager.lane_change.active)
+        self.assertEqual(manager.lane_change.stabilization_frames, 4)
+
     def test_completion_waits_for_transition_arc(self):
         manager = ManeuverManager()
         manager.begin_lane_change(
