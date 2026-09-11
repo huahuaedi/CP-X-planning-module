@@ -587,7 +587,7 @@ mpc:
       lane_center_q_psi: 2.0
       road_boundary_w: 10000.0
       road_boundary_margin_m: 0.50
-      road_boundary_max_slack_m: 0.0
+      road_boundary_max_slack_m: 0.10
       w_control: 8.0
       q_a: 8.0
       q_delta: 160.0
@@ -603,7 +603,7 @@ mpc:
       lane_center_q_psi: 1.0
       road_boundary_w: 1500.0
       road_boundary_margin_m: 0.45
-      road_boundary_max_slack_m: 0.0
+      road_boundary_max_slack_m: 0.20
       w_control: 18.0
       q_a: 18.0
       q_delta: 260.0
@@ -619,7 +619,7 @@ mpc:
       lane_center_q_psi: 0.8
       road_boundary_w: 1000.0
       road_boundary_margin_m: 0.45
-      road_boundary_max_slack_m: 0.0
+      road_boundary_max_slack_m: 0.25
       w_control: 22.0
       q_a: 24.0
       q_delta: 320.0
@@ -635,7 +635,7 @@ mpc:
       lane_center_q_psi: 2.2
       road_boundary_w: 16000.0
       road_boundary_margin_m: 0.65
-      road_boundary_max_slack_m: 0.0
+      road_boundary_max_slack_m: 0.06
       w_control: 5.0
       q_a: 5.0
       q_delta: 60.0
@@ -651,7 +651,7 @@ mpc:
       lane_center_q_psi: 2.5
       road_boundary_w: 12000.0
       road_boundary_margin_m: 0.55
-      road_boundary_max_slack_m: 0.0
+      road_boundary_max_slack_m: 0.08
       w_control: 10.0
       q_a: 12.0
       q_delta: 140.0
@@ -667,7 +667,7 @@ mpc:
       lane_center_q_psi: 2.0
       road_boundary_w: 11000.0
       road_boundary_margin_m: 0.55
-      road_boundary_max_slack_m: 0.0
+      road_boundary_max_slack_m: 0.09
       w_control: 7.0
       q_a: 7.0
       q_delta: 130.0
@@ -683,7 +683,7 @@ mpc:
       lane_center_q_psi: 2.5
       road_boundary_w: 14000.0
       road_boundary_margin_m: 0.60
-      road_boundary_max_slack_m: 0.0
+      road_boundary_max_slack_m: 0.07
       w_control: 8.0
       q_a: 8.0
       q_delta: 160.0
@@ -699,7 +699,7 @@ mpc:
       lane_center_q_psi: 2.0
       road_boundary_w: 10000.0
       road_boundary_margin_m: 0.60
-      road_boundary_max_slack_m: 0.0
+      road_boundary_max_slack_m: 0.10
       w_control: 14.0
       q_a: 14.0
       q_delta: 180.0
@@ -773,13 +773,9 @@ mpc:
       # Zero cost while both road-edge clearances are above this margin [m].
       margin_m: 0.50
 
-      # Feasibility-restoration slack.  Zero means unbounded; the large
-      # quadratic weight still makes leaving the admitted AD-map corridor
-      # expensive, while a transient tracking error can no longer make the
-      # whole control QP infeasible. Grossly invalid geometry is rejected by
-      # the reference contract before MPC, and actual clearance is monitored
-      # by the safety supervisor.
-      max_slack_m: 0.0
+      # Hard-ish cap on boundary slack [m]. Keeps severe boundary violations
+      # from being accepted as merely high-cost soft-constraint solutions.
+      max_slack_m: 0.10
 
     # Road-envelope block-union hard constraint (Yu et al., "Spatial
     # Envelope MPC," arXiv:2509.18506, Sec. III-B1). Off by default: only
@@ -798,9 +794,8 @@ mpc:
       enabled: true
       # Quadratic penalty weight on the envelope slack.
       w_envelope: 10000.0
-      # Zero means unbounded feasibility-restoration slack, under the same
-      # high penalty and upstream/downstream safety contract as road_boundary.
-      max_slack_m: 0.0
+      # Hard-ish cap on envelope slack [m].
+      max_slack_m: 0.10
       # p-norm exponent for the hyperellipse blocks. Must stay an even
       # integer (removes the abs()-kink, keeps the block distance smooth).
       shape_exponent: 4.0

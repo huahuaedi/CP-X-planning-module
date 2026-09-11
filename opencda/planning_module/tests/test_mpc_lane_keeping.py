@@ -674,53 +674,6 @@ class MPCLaneKeepingIntegrationTests(unittest.TestCase):
         self.assertIsNotNone(solution_on)
         self.assertIn("solved", status_on)
 
-    def test_unbounded_boundary_slack_is_feasibility_restoration_not_a_hard_gate(self):
-        """An admitted reference may be temporarily unreachable, not invalid.
-
-        The reference contract and safety supervisor own hard geometry
-        rejection.  MPC's boundary term must remain solvable while steering
-        rate catches up, otherwise a small tracking transient is converted
-        into a full-vehicle braking fallback.
-        """
-
-        x0 = np.array([0.0, 0.0, 2.6, 0.0], dtype=float)
-        horizon_steps = 10
-        x_ref_rollout = np.tile(x0, (horizon_steps + 1, 1))
-        u_ref_rollout = np.zeros((horizon_steps, 2), dtype=float)
-        target_lane_reference = [
-            {
-                "x_ref_m": 0.3 * float(k),
-                "y_ref_m": 3.5,
-                "heading_rad": 0.0,
-                "lane_id": 2,
-                "lane_width_m": 3.5,
-                "road_center_offset_m": 0.0,
-                "road_left_width_m": 1.75,
-                "road_right_width_m": 1.75,
-            }
-            for k in range(horizon_steps + 1)
-        ]
-
-        mpc = MPC(*self._lane_change_mpc_config(road_envelope_enabled=False))
-        mpc.horizon_steps = horizon_steps
-        mpc.road_boundary_max_slack_m = 0.0
-        P, q, A, l, u, _ = mpc._build_qp(
-            x0=x0,
-            x_ref_target=x0,
-            object_snapshots=[],
-            current_acceleration_mps2=0.0,
-            current_steering_rad=0.0,
-            x_ref_rollout=x_ref_rollout,
-            u_ref_rollout=u_ref_rollout,
-            lane_center_reference=target_lane_reference,
-            speed_upper_bound_mps=None,
-            reachable_speed_floor_profile_mps=None,
-        )
-        solution, status, _ = mpc._solve_qp(P=P, q=q, A=A, l=l, u=u)
-
-        self.assertIsNotNone(solution)
-        self.assertIn("solved", status)
-
     def test_road_envelope_gradient_points_away_from_nearer_block(self):
         # Sign-convention sanity check before this ever reaches CARLA: the
         # gradient of g_lse must point in the direction that *increases*
