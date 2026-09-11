@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from pipeline.perception_stage import PerceptionStage
+from pipeline.tracker import CPXObstacleTracker
 
 
 def test_perception_stage_builds_one_fused_obstacle_view():
@@ -63,3 +64,37 @@ def test_ignore_dynamic_objects_is_applied_before_mpc_and_gap():
     assert result.fused_objects == ()
     assert result.mpc_objects == ()
     assert observed == {}
+
+
+def test_perception_stage_tracks_before_front_speed_is_resolved():
+    """The initial speed/safety decision must consume tracker kinematics."""
+
+    stage = PerceptionStage(
+        obstacle_tracker=CPXObstacleTracker(),
+        max_mpc_obstacles=4,
+    )
+    ego = SimpleNamespace(x=0.0, y=0.0)
+
+    stage.build(
+        detected_objects={"vehicles": [{
+            "vehicle_id": "front", "x": 10.0, "y": 0.0, "v": 0.0,
+        }]},
+        cp_payload={},
+        ego_location=ego,
+        ego_yaw_rad=0.0,
+        timestamp_s=1.0,
+        ignore_dynamic_objects=False,
+    )
+    result = stage.build(
+        detected_objects={"vehicles": [{
+            "vehicle_id": "front", "x": 10.4, "y": 0.0, "v": 0.0,
+        }]},
+        cp_payload={},
+        ego_location=ego,
+        ego_yaw_rad=0.0,
+        timestamp_s=1.1,
+        ignore_dynamic_objects=False,
+    )
+
+    assert result.front_actor_speed_mps == pytest.approx(4.0)
+    assert result.fused_objects[0]["kinematics_source"] == "position_finite_difference"

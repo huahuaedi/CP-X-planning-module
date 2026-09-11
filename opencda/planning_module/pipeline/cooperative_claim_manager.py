@@ -42,8 +42,11 @@ class CooperativeClaimManager:
             end_m = proposal.s_end_m
             station_id = int(proposal.station_corridor_id)
             if previous is not None and previous.participates:
-                source_id = source_id or int(previous.source_corridor_id)
-                target_id = target_id or int(previous.target_corridor_id)
+                # Continuous map matching may report the target lane before
+                # the physical maneuver is complete.  Claim topology belongs
+                # to this lifecycle owner and is immutable until release.
+                source_id = int(previous.source_corridor_id) or source_id
+                target_id = int(previous.target_corridor_id) or target_id
                 station_id = station_id or int(previous.station_corridor_id)
                 if begin_m is None:
                     begin_m = previous.s_begin_m

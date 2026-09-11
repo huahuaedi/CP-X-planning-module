@@ -30,12 +30,14 @@ class PerceptionStage:
     def __init__(
         self,
         *,
+        obstacle_tracker: Any = None,
         max_mpc_obstacles: int = 0,
         ego_length_m: float = 4.5,
         ego_width_m: float = 2.0,
         lane_width_m: float = 3.5,
         lane_change_boundary_overlap_m: float = 0.75,
     ) -> None:
+        self._obstacle_tracker = obstacle_tracker
         self._max_mpc_obstacles = max(0, int(max_mpc_obstacles))
         self._ego_half_length_m = 0.5 * max(0.0, float(ego_length_m))
         self._ego_width_m = max(0.5, float(ego_width_m))
@@ -62,6 +64,15 @@ class PerceptionStage:
         )
         if bool(ignore_dynamic_objects):
             fused = []
+        elif self._obstacle_tracker is not None:
+            # Fusion and temporal tracking form one perception boundary.  All
+            # consumers of PerceptionStageResult therefore observe the same
+            # recovered pose/velocity rather than mixing raw detections with
+            # a separately tracked view later in the planning cycle.
+            fused = self._obstacle_tracker.update(
+                obstacle_snapshots=fused,
+                timestamp_s=float(timestamp_s),
+            )
         mpc_objects = self.limit_for_mpc(fused, ego_location=ego_location)
         gap_m, actor_id = self.front_gap(
             ego_location=ego_location,

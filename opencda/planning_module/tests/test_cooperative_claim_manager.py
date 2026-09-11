@@ -106,3 +106,29 @@ def test_committed_claim_preserves_proposed_spatial_resource_on_publish():
     assert committed.station_corridor_id == 30
     assert committed.s_begin_m == 100.0
     assert committed.s_end_m == 150.0
+
+
+def test_committed_claim_does_not_follow_matcher_into_target_lane():
+    manager = CooperativeClaimManager(enabled=True)
+    manager.claim(
+        proposal=_proposal(source=10, target=20, station=20,
+                           s_begin=40.0, s_end=90.0),
+        sim_time_s=1.0,
+    )
+    manager.claim(
+        proposal=_proposal(source=10, target=20, station=20,
+                           active=True, committed_at_s=1.4,
+                           s_begin=42.0, s_end=92.0),
+        sim_time_s=1.5,
+    )
+    updated = manager.claim(
+        proposal=_proposal(source=20, target=20, station=20,
+                           active=True, committed_at_s=1.4,
+                           s_begin=50.0, s_end=100.0),
+        sim_time_s=1.7,
+    )
+    assert updated.resource_id == "lane_change:10:20"
+    assert updated.source_corridor_id == 10
+    assert updated.target_corridor_id == 20
+    assert updated.s_begin_m == 50.0
+    assert updated.s_end_m == 100.0

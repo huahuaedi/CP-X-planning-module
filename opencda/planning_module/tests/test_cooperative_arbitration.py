@@ -165,16 +165,30 @@ class ConflictRoleAssignmentTest(unittest.TestCase):
         )
         self.assertEqual(a, [])
 
-    def test_inactive_or_out_of_range_or_behind_cav_skipped(self):
+    def test_inactive_or_behind_cav_skipped(self):
         self.assertEqual(
             self._assign([_cav(2, (12.0, 0.0), 5.0, active=False)])[0], []
         )
         self.assertEqual(
-            self._assign([_cav(2, (500.0, 0.0), 5.0)])[0], []
-        )
-        self.assertEqual(
             self._assign([_cav(2, (-12.0, 0.0), 5.0)])[0], []
         )
+
+    def test_stage_b_does_not_repeat_stage_a_distance_filtering(self):
+        diagnostics = {}
+        roles, _ = assign_conflict_roles(
+            my_claim=_claim(committed_at_s=10.0),
+            my_actor_id=5,
+            my_position_xy=(0.0, 0.0),
+            my_heading_rad=0.0,
+            cavs=[_cav(2, (42.0, 0.0), committed_at_s=5.0)],
+            diagnostics=diagnostics,
+        )
+        self.assertEqual(len(roles), 1)
+        self.assertEqual(
+            diagnostics["eligibility"]["2"]["reason"],
+            "assigned",
+        )
+        self.assertEqual(diagnostics["assignment_count"], 1)
 
     def test_hysteresis_holds_role_through_a_transient_flip(self):
         # tick 1: cav commits later -> ego proceeds, latched.

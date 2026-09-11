@@ -1,0 +1,83 @@
+base_config: cpx_profile_full_default.yaml
+
+description: |-
+  Minimal Town05 perpendicular-crossing regression. One CP-X ego follows the
+  eastbound lane through the junction near (-124.5, 91.4), while one
+  deterministic non-CP vehicle travels southbound across the same conflict
+  point. The ego consumes three synthetic prediction modes at 5 Hz; no CV
+  experiment arm, background traffic, or traffic-light policy is involved.
+
+cpx_mature:
+  town: Town05
+  max_ticks: 900
+  destination_tolerance_m: 5.0
+  run_opencda_evaluation: false
+  synthetic_multimodal_prediction:
+    enabled: true
+    prediction_mode: synthetic_multimodal
+    ego_cav_index: 0
+    target_scripted_actor_index: 0
+
+carla_traffic_manager:
+  vehicle_list: []
+  range: ~
+
+vehicle_base:
+  behavior:
+    ignore_traffic_light: true
+    overtake_allowed: false
+  planner:
+    global_planner_xodr_path: Global_Planner/maps/Town05.xodr
+    cav_conflict_enabled: true
+    # OpenCDA's behavior flag and CP-X traffic-control input are separate.
+    # Both are disabled so this experiment isolates prediction/corridor logic.
+    ignore_traffic_control: true
+    following_idm_enabled: true
+    prediction_lane_following_enabled: false
+    prediction_mode: synthetic_multimodal
+    prediction_update_hz: 5.0
+    prediction_mode_min_probability: 0.05
+    prediction_credible_probability_min: 0.15
+    prediction_credible_ttc_s: 2.0
+    record_evaluation_metrics: true
+    debug_log_formats: [jsonl]
+
+scenario:
+  single_cav_list:
+    - name: town05_crossing_ego
+      # Verified Town05 approach used by the imported MDrive left-turn case;
+      # this test continues straight instead of turning at the junction.
+      spawn_position: [-173.802, 91.368, 0.6, 0, 0.057, 0]
+      destination: [-72.0, 91.368, 0.6]
+      v2x:
+        enabled: true
+        communication_range: 100
+      planner:
+        target_speed_mps: 8.0
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_town05_crossing_multimodal
+        # Investigation-only: dump every tick with an active Stage-D corridor
+        # row to tools/frame_replay.py's FrameCapture format. min_row_count
+        # keeps this to the conflict window instead of the whole run.
+        frame_capture:
+          out_dir: artifacts/deflection_frames/two_vehicle_crossing
+          min_row_count: 1
+          max_frames: 90
+
+  scripted_actors:
+    - blueprint: vehicle.tesla.model3
+      # Southbound leg of the same Town05 junction. Held at the start point
+      # until the ego crosses x = -150 (~25.5 m short of the conflict point,
+      # near cruise speed); it then covers the 16.8 m to y = 91.368 in ~2.8 s
+      # while the ego needs ~3.0 s -- the crosser enters the box just ahead,
+      # so the ego is the yielding party. The trigger removes the ego's
+      # variable spawn-settle + acceleration time from the alignment.
+      path:
+        - [-124.475, 108.0]
+        - [-124.475, 91.368]
+        - [-124.475, 20.0]
+      speed_mps: 6.0
+      z: 0.6
+      trigger:
+        axis: x
+        cross: -150.0
+        from: below

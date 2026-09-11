@@ -42,7 +42,7 @@ def test_end_to_end_follow_is_delegated_to_speed_planner():
     assert r.corridor.feasible
 
 
-def test_multimodal_follow_is_also_delegated_to_speed_planner():
+def test_multimodal_follow_reduces_modes_to_prediction_safety_corridor():
     modes = [
         {"path": [{"x": 30.0 + 0.6 * k, "y": 0.1} for k in range(21)],
          "probability": probability}
@@ -56,7 +56,30 @@ def test_multimodal_follow_is_also_delegated_to_speed_planner():
         }],
     )
     assert set(result.diagnostics["tags"].values()) == {FOLLOW}
+    assert any(value < _BIG for value in result.corridor.s_hi)
+    assert any(result.corridor.binding)
+
+
+def test_multimodal_risk_beyond_route_end_does_not_constrain_mpc():
+    modes = [
+        {
+            "path": [{"x": 15.0, "y": 0.1} for _ in range(21)],
+            "probability": probability,
+        }
+        for probability in (0.55, 0.25, 0.20)
+    ]
+    result = resolve_conflicts(
+        reference_samples=REF,
+        ego_snapshot={"x": 0.0, "y": 0.0, "v": 4.0, "psi": 0.0},
+        my_actor_id=1,
+        obstacle_snapshots=[{
+            "id": "lead", "x": 15.0, "y": 0.1, "v": 0.0,
+            "psi": 0.0, "predicted_modes": modes,
+        }],
+        nominal_progress_limit_m=5.0,
+    )
     assert all(value >= _BIG for value in result.corridor.s_hi)
+    assert result.diagnostics["credible_mode_veto_count"] == 0
 
 
 def test_stage_c_reuses_rebased_corridor_between_scheduled_updates():
@@ -72,6 +95,21 @@ def test_stage_c_reuses_rebased_corridor_between_scheduled_updates():
     )
     assert result.corridor is cached
     assert not result.diagnostics["corridor_rebuilt"]
+
+
+def test_stage_c_refresh_retains_pending_rows_for_unchanged_conflict():
+    cached = Corridor(
+        s_lo=[-_BIG] * 21, s_hi=[18.0] * 21,
+        binding=["cached-peer"] * 21,
+    )
+    result = resolve_conflicts(
+        reference_samples=REF, ego_snapshot=EGO, my_actor_id=1,
+        obstacle_snapshots=[], tag_state={}, rebuild_corridor=True,
+        cached_corridor=cached,
+    )
+    assert result.diagnostics["corridor_rebuilt"]
+    assert result.corridor.s_hi == cached.s_hi
+    assert result.corridor.binding == cached.binding
 
 
 def test_cooperative_make_gap_overrides_generic_follow_handoff():
@@ -338,3 +376,45 @@ def test_multimodal_probability_boundaries_are_inclusive():
     assert resolve(0.149).diagnostics["credible_mode_veto_count"] == 0
     assert resolve(0.150).diagnostics["credible_mode_veto_count"] == 1
     assert resolve(0.151).diagnostics["credible_mode_veto_count"] == 1
+
+
+def test_credible_veto_hysteresis_holds_through_a_brief_flicker():
+    from pipeline.cav_conflict_pipeline import _apply_veto_hysteresis
+
+    state = {}
+    # tick 0: real danger -> engage immediately
+    d, held, e = _apply_veto_hysteresis(
+        mode_id="p::mode1", raw_dangerous=True, recovered=False,
+        veto_state=state, release_ticks=5)
+    state = {"p::mode1": e}
+    assert d and not held
+
+    # ticks 1-4: raw flag drops but risk has NOT comfortably receded ->
+    # veto is HELD, not released
+    for _ in range(4):
+        d, held, e = _apply_veto_hysteresis(
+            mode_id="p::mode1", raw_dangerous=False, recovered=False,
+            veto_state=state, release_ticks=5)
+        state = {"p::mode1": e}
+        assert d and held
+
+    # a single raw re-trigger resets the clear streak
+    d, held, e = _apply_veto_hysteresis(
+        mode_id="p::mode1", raw_dangerous=True, recovered=False,
+        veto_state=state, release_ticks=5)
+    state = {"p::mode1": e}
+    assert d and not held and e["clear_streak"] == 0
+
+
+def test_credible_veto_releases_after_sustained_clear_and_recovery():
+    from pipeline.cav_conflict_pipeline import _apply_veto_hysteresis
+
+    state = {"p::mode1": {"dangerous": True, "clear_streak": 0}}
+    for i in range(5):
+        d, held, e = _apply_veto_hysteresis(
+            mode_id="p::mode1", raw_dangerous=False, recovered=True,
+            veto_state=state, release_ticks=5)
+        state = {"p::mode1": e}
+        if i < 4:
+            assert d and held           # still holding
+    assert not d and not held           # released on the 5th sustained clear+recovered

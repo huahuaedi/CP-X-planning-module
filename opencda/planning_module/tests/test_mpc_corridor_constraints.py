@@ -14,6 +14,23 @@ def test_open_corridor_yields_no_rows():
     assert corridor_rows(cor, REF) == []
 
 
+def test_curved_nonuniform_reference_cap_has_correct_world_boundary():
+    # Station 15 is (10, 5), on the northbound segment, regardless of
+    # extra samples on the first metre of the eastbound segment.
+    for points in ([(0, 0), (10, 0), (10, 20)],
+                   [(0, 0), (0.1, 0), (0.2, 0), (1, 0), (10, 0), (10, 20)]):
+        reference = [{"x": x, "y": y} for x, y in points]
+        corridor = Corridor(s_lo=[-_BIG, -_BIG], s_hi=[_BIG, 15],
+                            binding=["", "crossing"])
+        for ox, oy in [(0, 0), (3, 2)]:
+            row = corridor_rows(corridor, reference, (ox, oy))[0]
+            assert abs(row.a_x) < 1e-9
+            assert abs(row.a_y - 1) < 1e-9
+            assert abs(row.a_x * (10 - ox) + row.a_y * (5 - oy)
+                       - row.upper) < 1e-9
+            assert row.a_x * (10 - ox) + row.a_y * (6 - oy) > row.upper
+
+
 def test_current_state_stage_is_never_constrained():
     cor = Corridor(
         s_lo=[-_BIG, -_BIG],

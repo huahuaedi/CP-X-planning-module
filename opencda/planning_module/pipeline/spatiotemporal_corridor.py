@@ -6,7 +6,10 @@ as linear constraints:
 
     s_lo(t_k) <= s_ego(t_k) <= s_hi(t_k)     for k = 0 .. N
 
-* FOLLOW / LEAD_BRAKE            -> no row; SpeedPlanner/IDM is sole owner.
+* deterministic FOLLOW / LEAD_BRAKE -> no row; SpeedPlanner/IDM owns nominal
+  car-following.
+* prediction-mode FOLLOW / LEAD_BRAKE -> optional RSS upper bound used while
+  reducing probabilistic futures to one MPC safety corridor.
 * CUT_IN                          -> s_hi capped a RSS gap behind the agent.
 * CROSSING / ONCOMING, ego yields -> s_hi capped just short of the
   conflict point while the agent is near it.
@@ -41,8 +44,8 @@ from opencda.planning_module.pipeline.conflict_classifier import (
 from opencda.planning_module.pipeline.cooperative_arbitration import ConflictAssignment
 from opencda.planning_module.pipeline.mpc_obstacle_relevance import (
     _obstacle_track_xy,
-    _point_to_polyline,
     _polyline_xy,
+    project_to_extended_polyline,
 )
 from opencda.planning_module.pipeline.rss import RSSParams, longitudinal_safe_distance
 
@@ -62,6 +65,14 @@ class CorridorParams:
     # corridor overrides a stale ``proceed`` role.
     proceed_safety_override_ttc_s: float = 1.0
     ego_half_length_m: float = 2.45
+    # Magnitude of the MPC's own hard deceleration limit (mpc.yaml
+    # constraints.min_acceleration_mps2). A cap tighter than what this lets
+    # the ego reach by braking alone is not a geometry problem Stage D can
+    # solve honestly: the longitudinal row only constrains the projection
+    # onto the reference tangent, so an unreachable cap is a cheaper QP
+    # solution via a heading rotation than via the (already maxed-out) brake
+    # -- see build_longitudinal_corridor's kinematic floor below.
+    max_braking_mps2: float = 3.0
 
 
 @dataclass
@@ -96,8 +107,8 @@ def rebase_corridor(
             first_infeasible_stage=corridor.first_infeasible_stage,
         )
     ego_x, ego_y = float(current_ego_xy[0]), float(current_ego_xy[1])
-    source_ego_s = _point_to_polyline(ego_x, ego_y, source_poly)[1]
-    current_ego_s = _point_to_polyline(ego_x, ego_y, current_poly)[1]
+    source_ego_s = project_to_extended_polyline(ego_x, ego_y, source_poly)[1]
+    current_ego_s = project_to_extended_polyline(ego_x, ego_y, current_poly)[1]
     station_shift = float(current_ego_s - source_ego_s)
     stage_shift = max(0, int(float(age_s) / max(1.0e-3, float(dt_s))))
     n = len(corridor.s_hi)
@@ -126,6 +137,43 @@ def rebase_corridor(
     return rebased
 
 
+def retain_pending_corridor(
+    current: Corridor, previous: Optional[Corridor],
+) -> Corridor:
+    """Keep previously published bounds until their stages age out.
+
+    ``previous`` must already be time/station rebased to the current tick.
+    A fresh prediction may tighten a bound immediately, but an open or looser
+    refresh cannot revoke a constraint that was published for a still-future
+    stage.  The rolling horizon removes those rows naturally.  This is the
+    corridor lifecycle contract; it avoids a second timer/hysteresis owner.
+    """
+
+    if previous is None:
+        return current
+    n = min(len(current.s_hi), len(previous.s_hi))
+    if n <= 0:
+        return current
+    for k in range(n):
+        previous_hi = float(previous.s_hi[k])
+        if previous_hi < float(current.s_hi[k]):
+            current.s_hi[k] = previous_hi
+            current.binding[k] = str(previous.binding[k])
+        previous_lo = float(previous.s_lo[k])
+        if previous_lo > float(current.s_lo[k]):
+            current.s_lo[k] = previous_lo
+    if not bool(previous.feasible):
+        current.feasible = False
+        previous_stage = previous.first_infeasible_stage
+        if previous_stage is not None and (
+            current.first_infeasible_stage is None
+            or int(previous_stage) < int(current.first_infeasible_stage)
+        ):
+            current.first_infeasible_stage = int(previous_stage)
+    current.clamp_and_check()
+    return current
+
+
 def aggregate_mode_corridors(
     mode_corridors: Sequence[Tuple[Corridor, float, bool, str]],
     nominal_s: Sequence[float],
@@ -148,6 +196,22 @@ def aggregate_mode_corridors(
     total_probability = sum(float(item[1]) for item in retained)
     if n == 0 or total_probability <= 1.0e-9:
         return out
+
+    # A per-mode corridor's own caps are already floored at what braking can
+    # reach (build_longitudinal_corridor), so the weighted expectation and
+    # the veto minimum below are algebraically bounded below by that floor
+    # too -- the aggregated numbers are correct with no extra work. Only the
+    # informational flag needs carrying across: it does not fall out of a
+    # fresh ``Corridor()``, and diagnostics / warm-start invalidation read it
+    # from this aggregated result, not the per-mode ones.
+    for corridor, _probability, _dangerous, _label in retained:
+        if not corridor.feasible:
+            out.feasible = False
+            if corridor.first_infeasible_stage is not None and (
+                out.first_infeasible_stage is None
+                or corridor.first_infeasible_stage < out.first_infeasible_stage
+            ):
+                out.first_infeasible_stage = corridor.first_infeasible_stage
 
     for k in range(n):
         neutral = float(nominal_s[k])
@@ -181,6 +245,26 @@ def _f(m: Mapping[str, Any], *keys: str, default: float = 0.0) -> float:
     return default
 
 
+def _min_reachable_station_m(v0_mps: float, decel_mps2: float, t_s: float) -> float:
+    """Least station the ego can be at after ``t_s`` s, braking as hard as
+    ``decel_mps2`` (magnitude) starting now.
+
+    A longitudinal cap tighter than this asks for more deceleration than the
+    vehicle has; the corridor cannot honor it by slowing down, and Stage D's
+    direction-only row lets the QP satisfy the number anyway by rotating
+    heading away from the reference tangent instead of admitting the row is
+    unreachable. This is the floor that keeps a cap physically honest.
+    """
+
+    v0 = max(0.0, float(v0_mps))
+    decel = max(1.0e-6, float(decel_mps2))
+    t = max(0.0, float(t_s))
+    t_stop = v0 / decel
+    if t >= t_stop:
+        return (v0 * v0) / (2.0 * decel)
+    return v0 * t - 0.5 * decel * t * t
+
+
 def _agent_station_series(
     agent_snapshot: Mapping[str, Any], poly: Sequence[XY], n: int
 ) -> List[float]:
@@ -190,7 +274,7 @@ def _agent_station_series(
     out: List[float] = []
     for k in range(n):
         px, py = track[min(k, len(track) - 1)]
-        out.append(_point_to_polyline(px, py, poly)[1])
+        out.append(project_to_extended_polyline(px, py, poly)[1])
     return out
 
 
@@ -200,8 +284,17 @@ def build_longitudinal_corridor(
     items: Sequence[Tuple[Mapping[str, Any], ConflictTag, Optional[ConflictAssignment]]],
     p: CorridorParams = CorridorParams(),
     rss: RSSParams = RSSParams(),
+    *,
+    constrain_follow: bool = False,
 ) -> Corridor:
-    """``items`` is ``(agent_snapshot, tag, assignment|None)`` per agent."""
+    """Build one longitudinal safety envelope.
+
+    ``items`` is ``(agent_snapshot, tag, assignment|None)`` per agent.
+    ``constrain_follow`` is reserved for prediction-mode reduction.  The
+    ordinary measured lead remains owned by SpeedPlanner/IDM; predicted
+    futures need a time-indexed envelope or their probabilities cannot affect
+    MPC at all.
+    """
 
     n = max(1, int(p.horizon_steps))
     dt = max(1e-3, float(p.dt_s))
@@ -216,10 +309,26 @@ def build_longitudinal_corridor(
     ego_heading = _f(ego_snapshot, "psi", "heading_rad", "yaw")
     ego_tx, ego_ty = math.cos(ego_heading), math.sin(ego_heading)
 
+    # Per-stage floor: the least station reachable by braking at the MPC's
+    # own hard limit, starting now. A cap below this is not a row Stage D
+    # can honor honestly (see _min_reachable_station_m); flooring it there
+    # keeps every row solvable by slowing down, and flags the corridor so a
+    # held warm-start solution is not reused across the transition.
+    braking_floor = [
+        _min_reachable_station_m(ego_v, p.max_braking_mps2, k * dt)
+        for k in range(n + 1)
+    ]
+
     def _cap(k: int, value: float, agent_id: str) -> None:
-        if value < cor.s_hi[k]:
-            cor.s_hi[k] = value
+        floor = braking_floor[k]
+        effective = max(float(value), floor)
+        if effective < cor.s_hi[k]:
+            cor.s_hi[k] = effective
             cor.binding[k] = agent_id
+        if float(value) < floor - 1.0e-9:
+            cor.feasible = False
+            if cor.first_infeasible_stage is None or k < cor.first_infeasible_stage:
+                cor.first_infeasible_stage = k
 
     for agent, tag, assignment in list(items or []):
         role = str(getattr(assignment, "role", "") or "")
@@ -246,12 +355,17 @@ def build_longitudinal_corridor(
                     _cap(k, station[k] - gap, tag.agent_id)
             continue
 
-        # Ordinary car-following has exactly one longitudinal owner:
-        # SpeedPlanner/IDM.  Mirroring FOLLOW/LEAD_BRAKE here used the same
-        # peer a second time as a geometric QP bound.  On a lane-change
-        # reference that tangent row coupled longitudinal following into the
-        # lateral solution and pulled the vehicle away from lane centre.
+        # Measured car-following remains a nominal SpeedPlanner/IDM concern.
+        # During probabilistic mode reduction this branch instead creates the
+        # time-indexed safety envelope that distinguishes a keep-lane future
+        # from a braking future.  Stage D linearizes it on the executable
+        # reference, so it no longer inherits the old lane-change-preview
+        # tangent mismatch.
         if tag.tag in (FOLLOW, LEAD_BRAKE):
+            if constrain_follow and not agent_starts_behind:
+                for k in range(n + 1):
+                    if k < len(station):
+                        _cap(k, station[k] - gap, tag.agent_id)
             continue
 
         if tag.tag == CUT_IN:

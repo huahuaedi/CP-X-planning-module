@@ -1,0 +1,55 @@
+base_config: cpx_two_vehicle_cut_in.yaml
+
+description: |-
+  Multimodal CUT_IN regression. The physical path is the existing deterministic
+  cut-in fixture; the scripted actor starts from an ego-position trigger and
+  supplies three 5 Hz prediction hypotheses to the normal conflict pipeline.
+
+cpx_mature:
+  # The interaction deliberately slows ego before FOLLOW takes over. Allow
+  # enough closed-loop time to reach the unchanged 210 m destination.
+  max_ticks: 850
+  synthetic_multimodal_prediction:
+    enabled: true
+    prediction_mode: synthetic_multimodal
+    ego_cav_index: 0
+    target_scripted_actor_index: 0
+
+vehicle_base:
+  planner:
+    prediction_mode: synthetic_multimodal
+    prediction_update_hz: 5.0
+    prediction_mode_min_probability: 0.05
+    prediction_credible_probability_min: 0.15
+    prediction_credible_ttc_s: 2.0
+
+# Lists are repeated because OmegaConf replaces them wholesale. The trigger
+# removes simulator startup timing from the encounter alignment.
+scenario:
+  single_cav_list:
+    - name: cut_in_ego
+      spawn_position: [-300.0, 8.3, 0.3, 0, 0, 0]
+      destination: [-90.0, 8.3, 0.3]
+      v2x:
+        enabled: true
+        communication_range: 80
+      planner:
+        target_speed_mps: 10.0
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_conflict_cut_in_multimodal
+  scripted_actors:
+    - blueprint: vehicle.tesla.model3
+      path:
+        - [-270.0, 4.8]
+        - [-255.0, 4.8]
+        - [-235.0, 8.3]
+        # Leave the ego route before stopping. Ending at the ego destination
+        # turned this interaction fixture into a permanent stopped-obstacle
+        # test after the cut-in had already completed.
+        - [-50.0, 8.3]
+      speed_mps: 8.0
+      acceleration_mps2: 4.0
+      trigger:
+        axis: x
+        cross: -280.0
+        from: below
+      z: 0.3

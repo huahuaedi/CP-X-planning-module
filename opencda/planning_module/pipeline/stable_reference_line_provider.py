@@ -66,7 +66,11 @@ def _interpolate(first, second, ratio, station_m):
     result["x_ref_m"] = result["x"] = ax + ratio * (bx - ax)
     result["y_ref_m"] = result["y"] = ay + ratio * (by - ay)
     for key in ("curvature_1pm", "speed_ref_mps", "v_ref_mps", "speed_mps",
-                "lane_change_progress", "frenet_d_m", "lane_width_m"):
+                "lane_change_progress", "frenet_d_m", "lane_width_m",
+                "road_center_offset_m", "road_left_width_m",
+                "road_right_width_m", "left_boundary_x_m",
+                "left_boundary_y_m", "right_boundary_x_m",
+                "right_boundary_y_m"):
         try:
             a = float(first.get(key, second.get(key, 0.0)))
             b = float(second.get(key, a))

@@ -491,6 +491,38 @@ class MPCLaneKeepingIntegrationTests(unittest.TestCase):
         self.assertEqual(int(index.road_boundary_slack_count), 2 * int(mpc.horizon_steps))
         self.assertFalse(hasattr(index, "lane_boundary_slack_index"))
 
+    def test_refresh_ego_footprint_margins_updates_road_boundary_margin(self):
+        # mpc.yaml has no ego_width_m key, so it defaults to 0.0 at
+        # construction; road_boundary_margin_m must reflect that until a
+        # caller applies the platform's real vehicle width and refreshes it.
+        mpc = MPC(
+            {
+                "horizon_s": 0.2,
+                "plan_dt_s": 0.1,
+                "wheelbase_m": 2.7,
+                "cost": {
+                    "attractive": {"w_attractive": 0.0},
+                    "lane_center_follow": {"enabled": False, "w0": 0.0},
+                    "road_boundary": {
+                        "enabled": True,
+                        "w_boundary": 10000.0,
+                        "margin_m": 0.5,
+                        "footprint_extra_margin_m": 0.2,
+                    },
+                    "control": {"w_control": 0.0, "q_a": 0.0, "q_delta": 0.0},
+                    "repulsive_potential": {"enabled": False},
+                },
+            },
+            {"lane_width_m": 4.0, "lane_count": 3},
+        )
+        self.assertEqual(mpc.ego_width_m, 0.0)
+        self.assertAlmostEqual(mpc.road_boundary_margin_m, 0.5)  # configured floor wins
+
+        mpc.ego_width_m = 2.0
+        mpc.refresh_ego_footprint_margins()
+        # 0.5*2.0 + 0.2 = 1.2, now above the configured 0.5 m floor.
+        self.assertAlmostEqual(mpc.road_boundary_margin_m, 1.2)
+
     @staticmethod
     def _lane_change_mpc_config(*, road_envelope_enabled: bool):
         return (
@@ -851,6 +883,22 @@ class MPCLaneKeepingIntegrationTests(unittest.TestCase):
         rows = [{"stage": 1, "a_x": 1.0, "a_y": 0.0, "lower": -1e9, "upper": 5.0}]
         *_, idx = self._corridor_build_qp(mpc, rows)
         self.assertEqual(idx.corridor_slack_count, 0)
+
+    def test_brake_command_is_not_used_as_negative_acceleration_at_rest(self):
+        mpc = MPC(*self._minimal_mpc_config(speed_soft_enabled=False))
+        projected = mpc._project_acceleration_seed_to_velocity_bounds(
+            current_speed_mps=0.0,
+            acceleration_seed_mps2=-3.0,
+        )
+        self.assertAlmostEqual(projected, 0.0)
+
+    def test_acceleration_seed_is_unchanged_away_from_velocity_bounds(self):
+        mpc = MPC(*self._minimal_mpc_config(speed_soft_enabled=False))
+        projected = mpc._project_acceleration_seed_to_velocity_bounds(
+            current_speed_mps=6.0,
+            acceleration_seed_mps2=-3.0,
+        )
+        self.assertAlmostEqual(projected, -3.0)
 
     @staticmethod
     def _yaml_mpc_corridor(enabled, *, w_slack=5000.0, max_slack_m=0.5):

@@ -1,4 +1,20 @@
-from pipeline.mpc_obstacle_relevance import split_relevant_mpc_obstacles
+from pipeline.mpc_obstacle_relevance import (
+    project_to_extended_polyline,
+    split_relevant_mpc_obstacles,
+)
+
+
+def test_extended_projection_preserves_longitudinal_distance_beyond_ends():
+    poly = [(0.0, 0.0), (5.0, 0.0), (10.0, 0.0)]
+    assert project_to_extended_polyline(25.0, 0.2, poly) == (0.2, 25.0)
+    assert project_to_extended_polyline(-4.0, -0.3, poly) == (0.3, -4.0)
+
+
+def test_extended_projection_does_not_override_a_closer_curved_interior():
+    poly = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)]
+    lateral, station = project_to_extended_polyline(8.0, 4.0, poly)
+    assert abs(lateral - 2.0) < 1.0e-9
+    assert abs(station - 14.0) < 1.0e-9
 
 
 # Ego reference: straight line along +x from (0,0) to (60,0).

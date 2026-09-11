@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Dict, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 
 CLAIM_PROPOSED = "proposed"
@@ -208,9 +208,9 @@ def assign_conflict_roles(
     my_heading_rad: float,
     cavs: Sequence[CavIntent],
     latch_state: Optional[Mapping[str, ArbitrationLatchEntry]] = None,
-    range_m: float = 40.0,
     hysteresis_ticks: int = 3,
     decisive_margin_s: float = 1.0,
+    diagnostics: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Sequence[ConflictAssignment], Dict[str, ArbitrationLatchEntry]]:
     """Assign a stable role and pass-side homotopy per cooperative CAV.
 
@@ -234,25 +234,37 @@ def assign_conflict_roles(
     fwd_y = math.sin(float(my_heading_rad))
     is_merge = str(my_claim.kind) in _MERGE_KINDS
 
+    eligibility: Dict[str, Dict[str, Any]] = {}
     for cav in cavs:
+        key = str(cav.actor_id)
         if not bool(getattr(cav, "cooperative", True)):
+            eligibility[key] = {"eligible": False, "reason": "not_cooperative"}
             continue
         pclaim = cav.claim
         if not bool(pclaim.participates):
+            eligibility[key] = {"eligible": False, "reason": "peer_claim_inactive"}
             continue
         if not my_claim.conflicts_with(pclaim):
+            eligibility[key] = {"eligible": False, "reason": "claim_resources_disjoint"}
             continue
         px, py = float(cav.position_xy[0]), float(cav.position_xy[1])
         dx = px - float(my_position_xy[0])
         dy = py - float(my_position_xy[1])
         distance_m = math.hypot(dx, dy)
-        if distance_m > float(range_m):
-            continue
         if bool(my_claim.require_ahead):
             if dx * fwd_x + dy * fwd_y <= 0.0:
+                eligibility[key] = {
+                    "eligible": False,
+                    "reason": "peer_not_ahead",
+                    "distance_m": float(distance_m),
+                }
                 continue
 
-        key = str(cav.actor_id)
+        eligibility[key] = {
+            "eligible": True,
+            "reason": "assigned",
+            "distance_m": float(distance_m),
+        }
         cav_wins = _raw_cav_wins(my_claim, my_actor_id, pclaim, cav.actor_id)
         raw_role = (
             (_ROLE_MAKE_GAP if is_merge else _ROLE_YIELD) if cav_wins
@@ -304,4 +316,7 @@ def assign_conflict_roles(
             )
         )
 
+    if diagnostics is not None:
+        diagnostics["eligibility"] = eligibility
+        diagnostics["assignment_count"] = len(assignments)
     return assignments, new

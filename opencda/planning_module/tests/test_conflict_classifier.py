@@ -39,6 +39,22 @@ def test_lead_vehicle_same_lane_is_follow():
     assert t.conflict_s_m is not None
 
 
+def test_lead_beyond_finite_reference_end_remains_follow():
+    short_reference = [
+        {"x_ref_m": float(x), "y_ref_m": 0.0} for x in range(0, 17)
+    ]
+    tag = classify_conflicts(
+        short_reference,
+        EGO,
+        [{"id": "lead", "x": 24.0, "y": 0.2, "v": 8.0, "psi": 0.0}],
+        P,
+    )[0]
+
+    assert tag.tag == FOLLOW
+    assert tag.min_lateral_m < 0.3
+    assert tag.conflict_s_m > 16.0
+
+
 def test_braking_lead_is_lead_brake():
     t = _one({"id": "lead", "x": 25.0, "y": 0.1, "v": 8.0, "psi": 0.0,
               "a": -2.0})
@@ -99,6 +115,18 @@ def test_oncoming_vehicle_is_oncoming():
     t = _one({"id": "onc", "x": 40.0, "y": 0.2, "v": 12.0, "psi": math.pi,
               **_track(pts)})
     assert t.tag == ONCOMING
+
+
+def test_stopped_lead_does_not_become_oncoming_from_velocity_heading_noise():
+    # A tracker may report psi ~= pi when a braking vehicle rolls backward a
+    # few millimetres.  At standstill that angle is not an observable motion
+    # direction and must not change the conflict topology.
+    pts = [(25.0 - 0.001 * k, 0.1) for k in range(20)]
+    t = _one({
+        "id": "stopped", "x": 25.0, "y": 0.1,
+        "v": 0.006, "psi": math.pi, **_track(pts),
+    })
+    assert t.tag == FOLLOW
 
 
 def test_far_behind_is_ignored():

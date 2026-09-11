@@ -214,13 +214,28 @@ class PlanningPipeline:
         *, reference_samples, constraint_reference_samples=None,
         ego_location, ego_yaw_rad, ego_speed_mps,
         actor_id, claim, obstacle_snapshots, cav_intents, latch_state,
-        tag_state=None,
+        tag_state=None, veto_state=None,
         horizon_steps, dt_s, mode_probability_floor=0.05,
         credible_mode_probability_min=0.15, credible_mode_ttc_s=2.0,
+        credible_mode_veto_release_ticks=12,
+        nominal_progress_limit_m=None,
         refresh_assignments=True, cached_assignments=(),
         rebuild_corridor=True, cached_corridor=None,
+        max_braking_mps2=3.0,
     ):
-        """Classify on proposal geometry and constrain the executable geometry."""
+        """Classify on proposal geometry and constrain the executable geometry.
+
+        ``reference_samples`` is what Stage A/B/C classify conflicts on -- it
+        may be a proposed-but-uncommitted cooperative lane-change preview
+        curve (CooperativeConflictReference), not the reference the vehicle
+        is actually driving. ``constraint_reference_samples`` (default: the
+        same as ``reference_samples``) is what Stage D's corridor_rows()
+        linearizes the QP tangent/anchor against. Passing the executed
+        reference here keeps the row's direction aligned with the path MPC
+        actually tracks; reusing the classification reference for both
+        reintroduces the reference-divergence failure mode this split exists
+        to prevent (corridor tangent built on a curve the vehicle isn't on).
+        """
 
         result = resolve_cav_conflicts(
             reference_samples=reference_samples,
@@ -230,16 +245,19 @@ class PlanningPipeline:
             },
             my_actor_id=int(actor_id), my_claim=claim,
             obstacle_snapshots=obstacle_snapshots, cav_intents=cav_intents,
-            latch_state=latch_state, tag_state=tag_state,
+            latch_state=latch_state, tag_state=tag_state, veto_state=veto_state,
             classifier_params=ClassifierParams(
                 horizon_steps=max(1, int(horizon_steps)), dt_s=float(dt_s)
             ),
             corridor_params=CorridorParams(
-                horizon_steps=max(1, int(horizon_steps)), dt_s=float(dt_s)
+                horizon_steps=max(1, int(horizon_steps)), dt_s=float(dt_s),
+                max_braking_mps2=max(1.0e-3, abs(float(max_braking_mps2))),
             ),
             mode_probability_floor=float(mode_probability_floor),
             credible_mode_probability_min=float(credible_mode_probability_min),
             credible_mode_ttc_s=float(credible_mode_ttc_s),
+            credible_mode_veto_release_ticks=int(credible_mode_veto_release_ticks),
+            nominal_progress_limit_m=nominal_progress_limit_m,
             refresh_assignments=bool(refresh_assignments),
             cached_assignments=cached_assignments,
             rebuild_corridor=bool(rebuild_corridor),
@@ -267,13 +285,13 @@ class PlanningPipeline:
                 points.append((float(sampled[0]), float(sampled[1])))
             tracks[int(intent.actor_id)] = points
         origin = (float(ego_location.x), float(ego_location.y))
-        qp_reference = (
+        corridor_reference = (
             reference_samples
             if constraint_reference_samples is None
             else constraint_reference_samples
         )
         longitudinal_rows = corridor_rows(
-            result.corridor, qp_reference, ego_origin_xy=origin
+            result.corridor, corridor_reference, ego_origin_xy=origin
         )
         lateral_rows = homotopy_keepout_rows(
             result.assignments,

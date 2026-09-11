@@ -374,48 +374,178 @@ class ReferenceLineProvider(StableReferenceLineProvider):
         elif map_changed:
             event = "map_epoch_changed"
         else:
-            # A planning tick is not a lifecycle event.  In particular, the
-            # rolling local window must never increment geometry revision or
-            # silently replace the persistent master.  The submitted window
-            # is still returned to MPC; only route/map/maneuver transitions
-            # are allowed to install a new master.
-            return ReferenceLineResult(
+            # A planning tick is not a lifecycle event.  The submitted rows
+            # have already served as a validity probe; they must not become a
+            # second geometry owner.  Advance and window the installed master
+            # instead, so unchanged geometry_revision really means unchanged
+            # geometry topology.
+            return self._published_master_window(
                 mode=mode,
-                samples=tuple(
-                    MappingProxyType(dict(sample)) for sample in rows
-                ),
-                accepted=True,
-                reason="persistent_reference_retained",
-                geometry_revision=int(current.geometry_revision),
+                request=request,
+                submitted_rows=rows,
+                reason="persistent_reference_window",
             )
+        install_rows, install_reason = self._installation_master(
+            mode=mode,
+            request=request,
+            submitted_rows=rows,
+            build_reason=str(build_reason),
+        )
         installed, reason = self.install(
             mode,
-            rows,
+            install_rows,
             route_revision=str(request.route_revision),
             map_epoch=str(request.map_epoch),
             event=event,
             source_lane_id=int(request.behavior.source_lane_id),
             target_lane_id=int(request.behavior.target_lane_id),
             maneuver_direction=str(request.behavior.direction),
-            build_reason=str(build_reason),
+            build_reason=str(install_reason),
             ego_x_m=float(request.ego_x_m),
             ego_y_m=float(request.ego_y_m),
         )
+        if not bool(installed):
+            snapshot = self.snapshot(mode)
+            return ReferenceLineResult(
+                mode=mode,
+                samples=snapshot.samples,
+                accepted=bool(snapshot.active),
+                reason=str(reason),
+                geometry_revision=int(snapshot.geometry_revision),
+            )
+        return self._published_master_window(
+            mode=mode,
+            request=request,
+            submitted_rows=rows,
+            reason=str(reason),
+        )
+
+    def _installation_master(
+        self, *, mode: str, request: ReferenceLineRequest,
+        submitted_rows: Sequence[Mapping[str, object]], build_reason: str,
+    ) -> tuple[list[dict[str, object]], str]:
+        """Resolve the immutable geometry installed for one lifecycle."""
+
+        if str(mode) != LANE_FOLLOW:
+            return [dict(row) for row in submitted_rows], str(build_reason)
+        local_map = request.local_map
+        start_lane_id = int(
+            request.behavior.source_lane_id
+            or getattr(local_map, "ego_lane_id", 0)
+            or 0
+        )
+        master, reason = self.reference_from_local_map(
+            local_map,
+            start_lane_id=start_lane_id,
+            target_speed_mps=float(request.behavior.requested_speed_mps),
+        )
+        if len(master) < 2:
+            return [dict(row) for row in submitted_rows], str(build_reason)
+        return [dict(row) for row in master], "%s:%s" % (
+            str(build_reason), str(reason)
+        )
+
+    def install_lane_follow_handoff(
+        self, *, local_map: Any, target_lane_id: int, target_speed_mps: float,
+        route_revision: str, map_epoch: str, ego_x_m: float, ego_y_m: float,
+    ) -> tuple[bool, str]:
+        """Install the completed maneuver corridor as lane-follow master."""
+
+        reference, build_reason = self.reference_from_local_map(
+            local_map,
+            start_lane_id=int(target_lane_id),
+            target_speed_mps=float(target_speed_mps),
+        )
+        if len(reference) < 2:
+            return False, "lane_follow_handoff_unavailable:" + str(build_reason)
+        installed, reason = self.install(
+            LANE_FOLLOW,
+            reference,
+            route_revision=str(route_revision),
+            map_epoch=str(map_epoch),
+            event="phase_transition",
+            source_lane_id=int(target_lane_id),
+            target_lane_id=int(target_lane_id),
+            build_reason="lane_change_completion_handoff:" + str(build_reason),
+            ego_x_m=float(ego_x_m),
+            ego_y_m=float(ego_y_m),
+        )
+        if not installed:
+            return False, "lane_follow_handoff_unavailable:" + str(reason)
+        return True, "lane_follow_handoff_installed:target_lane=%d" % int(
+            target_lane_id
+        )
+
+    def _published_master_window(
+        self, *, mode: str, request: ReferenceLineRequest,
+        submitted_rows: Sequence[Mapping[str, object]], reason: str,
+    ) -> ReferenceLineResult:
+        """Publish one monotonic horizon from the immutable active master."""
+
+        rows = [dict(row) for row in submitted_rows]
+        spacing_m = self._reference_spacing_m(rows)
+        first_forward_m = self._submitted_first_distance_m(
+            rows, ego_x_m=float(request.ego_x_m), ego_y_m=float(request.ego_y_m)
+        )
+        window = self.window(
+            mode,
+            ego_x_m=float(request.ego_x_m),
+            ego_y_m=float(request.ego_y_m),
+            first_forward_m=float(first_forward_m),
+            spacing_m=float(spacing_m),
+            count=max(2, len(rows)),
+        )
+        published = [dict(row) for row in window.samples]
+        if rows and published:
+            for key in ("speed_ref_mps", "v_ref_mps", "speed_mps"):
+                if key not in rows[0]:
+                    continue
+                value = rows[0][key]
+                for row in published:
+                    row[key] = value
         snapshot = self.snapshot(mode)
         return ReferenceLineResult(
             mode=mode,
-            samples=tuple(
-                MappingProxyType(dict(sample)) for sample in rows
-            ),
-            accepted=bool(installed or snapshot.active),
-            reason=str(reason),
+            samples=tuple(MappingProxyType(row) for row in published),
+            accepted=len(published) >= 2,
+            reason="%s:%s" % (str(reason), str(window.reason)),
             geometry_revision=int(snapshot.geometry_revision),
         )
+
+    @staticmethod
+    def _reference_spacing_m(
+        rows: Sequence[Mapping[str, object]],
+    ) -> float:
+        distances = []
+        for first, second in zip(rows[:-1], rows[1:]):
+            ax = float(first.get("x_ref_m", first.get("x", 0.0)))
+            ay = float(first.get("y_ref_m", first.get("y", 0.0)))
+            bx = float(second.get("x_ref_m", second.get("x", 0.0)))
+            by = float(second.get("y_ref_m", second.get("y", 0.0)))
+            distance = math.hypot(bx - ax, by - ay)
+            if distance > 1.0e-3:
+                distances.append(distance)
+        if not distances:
+            return 0.5
+        distances.sort()
+        return max(0.05, float(distances[len(distances) // 2]))
+
+    @staticmethod
+    def _submitted_first_distance_m(
+        rows: Sequence[Mapping[str, object]], *, ego_x_m: float, ego_y_m: float,
+    ) -> float:
+        if not rows:
+            return 0.5
+        first = rows[0]
+        x_m = float(first.get("x_ref_m", first.get("x", ego_x_m)))
+        y_m = float(first.get("y_ref_m", first.get("y", ego_y_m)))
+        return max(0.05, math.hypot(x_m - ego_x_m, y_m - ego_y_m))
 
     def build_behavior_reference(
         self,
         *,
         map_planner,
+        local_map=None,
         ego_pose,
         ego_state,
         route_points,
@@ -457,6 +587,25 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             generate_mpc_reference,
             select_reference_intent,
         )
+
+        local_route_reference = self._local_route_lane_follow_reference(
+            local_map=local_map,
+            ego_pose=ego_pose,
+            decision=str(decision),
+            in_junction=bool(in_junction),
+            current_lane_id=int(current_lane_id),
+            target_speed_mps=float(target_speed_mps),
+            horizon_steps=int(horizon_steps),
+            step_distance_m=(
+                max(0.05, float(lane_reference_step_distance_m))
+                if lane_reference_step_distance_m is not None
+                else max(0.5, float(dt_s) * max(
+                    1.0, float(ego_speed_mps), abs(float(target_speed_mps))
+                ))
+            ),
+        )
+        if local_route_reference is not None:
+            return local_route_reference
 
         prior = list(previous_target_state or [])
         destination = compute_temp_destination(
@@ -565,6 +714,56 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             reference_freeze_count=int(output.lane_reference_freeze_count),
             diagnostics=diagnostics,
             fallback_reason=str(output.last_reference_fallback_reason),
+        )
+
+    def _local_route_lane_follow_reference(
+        self, *, local_map, ego_pose, decision: str, in_junction: bool,
+        current_lane_id: int, target_speed_mps: float, horizon_steps: int,
+        step_distance_m: float,
+    ) -> Optional[BehaviorReferenceResult]:
+        """Build junction lane-follow geometry from frozen route topology."""
+
+        if (
+            str(decision).strip().lower() != "lane_follow"
+            or not bool(in_junction)
+            or local_map is None
+            or not bool(getattr(local_map, "valid", False))
+        ):
+            return None
+        master, reason = self.reference_from_local_map(
+            local_map,
+            start_lane_id=int(current_lane_id),
+            target_speed_mps=float(target_speed_mps),
+        )
+        if not master:
+            return None
+        window = self.window_from_reference(
+            master,
+            ego_x_m=float(ego_pose.get("x", 0.0)),
+            ego_y_m=float(ego_pose.get("y", 0.0)),
+            lower_s_m=0.0,
+            first_forward_m=max(0.1, float(step_distance_m)),
+            spacing_m=max(0.1, float(step_distance_m)),
+            count=max(2, int(horizon_steps) + 1),
+        )
+        rows = [dict(sample) for sample in window.samples]
+        if len(rows) < 2:
+            return None
+        terminal = rows[-1]
+        return BehaviorReferenceResult(
+            samples=tuple(MappingProxyType(dict(row)) for row in rows),
+            destination_state=(
+                float(terminal["x_ref_m"]), float(terminal["y_ref_m"]),
+                float(target_speed_mps), float(terminal["heading_rad"]),
+                int(terminal["lane_id"]),
+            ),
+            reference_freeze_count=0,
+            diagnostics=MappingProxyType({
+                "reference_source": "local_map_route_corridor",
+                "final_reference_geometry_source": "local_map_route_corridor",
+                "local_route_reference_reason": str(reason),
+            }),
+            fallback_reason="",
         )
 
     def turn_reference(self, request: TurnReferenceRequest):
@@ -1033,6 +1232,7 @@ class ReferenceLineProvider(StableReferenceLineProvider):
         else:
             built = self.build_behavior_reference(
                 map_planner=context.map_planner,
+                local_map=context.local_map,
                 ego_pose=context.ego_pose,
                 ego_state=context.current_state,
                 route_points=context.route_points,

@@ -6,6 +6,50 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
 
+def _object_id(snapshot):
+    for key in ("track_id", "object_id", "vehicle_id", "actor_id", "id"):
+        value = snapshot.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def _corridor_owned_actor_ids(rows):
+    """Physical actors whose interaction is already encoded by Stage D."""
+
+    actor_ids = set()
+    for row in list(rows or ()):
+        tag = str(getattr(row, "tag", "") or "").strip()
+        if not tag:
+            continue
+        actor_id = tag.split("::mode", 1)[0]
+        if actor_id:
+            actor_ids.add(actor_id)
+    return actor_ids
+
+
+def _exclusive_interaction_objects(object_snapshots, corridor_rows):
+    """Prevent two MPC mechanisms from controlling the same obstacle.
+
+    A Stage-D longitudinal corridor is the complete geometric interaction
+    contract for its actor.  Keeping that actor's repulsive potential active
+    at the same time creates a second, implicit lateral decision inside MPC:
+    a yielding lane-follow solution can turn sideways instead of braking.
+    Objects without an active corridor retain their normal collision cost.
+    """
+
+    owned = _corridor_owned_actor_ids(corridor_rows)
+    if not owned:
+        return list(object_snapshots or ())
+    result = []
+    for original in list(object_snapshots or ()):
+        snapshot = dict(original)
+        if _object_id(snapshot) in owned:
+            snapshot["repulsive_class_weight"] = 0.0
+        result.append(snapshot)
+    return result
+
+
 @dataclass(frozen=True)
 class MPCExecutionRequest:
     sim_time_s: float
@@ -101,6 +145,17 @@ class MPCExecutionStage:
                 context_key=context_key,
                 reference_anchor_relative_m=anchor,
             )
+            # Stop hold is an admitted execution mode, not a zero-speed MPC
+            # problem.  Returning here prevents the buffer's longitudinal
+            # speed-crossing detector from scheduling one redundant solve on
+            # the first stationary tick.
+            control = normal_stop_control()
+            self._planned_acceleration_mps2 = 0.0
+            self._last_constraint_revision = str(request.constraint_revision)
+            return MPCExecutionResult(
+                0.0, 0.0, control, "stop_hold_direct", "",
+                False, False, float(jerk_seed_acceleration_mps2),
+            )
 
         fallback_reason = ""
         reused_after_failure = False
@@ -140,7 +195,9 @@ class MPCExecutionStage:
                 self._mpc.plan_trajectory(
                     current_state=request.current_state,
                     destination_state=request.destination_state,
-                    object_snapshots=request.object_snapshots,
+                    object_snapshots=_exclusive_interaction_objects(
+                        request.object_snapshots, request.corridor_rows
+                    ),
                     current_acceleration_mps2=float(
                         jerk_seed_acceleration_mps2
                     ),
@@ -188,9 +245,6 @@ class MPCExecutionStage:
                     "stop_hold_direct"
                     if request.stationary_stop_hold else "buffer_reuse"
                 )
-            if request.stationary_stop_hold:
-                control = normal_stop_control()
-                acceleration = 0.0
             self._planned_acceleration_mps2 = float(acceleration)
             return MPCExecutionResult(
                 float(acceleration), float(steering), control, str(status), "",

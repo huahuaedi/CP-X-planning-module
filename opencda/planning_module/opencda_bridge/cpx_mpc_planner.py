@@ -454,6 +454,21 @@ class CPXMPCPlannerBridge:
 
         mpc_cfg, road_cfg = self._load_mpc_config()
         self.mpc = MPC(mpc_cfg=mpc_cfg, road_cfg=road_cfg)
+        # Vehicle geometry has one configuration owner.  Reference-contract
+        # footprint checks and MPC lane/collision constraints must describe
+        # the same body; mpc.yaml intentionally contains controller defaults,
+        # while the platform-specific dimensions live in the bridge profile.
+        self.mpc.ego_width_m = 2.0 * max(
+            0.0, float(self.config.get("reference_vehicle_half_width_m", 1.0))
+        )
+        self.mpc.ego_length_m = 2.0 * max(
+            0.0, float(self.config.get("reference_vehicle_half_length_m", 2.4))
+        )
+        # road_boundary_margin_m was baked in at MPC construction time from
+        # mpc.yaml's ego_width_m default (0.0); recompute it now that the
+        # bridge's real vehicle width is set, or the non-corridor road-
+        # boundary constraint silently under-estimates the ego footprint.
+        self.mpc.refresh_ego_footprint_margins()
         if self._cav_conflict_enabled:
             # One switch: cav_conflict_enabled also binds the Stage-C corridor
             # in the QP (else it is computed but ignored). mpc.yaml's
@@ -530,6 +545,7 @@ class CPXMPCPlannerBridge:
         ).strip().lower()
         self._prediction_snapshot_transform_cached = False
         self._prediction_snapshot_transform_fn = None
+        self._synthetic_prediction_actor_activation = None
         self._oracle_trace_store = None
         if self._prediction_mode == "oracle":
             from opencda.planning_module.pipeline.prediction_ablation import (
@@ -558,6 +574,7 @@ class CPXMPCPlannerBridge:
             "extent", None,
         )
         perception_stage = PerceptionStage(
+            obstacle_tracker=self.tracker,
             max_mpc_obstacles=int(self.max_mpc_obstacles),
             ego_length_m=2.0 * float(getattr(ego_extent, "x", 2.25)),
             ego_width_m=2.0 * float(getattr(ego_extent, "y", 1.0)),
@@ -1387,12 +1404,30 @@ class CPXMPCPlannerBridge:
         cav_result = cav_resolution
         cav_constraint_rows = ()
         cav_constraint_revision = ""
+        cav_diagnostics = {}
         if cav_result is not None:
             cav_constraint_rows = tuple(cav_result.mpc_rows or ())
             cav_diagnostics = dict(cav_result.diagnostics or {})
             cav_constraint_revision = self._cav_schedule.constraint_revision(
                 cav_diagnostics
             )
+        self._maybe_capture_execute_mpc_frame(
+            sim_time_s=float(sim_time_s),
+            current_state=current_state,
+            ego_location=ego_location,
+            ego_yaw_rad=float(ego_yaw_rad),
+            ego_speed_mps=float(ego_speed_mps),
+            current_acceleration_mps2=float(mpc_jerk_seed_accel_mps2),
+            current_steering_rad=float(self._last_steer_rad),
+            destination_state=destination_state,
+            target_speed_mps=float(speed_ref_mps),
+            stop_goal_active=bool(mpc_stop_goal_active),
+            behavior_decision=behavior_decision,
+            published_reference=lane_center_reference,
+            mpc_object_snapshots=mpc_object_snapshots,
+            cav_constraint_rows=cav_constraint_rows,
+            cav_diagnostics=cav_diagnostics,
+        )
         execution_result = self.pipeline.execute_mpc(
             MPCExecutionRequest(
                 sim_time_s=float(sim_time_s),
@@ -1643,6 +1678,61 @@ class CPXMPCPlannerBridge:
                 "latched_carla_signal_actor_error:"
                 f"{type(exc).__name__}"
             )
+
+    def _maybe_capture_execute_mpc_frame(self, *, sim_time_s, current_state,
+                                         ego_location, ego_yaw_rad, ego_speed_mps,
+                                         current_acceleration_mps2,
+                                         current_steering_rad, destination_state,
+                                         target_speed_mps, stop_goal_active,
+                                         behavior_decision, published_reference,
+                                         mpc_object_snapshots, cav_constraint_rows,
+                                         cav_diagnostics):
+        """Serialize one tick for tools/frame_replay. No-op unless the
+        ``frame_capture`` config block is present and the sim-time window
+        (if any) contains this tick. Debug-only; never raises into the
+        planning path."""
+
+        raw = self.config.get("frame_capture")
+        if not isinstance(raw, Mapping):
+            return
+        try:
+            from opencda.planning_module.tools.frame_capture_hook import (
+                FrameCaptureConfig,
+                dump_execute_mpc_frame,
+            )
+            cfg = getattr(self, "_frame_capture_cfg", None)
+            if cfg is None:
+                cfg = FrameCaptureConfig(raw)
+                self._frame_capture_cfg = cfg
+            if not cfg.wants(float(sim_time_s)):
+                return
+            pre_reference = getattr(self, "_frame_capture_pre_reference", None)
+            dump_execute_mpc_frame(
+                cfg,
+                sim_time_s=float(sim_time_s),
+                current_state=list(current_state),
+                ego_origin_xy=(float(ego_location.x), float(ego_location.y)),
+                ego_yaw_rad=float(ego_yaw_rad),
+                ego_speed_mps=float(ego_speed_mps),
+                current_acceleration_mps2=float(current_acceleration_mps2),
+                current_steering_rad=float(current_steering_rad),
+                destination_state=list(destination_state),
+                target_speed_mps=float(target_speed_mps),
+                stop_goal_active=bool(stop_goal_active),
+                behavior_maneuver=str(getattr(behavior_decision, "maneuver", "")),
+                behavior_phase=str(getattr(behavior_decision, "phase", "")),
+                pre_publication_reference=list(pre_reference or published_reference),
+                published_reference=list(published_reference or []),
+                mpc_object_snapshots=list(mpc_object_snapshots or []),
+                mpc_rows=list(cav_constraint_rows or ()),
+                cav_diagnostics=dict(cav_diagnostics or {}),
+                prev_u_solution=getattr(self.mpc, "_last_u_solution", None),
+                mpc_config_path=str(self.config.get("mpc_config_path", "") or "")
+                or None,
+            )
+        except Exception as exc:  # debug-only path; must not break planning
+            if self.debug:
+                print(f"[CP-X OpenCDA Bridge] frame capture failed: {exc}")
 
     def _resolved_debug_output_dir(self) -> Path:
         """Configured debug dir, with the prediction-ablation mode appended as
@@ -2420,6 +2510,15 @@ class CPXMPCPlannerBridge:
             cp_payload=cp_payload,
         )
         planner_input_frame = adapter_output.frame
+        # The adapter's tracker is the sole temporal obstacle-state owner.
+        # Downstream behavior, speed and interaction stages must consume the
+        # same recovered kinematics as prediction.  Reusing the raw CARLA
+        # detections here made kinematically scripted (and some real sensor)
+        # actors appear to move in prediction while SpeedPlanner saw v=0.
+        object_snapshots = [
+            dict(snapshot)
+            for snapshot in planner_input_frame.perception.planning_objects
+        ]
         local_map_snapshot = getattr(
             self, "_local_map_snapshot", LocalMapSnapshot()
         )
@@ -2813,6 +2912,7 @@ class CPXMPCPlannerBridge:
         base_temporary_destination_state = nominal_state.target_state()
         built_reference = self._stable_reference_line_provider.build_behavior_reference(
             map_planner=self.reference_map,
+            local_map=getattr(self, "_local_map_snapshot", None),
             ego_pose=ego_pose,
             ego_state=current_state,
             route_points=route_points,
@@ -2844,6 +2944,11 @@ class CPXMPCPlannerBridge:
             authoritative_ego_waypoint=self._authoritative_ego_waypoint,
         )
         local_lane_center_reference = built_reference.mutable_samples()
+        # Stash the pre-publication reference (the one Stage C/D build corridor
+        # rows on) so the offline frame-replay hook can compare it against the
+        # post-publication reference the MPC tracks. No-op unless armed.
+        if isinstance(self.config.get("frame_capture"), Mapping):
+            self._frame_capture_pre_reference = list(local_lane_center_reference)
         nominal_destination_state = built_reference.mutable_destination_state()
         nominal_freeze_count = int(built_reference.reference_freeze_count)
         reference_debug = PlannerDiagnosticsStage.build_reference_debug(self, {
@@ -2959,6 +3064,10 @@ class CPXMPCPlannerBridge:
             )
             cav_result = self.pipeline.resolve_cav_interaction(
                 reference_samples=conflict_reference.mutable_samples(),
+                # Stage D's QP rows must linearize against the reference the
+                # vehicle is actually driving, not the lane-change preview
+                # curve used only to classify a proposed maneuver -- see
+                # PlanningPipeline.resolve_cav_interaction's docstring.
                 constraint_reference_samples=local_lane_center_reference,
                 ego_location=ego_location,
                 ego_yaw_rad=float(ego_yaw_rad),
@@ -2974,6 +3083,7 @@ class CPXMPCPlannerBridge:
                 cav_intents=cav_intents,
                 latch_state=self._cav_schedule.latch_state,
                 tag_state=self._cav_schedule.tag_state,
+                veto_state=self._cav_schedule.veto_state,
                 horizon_steps=int(self.mpc.horizon_steps),
                 dt_s=float(self.mpc.dt_s),
                 mode_probability_floor=float(self.config.get(
@@ -2985,10 +3095,27 @@ class CPXMPCPlannerBridge:
                 credible_mode_ttc_s=float(self.config.get(
                     "prediction_credible_ttc_s", 2.0
                 )),
+                credible_mode_veto_release_ticks=int(self.config.get(
+                    "prediction_credible_veto_release_ticks", 12
+                )),
+                nominal_progress_limit_m=(
+                    float(self.route_manager.last_status.remaining_distance_m)
+                    if (
+                        math.isfinite(float(
+                            self.route_manager.last_status.remaining_distance_m
+                        ))
+                        and (
+                            float(self.route_manager.last_status.remaining_distance_m) > 0.0
+                            or bool(self.route_manager.last_status.reached_destination)
+                        )
+                    )
+                    else None
+                ),
                 refresh_assignments=bool(schedule.refresh_roles),
                 cached_assignments=self._cav_schedule.assignments,
                 rebuild_corridor=bool(schedule.refresh_roles),
                 cached_corridor=cached_corridor,
+                max_braking_mps2=abs(float(self.mpc.constraints.min_acceleration_mps2)),
             )
             self._cav_schedule.observe(
                 sim_time_s=float(sim_time_s), result=cav_result,
@@ -3641,6 +3768,7 @@ class CPXMPCPlannerBridge:
             current_lane_id=current_lane_id,
             ego_location=ego_location,
             ego_yaw_rad=ego_yaw_rad,
+            local_map=getattr(self, "_local_map_snapshot", None),
         )
 
     def _start_target_lane_stabilization(
@@ -3929,6 +4057,9 @@ class CPXMPCPlannerBridge:
             ),
             synthetic_update_period_s=1.0 / max(
                 0.1, float(self.config.get("prediction_update_hz", 5.0))
+            ),
+            synthetic_actor_activation=(
+                self._synthetic_prediction_actor_activation
             ),
         )
         self._prediction_snapshot_transform_cached = True

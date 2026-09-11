@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export plots and metrics for CV / primary-only / multimodal runs."""
+"""Export matched-physics plots for primary-only and multimodal prediction."""
 
 from __future__ import annotations
 
@@ -16,8 +16,7 @@ except ModuleNotFoundError:
 ROOT = Path(__file__).resolve().parents[2]
 DEBUG = ROOT / "opencda" / "planning_module" / "opencda_bridge"
 ARMS = {
-    "CV": DEBUG / "debug_prediction_cv_ego",
-    "Primary only": DEBUG / "debug_prediction_primary_ego",
+    "Primary only": DEBUG / "debug_prediction_primary_ego_synthetic_multimodal",
     "Multimodal": DEBUG / "debug_multimodal_ego_synthetic_multimodal",
 }
 OUTPUT = ROOT / "artifacts" / "multimodal_prediction_report"

@@ -167,7 +167,8 @@ class QPIndex:
     Decision-variable indexing helper.
 
     Variable layout:
-        z = [X(0..N), U(0..N-1), S_road_left/right(1..N), S_speed(1..N), S_envelope(1..N)]
+        z = [X(0..N), U(0..N-1), S_road_left/right(1..N), S_speed(1..N),
+             S_envelope(1..N), S_corridor(1..N), S_corridor_heading(1..N)]
     """
 
     nx: int
@@ -177,6 +178,7 @@ class QPIndex:
     speed_slack_count: int = 0
     road_envelope_slack_count: int = 0
     corridor_slack_count: int = 0
+    corridor_heading_slack_count: int = 0
 
     @property
     def state_offset(self) -> int:
@@ -208,6 +210,12 @@ class QPIndex:
 
     @property
     def total_variables(self) -> int:
+        return self.corridor_heading_slack_offset + int(
+            self.corridor_heading_slack_count
+        )
+
+    @property
+    def corridor_heading_slack_offset(self) -> int:
         return self.corridor_slack_offset + int(self.corridor_slack_count)
 
     def state_index(self, k: int, i: int) -> int:
@@ -230,6 +238,9 @@ class QPIndex:
 
     def corridor_slack_index(self, k: int) -> int:
         return self.corridor_slack_offset + (k - 1)
+
+    def corridor_heading_slack_index(self, k: int) -> int:
+        return self.corridor_heading_slack_offset + (k - 1)
 
 
 class MPC:
@@ -389,6 +400,26 @@ class MPC:
         self.corridor_slack_weight = max(
             0.0, float(corridor_cfg.get("w_slack", 1.0e4))
         )
+        self.corridor_heading_slack_weight = max(
+            0.0, float(corridor_cfg.get("w_heading_slack", 1.0e5))
+        )
+        self.corridor_lane_boundary_slack_weight = max(
+            0.0,
+            float(corridor_cfg.get("w_lane_boundary_slack", 1.0e6)),
+        )
+        configured_lane_boundary_slack_m = float(
+            corridor_cfg.get("max_lane_boundary_slack_m", 0.0)
+        )
+        if configured_lane_boundary_slack_m < 0.0:
+            raise ValueError(
+                "cost.corridor.max_lane_boundary_slack_m must be non-negative"
+            )
+        self.corridor_max_lane_boundary_slack_m = (
+            configured_lane_boundary_slack_m
+        )
+        self.corridor_max_reference_heading_error_rad = math.radians(max(
+            0.0, float(corridor_cfg.get("max_reference_heading_error_deg", 8.0))
+        ))
         configured_corridor_slack_m = float(corridor_cfg.get("max_slack_m", 3.0))
         if configured_corridor_slack_m < 0.0:
             raise ValueError("cost.corridor.max_slack_m must be non-negative")
@@ -508,19 +539,18 @@ class MPC:
                 )
             ),
         )
-        configured_road_boundary_margin_m = max(
+        self._configured_road_boundary_margin_m = max(
             0.0,
             float(road_boundary_cfg.get("margin_m", road_boundary_cfg.get("margin", 0.5))),
         )
-        footprint_extra_margin_m = max(
+        self._road_boundary_footprint_extra_margin_m = max(
             0.0,
             float(road_boundary_cfg.get("footprint_extra_margin_m", 0.2)),
         )
-        footprint_margin_m = 0.5 * float(self.ego_width_m) + float(footprint_extra_margin_m)
-        self.road_boundary_margin_m = max(
-            float(configured_road_boundary_margin_m),
-            float(footprint_margin_m),
-        )
+        # Depends on self.ego_width_m, which a caller (e.g. the bridge, once
+        # it knows the platform's real vehicle dimensions) may override after
+        # construction -- see refresh_ego_footprint_margins().
+        self.refresh_ego_footprint_margins()
         self.road_boundary_max_slack_m = max(
             0.0,
             float(road_boundary_cfg.get("max_slack_m", 0.25)),
@@ -2070,6 +2100,27 @@ class MPC:
         self._previous_x_solution = None
         self._previous_u_solution = None
 
+    def refresh_ego_footprint_margins(self) -> None:
+        """Recompute road_boundary_margin_m from the current ego_width_m.
+
+        __init__ calls this once with ego_width_m at whatever mpc.yaml
+        default it has (0.0 unless configured there); a caller that later
+        overrides self.ego_width_m/ego_length_m with the platform's real
+        vehicle dimensions (e.g. the bridge, from its own profile config)
+        must call this again or road_boundary_margin_m keeps describing a
+        zero-width vehicle everywhere except the Stage-D corridor path,
+        which already recomputes its own footprint margin fresh each solve.
+        """
+
+        footprint_margin_m = (
+            0.5 * float(self.ego_width_m)
+            + float(self._road_boundary_footprint_extra_margin_m)
+        )
+        self.road_boundary_margin_m = max(
+            float(self._configured_road_boundary_margin_m),
+            float(footprint_margin_m),
+        )
+
     def clear_solution_memory(self) -> None:
         """Reset rollout and control seeds at an explicit maneuver-mode boundary."""
 
@@ -2262,6 +2313,47 @@ class MPC:
             profile.append(float(v_k_mps))
             a_prev_mps2 = float(a_k_mps2)
         return profile
+
+    def _project_acceleration_seed_to_velocity_bounds(
+        self,
+        *,
+        current_speed_mps: float,
+        acceleration_seed_mps2: float,
+    ) -> float:
+        """Return a physically meaningful jerk anchor at a speed boundary.
+
+        The bridge supplies the previous *commanded* acceleration.  At zero
+        speed CARLA cannot realize a negative longitudinal acceleration, so a
+        lingering brake command is not the vehicle's measured acceleration.
+        Anchoring the jerk constraint to that command would require both
+        ``v_1 < 0`` and the hard ``v_1 >= min_velocity`` bound.  Project the
+        seed onto the one-step velocity-feasible acceleration interval before
+        it is used by rollout, rate cost, and jerk constraints.
+        """
+
+        dt_s = max(1e-6, float(self.dt_s))
+        speed_mps = self._clamp(
+            float(current_speed_mps),
+            float(self.constraints.min_velocity_mps),
+            float(self.constraints.max_velocity_mps),
+        )
+        one_step_lower_mps2 = (
+            float(self.constraints.min_velocity_mps) - speed_mps
+        ) / dt_s
+        one_step_upper_mps2 = (
+            float(self.constraints.max_velocity_mps) - speed_mps
+        ) / dt_s
+        lower_mps2 = max(
+            float(self.constraints.min_acceleration_mps2),
+            float(one_step_lower_mps2),
+        )
+        upper_mps2 = min(
+            float(self.constraints.max_acceleration_mps2),
+            float(one_step_upper_mps2),
+        )
+        return self._clamp(
+            float(acceleration_seed_mps2), lower_mps2, upper_mps2
+        )
 
     def _fail_safe_fallback_trajectory(
         self,
@@ -2786,6 +2878,11 @@ class MPC:
             bool(getattr(self, "corridor_constraint_enabled", False))
             and len(corridor_row_list) > 0
         )
+        corridor_heading_term_active = (
+            corridor_term_active
+            and float(self.corridor_max_reference_heading_error_rad) > 0.0
+            and bool(lane_center_reference)
+        )
         index = QPIndex(
             nx=self.nx,
             nu=self.nu,
@@ -2799,6 +2896,9 @@ class MPC:
             ),
             corridor_slack_count=(
                 int(self.horizon_steps) if corridor_term_active else 0
+            ),
+            corridor_heading_slack_count=(
+                int(self.horizon_steps) if corridor_heading_term_active else 0
             ),
         )
         n_var = index.total_variables
@@ -3001,15 +3101,14 @@ class MPC:
                 b_coef = float(lane_affine.y_coef)
                 c_coef = float(lane_affine.constant)
                 lane_heading_ref = float(lane_reference.heading_rad)
+                lane_heading_ref_aligned = self._align_angle_near(
+                    angle_rad=float(lane_heading_ref),
+                    around_rad=float(x_ref_rollout[k, 3]),
+                )
 
                 if bool(self.lane_center_follow_enabled) and float(self.lane_center_follow_weight) > 0.0:
                     lane_weight = float(self.lane_center_follow_weight)
                     lane_heading_weight = lane_weight * float(self.lane_center_follow_qpsi)
-                    lane_heading_ref_aligned = self._align_angle_near(
-                        angle_rad=float(lane_heading_ref),
-                        around_rad=float(x_ref_rollout[k, 3]),
-                    )
-
                     add_quadratic(x_k_idx, lane_weight * a_coef * a_coef)
                     add_quadratic(y_k_idx, lane_weight * b_coef * b_coef)
                     add_p_entry(x_k_idx, y_k_idx, 2.0 * lane_weight * a_coef * b_coef)
@@ -3018,10 +3117,56 @@ class MPC:
                     if lane_heading_weight > 0.0:
                         add_tracking(index.state_index(k, 3), lane_heading_weight, lane_heading_ref_aligned)
 
+                if corridor_term_active:
+                    # A longitudinal progress cap must not be satisfiable by
+                    # rotating across the Behavior-selected reference.  The
+                    # nominal reference may itself turn or change lanes; this
+                    # bound follows its local heading and therefore constrains
+                    # tracking error rather than the maneuver geometry.
+                    heading_limit = float(
+                        self.corridor_max_reference_heading_error_rad
+                    )
+                    if corridor_heading_term_active:
+                        heading_slack_idx = index.corridor_heading_slack_index(k)
+                        add_quadratic(
+                            heading_slack_idx,
+                            float(self.corridor_heading_slack_weight),
+                        )
+                        add_constraint(
+                            {
+                                index.state_index(k, 3): 1.0,
+                                heading_slack_idx: 1.0,
+                            },
+                            float(lane_heading_ref_aligned) - heading_limit,
+                            np.inf,
+                        )
+                        add_constraint(
+                            {
+                                index.state_index(k, 3): 1.0,
+                                heading_slack_idx: -1.0,
+                            },
+                            -np.inf,
+                            float(lane_heading_ref_aligned) + heading_limit,
+                        )
+                        # This auxiliary guard must obey the same feasibility
+                        # contract as the Stage-D corridor itself: interaction
+                        # constraints may be expensive to violate, but may not
+                        # make the QP infeasible when the vehicle enters with
+                        # an already-large tracking error.
+                        add_constraint({heading_slack_idx: 1.0}, 0.0, np.inf)
+
                 if road_boundary_term_active:
                     left_slack_idx = index.road_boundary_left_slack_index(k)
                     right_slack_idx = index.road_boundary_right_slack_index(k)
-                    road_weight = float(getattr(self, "road_boundary_weight", self.lane_keep_boundary_weight))
+                    road_weight = float(
+                        self.corridor_lane_boundary_slack_weight
+                        if corridor_term_active
+                        else getattr(
+                            self,
+                            "road_boundary_weight",
+                            self.lane_keep_boundary_weight,
+                        )
+                    )
                     road_margin_m = float(getattr(self, "road_boundary_margin_m", 0.5))
                     road_center_offset_m = float(lane_reference.road_center_offset_m)
                     road_left_width_m = float(lane_reference.left_road_width_m)
@@ -3046,7 +3191,11 @@ class MPC:
                         float(road_margin_m) - float(road_right_width_m) - float(c_coef) + float(road_center_offset_m),
                         np.inf,
                     )
-                    road_max_slack_m = float(getattr(self, "road_boundary_max_slack_m", np.inf))
+                    road_max_slack_m = float(
+                        self.corridor_max_lane_boundary_slack_m
+                        if corridor_term_active
+                        else getattr(self, "road_boundary_max_slack_m", np.inf)
+                    )
                     road_slack_upper = (
                         float(road_max_slack_m)
                         if math.isfinite(float(road_max_slack_m)) and float(road_max_slack_m) > 0.0
@@ -3229,6 +3378,9 @@ class MPC:
         if corridor_term_active:
             for k in range(1, self.horizon_steps + 1):
                 add_quadratic(index.corridor_slack_index(k), tiny_reg)
+        if corridor_heading_term_active:
+            for k in range(1, self.horizon_steps + 1):
+                add_quadratic(index.corridor_heading_slack_index(k), tiny_reg)
 
         # --- Objective + constraints: Stage-D spatiotemporal rows ---
         # Per stage k, longitudinal corridor bands and lateral homotopy
@@ -3728,7 +3880,19 @@ class MPC:
         x0 = np.asarray(x0_world, dtype=float).copy()
         x0[0] = 0.0
         x0[1] = 0.0
-        planning_current_acceleration_mps2 = float(current_acceleration_mps2)
+        planning_current_acceleration_mps2 = (
+            self._project_acceleration_seed_to_velocity_bounds(
+                current_speed_mps=float(x0[2]),
+                acceleration_seed_mps2=float(current_acceleration_mps2),
+            )
+        )
+        acceleration_seed_was_projected = (
+            abs(
+                float(planning_current_acceleration_mps2)
+                - float(current_acceleration_mps2)
+            )
+            > 1e-9
+        )
         destination_world = self._normalize_destination_state(destination_state)
         destination = np.asarray(destination_world, dtype=float).copy()
         destination[0] -= float(origin_x_m)
@@ -3756,19 +3920,6 @@ class MPC:
             abs(float(destination[2]))
             <= float(self.final_stop_speed_cap_activation_threshold_mps)
         )
-        _resume_release_speed_threshold_mps = max(
-            float(self.final_stop_speed_cap_activation_threshold_mps),
-            1.0,
-        )
-        _transitioning_from_stationary_hold = (
-            not bool(_is_stop_goal)
-            and float(x0[2]) <= float(_resume_release_speed_threshold_mps)
-            and float(destination[2]) > float(_resume_release_speed_threshold_mps)
-            and float(planning_current_acceleration_mps2) < -0.05
-        )
-        if _transitioning_from_stationary_hold:
-            planning_current_acceleration_mps2 = 0.0
-
         if _is_stop_goal:
             # Replace the static v_ref=0 with a dynamic kinematic profile:
             #   v_ref = active_speed_upper_bound_mps
@@ -3865,9 +4016,9 @@ class MPC:
         # propagate acceleration properly and allows the QP to plan a
         # physically meaningful re-acceleration trajectory.
         _transitioning_from_stop = bool(self._last_was_stop_goal) and not bool(_is_stop_goal)
-        if _is_stop_goal or _transitioning_from_stop or _transitioning_from_stationary_hold:
+        if _is_stop_goal or _transitioning_from_stop or acceleration_seed_was_projected:
             shifted_seed = None
-            if _transitioning_from_stop or _transitioning_from_stationary_hold:
+            if _transitioning_from_stop or acceleration_seed_was_projected:
                 # Also drop any stored solution so _build_shifted_previous_solution_seed
                 # cannot return it on a later call before the ego has moved.
                 self._previous_x_solution = None

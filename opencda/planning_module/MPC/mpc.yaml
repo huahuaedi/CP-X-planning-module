@@ -764,7 +764,7 @@ mpc:
       xy_term_uses_frenet_decomposition: false
 
     road_boundary:
-      # Road = all same-direction CARLA Driving lanes around the reference lane.
+      # Drivable bounds carried by the Behavior-selected AD-map reference.
       enabled: true
       # Road-boundary penalty weight:
       #   J_road = w_boundary * (s_left^2 + s_right^2)
@@ -851,8 +851,24 @@ mpc:
     # field. Disabled by default; a no-op when no rows are passed.
     corridor:
       enabled: false
-      w_slack: 10000.0      # quadratic penalty on band violation (>= road_boundary)
+      # A probabilistic/RSS envelope may yield when it conflicts with physical
+      # lane recovery; it must never make sideways escape cheaper.
+      w_slack: 1000.0
+      w_heading_slack: 1000000.0  # radian-space lane-ownership guard
+      # While prediction rows are active, lane ownership must dominate their
+      # conservative RSS/probability envelope. The recovery slack is unbounded
+      # (0 sentinel) so an already-bad state remains solvable, but its much
+      # larger cost makes straight in-lane braking cheaper than lateral escape.
+      w_lane_boundary_slack: 1000000.0
+      max_lane_boundary_slack_m: 0.0
       max_slack_m: 0.0      # 0 = unbounded; high cost softens without infeasible QP
+      # A progress cap is longitudinal authority, not permission to rotate
+      # sideways inside a wide multi-lane road.  Bound heading error relative
+      # to the selected reference. This guard is strongly penalized but soft:
+      # a pre-existing tracking error must never make the interaction QP
+      # infeasible. The reference itself remains free to encode an authorized
+      # lane change or turn.
+      max_reference_heading_error_deg: 3.0
 
     # Super-ellipsoid obstacle collision potential used in the live MPC objective.
     #

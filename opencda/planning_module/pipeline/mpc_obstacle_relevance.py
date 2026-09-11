@@ -111,6 +111,64 @@ def _point_to_polyline(px: float, py: float, poly: Sequence[XY]) -> Tuple[float,
     return best_perp, best_along
 
 
+def project_to_extended_polyline(
+    px: float, py: float, poly: Sequence[XY],
+) -> Tuple[float, float]:
+    """Project onto a finite polyline with infinite endpoint tangents.
+
+    Local planning references are shorter than the perception/prediction
+    range.  Clamping an actor beyond either endpoint to the endpoint turns
+    longitudinal separation into lateral error and gives Stage A and Stage C
+    incompatible Frenet coordinates.  The interior remains a normal closest
+    segment projection; only points strictly before/after the reference use
+    its first/last tangent.
+    """
+
+    lateral_m, station_m = _point_to_polyline(float(px), float(py), poly)
+    if len(poly) < 2:
+        return float(lateral_m), float(station_m)
+
+    arc_m = sum(
+        math.hypot(poly[i + 1][0] - poly[i][0],
+                   poly[i + 1][1] - poly[i][1])
+        for i in range(len(poly) - 1)
+    )
+
+    first_x, first_y = poly[0]
+    next_x, next_y = poly[1]
+    first_dx, first_dy = next_x - first_x, next_y - first_y
+    first_len = math.hypot(first_dx, first_dy)
+    if first_len > 1.0e-9:
+        before_m = (
+            (float(px) - first_x) * first_dx
+            + (float(py) - first_y) * first_dy
+        ) / first_len
+        if station_m <= 1.0e-6 and before_m < 0.0:
+            cross_m = abs(
+                first_dx * (float(py) - first_y)
+                - first_dy * (float(px) - first_x)
+            ) / first_len
+            return float(cross_m), float(before_m)
+
+    prev_x, prev_y = poly[-2]
+    last_x, last_y = poly[-1]
+    last_dx, last_dy = last_x - prev_x, last_y - prev_y
+    last_len = math.hypot(last_dx, last_dy)
+    if last_len > 1.0e-9:
+        beyond_m = (
+            (float(px) - last_x) * last_dx
+            + (float(py) - last_y) * last_dy
+        ) / last_len
+        if station_m >= arc_m - 1.0e-6 and beyond_m > 0.0:
+            cross_m = abs(
+                last_dx * (float(py) - last_y)
+                - last_dy * (float(px) - last_x)
+            ) / last_len
+            return float(cross_m), float(arc_m + beyond_m)
+
+    return float(lateral_m), float(station_m)
+
+
 def split_relevant_mpc_obstacles(
     obstacle_snapshots: Sequence[Snapshot],
     reference_samples: Sequence[Any],
@@ -151,7 +209,7 @@ def split_relevant_mpc_obstacles(
             continue
         enters_band = False
         for px, py in _obstacle_track_xy(snap):
-            perp, along = _point_to_polyline(px, py, poly)
+            perp, along = project_to_extended_polyline(px, py, poly)
             if perp < lat_gate and -_REAR_BAND_M <= along <= lon_gate:
                 enters_band = True
                 break

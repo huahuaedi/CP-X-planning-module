@@ -257,12 +257,10 @@ class OpenCDAPlanningAdapter:
             signal_context=signal_context,
             stop_target=stop_target,
         )
-        tracked_obstacles = bridge.tracker.update(
-            obstacle_snapshots=object_snapshots,
-            timestamp_s=float(sim_time_s),
-            signal_context=signal_context,
-            stop_target=stop_target,
-        )
+        # PerceptionStage already fused and tracked the immutable obstacle
+        # view before the initial emergency-speed decision.  Updating the
+        # tracker again here created a second temporal path in the same tick.
+        tracked_obstacles = [dict(snapshot) for snapshot in object_snapshots]
         # Lane assignment, safety scoring, and front-gap extraction used to
         # run once on raw detections and then immediately run again on the
         # tracker output below.  Nothing consumed the first result.  Keep the
@@ -371,6 +369,20 @@ class OpenCDAPlanningAdapter:
                 ),
                 route_lane_id=int(route_optimal_lane_id),
                 route_maneuver=str(route_context.next_macro_maneuver),
+                lateral_offset_m=float(
+                    getattr(local_map, "lateral_offset_m", 0.0)
+                    if local_map is not None else 0.0
+                ),
+                heading_error_rad=float(
+                    getattr(local_map, "heading_error_rad", 0.0)
+                    if local_map is not None else 0.0
+                ),
+                match_valid=bool(
+                    local_map is not None
+                    and getattr(local_map, "valid", False)
+                    and int(getattr(local_map, "ego_lane_id", 0) or 0)
+                    == int(current_lane_id)
+                ),
             ),
             perception=PerceptionContext(
                 dynamic_objects=[dict(obj) for obj in tracked_obstacles],

@@ -11,19 +11,22 @@ scenario:
   single_cav_list:
     - name: predicted_vehicle
       spawn_position: [-300.0, 8.3, 0.3, 0, 0, 0]
-      destination: [-70.0, 8.3, 0.3]
+      destination: [-100.0, 8.3, 0.3]
       v2x: {enabled: true, communication_range: 80}
       behavior: {local_planner: {debug_trajectory: true, debug: true}}
       planner:
-        target_speed_mps: 8.0
+        target_speed_mps: 5.0
         debug_output_dir: opencda/planning_module/opencda_bridge/debug_prediction_primary_target
     - name: prediction_ego
       spawn_position: [-325.0, 8.3, 0.3, 0, 0, 0]
-      destination: [-70.0, 8.3, 0.3]
+      destination: [-140.0, 8.3, 0.3]
       v2x: {enabled: true, communication_range: 80}
       behavior: {local_planner: {debug_trajectory: true, debug: true}}
       planner:
         target_speed_mps: 10.0
         prediction_mode: synthetic_multimodal
+        prediction_update_hz: 5.0
+        following_idm_enabled: false
+        record_evaluation_metrics: true
         prediction_mode_min_probability: 0.30
         debug_output_dir: opencda/planning_module/opencda_bridge/debug_prediction_primary_ego

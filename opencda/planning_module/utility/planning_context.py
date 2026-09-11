@@ -221,6 +221,9 @@ class MapLaneContext:
     in_junction: bool = False
     route_lane_id: int = 0
     route_maneuver: str = "straight"
+    lateral_offset_m: float = 0.0
+    heading_error_rad: float = 0.0
+    match_valid: bool = False
 
     @classmethod
     def from_local_context(
@@ -245,6 +248,9 @@ class MapLaneContext:
             in_junction=bool(in_junction),
             route_lane_id=int(route_context.optimal_lane_id),
             route_maneuver=str(route_context.next_macro_maneuver),
+            lateral_offset_m=_to_float(context.get("lateral_offset_m", 0.0)),
+            heading_error_rad=_to_float(context.get("heading_error_rad", 0.0)),
+            match_valid=bool(context.get("match_valid", False)),
         )
 
 

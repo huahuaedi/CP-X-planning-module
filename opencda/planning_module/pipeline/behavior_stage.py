@@ -270,6 +270,33 @@ class BehaviorStage:
         self._route_lane_change_latch.reset()
 
     @staticmethod
+    def _lane_alignment(
+        *, map_lane_context: Any, reference_map: Any, ego_pose: Any,
+    ) -> Mapping[str, object]:
+        """Return alignment from the frame's authoritative map match."""
+
+        if bool(getattr(map_lane_context, "match_valid", False)):
+            return {
+                "lane_id": int(getattr(map_lane_context, "lane_id", 0)),
+                "lateral_offset_m": float(getattr(
+                    map_lane_context, "lateral_offset_m", 0.0
+                )),
+                "heading_error_rad": float(getattr(
+                    map_lane_context, "heading_error_rad", 0.0
+                )),
+            }
+        from opencda.planning_module.behavior_planner import compute_ego_lane_offset
+
+        try:
+            return compute_ego_lane_offset(reference_map, ego_pose)
+        except Exception:
+            return {
+                "lane_id": 0,
+                "lateral_offset_m": float("inf"),
+                "heading_error_rad": float("inf"),
+            }
+
+    @staticmethod
     def _cooperative_proposal_from_candidate(
         *, authorization: Any, candidate_frame: Any, current_lane_id: int,
         opportunistic_lane_change_allowed: bool,
@@ -361,6 +388,7 @@ class BehaviorStage:
             behavior_planner=behavior_planner,
             static_obstacle_stage=static_obstacle_stage,
             reference_map=reference_map, ego_pose=request.ego_pose,
+            map_lane_context=frame.map_lane,
             ego_x_m=float(request.ego_location.x),
             ego_y_m=float(request.ego_location.y),
             ego_yaw_rad=float(request.ego_yaw_rad),
@@ -411,6 +439,7 @@ class BehaviorStage:
     def produce_command(
         *, behavior_planner: Any, static_obstacle_stage: Any,
         reference_map: Any, ego_pose: Any, ego_x_m: float, ego_y_m: float,
+        map_lane_context: Any = None,
         ego_yaw_rad: float, ego_speed_mps: float, max_deceleration_mps2: float,
         current_lane_id: int, route_optimal_lane_id: int,
         next_macro_maneuver: str, in_junction: bool, sim_time_s: float,
@@ -429,17 +458,17 @@ class BehaviorStage:
         """Produce one behavior command through the sole obstacle arbitration path."""
 
         from opencda.planning_module.behavior_planner import (
-            compute_ego_lane_offset,
             evaluate_intersection_obstacle_response,
         )
 
-        try:
-            alignment = compute_ego_lane_offset(reference_map, ego_pose)
-        except Exception:
-            alignment = {
-                "lane_id": 0, "lateral_offset_m": float("inf"),
-                "heading_error_rad": float("inf"),
-            }
+        # Lane identity and alignment must come from the same stateful map
+        # match.  A second nearest-waypoint query can select a crossing lane
+        # at junctions even while LocalMapSnapshot keeps the correct lane id.
+        alignment = BehaviorStage._lane_alignment(
+            map_lane_context=map_lane_context,
+            reference_map=reference_map,
+            ego_pose=ego_pose,
+        )
         lateral_m = float(alignment.get("lateral_offset_m", float("inf")))
         heading_rad = float(alignment.get("heading_error_rad", float("inf")))
         alignment_valid = bool(

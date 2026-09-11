@@ -33,7 +33,7 @@ scenario:
         debug_output_dir: opencda/planning_module/opencda_bridge/debug_two_cav_merge_off_cav1
 
     - name: cav2
-      spawn_position: [-325.0, 8.3, 0.3, 0, 0, 0]
+      spawn_position: [-315.0, 8.3, 0.3, 0, 0, 0]
       destination: [-70.0, 8.3, 0.3]
       v2x:
         enabled: true

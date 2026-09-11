@@ -64,6 +64,39 @@ def test_local_route_reference_prefixes_matched_lane_before_connector():
     assert reason == "local_map_snapshot_route:10>20>30"
 
 
+def test_junction_lane_follow_uses_topology_order_not_waypoint_successor():
+    geometries = {
+        10: _local_geometry(10, [(float(x), 0.0) for x in range(0, 11)]),
+        20: _local_geometry(20, [(float(x), 0.0) for x in range(10, 31)]),
+    }
+    snapshot = SimpleNamespace(
+        valid=True,
+        route_lane_sequence=(10, 20),
+        geometry_for_lane=lambda lane_id: geometries.get(int(lane_id)),
+    )
+
+    result = ReferenceLineProvider()._local_route_lane_follow_reference(
+        local_map=snapshot,
+        ego_pose={"x": 8.0, "y": 0.2, "heading_rad": 0.0},
+        decision="lane_follow",
+        in_junction=True,
+        current_lane_id=10,
+        target_speed_mps=5.0,
+        horizon_steps=12,
+        step_distance_m=1.0,
+    )
+
+    assert result is not None
+    samples = result.mutable_samples()
+    assert len(samples) == 13
+    assert all(abs(float(sample["y_ref_m"])) < 1.0e-9 for sample in samples)
+    assert all(
+        float(second["x_ref_m"]) > float(first["x_ref_m"])
+        for first, second in zip(samples, samples[1:])
+    )
+    assert result.diagnostics["reference_source"] == "local_map_route_corridor"
+
+
 def test_turn_reference_keeps_valid_master_until_local_map_revision_catches_up():
     provider = ReferenceLineProvider()
     provider.attach_builder(SimpleNamespace(
@@ -482,3 +515,118 @@ def test_publish_consumes_typed_planning_inputs_and_owns_acceptance():
     assert result.accepted
     assert result.mode == LANE_CHANGE
     assert provider.snapshot(LANE_CHANGE).target_lane_id == 11
+
+
+def test_lane_follow_publish_windows_one_admap_master_across_ticks():
+    geometries = {
+        10: _local_geometry(10, [(float(x), 0.0) for x in range(0, 31)]),
+        20: _local_geometry(20, [(float(x), 0.0) for x in range(30, 81)]),
+    }
+    local_map = SimpleNamespace(
+        valid=True,
+        ego_lane_id=10,
+        route_lane_sequence=(10, 20),
+        geometry_for_lane=lambda lane_id: geometries.get(int(lane_id)),
+    )
+    behavior = BehaviorDecision.from_mapping(
+        {
+            "decision": "lane_follow",
+            "current_lane_id": 10,
+            "target_lane_id": 10,
+            "target_speed_mps": 6.0,
+        },
+        default_speed_mps=6.0,
+    )
+    provider = ReferenceLineProvider()
+
+    first = provider.publish(
+        ReferenceLineRequest(
+            local_map=local_map,
+            route_cursor=SimpleNamespace(segment_kind="lane_follow"),
+            behavior=behavior,
+            route_revision="route-1",
+            map_epoch="town05",
+            ego_x_m=5.0,
+            ego_y_m=0.1,
+        ),
+        _line(y_m=0.0)[:12],
+        valid=True,
+        build_reason="local_map_route_corridor",
+    )
+    revision = first.geometry_revision
+
+    # A per-tick candidate with a contradictory northbound shape is only a
+    # validity probe. It must not replace the installed AD-map topology.
+    northbound = [
+        {"x_ref_m": 8.0, "y_ref_m": float(y), "speed_ref_mps": 4.0}
+        for y in range(1, 13)
+    ]
+    second = provider.publish(
+        ReferenceLineRequest(
+            local_map=local_map,
+            route_cursor=SimpleNamespace(segment_kind="lane_follow"),
+            behavior=behavior,
+            route_revision="route-1",
+            map_epoch="town05",
+            ego_x_m=8.0,
+            ego_y_m=0.1,
+        ),
+        northbound,
+        valid=True,
+        build_reason="transient_candidate",
+    )
+
+    assert second.accepted
+    assert second.geometry_revision == revision
+    assert "persistent_reference_window" in second.reason
+    assert all(abs(float(row["y_ref_m"])) < 1.0e-9 for row in second.samples)
+    assert all(
+        float(next_row["x_ref_m"]) > float(row["x_ref_m"])
+        for row, next_row in zip(second.samples, second.samples[1:])
+    )
+    assert provider.snapshot(LANE_FOLLOW).progress_s_m >= 8.0
+    assert all(float(row["speed_ref_mps"]) == pytest.approx(4.0)
+               for row in second.samples)
+
+
+def test_lane_change_completion_installs_target_lane_follow_master():
+    geometries = {
+        10: _local_geometry(10, [(float(x), 0.0) for x in range(31)]),
+        11: _local_geometry(11, [(float(x), 3.5) for x in range(31)]),
+    }
+    local_map = SimpleNamespace(
+        valid=True,
+        ego_lane_id=11,
+        route_lane_sequence=(11,),
+        geometry_for_lane=lambda lane_id: geometries.get(int(lane_id)),
+    )
+    provider = ReferenceLineProvider()
+    provider.install(
+        LANE_FOLLOW,
+        _line(y_m=0.0),
+        route_revision="route-1",
+        map_epoch="town05",
+        event="initial_route",
+        source_lane_id=10,
+        target_lane_id=10,
+    )
+    previous_revision = provider.snapshot(LANE_FOLLOW).geometry_revision
+
+    installed, reason = provider.install_lane_follow_handoff(
+        local_map=local_map,
+        target_lane_id=11,
+        target_speed_mps=6.0,
+        route_revision="route-1",
+        map_epoch="town05",
+        ego_x_m=5.0,
+        ego_y_m=3.5,
+    )
+
+    snapshot = provider.snapshot(LANE_FOLLOW)
+    assert installed
+    assert reason == "lane_follow_handoff_installed:target_lane=11"
+    assert snapshot.geometry_revision == previous_revision + 1
+    assert snapshot.source_lane_id == 11
+    assert snapshot.target_lane_id == 11
+    assert all(abs(float(row["y_ref_m"]) - 3.5) < 1.0e-6
+               for row in snapshot.samples)

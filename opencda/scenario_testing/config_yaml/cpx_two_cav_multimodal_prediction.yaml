@@ -19,13 +19,17 @@ vehicle_base:
     full_allow_opportunistic_lane_change: false
 
 cpx_mature:
-  max_ticks: 900
+  max_ticks: 1200
   destination_tolerance_m: 4.0
   completion_mode: all_cavs
   scripted_target_brake:
     enabled: true
     target_cav_index: 0
-    start_tick: 300
+    ego_cav_index: 1
+    # Exogenous stimulus shared by both A/B arms.  Target progress is
+    # independent of how early the ego prediction constraint reacts.
+    minimum_start_tick: 80
+    trigger_target_position: {axis: x, value: -250.0, direction: increasing}
     duration_ticks: 50
     brake: 0.65
   synthetic_multimodal_prediction:
@@ -36,8 +40,15 @@ cpx_mature:
 scenario:
   single_cav_list:
     - name: predicted_vehicle
-      spawn_position: [-270.0, 8.3, 0.3, 0, 0, 0]
-      destination: [20.0, 8.3, 0.3]
+      # Start inside the planner's longitudinal interaction window.  At the
+      # deterministic brake event the faster ego is then closing on this CAV,
+      # so the prediction ablation exercises FOLLOW constraints instead of an
+      # out-of-range no-op.
+      spawn_position: [-300.0, 8.3, 0.3, 0, 0, 0]
+      # Continue beyond the ego goal after the brake event.  Giving both
+      # same-lane vehicles the same destination makes all_cavs completion
+      # physically impossible because ego must stop a safe gap behind.
+      destination: [-100.0, 8.3, 0.3]
       v2x:
         enabled: true
         communication_range: 80
@@ -46,12 +57,12 @@ scenario:
           debug_trajectory: true
           debug: true
       planner:
-        target_speed_mps: 8.0
+        target_speed_mps: 5.0
         debug_output_dir: opencda/planning_module/opencda_bridge/debug_multimodal_target
 
     - name: prediction_ego
       spawn_position: [-325.0, 8.3, 0.3, 0, 0, 0]
-      destination: [20.0, 8.3, 0.3]
+      destination: [-140.0, 8.3, 0.3]
       v2x:
         enabled: true
         communication_range: 80
@@ -63,9 +74,10 @@ scenario:
         target_speed_mps: 10.0
         prediction_mode: synthetic_multimodal
         prediction_update_hz: 5.0
-        # FOLLOW has one longitudinal owner: the standard SpeedPlanner/IDM.
-        # Prediction QP rows remain reserved for geometric conflicts.
-        following_idm_enabled: true
+        # Controlled prediction-to-MPC ablation: IDM is deliberately disabled
+        # in both arms so it cannot mask the prediction corridor. Production
+        # profiles retain their normal IDM following owner.
+        following_idm_enabled: false
         record_evaluation_metrics: true
         prediction_mode_min_probability: 0.05
         prediction_credible_probability_min: 0.15

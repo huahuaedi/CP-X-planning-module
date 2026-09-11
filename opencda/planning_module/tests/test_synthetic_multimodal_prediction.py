@@ -19,6 +19,25 @@ def test_synthetic_transform_targets_one_actor_and_normalizes_probabilities():
     assert modes[2]["points"][-1]["y"] > 3.0
 
 
+def test_synthetic_modes_follow_runtime_actor_activation():
+    activation = {"7": False}
+    transform = synthetic_multimodal_snapshot_transform(
+        horizon_s=2.0,
+        dt_s=0.2,
+        actor_ids=[7],
+        actor_activation=activation,
+    )
+    snapshot = {"id": 7, "x": 0, "y": 0, "v": 5, "psi": 0}
+    inactive = transform(snapshot, 1.0)
+    assert "trajectory_hypotheses" not in inactive
+    assert inactive["prediction_source"] == "synthetic_inactive"
+
+    activation["7"] = True
+    active = transform(snapshot, 1.05)
+    assert len(active["trajectory_hypotheses"]) == 3
+    assert active["prediction_source"] == "synthetic_multimodal"
+
+
 def test_prediction_frame_preserves_all_synthetic_hypotheses():
     transform = synthetic_multimodal_snapshot_transform(
         horizon_s=2.0, dt_s=0.2, actor_ids=[7]

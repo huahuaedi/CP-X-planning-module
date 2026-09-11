@@ -28,10 +28,11 @@ from dataclasses import dataclass
 from typing import Any, List, Mapping, Optional, Sequence, Tuple
 
 from opencda.planning_module.pipeline.mpc_obstacle_relevance import (
-    _point_to_polyline,
     _polyline_xy,
+    project_to_extended_polyline,
 )
 from opencda.planning_module.pipeline.spatiotemporal_corridor import Corridor
+from opencda.planning_module.pipeline.reference_geometry import pose_at_arc
 
 XY = Tuple[float, float]
 _BIG = 1.0e9
@@ -50,17 +51,6 @@ class LinearRow:
     upper: float
     slack_group: str
     tag: str = ""
-
-
-def _tangent_at(poly: Sequence[XY], along_m: float, total_m: float) -> Tuple[float, float]:
-    if len(poly) < 2 or total_m <= 1e-6:
-        return (1.0, 0.0)
-    frac = min(1.0, max(0.0, along_m / total_m))
-    i = max(0, min(len(poly) - 2, int(frac * (len(poly) - 1))))
-    dx = poly[i + 1][0] - poly[i][0]
-    dy = poly[i + 1][1] - poly[i][1]
-    n = math.hypot(dx, dy)
-    return (1.0, 0.0) if n < 1e-9 else (dx / n, dy / n)
 
 
 def _poly_len(poly: Sequence[XY]) -> float:
@@ -82,9 +72,9 @@ def corridor_rows(
 
     ``ego_origin_xy`` is the world point the MPC frame is centred on
     (``mpc.py`` shifts everything to the current ego position). Rows are in
-    that shifted frame: ``a . (x_k, y_k)`` is arc-length measured from the
-    reference's start, minus the origin's own arc-length offset folded into
-    the band.
+    that shifted frame. The affine station approximation is
+    ``s(p) = s_anchor + tangent . (p - p_anchor)``; its constant term is
+    folded into the band, including on curved and nonuniform references.
     """
 
     poly_world = _polyline_xy(reference_samples)
@@ -93,7 +83,7 @@ def corridor_rows(
     total = _poly_len(poly_world)
     ox, oy = float(ego_origin_xy[0]), float(ego_origin_xy[1])
     poly = [(x - ox, y - oy) for (x, y) in poly_world]
-    origin_along = _point_to_polyline(0.0, 0.0, poly)[1]
+    origin_along = project_to_extended_polyline(0.0, 0.0, poly)[1]
 
     rows: List[LinearRow] = []
     n_stages = len(corridor.s_hi)
@@ -114,17 +104,20 @@ def corridor_rows(
             anchor = s_hi
         elif s_lo > -_BIG:
             anchor = s_lo
-        tx, ty = _tangent_at(poly, anchor, total)
-        # The row measures arc-length RELATIVE to the ego origin
-        # (t . (x_k, y_k) ~= s(point) - s(ego_origin)); shift the band by the
-        # origin's own station so the bound is on absolute arc-length.
+        anchor = min(total, max(0.0, anchor))
+        ax, ay, heading = pose_at_arc(poly, anchor)
+        tx, ty = math.cos(heading), math.sin(heading)
+        # s(p) ~= anchor + tangent . (p - anchor_point).
+        # anchor_point is already in the ego-origin XY frame. Its affine
+        # offset cannot be replaced by ego station on a curved reference.
+        offset = tx * ax + ty * ay - anchor
         lo_rel = (
             -_BIG if s_lo <= -_BIG
-            else max(s_lo, anchor - float(max_band_m)) - origin_along
+            else max(s_lo, anchor - float(max_band_m)) + offset
         )
         hi_rel = (
             _BIG if s_hi >= _BIG
-            else min(s_hi, anchor + float(max_band_m)) - origin_along
+            else min(s_hi, anchor + float(max_band_m)) + offset
         )
         lower, upper = lo_rel, hi_rel
         rows.append(

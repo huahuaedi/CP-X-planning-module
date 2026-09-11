@@ -35,6 +35,7 @@ class LaneChangeLifecycleStage:
 
     def release_completed(
         self, *, current_lane_id: int, ego_location: Any, ego_yaw_rad: float,
+        local_map: Any = None,
     ) -> str:
         snapshot = self._provider.snapshot(LANE_CHANGE)
         if not snapshot.mutable_samples():
@@ -132,6 +133,19 @@ class LaneChangeLifecycleStage:
         )
         if transition.action != "complete":
             return ""
+        handoff_reason = self._install_lane_follow_handoff(
+            local_map=local_map,
+            target_lane_id=target_lane_id,
+            ego_location=ego_location,
+        )
+        if local_map is not None and not handoff_reason.startswith(
+            "lane_follow_handoff_installed"
+        ):
+            # Completion is a reference lifecycle boundary. Do not release
+            # the target-lane stabilization geometry until its lane-follow
+            # successor is installed; otherwise the still-active source-lane
+            # master becomes authoritative again on the next tick.
+            return "lane_change_completion_waiting_for_" + str(handoff_reason)
         self._maneuver.complete_lane_change(str(transition.reason))
         self.reset_reference()
         clear_seed = getattr(self._mpc, "clear_solution_memory", None)
@@ -148,8 +162,32 @@ class LaneChangeLifecycleStage:
             f"progress={float(completion.progress):.3f}:"
             f"lateral_error={float(completion.target_lateral_error_m):.3f}:"
             "heading_error_deg="
-            f"{math.degrees(float(completion.target_heading_error_rad)):.2f}"
+            f"{math.degrees(float(completion.target_heading_error_rad)):.2f}:"
+            f"{handoff_reason}"
         )
+
+    def _install_lane_follow_handoff(
+        self, *, local_map: Any, target_lane_id: int, ego_location: Any,
+    ) -> str:
+        """Atomically transfer geometry ownership to the completed corridor."""
+
+        if local_map is None:
+            return "lane_follow_handoff_unavailable:no_local_map"
+        installed, reason = self._provider.install_lane_follow_handoff(
+            local_map=local_map,
+            target_lane_id=int(target_lane_id),
+            target_speed_mps=float(
+                self._maneuver.lane_change.target_speed_mps
+                or self._target_speed_mps
+            ),
+            route_revision=str(getattr(self._route, "route_revision", "")),
+            map_epoch=self._map_epoch,
+            ego_x_m=float(ego_location.x),
+            ego_y_m=float(ego_location.y),
+        )
+        if not installed:
+            return str(reason)
+        return str(reason)
 
     def _start_stabilization(self, *, ego_location: Any, ego_yaw_rad: float) -> str:
         lifecycle = self._maneuver.lane_change

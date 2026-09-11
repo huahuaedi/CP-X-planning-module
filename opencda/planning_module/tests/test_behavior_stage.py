@@ -12,6 +12,28 @@ from pipeline.behavior_stage import (
 from pipeline.maneuver_manager import ManeuverManager
 
 
+def test_lane_alignment_uses_stateful_frame_match_at_junction():
+    class AmbiguousNearestMap:
+        def get_waypoint(self, _pose):
+            raise AssertionError("must not rematch a frozen planning frame")
+
+    context = SimpleNamespace(
+        match_valid=True,
+        lane_id=18630151,
+        lateral_offset_m=-0.18,
+        heading_error_rad=math.radians(-0.9),
+    )
+    alignment = BehaviorStage._lane_alignment(
+        map_lane_context=context,
+        reference_map=AmbiguousNearestMap(),
+        ego_pose={"x": -129.0, "y": 91.1, "heading_rad": 0.0},
+    )
+
+    assert alignment["lane_id"] == 18630151
+    assert alignment["lateral_offset_m"] == -0.18
+    assert math.degrees(alignment["heading_error_rad"]) == -0.9
+
+
 def _route_lane_change_request(**overrides):
     values = dict(
         route_lane_change_allowed=True,

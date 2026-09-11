@@ -20,6 +20,7 @@ class CAVConflictSchedule:
     coordination_period_s: float = 0.2
     latch_state: dict = field(default_factory=dict)
     tag_state: dict = field(default_factory=dict)
+    veto_state: dict = field(default_factory=dict)
     assignments: tuple = ()
     corridor: Any = None
     corridor_reference: tuple = ()
@@ -129,6 +130,7 @@ class CAVConflictSchedule:
     ) -> None:
         self.latch_state = dict(getattr(result, "latch_state", {}) or {})
         self.tag_state = dict(getattr(result, "tag_state", {}) or {})
+        self.veto_state = dict(getattr(result, "veto_state", {}) or {})
         self.assignments = tuple(getattr(result, "assignments", ()) or ())
         self._has_observation = True
         if bool(getattr(result, "diagnostics", {}).get(

@@ -574,6 +574,7 @@ class CandidateSelectionStage:
             current_lane_id=int(request.current_lane_id),
             ego_location=request.ego_location,
             ego_yaw_rad=float(request.ego_yaw_rad),
+            local_map=getattr(request.reference_context, "local_map", None),
         ) or "")
         intents = list(request.intents or ())
         if self._maneuver.route_lane_change_edge_completed:

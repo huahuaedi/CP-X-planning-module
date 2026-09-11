@@ -1,0 +1,36 @@
+base_config: cpx_town05_crossing_late_conflict.yaml
+
+description: |-
+  Controlled OFF arm for the Town05 late-crossing experiment. Physical
+  actors, trigger timing and synthetic prediction payload are identical to
+  the ON arm; only prediction-to-corridor conflict handling is disabled.
+
+vehicle_base:
+  planner:
+    cav_conflict_enabled: false
+
+# OmegaConf replaces lists rather than merging list entries. Repeat the one
+# ego solely to give the OFF arm an independent diagnostics directory.
+scenario:
+  single_cav_list:
+    - name: town05_late_conflict_ego
+      spawn_position: [-173.802, 91.368, 0.6, 0, 0.057, 0]
+      destination: [-72.0, 91.368, 0.6]
+      v2x:
+        enabled: true
+        communication_range: 100
+      planner:
+        target_speed_mps: 8.0
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_town05_late_conflict_off
+  scripted_actors:
+    - blueprint: vehicle.tesla.model3
+      path:
+        - [-124.475, 102.0]
+        - [-124.475, 91.368]
+        - [-124.475, 20.0]
+      speed_mps: 6.0
+      z: 0.6
+      trigger:
+        axis: x
+        cross: -138.0
+        from: below

@@ -48,7 +48,9 @@ class PlannerDiagnosticsStage:
             "stage": debug.get("reference_pipeline_stage", ""),
             "intent_mode": debug.get("reference_pipeline_intent_mode", ""),
             "fallback_reason": str(c["built_reference"].fallback_reason),
-            "reference_source": "behavior_reference_pipeline",
+            "reference_source": str(debug.get(
+                "reference_source", "behavior_reference_pipeline"
+            )),
             "front_gap_actor_id": str(c["front_gap_actor_id"] or ""),
             "front_gap_obstacle_speed_mps": (
                 "" if c["front_gap_obstacle_speed_mps"] is None
@@ -221,6 +223,9 @@ class PlannerDiagnosticsStage:
                 cav_diag.get("agent_states", {}) or {}
             ),
             "cav_conflict_roles": dict(cav_diag.get("roles", {}) or {}),
+            "cav_ego_claim": dict(cav_diag.get("ego_claim", {}) or {}),
+            "cav_peer_claims": dict(cav_diag.get("peer_claims", {}) or {}),
+            "cav_arbitration": dict(cav_diag.get("arbitration", {}) or {}),
             "cav_corridor_binding": ",".join(
                 str(b) for b in cav_diag.get("corridor_binding", [])
             ),
@@ -268,6 +273,9 @@ class PlannerDiagnosticsStage:
             ),
             "cav_credible_mode_veto_count": int(
                 cav_diag.get("credible_mode_veto_count", 0) or 0
+            ),
+            "cav_credible_mode_veto_held_count": int(
+                cav_diag.get("credible_mode_veto_held_count", 0) or 0
             ),
             "cav_trajectory_sources": ";".join(
                 f"{k}={v}"

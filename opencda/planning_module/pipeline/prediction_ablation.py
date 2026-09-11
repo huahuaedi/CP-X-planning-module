@@ -99,6 +99,7 @@ def frozen_snapshot_transform(
 def synthetic_multimodal_snapshot_transform(
     *, horizon_s: float, dt_s: float, actor_ids: Sequence[int] = (),
     update_period_s: float = 0.2,
+    actor_activation: Optional[Mapping[str, bool]] = None,
 ) -> SnapshotTransform:
     """Inject 5-Hz-style keep-lane/brake/lane-change hypotheses.
 
@@ -122,6 +123,11 @@ def synthetic_multimodal_snapshot_transform(
         ), "")
         if selected and actor_id not in selected:
             return out
+        if actor_activation is not None and not bool(
+            actor_activation.get(str(actor_id), True)
+        ):
+            out["prediction_source"] = "synthetic_inactive"
+            return out
         cached = cache.get(actor_id)
         if cached is not None:
             cached_time_s, cached_modes = cached
@@ -142,11 +148,13 @@ def synthetic_multimodal_snapshot_transform(
             for index in range(count):
                 time_s = float(index) * step_s
                 speed = max(0.0, v0 - 2.0 * time_s) if kind == "brake" else v0
+                # Integrate deceleration only until rest; extending the
+                # parabola past v=0 would make a stopped prediction reverse.
+                moving_time_s = min(time_s, v0 / 2.0)
                 distance = (
-                    min(v0 * time_s, v0 * time_s - time_s ** 2)
+                    v0 * moving_time_s - moving_time_s ** 2
                     if kind == "brake" else v0 * time_s
                 )
-                distance = max(0.0, distance)
                 u = min(1.0, time_s / max(1.0, 0.75 * float(horizon_s)))
                 smooth = 10.0 * u ** 3 - 15.0 * u ** 4 + 6.0 * u ** 5
                 lateral = 3.5 * smooth if kind == "lane_change_left" else 0.0
@@ -356,6 +364,7 @@ def build_snapshot_transform(
     freeze_unmatched_oracle: bool = False,
     synthetic_actor_ids: Sequence[int] = (),
     synthetic_update_period_s: float = 0.2,
+    synthetic_actor_activation: Optional[Mapping[str, bool]] = None,
 ) -> Optional[SnapshotTransform]:
     """Factory used by the bridge: map a config mode string to a transform.
 
@@ -384,6 +393,7 @@ def build_snapshot_transform(
             horizon_s=float(horizon_s), dt_s=float(dt_s),
             actor_ids=synthetic_actor_ids,
             update_period_s=float(synthetic_update_period_s),
+            actor_activation=synthetic_actor_activation,
         )
     raise ValueError(f"unknown prediction_mode: {prediction_mode!r}")
 

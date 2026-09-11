@@ -1,0 +1,35 @@
+base_config: cpx_town05_two_vehicle_crossing.yaml
+
+description: |-
+  Short arrival-window Town05 crossing. At the ego trigger, approximately
+  13.5 m remain to the conflict point (1.7 s at 8 m/s); the crosser has
+  10.6 m remaining (1.8 s at 6 m/s). This changes physical timing only,
+  preserving prediction probabilities and planning thresholds.
+
+scenario:
+  single_cav_list:
+    - name: town05_late_conflict_ego
+      spawn_position: [-173.802, 91.368, 0.6, 0, 0.057, 0]
+      destination: [-72.0, 91.368, 0.6]
+      v2x:
+        enabled: true
+        communication_range: 100
+      planner:
+        target_speed_mps: 8.0
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_town05_late_conflict
+        frame_capture:
+          out_dir: artifacts/deflection_frames/late_conflict_after_fix
+          min_row_count: 1
+          max_frames: 90
+  scripted_actors:
+    - blueprint: vehicle.tesla.model3
+      path:
+        - [-124.475, 102.0]
+        - [-124.475, 91.368]
+        - [-124.475, 20.0]
+      speed_mps: 6.0
+      z: 0.6
+      trigger:
+        axis: x
+        cross: -138.0
+        from: below

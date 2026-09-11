@@ -263,3 +263,75 @@ def test_pipeline_owns_reference_publication_and_mpc_admission_sequence():
     assert result.control_context == "control-context"
     assert result.trace_fields()["mpc_entry_allowed"] is True
     assert [call[0] for call in calls] == ["publish", "entry", "context"]
+
+
+def test_resolve_cav_interaction_builds_corridor_rows_on_the_constraint_reference():
+    # Classification runs on a straight +y reference (so the crosser still
+    # reads as CROSSING exactly as in the default-behavior test below).
+    # constraint_reference_samples stands in for the actually-executed
+    # geometry and is rotated 45 degrees from it -- e.g. a proposed lane
+    # change under evaluation while the vehicle still drives the original
+    # lane-follow line. The QP row's tangent must come from the *executed*
+    # reference, not the classification one, or Stage D points the
+    # longitudinal band the wrong way relative to the path MPC tracks (the
+    # reference-divergence bug fixed by restoring this parameter).
+    classification_reference = [
+        {"x_ref_m": 0.0, "y_ref_m": float(y)} for y in range(0, 61, 2)
+    ]
+    executed_reference = [
+        {"x_ref_m": float(k), "y_ref_m": float(k)} for k in range(0, 61, 2)
+    ]
+    crosser = {
+        "id": "x", "x": -8.0, "y": 18.0, "v": 7.0, "psi": 0.0,
+        "predicted_trajectory": [
+            {"x": -8.0 + 0.7 * k, "y": 18.0} for k in range(21)
+        ],
+    }
+    ego_location = SimpleNamespace(x=0.0, y=0.0)
+
+    result = PlanningPipeline.resolve_cav_interaction(
+        reference_samples=classification_reference,
+        constraint_reference_samples=executed_reference,
+        ego_location=ego_location, ego_yaw_rad=1.5707963267948966,
+        ego_speed_mps=9.0, actor_id=1, claim=None,
+        obstacle_snapshots=[crosser], cav_intents=[], latch_state={},
+        horizon_steps=20, dt_s=0.1,
+    )
+
+    longitudinal_rows = [
+        row for row in result.mpc_rows if row.slack_group == "corridor"
+    ]
+    assert longitudinal_rows
+    half_sqrt2 = 0.7071067811865476
+    for row in longitudinal_rows:
+        # Executed (diagonal) reference tangent, not the classification
+        # reference's straight-+y (0, 1).
+        assert row.a_x == pytest.approx(half_sqrt2, abs=1.0e-6)
+        assert row.a_y == pytest.approx(half_sqrt2, abs=1.0e-6)
+
+
+def test_resolve_cav_interaction_defaults_constraint_reference_to_reference_samples():
+    reference = [{"x_ref_m": 0.0, "y_ref_m": float(y)} for y in range(0, 61, 2)]
+    crosser = {
+        "id": "x", "x": -8.0, "y": 18.0, "v": 7.0, "psi": 0.0,
+        "predicted_trajectory": [
+            {"x": -8.0 + 0.7 * k, "y": 18.0} for k in range(21)
+        ],
+    }
+    ego_location = SimpleNamespace(x=0.0, y=0.0)
+
+    result = PlanningPipeline.resolve_cav_interaction(
+        reference_samples=reference,
+        ego_location=ego_location, ego_yaw_rad=1.5707963267948966,
+        ego_speed_mps=9.0, actor_id=1, claim=None,
+        obstacle_snapshots=[crosser], cav_intents=[], latch_state={},
+        horizon_steps=20, dt_s=0.1,
+    )
+
+    longitudinal_rows = [
+        row for row in result.mpc_rows if row.slack_group == "corridor"
+    ]
+    assert longitudinal_rows
+    for row in longitudinal_rows:
+        assert row.a_x == pytest.approx(0.0, abs=1.0e-6)
+        assert row.a_y == pytest.approx(1.0, abs=1.0e-6)

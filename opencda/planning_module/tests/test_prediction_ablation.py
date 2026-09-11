@@ -20,6 +20,23 @@ def test_cv_mode_returns_no_transform():
     ) is None
 
 
+def test_synthetic_brake_stays_at_rest_after_stopping():
+    transform = build_snapshot_transform(
+        prediction_mode="synthetic_multimodal", horizon_s=5.0, dt_s=0.1
+    )
+    for speed in (0.0, 2.0, 6.0):
+        output = transform(_obstacle(10.0, 0.0, speed), speed + 10.0)
+        points = next(mode["points"] for mode in output["trajectory_hypotheses"]
+                      if mode["maneuver"] == "brake")
+        assert all(b["x"] >= a["x"] - 1e-9
+                   for a, b in zip(points, points[1:]))
+        stopped = [point for point in points if point["t"] >= speed / 2.0]
+        assert stopped
+        assert all(point["v"] == 0.0 for point in stopped)
+        assert all(abs(point["x"] - (10.0 + speed ** 2 / 4.0)) < 1e-9
+                   for point in stopped)
+
+
 def test_blind_freezes_obstacle_future():
     tf = frozen_snapshot_transform(horizon_s=2.0, dt_s=0.5)
     out = tf(_obstacle(10.0, 0.0, 8.0), 0.0)

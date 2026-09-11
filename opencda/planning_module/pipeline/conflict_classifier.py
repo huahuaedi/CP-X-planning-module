@@ -25,8 +25,8 @@ from typing import Any, List, Mapping, Optional, Sequence, Tuple
 
 from opencda.planning_module.pipeline.mpc_obstacle_relevance import (
     _obstacle_track_xy,
-    _point_to_polyline,
     _polyline_xy,
+    project_to_extended_polyline,
 )
 
 XY = Tuple[float, float]
@@ -87,7 +87,17 @@ def _agent_id(m: Mapping[str, Any]) -> str:
     )
 
 
-def _agent_heading(m: Mapping[str, Any]) -> float:
+def _agent_heading(
+    m: Mapping[str, Any], *, low_speed_fallback: Optional[float] = None,
+) -> float:
+    speed = max(0.0, _f(m, "v", "speed", "speed_mps"))
+    # Heading inferred from tracked velocity is unobservable near standstill:
+    # centimetre-scale rollback can flip atan2 by pi.  For relation
+    # classification a stopped obstacle has no oncoming/crossing direction;
+    # use the ego-path direction and let its predicted track geometry decide
+    # whether it later crosses or merges.
+    if speed <= 0.1 and low_speed_fallback is not None:
+        return float(low_speed_fallback)
     if "psi" in m or "heading_rad" in m or "yaw" in m:
         return _f(m, "psi", "heading_rad", "yaw")
     vx, vy = _f(m, "vx"), _f(m, "vy")
@@ -102,7 +112,7 @@ def _cv_track(m: Mapping[str, Any], n: int, dt: float) -> List[XY]:
 
 
 def _ego_arc_at(ego_xy: XY, poly: Sequence[XY]) -> float:
-    return _point_to_polyline(ego_xy[0], ego_xy[1], poly)[1]
+    return project_to_extended_polyline(ego_xy[0], ego_xy[1], poly)[1]
 
 
 def _poly_length(poly: Sequence[XY]) -> float:
@@ -144,7 +154,7 @@ def classify_conflicts(
         ]
         if len(track) < n:
             track = _cv_track(a, n, dt)
-        a_h = _agent_heading(a)
+        a_h = _agent_heading(a, low_speed_fallback=ego_h)
         d_head = abs(math.atan2(math.sin(a_h - ego_h), math.cos(a_h - ego_h)))
         a_accel = _f(a, "a", "acceleration", "acceleration_mps2")
 
@@ -155,7 +165,7 @@ def classify_conflicts(
         signed_lat: List[float] = []
         for k in range(min(n, len(track))):
             px, py = track[k]
-            perp, along = _point_to_polyline(px, py, poly)
+            perp, along = project_to_extended_polyline(px, py, poly)
             # signed lateral: + is left of the ego path direction at that point
             i = max(0, min(len(poly) - 2, int(along / max(1e-6, poly_len) * (len(poly) - 1))))
             seg_h = math.atan2(poly[i + 1][1] - poly[i][1], poly[i + 1][0] - poly[i][0])
@@ -170,14 +180,23 @@ def classify_conflicts(
                 min_gap = gap
                 conflict_s, conflict_t = along, dt * k
 
-        ever_in_ignore_box = any(
-            perp < p.ignore_lateral_m for perp in lat_series
-        ) and (conflict_s is None or
-               -p.ignore_longitudinal_behind_m <= (conflict_s - ego_s0) <= p.ignore_longitudinal_ahead_m)
+        near_path = any(perp < p.ignore_lateral_m for perp in lat_series)
+        within_longitudinal_window = (
+            conflict_s is None
+            or -p.ignore_longitudinal_behind_m
+            <= (conflict_s - ego_s0)
+            <= p.ignore_longitudinal_ahead_m
+        )
+        ever_in_ignore_box = bool(near_path and within_longitudinal_window)
 
         # ----- classification -----
         if not ever_in_ignore_box:
-            tag, reason = IGNORE, f"min_lat={min_lat:.1f}>=gate"
+            reason = (
+                f"min_lat={min_lat:.1f}>=gate"
+                if not near_path
+                else "outside_longitudinal_window"
+            )
+            tag = IGNORE
         elif d_head >= p.oncoming_heading_rad:
             tag, reason = ONCOMING, f"dhead={math.degrees(d_head):.0f}"
         elif d_head >= (

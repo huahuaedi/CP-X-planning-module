@@ -6,6 +6,7 @@ from pipeline.mpc_execution_stage import (
     MPCExecutionRequest,
     MPCExecutionStage,
 )
+from pipeline.mpc_corridor_constraints import LinearRow
 
 
 class _Buffer:
@@ -41,8 +42,10 @@ class _MPC:
             min_acceleration_mps2=-4.0,
             max_jerk_mps3=10.0,
         )
+        self.plan_kwargs = {}
 
     def plan_trajectory(self, **kwargs):
+        self.plan_kwargs = dict(kwargs)
         return None
 
 
@@ -103,6 +106,28 @@ def test_constraint_revision_change_forces_immediate_resolve():
     assert not second.replan_executed
 
 
+def test_corridor_owned_actor_is_not_also_a_repulsive_cost_source():
+    mpc = _MPC()
+    rows = [LinearRow(
+        stage=1, a_x=1.0, a_y=0.0, lower=-1.0e9, upper=8.0,
+        slack_group="corridor", tag="17::mode1",
+    )]
+    objects = [
+        {"id": 17, "repulsive_class_weight": 1.0},
+        {"id": 18, "repulsive_class_weight": 0.5},
+    ]
+
+    _run(
+        MPCExecutionStage(mpc=mpc, control_buffer=_Buffer(replan=True)),
+        _request(object_snapshots=objects, corridor_rows=rows),
+    )
+
+    passed = mpc.plan_kwargs["object_snapshots"]
+    assert passed[0]["repulsive_class_weight"] == 0.0
+    assert passed[1]["repulsive_class_weight"] == 0.5
+    assert objects[0]["repulsive_class_weight"] == 1.0
+
+
 def test_failed_solve_reuses_only_valid_buffered_control():
     buffer = _Buffer(replan=True, sample=(0.2, -0.05, "valid"))
     result = _run(
@@ -135,6 +160,26 @@ def test_hard_gate_resets_buffer_and_uses_emergency_stop():
     assert result.status == "candidate_hard_gate"
     assert result.control == "emergency-stop"
     assert buffer.reset_reason == "control_buffer_reference_hard_veto"
+
+
+def test_stationary_stop_hold_never_enters_mpc_scheduler_or_solver():
+    buffer = _Buffer(replan=True)
+    mpc = _MPC(status="primal infeasible")
+    result = _run(
+        MPCExecutionStage(mpc=mpc, control_buffer=buffer),
+        _request(
+            ego_speed_mps=0.0,
+            target_speed_mps=0.0,
+            stop_goal_active=True,
+            behavior_maneuver="stop_at_intersection",
+            stationary_stop_hold=True,
+        ),
+    )
+    assert result.status == "stop_hold_direct"
+    assert result.control == "hold"
+    assert not result.replan_executed
+    assert buffer.last_replan_request == {}
+    assert mpc.plan_kwargs == {}
 
 
 def test_fallback_jerk_uses_last_planned_acceleration_and_tick_elapsed_time():

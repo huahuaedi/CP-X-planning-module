@@ -34,6 +34,20 @@ class BehaviorReferenceResult:
     failure_reason: str = ""
 
 
+def _state_component(state: Sequence[float], index: int, default: float = 0.0) -> float:
+    """Read one entry of the MPC state vector, tolerating a short/empty state.
+
+    The recovery path runs after the planner has already failed; a state
+    vector that is missing an entry must not turn that into a second,
+    unhandled exception inside the exception handler.
+    """
+
+    try:
+        return float(state[index])
+    except (IndexError, KeyError, TypeError, ValueError):
+        return float(default)
+
+
 class BehaviorReferenceExecutionStage:
     """Own the behavior/reference exception boundary and degradation policy."""
 
@@ -67,75 +81,134 @@ class BehaviorReferenceExecutionStage:
                 cp_payload=request.cp_payload,
             )
             if not isinstance(result, BehaviorReferenceResult):
-                raise TypeError("planner must return BehaviorReferenceResult")
+                # A contract violation, not a runtime failure. It still routes
+                # through degradation so the tick produces a command, but the
+                # message and the diagnostics key stay distinct so it is not
+                # mistaken for a transient planner exception.
+                raise TypeError(
+                    "planner returned %s, expected BehaviorReferenceResult"
+                    % type(result).__name__
+                )
             return result
         except Exception as exc:
             trace = traceback.format_exc(limit=8).strip()
+            return self._degrade(request, exc=exc, trace=trace)
+
+    def _degrade(
+        self,
+        request: BehaviorReferenceRequest,
+        *,
+        exc: BaseException,
+        trace: str,
+    ) -> BehaviorReferenceResult:
+        """Own the exception boundary: every call here is failure-tolerant.
+
+        A failure while recovering must still yield a bounded-safe-stop
+        result rather than escaping ``run``; the caller unconditionally
+        dereferences ``behavior_stage_result``.
+        """
+
+        state_x = _state_component(request.current_state, 0)
+        state_y = _state_component(request.current_state, 1)
+        state_yaw = _state_component(request.current_state, 3)
+
+        generated_samples: list = []
+        generated_destination: list = []
+        try:
             generated = self._reference_provider.lane_fallback_reference(
                 ego_location=request.ego_location,
                 ego_yaw_rad=float(request.ego_yaw_rad),
                 current_state=list(request.current_state),
                 speed_ref_mps=float(request.requested_speed_mps),
             )
-            failure = FailureReason(
-                stage="behavior_reference",
-                code="pipeline_exception",
-                severity="degraded",
-                recoverable=True,
-                details=str(exc),
+            generated_samples = list(getattr(generated, "samples", None) or [])
+            generated_destination = list(
+                getattr(generated, "destination_state", None) or []
             )
-            fallback = self._fallback.resolve(
-                sim_time_s=float(request.sim_time_s),
-                route_revision=str(request.route_revision),
-                current_speed_mps=float(request.ego_speed_mps),
-                current_reference=list(generated.samples or []),
-                failure_reason=failure,
-            )
-            reference = fallback.mutable_trajectory()
-            destination = list(generated.destination_state or [])
+        except Exception as ref_exc:  # noqa: BLE001 - boundary is intentional
+            trace = (
+                trace + "\n-- lane_fallback_reference failed: " + repr(ref_exc)
+            ).strip()
+
+        failure = FailureReason(
+            stage="behavior_reference",
+            code="pipeline_exception",
+            severity="degraded",
+            recoverable=True,
+            details=str(exc),
+        )
+        fallback = self._fallback.resolve(
+            sim_time_s=float(request.sim_time_s),
+            route_revision=str(request.route_revision),
+            current_speed_mps=float(request.ego_speed_mps),
+            current_reference=generated_samples,
+            failure_reason=failure,
+        )
+        reference = fallback.mutable_trajectory()
+
+        try:
             lane_id = int(self._lane_id_at_location(request.ego_location))
-            if reference:
-                terminal = dict(reference[-1])
-                destination = [
-                    float(terminal.get("x_ref_m", terminal.get("x", request.current_state[0]))),
-                    float(terminal.get("y_ref_m", terminal.get("y", request.current_state[1]))),
-                    float(fallback.target_speed_mps),
-                    float(terminal.get("heading_rad", request.current_state[3])),
-                    lane_id,
-                ]
-            fallback_stop = bool(
-                str(fallback.mode) == "bounded_safe_stop"
-                or float(fallback.target_speed_mps) <= 0.0
-            )
-            behavior = self._behavior.finalize(
-                maneuver="lane_follow",
-                phase="FALLBACK",
-                source_lane_id=lane_id,
-                target_lane_id=0,
-                requested_speed_mps=float(fallback.target_speed_mps),
-                stop_required=fallback_stop,
-                route_required=False,
-                traffic_signal_state="unknown",
-                boundary_recovery_active=False,
-                stop_target=None,
-                reason=str(fallback.reason),
-                diagnostics={
-                    "pipeline_error": str(exc),
-                    "pipeline_error_traceback": trace,
-                },
-            )
-            debug = {
-                "reference_source": "fallback_manager:" + str(fallback.mode),
-                "fallback_reason": str(fallback.reason),
+        except Exception as lane_exc:  # noqa: BLE001 - boundary is intentional
+            lane_id = 0
+            trace = (
+                trace + "\n-- lane_id_at_location failed: " + repr(lane_exc)
+            ).strip()
+
+        destination = list(generated_destination)
+        if reference:
+            terminal = dict(reference[-1])
+            destination = [
+                float(terminal.get("x_ref_m", terminal.get("x", state_x))),
+                float(terminal.get("y_ref_m", terminal.get("y", state_y))),
+                float(fallback.target_speed_mps),
+                float(terminal.get("heading_rad", state_yaw)),
+                lane_id,
+            ]
+        if len(destination) < 5:
+            # Keep the (x, y, v, heading, lane_id) contract even when neither
+            # the fallback reference nor the generated destination produced a
+            # usable terminal sample.
+            destination = [
+                state_x,
+                state_y,
+                float(fallback.target_speed_mps),
+                state_yaw,
+                lane_id,
+            ]
+
+        fallback_stop = bool(
+            str(fallback.mode) == "bounded_safe_stop"
+            or float(fallback.target_speed_mps) <= 0.0
+        )
+        behavior = self._behavior.finalize(
+            maneuver="lane_follow",
+            phase="FALLBACK",
+            source_lane_id=lane_id,
+            target_lane_id=0,
+            requested_speed_mps=float(fallback.target_speed_mps),
+            stop_required=fallback_stop,
+            route_required=False,
+            traffic_signal_state="unknown",
+            boundary_recovery_active=False,
+            stop_target=None,
+            reason=str(fallback.reason),
+            diagnostics={
                 "pipeline_error": str(exc),
                 "pipeline_error_traceback": trace,
-            }
-            return BehaviorReferenceResult(
-                destination_state=destination,
-                reference_samples=tuple(dict(item) for item in reference),
-                behavior_stage_result=behavior,
-                reference_debug=debug,
-                speed_plan=None,
-                cav_resolution=None,
-                failure_reason=str(exc),
-            )
+            },
+        )
+        debug = {
+            "reference_source": "fallback_manager:" + str(fallback.mode),
+            "fallback_reason": str(fallback.reason),
+            "pipeline_error": str(exc),
+            "pipeline_error_traceback": trace,
+        }
+        return BehaviorReferenceResult(
+            destination_state=destination,
+            reference_samples=tuple(dict(item) for item in reference),
+            behavior_stage_result=behavior,
+            reference_debug=debug,
+            speed_plan=None,
+            cav_resolution=None,
+            failure_reason=str(exc),
+        )
