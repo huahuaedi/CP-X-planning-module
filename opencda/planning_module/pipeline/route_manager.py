@@ -336,16 +336,33 @@ class CPXRouteManager:
         # GlobalPlanner is topology construction only. Runtime position must
         # never be sent back through its nearest-node query, otherwise route
         # progress and lane intent acquire a second owner beside RouteCursor.
+        previous_heading = (
+            float(self._last_progress_sync_pose[2])
+            if self._last_progress_sync_pose is not None
+            else 0.0
+        )
+        self._last_progress_sync_pose = (
+            round(float(x_m), 6),
+            round(float(y_m), 6),
+            round(float(previous_heading), 6),
+        )
+        remaining = self._distance_to_mission_goal(
+            x_m=float(x_m),
+            y_m=float(y_m),
+        )
+        reached = bool(remaining <= self.reached_distance_m)
         self._last_status = RouteManagerStatus(
             route_found=False,
             route_point_count=0,
-            remaining_distance_m=0.0,
-            reached_destination=False,
+            remaining_distance_m=float(remaining),
+            reached_destination=bool(reached),
             debug_reason="route_topology_unavailable",
         )
         return self._fallback_summary(
             fallback_lane_id=int(fallback_lane_id),
             debug_reason=str(self._last_status.debug_reason),
+            remaining_distance_m=float(remaining),
+            reached_destination=bool(reached),
         )
 
     def _route_info(
@@ -900,19 +917,21 @@ class CPXRouteManager:
         forward window and preserve monotonic progress.
         """
 
-        nodes = self._route_nodes()
-        if len(nodes) < 2:
-            self._route_projection = None
-            self._route_sync_reason = str(
-                self._route_debug_reason or "route_unavailable"
-            )
-            return str(self._route_sync_reason)
-
         sync_pose = (
             round(float(ego_x_m), 6),
             round(float(ego_y_m), 6),
             round(float(ego_heading_rad), 6),
         )
+        nodes = self._route_nodes()
+        if len(nodes) < 2:
+            self._last_progress_sync_pose = sync_pose
+            if int(current_lane_id) != 0:
+                self._route_current_lane_id = int(current_lane_id)
+            self._route_projection = None
+            self._route_sync_reason = str(
+                self._route_debug_reason or "route_unavailable"
+            )
+            return str(self._route_sync_reason)
         if (
             bool(self._route_progress_initialized)
             and sync_pose == self._last_progress_sync_pose
@@ -1096,6 +1115,7 @@ class CPXRouteManager:
             )
             + float(self.route_sampling_resolution_m)
         )
+        fallback_remaining_m = self._latest_distance_to_mission_goal()
         if projection is None:
             return RouteCursorSnapshot(
                 route_revision=self.route_revision,
@@ -1115,7 +1135,11 @@ class CPXRouteManager:
                 current_road_option=(decision.current_road_option if decision else ""),
                 next_macro_maneuver=(decision.next_macro_maneuver if decision else "Continue Straight"),
                 next_macro_distance_m=(decision.next_macro_distance_m if decision else float("inf")),
-                remaining_distance_m=(geometry.remaining_m(self._route_s_m) if geometry else 0.0),
+                remaining_distance_m=(
+                    geometry.remaining_m(self._route_s_m)
+                    if geometry is not None and geometry.valid
+                    else fallback_remaining_m
+                ),
                 stalled_motion_m=float(self._route_stalled_motion_m),
                 missed_maneuver=bool(missed_maneuver),
             )
@@ -1139,7 +1163,11 @@ class CPXRouteManager:
             current_road_option=(decision.current_road_option if decision else ""),
             next_macro_maneuver=(decision.next_macro_maneuver if decision else "Continue Straight"),
             next_macro_distance_m=(decision.next_macro_distance_m if decision else float("inf")),
-            remaining_distance_m=(geometry.remaining_m(self._route_s_m) if geometry else 0.0),
+            remaining_distance_m=(
+                geometry.remaining_m(self._route_s_m)
+                if geometry is not None and geometry.valid
+                else fallback_remaining_m
+            ),
             stalled_motion_m=float(self._route_stalled_motion_m),
             missed_maneuver=bool(missed_maneuver),
         )
@@ -1253,22 +1281,24 @@ class CPXRouteManager:
             return getattr(summary, name, default)
 
         route_found = bool(value("route_found", False))
-        remaining = max(
-            0.0,
-            float(
-                value(
-                    "distance_to_destination_m",
-                    value("remaining_distance_m", 0.0),
-                )
-                or 0.0
-            ),
+        raw_remaining = value(
+            "distance_to_destination_m",
+            value("remaining_distance_m", None),
+        )
+        remaining_known = raw_remaining is not None
+        remaining = (
+            max(0.0, float(raw_remaining))
+            if remaining_known
+            else float("inf")
         )
         route_waypoints = list(value("route_waypoints", []) or [])
         route_point_count = max(
             len(route_waypoints),
             len(self._fallback_route_points),
         )
-        reached = bool(route_found and remaining <= self.reached_distance_m)
+        # Mission completion is a localization/goal fact.  It must not become
+        # impossible merely because topology construction failed upstream.
+        reached = bool(remaining_known and remaining <= self.reached_distance_m)
         self._last_status = RouteManagerStatus(
             route_found=route_found,
             route_point_count=int(route_point_count),
@@ -1364,16 +1394,43 @@ class CPXRouteManager:
             else str(getattr(summary, "debug_reason", "route_active")),
         )
 
+    def _distance_to_mission_goal(self, *, x_m: float, y_m: float) -> float:
+        if self._goal_point is None:
+            return float("inf")
+        return math.hypot(
+            float(self._goal_point["x"]) - float(x_m),
+            float(self._goal_point["y"]) - float(y_m),
+        )
+
+    def _latest_distance_to_mission_goal(self) -> float:
+        if self._last_progress_sync_pose is not None:
+            return self._distance_to_mission_goal(
+                x_m=float(self._last_progress_sync_pose[0]),
+                y_m=float(self._last_progress_sync_pose[1]),
+            )
+        if self._start_point is not None:
+            return self._distance_to_mission_goal(
+                x_m=float(self._start_point["x"]),
+                y_m=float(self._start_point["y"]),
+            )
+        return float("inf")
+
     @staticmethod
-    def _fallback_summary(*, fallback_lane_id: int, debug_reason: str) -> Dict[str, object]:
+    def _fallback_summary(
+        *,
+        fallback_lane_id: int,
+        debug_reason: str,
+        remaining_distance_m: float = float("inf"),
+        reached_destination: bool = False,
+    ) -> Dict[str, object]:
         return {
             "route_found": False,
             "optimal_lane_id": int(fallback_lane_id),
             "current_road_option": "",
             "next_macro_maneuver": "Continue Straight",
             "debug_reason": str(debug_reason),
-            "remaining_distance_m": 0.0,
-            "reached_destination": False,
+            "remaining_distance_m": float(remaining_distance_m),
+            "reached_destination": bool(reached_destination),
         }
 
     @staticmethod

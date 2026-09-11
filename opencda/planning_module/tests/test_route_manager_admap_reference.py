@@ -64,6 +64,44 @@ def _planner(points_and_options):
 
 
 class RouteManagerADMapReferenceTest(unittest.TestCase):
+    def test_missing_topology_reports_goal_distance_not_zero_remaining(self):
+        manager = CPXRouteManager(global_planner=_planner([]))
+        manager.set_destination(
+            start_point={"x": 0.0, "y": 0.0},
+            goal_point={"x": 100.0, "y": 0.0},
+        )
+
+        route_info = manager.get_route_info(
+            x_m=25.0,
+            y_m=0.0,
+            query_key="ego",
+            fallback_lane_id=7,
+        )
+
+        self.assertFalse(route_info["route_found"])
+        self.assertAlmostEqual(route_info["remaining_distance_m"], 75.0)
+        self.assertFalse(route_info["reached_destination"])
+        self.assertAlmostEqual(manager.route_cursor.remaining_distance_m, 75.0)
+        self.assertEqual(manager.last_status.debug_reason, "route_topology_unavailable")
+
+    def test_goal_completion_is_independent_of_topology_availability(self):
+        manager = CPXRouteManager(global_planner=_planner([]), reached_distance_m=3.0)
+        manager.set_destination(
+            start_point={"x": 0.0, "y": 0.0},
+            goal_point={"x": 100.0, "y": 0.0},
+        )
+
+        route_info = manager.get_route_info(
+            x_m=98.0,
+            y_m=0.0,
+            query_key="ego",
+            fallback_lane_id=7,
+        )
+
+        self.assertFalse(route_info["route_found"])
+        self.assertTrue(route_info["reached_destination"])
+        self.assertTrue(manager.last_status.reached_destination)
+
     def test_destination_installs_only_admap_dense_route(self):
         planner = _planner([
             (0.0, 0.0, 1, "LANEFOLLOW"),

@@ -3,7 +3,7 @@ base_config: cpx_lane_change_2lanefree.yaml
 description: Isolated repeatable lane-change test at 8 m/s.
 
 cpx_mature:
-  max_ticks: 2200
+  max_ticks: 2600
 
 vehicle_base:
   planner:

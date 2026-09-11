@@ -78,6 +78,10 @@ scenario:
   single_cav_list:
     - name: cav1
       spawn_position: [ -370, 8.3, 0.3, 0, 0, 0 ]
-      destination: [ 700, 8.3, 0.3 ]
+      # Keep this regression route inside the AD-map-connected corridor.
+      # The upstream custom OpenDRIVE asset has a broken road-66 -> road-62
+      # junction link near x=426 m; crossing it makes topology construction
+      # fail before the planner is exercised.
+      destination: [ 350, 8.3, 0.3 ]
       v2x:
         communication_range: 60
