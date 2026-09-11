@@ -756,7 +756,7 @@ def test_lane_follow_handoff_ignores_future_lateral_route_target():
         ego_lane_id=11,
         # RouteCursor is allowed to expose the next required lane change, but
         # behavior has not committed it yet.
-        route_lane_sequence=(11, 12, 21),
+        route_lane_sequence=(11, 21),
         corridors=corridors,
         offset_for_lane=lambda lane_id: 0 if int(lane_id) in (11, 12) else -1,
         geometry_for_lane=lambda lane_id: geometries.get(int(lane_id)),
