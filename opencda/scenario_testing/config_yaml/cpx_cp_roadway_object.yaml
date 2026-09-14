@@ -1,0 +1,74 @@
+base_config: cpx_profile_full_default.yaml
+
+description: |-
+  Use case D, native OpenCDA entry point. Ego and an auxiliary CAV share the
+  same 60 m communication/observation range. Initially the stationary roadway
+  object is about 110 m ahead of ego but only 60 m ahead of the auxiliary CAV,
+  so only the auxiliary can report it. The CP-off arm keeps the exact physical
+  scene and disables only ego's CP publication/consumption path.
+
+cpx_mature:
+  map_mode: 2lane_freeway_simplified
+  max_ticks: 650
+  destination_tolerance_m: 3.0
+  completion_mode: first_cav
+  run_opencda_evaluation: false
+
+carla_traffic_manager:
+  vehicle_list: []
+
+vehicle_base:
+  sensing:
+    perception:
+      activate: false
+    localization:
+      activate: false
+      debug_helper:
+        show_animation: false
+  behavior:
+    ignore_traffic_light: true
+    overtake_allowed: false
+  planner:
+    global_planner_xodr_path: ../assets/2lane_freeway_simplified/2lane_freeway_simplified.xodr
+    target_speed_mps: 8.0
+    communication_range_m: 60.0
+    publish_cp_message: true
+    require_native_opencda_cp: true
+    full_allow_opportunistic_lane_change: false
+    following_idm_enabled: true
+    debug_output_dir: opencda/planning_module/opencda_bridge/debug_cp_roadway_object_on
+
+scenario:
+  single_cav_list:
+    - name: ego
+      spawn_position: [-290.0, 8.3, 0.3, 0, 0, 0]
+      destination: [-80.0, 8.3, 0.3]
+      v2x:
+        enabled: true
+        communication_range: 60
+      planner:
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_cp_roadway_object_on
+
+    - name: observer
+      spawn_position: [-240.0, 4.8, 0.3, 0, 0, 0]
+      destination: [100.0, 4.8, 0.3]
+      v2x:
+        enabled: true
+        communication_range: 60
+      behavior:
+        max_speed: 15
+        overtake_allowed: false
+        local_planner:
+          debug_trajectory: false
+          debug: false
+      planner:
+        enabled: false
+
+  scripted_actors:
+    - blueprint: vehicle.carlamotors.carlacola
+      path:
+        - [-180.0, 8.3]
+        - [-179.0, 8.3]
+      speed_mps: 0.0
+      start_tick: 0
+      z: 0.3

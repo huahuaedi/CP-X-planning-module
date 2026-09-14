@@ -11,6 +11,10 @@ import opencda.scenario_testing.utils.customized_map_api as map_api
 import opencda.scenario_testing.utils.sim_api as sim_api
 from opencda.core.common.cav_world import CavWorld
 from opencda.planning_module.opencda_bridge.debug_viewer import OpenCDADebugViewer
+from opencda.planning_module.utility.cp_messages import (
+    CP_MESSAGE_PATH,
+    reset_cp_message_payload,
+)
 from opencda.scenario_testing.evaluations.evaluate_manager import EvaluationManager
 from opencda.scenario_testing.scripted_actor import spawn_scripted_actors
 from opencda.scenario_testing.utils.yaml_utils import add_current_time
@@ -191,6 +195,35 @@ def _scenario_manager_kwargs(scenario_params):
     return {"town": town}, None
 
 
+def _reset_cooperative_payloads(scenario_params):
+    """Start every native scenario with an empty CP transport payload.
+
+    The message file is transport state, not persistent scenario state.  In
+    particular, a CP-off ablation must not consume obstacle messages left by
+    the preceding CP-on run.  Reset every configured path once before any
+    vehicle manager (and therefore any planner reader/provider) is created.
+    """
+
+    paths = {str(CP_MESSAGE_PATH)}
+    planner_configs = [
+        scenario_params.get("vehicle_base", {}).get("planner", {}),
+    ]
+    planner_configs.extend(
+        cav.get("planner", {})
+        for cav in scenario_params.get("scenario", {}).get(
+            "single_cav_list", []
+        )
+    )
+    for planner_config in planner_configs:
+        configured_path = str(
+            planner_config.get("cp_message_path", "") or ""
+        ).strip()
+        if configured_path:
+            paths.add(configured_path)
+    for message_path in sorted(paths):
+        reset_cp_message_payload(message_path=message_path)
+
+
 def _configure_synthetic_multimodal_prediction(
     *, scenario_params, single_cav_list, scripted_actor_list,
 ):
@@ -276,6 +309,7 @@ def run_mature_scenario(opt, scenario_params, *, script_name):
     scripted_actor_list = []
     try:
         scenario_params = add_current_time(scenario_params)
+        _reset_cooperative_payloads(scenario_params)
         cav_world = CavWorld(opt.apply_ml)
         manager_kwargs, map_helper = _scenario_manager_kwargs(scenario_params)
         scenario_manager = sim_api.ScenarioManager(

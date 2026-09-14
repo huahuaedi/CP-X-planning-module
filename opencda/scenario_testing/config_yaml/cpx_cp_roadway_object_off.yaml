@@ -1,0 +1,38 @@
+base_config: cpx_cp_roadway_object.yaml
+
+description: |-
+  CP-off control arm for use case D. Physical actors, routes, and timing are
+  inherited unchanged; only ego's CP provider is disabled.
+
+vehicle_base:
+  planner:
+    publish_cp_message: false
+    require_native_opencda_cp: false
+
+scenario:
+  single_cav_list:
+    - name: ego
+      spawn_position: [-290.0, 8.3, 0.3, 0, 0, 0]
+      destination: [-80.0, 8.3, 0.3]
+      v2x:
+        enabled: true
+        communication_range: 60
+      planner:
+        publish_cp_message: false
+        require_native_opencda_cp: false
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_cp_roadway_object_off
+
+    - name: observer
+      spawn_position: [-240.0, 4.8, 0.3, 0, 0, 0]
+      destination: [100.0, 4.8, 0.3]
+      v2x:
+        enabled: true
+        communication_range: 60
+      behavior:
+        max_speed: 15
+        overtake_allowed: false
+        local_planner:
+          debug_trajectory: false
+          debug: false
+      planner:
+        enabled: false
