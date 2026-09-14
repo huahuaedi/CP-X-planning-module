@@ -291,7 +291,6 @@ class CandidateSelectionStage:
         route_revision: str,
         road_envelope: Callable[[], Any],
         validate_contract: Callable[..., Any],
-        validate_locked_reference: Callable[..., Any],
     ) -> CandidateArbitrationResult:
         """Build, select and finalize candidates through one stage boundary."""
 
@@ -400,7 +399,6 @@ class CandidateSelectionStage:
             route_revision=str(route_revision),
             road_envelope=road_envelope,
             validate_contract=validate_contract,
-            validate_locked_reference=validate_locked_reference,
         )
         final = self.finalize_selected_frame(
             decision=str(selected.decision),
@@ -566,7 +564,6 @@ class CandidateSelectionStage:
         route_revision: str,
         road_envelope: Callable[[], Any],
         validate_contract: Callable[..., Any],
-        validate_locked_reference: Callable[..., Any],
     ) -> CandidateSelectionResult:
         if self._lane_change_lifecycle is None:
             raise RuntimeError("lane-change lifecycle is not configured")
@@ -716,7 +713,6 @@ class CandidateSelectionStage:
                 sim_time_s=float(sim_time_s),
                 config=self._config,
                 mpc=self._mpc,
-                validate_locked_reference=validate_locked_reference,
             )
         result = self._evaluator.finalize_selection(
             selected=selected,

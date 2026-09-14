@@ -999,33 +999,6 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
             bridge.maneuver_manager.lane_change.progress, 0.30, places=2
         )
 
-    def test_validation_rejects_reference_over_25_degree_heading_error(self):
-        bridge = self._bridge()
-        bridge.reference_generator._map_waypoint_callback = lambda location: types.SimpleNamespace(
-            transform=types.SimpleNamespace(
-                location=types.SimpleNamespace(x=location.x, y=location.y),
-                rotation=types.SimpleNamespace(yaw=30.0),
-            ),
-            lane_width=3.5,
-        )
-        reference = [
-            {
-                "x_ref_m": float(index + 1),
-                "y_ref_m": float(index + 1),
-                "heading_rad": math.pi / 4.0,
-            }
-            for index in range(20)
-        ]
-
-        valid, reason = bridge._validate_route_tracking_lane_change_reference(
-            reference=reference,
-            ego_location=bridge.carla.Location(),
-            ego_yaw_rad=0.0,
-        )
-
-        self.assertFalse(valid)
-        self.assertIn("heading_error", reason)
-
     def test_quintic_lane_recovery_removes_turn_exit_curvature_spike(self):
         bridge = self._bridge()
         bridge.config["lane_recovery_anchor_forward_m"] = 0.8

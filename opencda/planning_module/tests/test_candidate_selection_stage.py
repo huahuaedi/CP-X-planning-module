@@ -105,7 +105,6 @@ def test_arbitrate_owns_intent_selection_and_finalization():
         sim_time_s=1.0, route_revision="route:1",
         road_envelope=lambda: None,
         validate_contract=lambda **_kwargs: None,
-        validate_locked_reference=lambda **_kwargs: None,
     )
 
     assert captured["intent"]["selected_decision"] == "lane_follow"
@@ -227,7 +226,6 @@ def test_no_candidates_returns_typed_baseline_and_runs_completion_release():
         route_revision="route:1",
         road_envelope=lambda: None,
         validate_contract=lambda **_kwargs: None,
-        validate_locked_reference=lambda **_kwargs: None,
     )
 
     assert releases == [True]

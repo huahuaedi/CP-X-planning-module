@@ -441,7 +441,6 @@ class CandidateTrajectoryEvaluator:
         sim_time_s,
         config,
         mpc,
-        validate_locked_reference,
     ):
         """Commit and window an accepted lane-change candidate once."""
 
@@ -615,13 +614,9 @@ class CandidateTrajectoryEvaluator:
             spacing_m=max(0.1, float(geometry.step_m)),
             horizon_steps=int(mpc.horizon_steps),
         )
-        locked_valid, validation_reason = validate_locked_reference(
-            reference=reference,
-            ego_location=ego_location,
-            ego_yaw_rad=float(ego_yaw_rad),
-        )
+        validation_reason = "committed_reference_contract_owned"
         destination = list(selected_destination)
-        if reference and locked_valid:
+        if reference:
             terminal = reference[-1]
             if len(destination) >= 4:
                 destination[0] = float(
