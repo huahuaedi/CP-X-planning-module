@@ -618,19 +618,23 @@ class CandidateTrajectoryEvaluator:
         destination = list(selected_destination)
         if reference:
             terminal = reference[-1]
-            if len(destination) >= 4:
-                destination[0] = float(
-                    terminal.get("x_ref_m", terminal.get("x", destination[0]))
-                )
-                destination[1] = float(
-                    terminal.get("y_ref_m", terminal.get("y", destination[1]))
-                )
-                destination[2] = float(selected.intent.target_speed_mps)
-                destination[3] = float(
-                    terminal.get("heading_rad", destination[3])
-                )
-                if len(destination) >= 5:
-                    destination[4] = target_lane_id
+            defaults = [
+                float(current_state[0]), float(current_state[1]),
+                float(selected.intent.target_speed_mps),
+                float(ego_yaw_rad), int(target_lane_id),
+            ]
+            destination.extend(defaults[len(destination):])
+            destination[0] = float(
+                terminal.get("x_ref_m", terminal.get("x", destination[0]))
+            )
+            destination[1] = float(
+                terminal.get("y_ref_m", terminal.get("y", destination[1]))
+            )
+            destination[2] = float(selected.intent.target_speed_mps)
+            destination[3] = float(
+                terminal.get("heading_rad", destination[3])
+            )
+            destination[4] = int(target_lane_id)
         diagnostics = dict(selected_debug)
         diagnostics.update({
             "lane_change_planning_average_speed_mps": float(
