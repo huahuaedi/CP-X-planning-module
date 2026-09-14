@@ -129,6 +129,24 @@ class MPCLaneReferenceTests(unittest.TestCase):
         self.assertAlmostEqual(float(sample["x_ref_m"]), 2.5)
         self.assertAlmostEqual(float(sample["y_ref_m"]), 0.0)
 
+    def test_rolling_reference_local_projection_uses_master_station_origin(self):
+        reference = [
+            {"x_ref_m": 0.0, "y_ref_m": 0.0, "heading_rad": 0.0,
+             "progress_m": 30.0},
+            {"x_ref_m": 2.0, "y_ref_m": -1.0, "heading_rad": -0.2,
+             "progress_m": 32.0},
+        ]
+
+        origin_m = MPC._reference_progress_origin_m(reference)
+        sample = object.__new__(MPC)._get_lane_center_stage_sample_by_progress(
+            lane_center_reference=reference,
+            query_progress_m=origin_m + 1.0,
+        )
+
+        self.assertEqual(origin_m, 30.0)
+        self.assertAlmostEqual(float(sample["x_ref_m"]), 1.0)
+        self.assertAlmostEqual(float(sample["y_ref_m"]), -0.5)
+
     def test_progress_based_lookup_falls_back_to_none_when_progress_missing(self):
         mpc = object.__new__(MPC)
         lane_center_reference = [

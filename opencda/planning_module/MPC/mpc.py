@@ -1252,6 +1252,29 @@ class MPC:
 
         return dict(valid_samples[-1])
 
+    @staticmethod
+    def _reference_progress_origin_m(
+        lane_center_reference: Sequence[Mapping[str, object]] | None,
+    ) -> float:
+        """Return the persistent-master station of a rolling window.
+
+        Geometric projection onto ``lane_center_reference`` is local to the
+        supplied window and therefore starts at zero.  ``progress_m`` tags,
+        however, remain stations on the immutable reference master.  Lookup
+        callers must add this origin before comparing the two coordinates.
+        """
+
+        for sample in list(lane_center_reference or []):
+            if not isinstance(sample, Mapping):
+                continue
+            try:
+                progress_m = float(sample.get("progress_m", float("nan")))
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(progress_m):
+                return float(progress_m)
+        return 0.0
+
     def _get_lane_center_stage_ref_by_progress(
         self,
         lane_center_reference: Sequence[Mapping[str, object]] | None,
@@ -2580,13 +2603,17 @@ class MPC:
         ) and bool(self.reference_prefer_lane_center_path) and bool(lane_center_reference)
         current_progress_m = 0.0
         if progress_lookup_active:
-            current_progress_m, _ = self._nearest_progress_along_route(
+            local_progress_m, _ = self._nearest_progress_along_route(
                 route_points=[
                     (float(s.get("x_ref_m", 0.0)), float(s.get("y_ref_m", 0.0)))
                     for s in lane_center_reference
                     if isinstance(s, Mapping)
                 ],
                 xy=[float(x0[0]), float(x0[1])],
+            )
+            current_progress_m = (
+                self._reference_progress_origin_m(lane_center_reference)
+                + float(local_progress_m)
             )
 
         for k in range(self.horizon_steps):
@@ -3027,13 +3054,17 @@ class MPC:
         ) and bool(lane_center_reference)
         qp_stage_progress_m: List[float] = []
         if qp_progress_lookup_active:
-            ego_progress_m, _ = self._nearest_progress_along_route(
+            ego_local_progress_m, _ = self._nearest_progress_along_route(
                 route_points=[
                     (float(s.get("x_ref_m", 0.0)), float(s.get("y_ref_m", 0.0)))
                     for s in lane_center_reference
                     if isinstance(s, Mapping)
                 ],
                 xy=[float(x0[0]), float(x0[1])],
+            )
+            ego_progress_m = (
+                self._reference_progress_origin_m(lane_center_reference)
+                + float(ego_local_progress_m)
             )
             cumulative_distance_m = 0.0
             qp_stage_progress_m = [float(ego_progress_m)]
