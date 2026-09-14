@@ -56,6 +56,7 @@ class ReferencePublicationStage:
         candidate_status: str = "",
         candidate_reason: str = "",
         heading_error_rad: float = float("nan"),
+        committed_lane_change_tracking_active: bool = False,
     ) -> ReferencePublicationStageResult:
         destination = list(destination_state)
         samples = [dict(sample) for sample in reference_samples]
@@ -123,6 +124,9 @@ class ReferencePublicationStage:
             stop_goal_active=bool(stop_goal_active),
             stop_target=behavior.stop_target,
             route_points=route_points,
+            committed_lane_change_tracking_active=bool(
+                committed_lane_change_tracking_active
+            ),
         ))
         destination = list(pipeline_result.destination_state)
         samples = [dict(sample) for sample in pipeline_result.reference_samples]
@@ -130,6 +134,9 @@ class ReferencePublicationStage:
         stabilizer_reason = str(pipeline_result.conditioning_reason)
         debug = dict(pipeline_result.as_debug_fields())
         debug.update(prepublish_debug)
+        debug["committed_lane_change_tracking_active"] = bool(
+            committed_lane_change_tracking_active
+        )
         publication = self._provider.publish(
             ReferenceLineRequest(
                 local_map=local_map,

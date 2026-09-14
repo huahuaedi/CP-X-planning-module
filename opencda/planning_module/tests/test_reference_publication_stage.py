@@ -42,7 +42,7 @@ class _Provider:
         return SimpleNamespace(reason="recovery_built"), samples, "conditioned"
 
 
-def _run(*, accepted):
+def _run(*, accepted, committed_lane_change_tracking_active=False):
     stage = ReferencePublicationStage(
         reference_pipeline=_Pipeline(accepted=accepted),
         reference_provider=_Provider(),
@@ -73,6 +73,9 @@ def _run(*, accepted):
         map_epoch="town06",
         reference_source="unit_reference",
         candidate_reason="candidate_ok",
+        committed_lane_change_tracking_active=bool(
+            committed_lane_change_tracking_active
+        ),
     )
 
 
@@ -88,6 +91,14 @@ def test_reference_publication_stage_submits_rejection_as_data():
     assert not result.gate.accepted
     assert result.debug_fields["candidate_pipeline_selected_status"] == "infeasible"
     assert "strict_reference_veto" in result.stabilizer_reason
+
+
+def test_reference_publication_stage_reports_committed_tracking_contract():
+    result = _run(
+        accepted=True,
+        committed_lane_change_tracking_active=True,
+    )
+    assert result.debug_fields["committed_lane_change_tracking_active"]
 
 
 def test_reference_publication_stage_owns_lateral_guard_diagnostic():

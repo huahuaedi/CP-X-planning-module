@@ -31,6 +31,7 @@ class ReferencePipelineRequest:
     stop_goal_active: bool
     stop_target: Mapping[str, object] | None = None
     route_points: Sequence[Sequence[float]] = ()
+    committed_lane_change_tracking_active: bool = False
 
 
 @dataclass(frozen=True)
@@ -400,6 +401,9 @@ class ReferencePipeline:
                 float(self.default_speed_mps),
                 float(request.target_speed_mps),
             ),
+            committed_lane_change_tracking_active=bool(
+                request.committed_lane_change_tracking_active
+            ),
         )
         if not bool(conditioned.validation.valid):
             gate = FinalReferenceGateResult(
@@ -756,6 +760,10 @@ class ReferencePipeline:
                     reference_samples=reference,
                 )
                 and not bool(lane_recovery)
+            ),
+            check_first_lateral=not bool(
+                request.committed_lane_change_tracking_active
+                and contract_mode in {"lane_change", "lane_change_direct"}
             ),
         )
 

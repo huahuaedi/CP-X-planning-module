@@ -151,6 +151,44 @@ class FinalReferenceGateTests(unittest.TestCase):
 
         self.assertTrue(result.accepted)
 
+    def test_committed_lane_change_keeps_geometry_checks_but_not_tracking_offset(self):
+        offset_reference = _straight_reference(lane_id=2)
+        for sample in offset_reference:
+            sample["y_ref_m"] = 1.5
+
+        result = FinalReferenceGate({}).validate(
+            reference_samples=offset_reference,
+            destination_state=[4.0, 1.5, 2.0],
+            ego_state=[0.0, 0.0, 2.0, 0.0],
+            behavior_decision="lane_change_left",
+            behavior_fsm_state="EXECUTE_LANE_CHANGE_LEFT",
+            current_lane_id=1,
+            target_lane_id=2,
+            stop_goal_active=False,
+            horizon_steps=4,
+            default_speed_mps=3.0,
+            committed_lane_change_tracking_active=True,
+        )
+
+        self.assertTrue(result.accepted, result.reason)
+
+        offset_reference[0]["x_ref_m"] = -1.0
+        invalid_geometry = FinalReferenceGate({}).validate(
+            reference_samples=offset_reference,
+            destination_state=[4.0, 1.5, 2.0],
+            ego_state=[0.0, 0.0, 2.0, 0.0],
+            behavior_decision="lane_change_left",
+            behavior_fsm_state="EXECUTE_LANE_CHANGE_LEFT",
+            current_lane_id=1,
+            target_lane_id=2,
+            stop_goal_active=False,
+            horizon_steps=4,
+            default_speed_mps=3.0,
+            committed_lane_change_tracking_active=True,
+        )
+        self.assertFalse(invalid_geometry.accepted)
+        self.assertIn("first_forward_before_contract", invalid_geometry.reason)
+
 
 if __name__ == "__main__":
     unittest.main()

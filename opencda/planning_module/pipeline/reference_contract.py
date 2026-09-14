@@ -118,6 +118,7 @@ def validate_reference_contract(
     ego_state: Sequence[float],
     contract: ReferenceContract,
     check_destination_body_lateral: bool,
+    check_first_lateral: bool = True,
 ) -> ReferenceValidationResult:
     samples = [dict(sample) for sample in list(reference_samples or [])]
     result = ReferenceValidationResult(
@@ -176,7 +177,11 @@ def validate_reference_contract(
         < float(contract.min_first_forward_m)
     ):
         violations.append("first_forward_before_contract")
-    if abs(result.first_lateral_m) > float(contract.max_first_lateral_abs_m):
+    if (
+        bool(check_first_lateral)
+        and abs(result.first_lateral_m)
+        > float(contract.max_first_lateral_abs_m)
+    ):
         violations.append("first_lateral_out_of_contract")
     if (
         not bool(contract.allow_lane_transition)

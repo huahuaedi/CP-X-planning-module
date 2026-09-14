@@ -56,6 +56,7 @@ class FinalReferenceGate:
         stop_goal_active: bool,
         horizon_steps: int,
         default_speed_mps: float,
+        committed_lane_change_tracking_active: bool = False,
     ) -> FinalReferenceGateResult:
         mode = self._contract_mode(
             behavior_decision=behavior_decision,
@@ -94,6 +95,15 @@ class FinalReferenceGate:
             check_destination_body_lateral=self.check_destination_body_lateral(
                 mode=mode,
                 reference_samples=reference_samples,
+            ),
+            # Once a lane-change reference is committed, lateral separation
+            # from its rolling first sample is tracking state rather than a
+            # geometry defect.  The caller may relax only this admission
+            # check when a continuous source-to-target road envelope is also
+            # active; curvature, ordering, lane and speed checks stay hard.
+            check_first_lateral=not bool(
+                committed_lane_change_tracking_active
+                and mode in {"lane_change", "lane_change_direct"}
             ),
         )
         return FinalReferenceGateResult(

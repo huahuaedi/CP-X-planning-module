@@ -1353,6 +1353,11 @@ class CPXMPCPlannerBridge:
                     if reference_debug.get("behavior_lane_heading_error_deg", "") != ""
                     else float("nan")
                 ),
+                "committed_lane_change_tracking_active": bool(
+                    self.maneuver_manager.lane_change.envelope_blocks
+                    and str(self.maneuver_manager.lane_change.phase)
+                    == "executing"
+                ),
             },
             behavior=behavior_decision,
             stop_goal_active=bool(mpc_stop_goal_active),
