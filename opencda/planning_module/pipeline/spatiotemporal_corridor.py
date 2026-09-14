@@ -58,6 +58,9 @@ class CorridorParams:
     horizon_steps: int = 20
     dt_s: float = 0.1
     follow_extra_buffer_m: float = 2.0
+    # Clearance measured forward from the ego front bumper. The longitudinal
+    # crossing cap also subtracts ``ego_half_length_m`` because corridor
+    # station represents the vehicle centre, not its front footprint.
     conflict_stop_buffer_m: float = 4.0
     crossing_clearance_time_s: float = 2.0   # cap s_hi within this of conflict_t
     # Arbitration is an efficiency agreement, not permission to collide. If
@@ -443,8 +446,13 @@ def build_longitudinal_corridor(
                 continue
             lo_k = max(0, int((tag.conflict_t_s - p.crossing_clearance_time_s) / dt))
             hi_k = min(n, int((tag.conflict_t_s + p.crossing_clearance_time_s) / dt))
+            centre_stop_station = (
+                float(tag.conflict_s_m)
+                - max(0.0, float(p.conflict_stop_buffer_m))
+                - max(0.0, float(p.ego_half_length_m))
+            )
             for k in range(lo_k, hi_k + 1):
-                _cap(k, float(tag.conflict_s_m) - p.conflict_stop_buffer_m, tag.agent_id)
+                _cap(k, centre_stop_station, tag.agent_id)
 
     cor.clamp_and_check()
     return cor

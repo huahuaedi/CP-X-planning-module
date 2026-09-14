@@ -112,8 +112,9 @@ def test_crossing_yield_caps_s_hi_near_conflict_point_only_in_the_window():
         CorridorParams(horizon_steps=30, dt_s=0.1, crossing_clearance_time_s=0.5,
                        conflict_stop_buffer_m=4.0),
     )
-    # window is t in [0.5, 1.5] s -> stages 5..15 capped at 30 - 4 = 26
-    assert cor.s_hi[10] == 26.0
+    # Window is t in [0.5, 1.5] s. The cap is on ego centre station, so the
+    # requested 4 m bumper clearance also subtracts ego half length.
+    assert cor.s_hi[10] == pytest.approx(30.0 - 4.0 - 2.45)
     assert cor.s_hi[0] >= _BIG      # before the window: uncapped
     assert cor.s_hi[25] >= _BIG     # after the window: uncapped
 
@@ -134,7 +135,7 @@ def test_imminent_crossing_overrides_stale_proceed_role():
           _tag("x", CROSSING, s=18.0, t=0.8), _assign("proceed"))],
         P,
     )
-    assert min(cor.s_hi) == 14.0
+    assert min(cor.s_hi) == pytest.approx(18.0 - 4.0 - P.ego_half_length_m)
 
 
 def test_merge_make_gap_puts_ego_behind_cav():
@@ -234,11 +235,11 @@ def test_close_follow_does_not_create_a_second_stop_controller():
 def test_crossing_cap_tighter_than_braking_is_floored_at_the_reachable_station():
     # Reproduces the captured cpx_town05_crossing_late_conflict frame
     # (sim_time 136.559s): ego at 6.79 m/s, a CROSSING yield whose window
-    # covers the whole horizon and whose geometric cap (conflict_s_m -
-    # buffer) freezes at 5.1 m -- 4.52 m/s^2 to stop there, tighter than the
+    # covers the whole horizon and whose centre-station cap includes both the
+    # requested bumper clearance and ego half length. It is tighter than the
     # 3.0 m/s^2 MPC braking limit. Without the floor this cap reached every
-    # stage unchanged and Stage D's tangent-only row let the QP satisfy it
-    # by rotating heading instead of braking (the observed deflection).
+    # stage unchanged and Stage D's tangent-only row let the QP satisfy it by
+    # rotating heading instead of braking (the observed deflection).
     ego = {"x": 0.0, "y": 0.0, "v": 6.791947, "psi": 0.0}
     params = CorridorParams(
         horizon_steps=32, dt_s=0.1,
@@ -250,7 +251,7 @@ def test_crossing_cap_tighter_than_braking_is_floored_at_the_reachable_station()
         [({"x": 9.2, "v": 6.0}, _tag("x", CROSSING, s=9.2, t=0.0), _assign("yield"))],
         params,
     )
-    geometric_cap = 9.2 - 4.0  # == 5.2, close to the captured 5.1 m freeze
+    geometric_cap = 9.2 - 4.0 - params.ego_half_length_m
     assert any(h > geometric_cap + 1.0e-6 for h in cor.s_hi[1:]), (
         "expected at least one early stage floored above the geometric cap"
     )
@@ -346,7 +347,7 @@ def test_crossing_cap_within_braking_limits_is_left_untouched():
         [({"x": 9.2, "v": 6.0}, _tag("x", CROSSING, s=9.2, t=0.0), _assign("yield"))],
         params,
     )
-    geometric_cap = 9.2 - 4.0
+    geometric_cap = 9.2 - 4.0 - params.ego_half_length_m
     assert all(abs(h - geometric_cap) < 1.0e-6 for h in cor.s_hi[1:])
     assert cor.feasible
     assert cor.first_infeasible_stage is None
