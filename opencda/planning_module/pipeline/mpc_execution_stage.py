@@ -108,7 +108,6 @@ class MPCExecutionStage:
         self._minimum_replan_speed_mps = max(
             0.0, float(minimum_replan_speed_mps)
         )
-        self._planned_acceleration_mps2 = None
         self._last_command_time_s = None
         self._last_constraint_revision = ""
 
@@ -124,10 +123,15 @@ class MPCExecutionStage:
         context_key = str(context.key)
         anchor = context.reference_anchor_relative_m
         hard_gate = bool(str(request.hard_gate_reason))
-        jerk_seed_acceleration_mps2 = (
-            float(request.current_acceleration_mps2)
-            if self._planned_acceleration_mps2 is None
-            else float(self._planned_acceleration_mps2)
+        # The request carries the acceleration command that survived command
+        # extraction and the safety supervisor on the preceding tick.  It is
+        # the only control the plant actually received, hence the only valid
+        # initial condition for the next jerk constraint.  Keeping a second
+        # copy of raw MPC u[0] here diverges whenever the platform speed
+        # adapter overrides that proposal (most visibly while holding zero
+        # speed for a conflict corridor).
+        jerk_seed_acceleration_mps2 = float(
+            request.current_acceleration_mps2
         )
         elapsed_s = (
             float(self._mpc.dt_s)
@@ -156,7 +160,6 @@ class MPCExecutionStage:
             # speed-crossing detector from scheduling one redundant solve on
             # the first stationary tick.
             control = normal_stop_control()
-            self._planned_acceleration_mps2 = 0.0
             self._last_constraint_revision = str(request.constraint_revision)
             return MPCExecutionResult(
                 0.0, 0.0, control, "stop_hold_direct", "",
@@ -251,7 +254,6 @@ class MPCExecutionStage:
                     "stop_hold_direct"
                     if request.stationary_stop_hold else "buffer_reuse"
                 )
-            self._planned_acceleration_mps2 = float(acceleration)
             return MPCExecutionResult(
                 float(acceleration), float(steering), control, str(status), "",
                 bool(replan), False, float(jerk_seed_acceleration_mps2),
@@ -294,7 +296,6 @@ class MPCExecutionStage:
                 )
                 steering = 0.0 if hard_gate else float(steering)
                 status = "candidate_hard_gate" if hard_gate else "bounded_safe_stop"
-            self._planned_acceleration_mps2 = float(acceleration)
             return MPCExecutionResult(
                 float(acceleration), float(steering), control, str(status),
                 fallback_reason, bool(replan), bool(reused_after_failure),

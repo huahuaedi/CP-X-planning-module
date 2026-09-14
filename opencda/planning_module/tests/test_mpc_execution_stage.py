@@ -189,7 +189,7 @@ def test_stationary_stop_hold_never_enters_mpc_scheduler_or_solver():
     assert mpc.plan_kwargs == {}
 
 
-def test_fallback_jerk_uses_last_planned_acceleration_and_tick_elapsed_time():
+def test_fallback_jerk_uses_last_applied_acceleration_and_tick_elapsed_time():
     buffer = _Buffer(replan=True)
     mpc = _MPC(status="solved")
     stage = MPCExecutionStage(mpc=mpc, control_buffer=buffer)
@@ -201,7 +201,7 @@ def test_fallback_jerk_uses_last_planned_acceleration_and_tick_elapsed_time():
         sim_time_s=1.05,
         current_acceleration_mps2=-4.0,
     ))
-    # The OpenCDA PID's pedal-equivalent -4.0 input is not MPC memory.
-    # With j_max=10 and a 0.05 s tick, 0.4 may only fall to -0.1.
-    assert abs(failed.jerk_seed_acceleration_mps2 - 0.4) < 1.0e-9
-    assert abs(failed.acceleration_mps2 - (-0.1)) < 1.0e-9
+    # The platform received -4.0, not the previous raw MPC proposal 0.4.
+    # Reusing 0.4 would create a second, divergent acceleration owner.
+    assert abs(failed.jerk_seed_acceleration_mps2 - (-4.0)) < 1.0e-9
+    assert abs(failed.acceleration_mps2 - (-4.0)) < 1.0e-9
