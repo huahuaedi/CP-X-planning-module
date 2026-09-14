@@ -221,7 +221,7 @@ class HighLevelRoutePlanningScenarioTests(unittest.TestCase):
                         _FakeEnvironmentObject("workzone", x=20.0, y=0.0),
                     ]
                 ),
-                world_map=_FakeWaypointWorldMap([20.0, 0.0], road_id=20, section_id=0, lane_id=-2),
+                map_planner=_FakeWaypointWorldMap([20.0, 0.0], road_id=20, section_id=0, lane_id=-2),
                 carla=_FakeCarla,
             )
 
@@ -232,7 +232,7 @@ class HighLevelRoutePlanningScenarioTests(unittest.TestCase):
                         _FakeEnvironmentObject("workzone", x=20.0, y=0.0),
                     ]
                 ),
-                world_map=_FakeWaypointWorldMap([20.0, 0.0], road_id=20, section_id=0, lane_id=-2),
+                map_planner=_FakeWaypointWorldMap([20.0, 0.0], road_id=20, section_id=0, lane_id=-2),
                 carla=_FakeCarla,
                 sim_time_s=0.0,
                 wall_time_s=0.0,
@@ -255,7 +255,7 @@ class HighLevelRoutePlanningScenarioTests(unittest.TestCase):
                         _FakeEnvironmentObject("workzone", x=20.0, y=0.0),
                     ]
                 ),
-                world_map=_FakeWaypointWorldMap([20.0, 0.0], road_id=20, section_id=0, lane_id=-2),
+                map_planner=_FakeWaypointWorldMap([20.0, 0.0], road_id=20, section_id=0, lane_id=-2),
                 carla=_FakeCarla,
                 sim_time_s=0.0,
                 wall_time_s=999.0,
@@ -276,7 +276,7 @@ class HighLevelRoutePlanningScenarioTests(unittest.TestCase):
             self.assertEqual(lane_events[0]["road_id"], 20)
             self.assertEqual(lane_events[0]["section_id"], 0)
             self.assertEqual(lane_events[0]["lane_id"], 1)
-            self.assertEqual(lane_events[0]["carla_lane_id"], -2)
+            self.assertEqual(lane_events[0]["opendrive_lane_id"], -2)
 
             _, _, final_runtime_state = maybe_replan_global_route(
                 runtime_state=next_runtime_state,
@@ -285,7 +285,7 @@ class HighLevelRoutePlanningScenarioTests(unittest.TestCase):
                         _FakeEnvironmentObject("workzone", x=20.0, y=0.0),
                     ]
                 ),
-                world_map=_FakeWaypointWorldMap([20.0, 0.0], road_id=20, section_id=0, lane_id=-2),
+                map_planner=_FakeWaypointWorldMap([20.0, 0.0], road_id=20, section_id=0, lane_id=-2),
                 carla=_FakeCarla,
                 sim_time_s=0.0,
                 wall_time_s=1000.0,
@@ -314,7 +314,7 @@ class HighLevelRoutePlanningScenarioTests(unittest.TestCase):
                         }
                     },
                     world=_FakeWorld(),
-                    world_map=_FakeWaypointWorldMap([1.0, 2.0]),
+                    map_planner=_FakeWaypointWorldMap([1.0, 2.0]),
                     carla=_FakeCarla,
                 )
 
@@ -340,7 +340,7 @@ class HighLevelRoutePlanningScenarioTests(unittest.TestCase):
                         _FakeActor(role_name="workzone", x=12.5, y=34.0),
                     ],
                 ),
-                world_map=_FakeWaypointWorldMap([13.0, 35.0], road_id=20, section_id=0, lane_id=-2),
+                map_planner=_FakeWaypointWorldMap([13.0, 35.0], road_id=20, section_id=0, lane_id=-2),
                 carla=_FakeCarla,
             )
 
@@ -359,7 +359,8 @@ class HighLevelRoutePlanningScenarioTests(unittest.TestCase):
 
         spawned = spawn_obstacles(
             world=world,
-            world_map=_FakeWaypointWorldMap([13.0, 35.0], road_id=20, section_id=0, lane_id=-2),
+            world_map=_FakeWaypointWorldMap(),
+            map_planner=_FakeWaypointWorldMap([13.0, 35.0], road_id=20, section_id=0, lane_id=-2),
             carla=_FakeCarla,
             blueprint_library=blueprint_library,
             scenario_cfg={
@@ -399,7 +400,7 @@ class HighLevelRoutePlanningScenarioTests(unittest.TestCase):
                     }
                 },
                 world=_FakeWorld(),
-                world_map=_FakeWaypointWorldMap([0.0, 0.0], road_id=20, section_id=0, lane_id=-2),
+                map_planner=_FakeWaypointWorldMap([0.0, 0.0], road_id=20, section_id=0, lane_id=-2),
                 carla=_FakeCarla,
             )
 
@@ -410,7 +411,7 @@ class HighLevelRoutePlanningScenarioTests(unittest.TestCase):
                         _FakeEnvironmentObject("workzone", x=40.0, y=50.0),
                     ]
                 ),
-                world_map=_FakeWaypointWorldMap([41.0, 51.0], road_id=20, section_id=0, lane_id=-2),
+                map_planner=_FakeWaypointWorldMap([41.0, 51.0], road_id=20, section_id=0, lane_id=-2),
                 carla=_FakeCarla,
                 sim_time_s=0.0,
                 wall_time_s=0.0,
@@ -426,7 +427,7 @@ class HighLevelRoutePlanningScenarioTests(unittest.TestCase):
             self.assertEqual(lane_events[0]["road_id"], 20)
             self.assertEqual(lane_events[0]["section_id"], 0)
             self.assertEqual(lane_events[0]["lane_id"], 1)
-            self.assertEqual(lane_events[0]["carla_lane_id"], -2)
+            self.assertEqual(lane_events[0]["opendrive_lane_id"], -2)
 
     def test_workzone_does_not_inject_virtual_obstacle_before_or_after_message(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -447,7 +448,7 @@ class HighLevelRoutePlanningScenarioTests(unittest.TestCase):
                         _FakeEnvironmentObject("workzone", x=12.5, y=34.0),
                     ]
                 ),
-                world_map=_FakeWaypointWorldMap([13.0, 35.0], road_id=20, section_id=0, lane_id=-2),
+                map_planner=_FakeWaypointWorldMap([13.0, 35.0], road_id=20, section_id=0, lane_id=-2),
                 carla=_FakeCarla,
             )
 
@@ -458,7 +459,8 @@ class HighLevelRoutePlanningScenarioTests(unittest.TestCase):
                         _FakeEnvironmentObject("workzone", x=12.5, y=34.0),
                     ]
                 ),
-                world_map=_FakeWaypointWorldMap([13.0, 35.0]),
+                world_map=_FakeWaypointWorldMap(),
+                map_planner=_FakeWaypointWorldMap([13.0, 35.0]),
                 carla=_FakeCarla,
                 object_snapshots=[],
                 sim_time_s=0.0,
@@ -473,7 +475,8 @@ class HighLevelRoutePlanningScenarioTests(unittest.TestCase):
                         _FakeEnvironmentObject("workzone", x=12.5, y=34.0),
                     ]
                 ),
-                world_map=_FakeWaypointWorldMap([13.0, 35.0]),
+                world_map=_FakeWaypointWorldMap(),
+                map_planner=_FakeWaypointWorldMap([13.0, 35.0]),
                 carla=_FakeCarla,
                 object_snapshots=[],
                 sim_time_s=999.0,
@@ -501,7 +504,7 @@ class HighLevelRoutePlanningScenarioTests(unittest.TestCase):
                         _FakeEnvironmentObject("workzone", x=20.0, y=0.0),
                     ]
                 ),
-                world_map=_FakeWaypointWorldMap([20.0, 0.0], road_id=20, section_id=0, lane_id=-2),
+                map_planner=_FakeWaypointWorldMap([20.0, 0.0], road_id=20, section_id=0, lane_id=-2),
                 carla=_FakeCarla,
             )
 
@@ -512,7 +515,7 @@ class HighLevelRoutePlanningScenarioTests(unittest.TestCase):
                         _FakeEnvironmentObject("workzone", x=20.0, y=0.0),
                     ]
                 ),
-                world_map=_FakeWaypointWorldMap([20.0, 0.0], road_id=20, section_id=0, lane_id=-2),
+                map_planner=_FakeWaypointWorldMap([20.0, 0.0], road_id=20, section_id=0, lane_id=-2),
                 carla=_FakeCarla,
                 sim_time_s=999.0,
                 wall_time_s=999.0,
@@ -528,7 +531,7 @@ class HighLevelRoutePlanningScenarioTests(unittest.TestCase):
                         _FakeEnvironmentObject("workzone", x=20.0, y=0.0),
                     ]
                 ),
-                world_map=_FakeWaypointWorldMap([20.0, 0.0], road_id=20, section_id=0, lane_id=-2),
+                map_planner=_FakeWaypointWorldMap([20.0, 0.0], road_id=20, section_id=0, lane_id=-2),
                 carla=_FakeCarla,
                 sim_time_s=0.0,
                 wall_time_s=0.0,

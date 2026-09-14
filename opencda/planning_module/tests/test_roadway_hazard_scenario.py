@@ -200,8 +200,9 @@ class RoadwayHazardScenarioTests(unittest.TestCase):
             self.assertTrue(bool(next_runtime_state.get("hazard_revealed", False)))
 
             with open(message_path, "r", encoding="utf-8") as message_file:
-                messages = json.load(message_file)
+                payload = json.load(message_file)
 
+            messages = list(payload.get("lane_events", []))
             self.assertEqual(len(messages), 1)
             self.assertEqual(messages[0]["type"], "hazard")
             self.assertEqual(messages[0]["hazard_vehicle_id"], "hazard")

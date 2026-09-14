@@ -11,12 +11,16 @@ class CpScenarioConfigTests(unittest.TestCase):
         self.assertIn("town10_cp_passing_merge", available)
 
     def test_cp_scenarios_use_config_driven_runtime(self):
-        expected_use_cases = {
-            "town10_cp_roadway_object": "D",
-            "town10_cp_red_light_violator": "A",
-            "town10_cp_passing_merge": "E",
+        expected = {
+            "town10_cp_roadway_object": ("D", "opencda_scenario.cp_scenarios"),
+            "town10_cp_red_light_violator": (
+                "A", "utility.coordinate_obstacle_spawner"
+            ),
+            "town10_cp_passing_merge": (
+                "E", "utility.coordinate_obstacle_spawner"
+            ),
         }
-        for scenario_name, expected_use_case in expected_use_cases.items():
+        for scenario_name, (expected_use_case, runtime_module) in expected.items():
             with self.subTest(scenario_name=scenario_name):
                 scenario_cfg = load_any_scenario(scenario_name)
                 self.assertEqual(
@@ -24,7 +28,7 @@ class CpScenarioConfigTests(unittest.TestCase):
                     str(scenario_cfg.get("runner_module", "")),
                 )
                 self.assertEqual(
-                    "opencda_scenario.cp_scenarios",
+                    runtime_module,
                     str(scenario_cfg.get("runtime", {}).get("module", "")),
                 )
                 self.assertEqual(
@@ -42,18 +46,15 @@ class CpScenarioConfigTests(unittest.TestCase):
         )
 
         red_light = load_any_scenario("town10_cp_red_light_violator")
-        self.assertGreaterEqual(
-            len(red_light.get("cp_scenario", {}).get("vehicles", [])),
-            1,
+        self.assertEqual(
+            len(red_light.get("obstacles", {}).get("npc_vehicles", [])), 1
         )
 
         passing_merge = load_any_scenario("town10_cp_passing_merge")
-        self.assertGreaterEqual(
-            len(passing_merge.get("cp_scenario", {}).get("vehicles", [])),
-            2,
+        self.assertEqual(
+            len(passing_merge.get("obstacles", {}).get("npc_vehicles", [])), 2
         )
 
 
 if __name__ == "__main__":
     unittest.main()
-

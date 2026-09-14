@@ -273,11 +273,11 @@ class Town10Scenario1Tests(unittest.TestCase):
             vehicle_spawn_requests,
             [
                 {"role_name": "vehicle_1", "autopilot_enabled": True},
-                {"role_name": "vehicle_2", "autopilot_enabled": False},
-                {"role_name": "vehicle_52", "autopilot_enabled": False},
+                {"role_name": "vehicle_2", "autopilot_enabled": True},
+                {"role_name": "vehicle_52", "autopilot_enabled": True},
             ],
         )
-        self.assertEqual(runtime_state.get("delayed_autopilot_vehicle_actor_ids", {}), {52: 102})
+        self.assertEqual(runtime_state.get("delayed_autopilot_vehicle_actor_ids", {}), {})
         self.assertEqual(
             [entry.get("role_name") for entry in runtime_state.get("vru_states", [])],
             ["town10_scenario_1_vru_1", "town10_scenario_1_vru_3"],
@@ -429,7 +429,7 @@ class Town10Scenario1Tests(unittest.TestCase):
         self.assertEqual(float(aligned_marker.transform.location.y), 40.0)
         self.assertEqual(float(aligned_marker.transform.rotation.yaw), 90.0)
 
-        delegated_cfg = delegate_run.call_args.kwargs["scenario_cfg"]
+        delegated_cfg = delegate_run.call_args[1]["scenario_cfg"]
         self.assertEqual(
             str(delegated_cfg.get("anchors", {}).get("final_destination", "")),
             target_marker_name,

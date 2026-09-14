@@ -47,11 +47,14 @@ class _FakeWaypoint:
         self.road_id = int(road_id)
         self.section_id = int(section_id)
         self.lane_id = int(lane_id)
+        self.ad_lane_id = int(lane_id)
 
 
 class _FakeWorldMap:
     def get_waypoint(self, location, project_to_road=True, lane_type=None):
         del project_to_road, lane_type
+        if isinstance(location, dict):
+            return _FakeWaypoint(float(location["x"]), float(location["y"]))
         return _FakeWaypoint(float(location.x), float(location.y))
 
 
@@ -166,6 +169,7 @@ class Town10Scenario5Tests(unittest.TestCase):
                         "traffic_manager": {"port": 8000},
                     },
                     world=world,
+                    map_planner=_FakeWorldMap(),
                     world_map=_FakeWorldMap(),
                     carla=_FakeCarla,
                 )

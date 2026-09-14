@@ -101,7 +101,7 @@ class OpenCDASumoScenarioTests(unittest.TestCase):
             )
 
         self.assertEqual(result, 7)
-        forwarded_cfg = run_mock.call_args.kwargs["scenario_cfg"]
+        forwarded_cfg = run_mock.call_args[1]["scenario_cfg"]
         self.assertNotIn("spawner_module", forwarded_cfg.get("obstacles", {}))
         self.assertEqual(
             str(forwarded_cfg.get("runtime", {}).get("module", "")),
