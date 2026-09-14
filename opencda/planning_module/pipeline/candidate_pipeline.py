@@ -17,7 +17,6 @@ from typing import Callable, Dict, Mapping, Optional, Sequence
 from MPC.lane_keep import (
     RoadEnvelopeBlock,
     normalize_lane_reference_sample,
-    road_envelope_block_signed_distance,
 )
 from .reference_contract import ReferenceValidationResult
 from .reference_geometry import align_parallel_reference
@@ -1104,108 +1103,6 @@ def _lane_change_initial_progress(
         return min(0.98, max(0.0, float(progress)))
     except Exception:
         return 0.0
-
-
-def build_route_tracking_lane_change_envelope_blocks(
-    *,
-    source_reference: Sequence[Mapping[str, object]],
-    target_reference: Sequence[Mapping[str, object]],
-    master_step_count: int,
-    step_distance_m: float,
-    road_boundary_margin_m: float = 0.5,
-    default_lane_width_m: float = 4.0,
-    length_pad_m: float = 3.0,
-    min_half_width_m: float = 0.3,
-) -> list[RoadEnvelopeBlock]:
-    """Build the static two-lane drivable corridor for one lane change.
-
-    The source and target lanes share an internal lane marking.  Eroding
-    each lane separately by the ego/body margin creates an artificial gap
-    at that marking, exactly where a lane-changing vehicle must travel.
-    Instead, merge the adjacent lane cross-sections first and erode only the
-    two *outer* road edges.  The resulting block is continuous from source
-    centre to target centre and remains fixed for the commitment lifetime.
-    """
-
-    source = [dict(sample) for sample in list(source_reference or [])]
-    target = [dict(sample) for sample in list(target_reference or [])]
-    if not source or not target:
-        return []
-    aligned_target = _align_target_reference_to_source(
-        source_reference=source,
-        target_reference=target,
-    )
-    if not aligned_target:
-        return []
-
-    source_anchor = normalize_lane_reference_sample(
-        source[0],
-        default_lane_width_m=float(default_lane_width_m),
-    )
-    target_anchor = normalize_lane_reference_sample(
-        aligned_target[0],
-        default_lane_width_m=float(default_lane_width_m),
-    )
-    if source_anchor is None or target_anchor is None:
-        return []
-
-    full_length_m = max(0.0, float(master_step_count) - 1.0) * max(0.0, float(step_distance_m))
-    length_pad_m = max(0.0, float(length_pad_m))
-    margin_m = max(0.0, float(road_boundary_margin_m))
-
-    heading_rad = float(source_anchor.heading_rad)
-    tangent_x = math.cos(heading_rad)
-    tangent_y = math.sin(heading_rad)
-    normal_x = -tangent_y
-    normal_y = tangent_x
-    target_dx_m = float(target_anchor.x_center_m) - float(source_anchor.x_center_m)
-    target_dy_m = float(target_anchor.y_center_m) - float(source_anchor.y_center_m)
-    target_along_m = target_dx_m * tangent_x + target_dy_m * tangent_y
-    target_lateral_m = target_dx_m * normal_x + target_dy_m * normal_y
-
-    # Cross-sections are expressed in the source frame.  Only the outermost
-    # edges receive the body/safety margin; the shared lane marking is not a
-    # road boundary and therefore must not constrain the vehicle centre.
-    raw_right_m = min(
-        -float(source_anchor.right_road_width_m),
-        float(target_lateral_m) - float(target_anchor.right_road_width_m),
-    )
-    raw_left_m = max(
-        float(source_anchor.left_road_width_m),
-        float(target_lateral_m) + float(target_anchor.left_road_width_m),
-    )
-    safe_right_m = float(raw_right_m) + margin_m
-    safe_left_m = float(raw_left_m) - margin_m
-    if safe_left_m <= safe_right_m:
-        return []
-    lateral_center_m = 0.5 * (safe_left_m + safe_right_m)
-    half_width_m = max(
-        float(min_half_width_m), 0.5 * (safe_left_m - safe_right_m)
-    )
-    # Candidate samples start at the first look-ahead point, not at the ego
-    # centre.  Pad both longitudinal ends so the first QP after commitment
-    # contains the current vehicle state as well as the full future master.
-    corridor_start_m = min(0.0, float(target_along_m)) - length_pad_m
-    corridor_end_m = max(
-        float(full_length_m), float(target_along_m) + float(full_length_m)
-    ) + length_pad_m
-    center_along_m = 0.5 * (corridor_start_m + corridor_end_m)
-    half_length_m = max(1.0, 0.5 * (corridor_end_m - corridor_start_m))
-    return [RoadEnvelopeBlock(
-        x_center_m=(
-            float(source_anchor.x_center_m)
-            + center_along_m * tangent_x
-            + lateral_center_m * normal_x
-        ),
-        y_center_m=(
-            float(source_anchor.y_center_m)
-            + center_along_m * tangent_y
-            + lateral_center_m * normal_y
-        ),
-        heading_rad=heading_rad,
-        half_length_m=float(half_length_m),
-        half_width_m=float(half_width_m),
-    )]
 
 
 def build_turn_reference_envelope_blocks(

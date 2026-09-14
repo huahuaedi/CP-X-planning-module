@@ -103,7 +103,6 @@ def test_arbitrate_owns_intent_selection_and_finalization():
             speed_plan=speed, turn_prepare_speed_suppressed=False,
         ),
         sim_time_s=1.0, route_revision="route:1",
-        road_envelope=lambda: None,
         validate_contract=lambda **_kwargs: None,
     )
 
@@ -224,7 +223,6 @@ def test_no_candidates_returns_typed_baseline_and_runs_completion_release():
         request,
         sim_time_s=1.0,
         route_revision="route:1",
-        road_envelope=lambda: None,
         validate_contract=lambda **_kwargs: None,
     )
 

@@ -283,6 +283,42 @@ def test_locked_lane_change_window_owns_padding_and_speed_tags():
     assert all(row["speed_ref_mps"] == 6.0 for row in result.samples)
 
 
+def test_completed_lane_change_padding_follows_target_lane_tangent():
+    # The transition's final chord still points downwards, while the target
+    # lane is straight.  Padding must follow the target lane; otherwise a
+    # short local-map target corridor extrapolates outside the road envelope.
+    samples = [
+        {
+            "x_ref_m": 0.0,
+            "y_ref_m": 1.0,
+            "heading_rad": -0.2,
+            "lane_change_progress": 0.9,
+            "lane_change_target_heading_rad": 0.0,
+        },
+        {
+            "x_ref_m": 1.0,
+            "y_ref_m": 0.8,
+            "heading_rad": -0.2,
+            "lane_change_progress": 1.0,
+            "lane_change_target_heading_rad": 0.0,
+            "lane_change_target_curvature_1pm": 0.0,
+        },
+    ]
+
+    result = ReferenceLineProvider._complete_lane_change_window(
+        samples,
+        count=5,
+        spacing_m=1.0,
+        target_lane_id=11,
+    )
+
+    assert [row["y_ref_m"] for row in result[1:]] == pytest.approx(
+        [0.8, 0.8, 0.8, 0.8]
+    )
+    assert result[-1]["x_ref_m"] == pytest.approx(4.0)
+    assert result[-1]["lane_change_target_y_m"] == pytest.approx(0.8)
+
+
 def test_provider_owns_transient_lane_fallback_generation():
     calls = []
     generated = SimpleNamespace(samples=_line(), destination_state=[1, 2, 3, 4])

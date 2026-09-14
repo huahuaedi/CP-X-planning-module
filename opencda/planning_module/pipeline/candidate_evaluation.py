@@ -363,7 +363,7 @@ class CandidateTrajectoryEvaluator:
             destination_state=destination,
             lane_center_reference=reference,
             committed_lane_change_tracking_active=bool(
-                phase == "executing" and lifecycle.envelope_blocks
+                phase == "executing"
             ),
         )
         intent = CandidateBehaviorIntent(
@@ -444,13 +444,7 @@ class CandidateTrajectoryEvaluator:
     ):
         """Commit and window an accepted lane-change candidate once."""
 
-        from .candidate_pipeline import (
-            build_route_tracking_lane_change_envelope_blocks,
-            predicted_lane_change_average_speed_mps,
-        )
-        from MPC.lane_keep import (
-            road_envelope_conservativeness_correction,
-        )
+        from .candidate_pipeline import predicted_lane_change_average_speed_mps
         from .reference_line_provider import LANE_CHANGE
 
         decision = str(selected.intent.decision)
@@ -555,53 +549,6 @@ class CandidateTrajectoryEvaluator:
                 clear_seed = getattr(mpc, "clear_previous_solution_seed", None)
                 if callable(clear_seed):
                     clear_seed()
-                # The accepted nominal trajectory already carries the
-                # station-aligned source and target centre points.  Build the
-                # continuous two-lane road envelope once at commitment; MPC
-                # consumes this immutable geometry on every execution tick.
-                boundary_width_m = max(
-                    0.1, float(getattr(mpc, "lane_width_m", 3.5))
-                )
-                source_boundary = []
-                target_boundary = []
-                for sample in selected_reference:
-                    if not all(key in sample for key in (
-                        "lane_change_source_x_m", "lane_change_source_y_m",
-                        "lane_change_target_x_m", "lane_change_target_y_m",
-                    )):
-                        continue
-                    common = {
-                        "heading_rad": float(sample.get("heading_rad", ego_yaw_rad)),
-                        "lane_width_m": boundary_width_m,
-                        "road_left_width_m": 0.5 * boundary_width_m,
-                        "road_right_width_m": 0.5 * boundary_width_m,
-                    }
-                    source_boundary.append(dict(common, **{
-                        "x_ref_m": float(sample["lane_change_source_x_m"]),
-                        "y_ref_m": float(sample["lane_change_source_y_m"]),
-                    }))
-                    target_boundary.append(dict(common, **{
-                        "x_ref_m": float(sample["lane_change_target_x_m"]),
-                        "y_ref_m": float(sample["lane_change_target_y_m"]),
-                    }))
-                envelope_blocks = build_route_tracking_lane_change_envelope_blocks(
-                    source_reference=source_boundary,
-                    target_reference=target_boundary,
-                    master_step_count=len(selected_reference),
-                    step_distance_m=max(0.1, float(geometry.step_m)),
-                    road_boundary_margin_m=float(
-                        getattr(mpc, "road_boundary_margin_m", 0.5)
-                    ),
-                    default_lane_width_m=boundary_width_m,
-                )
-                if envelope_blocks:
-                    lifecycle.envelope_blocks = envelope_blocks
-                    lifecycle.envelope_epsilon0 = (
-                        road_envelope_conservativeness_correction(
-                            envelope_blocks,
-                            rho=float(getattr(mpc, "road_envelope_rho", -8.0)),
-                        )
-                    )
             lock_reason = "accepted_candidate_committed:%s:%s" % (
                 str(install_reason), str(completion_reason)
             )
@@ -804,7 +751,6 @@ class CandidateTrajectoryEvaluator:
         object_snapshots,
         current_acceleration_mps2: float,
         current_steering_rad: float,
-        road_envelope_payload_world=None,
         required_decision: str = "",
         required_target_lane_id: int = 0,
     ) -> str:
@@ -893,11 +839,6 @@ class CandidateTrajectoryEvaluator:
                     current_steering_rad=float(current_steering_rad),
                     lane_center_reference_samples=[dict(v) for v in list(row.lane_center_reference or [])],
                     stop_goal_active=bool(intent.stop_goal_active),
-                    road_envelope_payload_world=(
-                        road_envelope_payload_world
-                        if str(intent.name) == "committed_lane_change_continuation"
-                        else None
-                    ),
                 )
                 self._mpc_probe_cache[cache_key] = dict(probe)
             apply_mpc_probe_result(

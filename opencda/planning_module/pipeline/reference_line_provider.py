@@ -541,7 +541,17 @@ class ReferenceLineProvider(StableReferenceLineProvider):
         step_m = max(0.05, float(spacing_m))
         while len(rows) < max(2, int(count)):
             previous = dict(rows[-1])
-            if len(rows) >= 2:
+            transition_complete = float(
+                previous.get("lane_change_progress", 0.0) or 0.0
+            ) >= 1.0 - 1.0e-6
+            target_heading = previous.get("lane_change_target_heading_rad")
+            if transition_complete and target_heading is not None:
+                # Once d(s) reaches its target, the target corridor owns the
+                # continuation geometry.  Extending the final transition
+                # chord instead makes a completed lane change drift through
+                # the outer road boundary when the AD-map window ends.
+                heading_rad = float(target_heading)
+            elif len(rows) >= 2:
                 before = rows[-2]
                 dx_m = float(previous.get("x_ref_m", previous.get("x", 0.0))) - float(
                     before.get("x_ref_m", before.get("x", 0.0))
@@ -573,6 +583,22 @@ class ReferenceLineProvider(StableReferenceLineProvider):
                 "lane_id": int(target_lane_id),
                 "lane_change_progress": 1.0,
             })
+            if transition_complete:
+                # A post-transition sample is target-lane geometry, not a
+                # virtual continuation of the source-to-target blend.
+                padded.update({
+                    "lane_change_target_x_m": padded["x_ref_m"],
+                    "lane_change_target_y_m": padded["y_ref_m"],
+                    "lane_change_target_heading_rad": float(heading_rad),
+                    "heading_rad": float(heading_rad),
+                    "curvature_1pm": float(
+                        previous.get("lane_change_target_curvature_1pm", 0.0)
+                        or 0.0
+                    ),
+                    "corridor_center_x_m": padded["x_ref_m"],
+                    "corridor_center_y_m": padded["y_ref_m"],
+                    "corridor_heading_rad": float(heading_rad),
+                })
             rows.append(padded)
         return rows
 

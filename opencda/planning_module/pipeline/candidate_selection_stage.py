@@ -289,7 +289,6 @@ class CandidateSelectionStage:
         *,
         sim_time_s: float,
         route_revision: str,
-        road_envelope: Callable[[], Any],
         validate_contract: Callable[..., Any],
     ) -> CandidateArbitrationResult:
         """Build, select and finalize candidates through one stage boundary."""
@@ -397,7 +396,6 @@ class CandidateSelectionStage:
             ),
             sim_time_s=float(sim_time_s),
             route_revision=str(route_revision),
-            road_envelope=road_envelope,
             validate_contract=validate_contract,
         )
         final = self.finalize_selected_frame(
@@ -562,7 +560,6 @@ class CandidateSelectionStage:
         *,
         sim_time_s: float,
         route_revision: str,
-        road_envelope: Callable[[], Any],
         validate_contract: Callable[..., Any],
     ) -> CandidateSelectionResult:
         if self._lane_change_lifecycle is None:
@@ -638,7 +635,6 @@ class CandidateSelectionStage:
             object_snapshots=request.object_snapshots,
             current_acceleration_mps2=float(request.current_acceleration_mps2),
             current_steering_rad=float(request.current_steering_rad),
-            road_envelope_payload_world=road_envelope(),
             required_decision=str(request.required_decision),
             required_target_lane_id=int(request.required_target_lane_id),
         )

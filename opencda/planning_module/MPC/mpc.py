@@ -559,15 +559,11 @@ class MPC:
 
         # Road-envelope block-union hard constraint (Yu et al.,
         # "Spatial Envelope MPC," arXiv:2509.18506, Sec. III-B1). Off by
-        # default: this only ever activates when the bridge explicitly
-        # supplies `road_envelope_blocks` to plan_trajectory (during a
-        # locked route-tracking lane change), and even then only when this
-        # flag is also on. Replaces the single-reference-line
-        # `road_boundary` constraint for that call only -- the union of two
-        # *static* blocks (source lane + target lane, fixed once at lock
-        # time) stays satisfiable even as the tracked reference switches
-        # lanes mid-maneuver, unlike a line tied to whichever reference
-        # sample is active that tick.
+        # default: this only activates when the bridge explicitly supplies
+        # `road_envelope_blocks` to plan_trajectory for a rolling junction
+        # turn. Lane changes use their single persistent reference and its
+        # ordinary road-boundary constraint; a second static envelope would
+        # create a competing geometry owner.
         road_envelope_cfg = dict(cost_cfg.get("road_envelope", {}))
         self.road_envelope_enabled = bool(road_envelope_cfg.get("enabled", False))
         self.road_envelope_weight = max(

@@ -814,57 +814,6 @@ class CandidatePipelineTest(unittest.TestCase):
         )
         self.assertLessEqual(self._discrete_curvature_1pm(shaped), 0.35)
 
-    def test_envelope_blocks_anchor_at_lock_position_and_span_lane_width(self):
-        source = [
-            {
-                "x_ref_m": float(index), "y_ref_m": 0.0, "heading_rad": 0.0,
-                "lane_width_m": 3.5, "road_left_width_m": 1.75, "road_right_width_m": 1.75,
-            }
-            for index in range(20)
-        ]
-        target = [
-            {
-                "x_ref_m": float(index), "y_ref_m": 3.5, "heading_rad": 0.0,
-                "lane_width_m": 3.5, "road_left_width_m": 1.75, "road_right_width_m": 1.75,
-            }
-            for index in range(20)
-        ]
-
-        blocks = candidate_pipeline.build_route_tracking_lane_change_envelope_blocks(
-            source_reference=source,
-            target_reference=target,
-            master_step_count=20,
-            step_distance_m=0.3,
-            road_boundary_margin_m=0.5,
-        )
-
-        self.assertEqual(len(blocks), 1)
-        corridor_block = blocks[0]
-        # The first sample is a look-ahead anchor.  The configured pad must
-        # extend behind it so the ego remains inside on the commitment tick.
-        self.assertAlmostEqual(
-            corridor_block.x_center_m - corridor_block.half_length_m,
-            -3.0,
-            places=6,
-        )
-        # Merge before erosion: one continuous centre-feasible corridor spans
-        # both lanes, including their shared lane marking at y=1.75.
-        self.assertAlmostEqual(corridor_block.y_center_m, 1.75, places=6)
-        # half_length covers the full locked master-array span.
-        full_length_m = (20 - 1) * 0.3
-        self.assertGreaterEqual(corridor_block.half_length_m, 0.5 * full_length_m)
-        # Only the two outer road edges receive the margin.
-        self.assertAlmostEqual(corridor_block.half_width_m, 3.5 - 0.5, places=6)
-        for lateral_m in (0.0, 1.75, 3.5):
-            signed_distance, _, _ = (
-                candidate_pipeline.road_envelope_block_signed_distance(
-                corridor_block,
-                x_m=corridor_block.x_center_m,
-                y_m=lateral_m,
-                )
-            )
-            self.assertLessEqual(signed_distance, 0.0)
-
     def test_lane_change_reference_uses_continuous_two_lane_corridor(self):
         source = [
             {
@@ -897,17 +846,6 @@ class CandidatePipelineTest(unittest.TestCase):
             self.assertAlmostEqual(
                 half_width, float(sample["road_right_width_m"]), places=7
             )
-
-    def test_envelope_blocks_empty_when_references_missing(self):
-        self.assertEqual(
-            candidate_pipeline.build_route_tracking_lane_change_envelope_blocks(
-                source_reference=[],
-                target_reference=[{"x_ref_m": 0.0, "y_ref_m": 0.0, "heading_rad": 0.0}],
-                master_step_count=20,
-                step_distance_m=0.3,
-            ),
-            [],
-        )
 
     def test_turn_envelope_is_rolling_and_reserves_vehicle_width(self):
         reference = [

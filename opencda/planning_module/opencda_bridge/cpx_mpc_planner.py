@@ -1354,9 +1354,7 @@ class CPXMPCPlannerBridge:
                     else float("nan")
                 ),
                 "committed_lane_change_tracking_active": bool(
-                    self.maneuver_manager.lane_change.envelope_blocks
-                    and str(self.maneuver_manager.lane_change.phase)
-                    == "executing"
+                    str(self.maneuver_manager.lane_change.phase) == "executing"
                 ),
             },
             behavior=behavior_decision,
@@ -1404,14 +1402,10 @@ class CPXMPCPlannerBridge:
         # after the speed target has recovered, otherwise forcing every new
         # solve to continue braking until the vehicle is almost stationary.
         mpc_jerk_seed_accel_mps2 = float(self._last_accel_mps2)
-        road_envelope_payload_world = (
-            self._current_route_tracking_lane_change_envelope_payload_world()
+        road_envelope_payload_world = self._rolling_turn_envelope_payload_world(
+            behavior_decision=str(behavior_decision.maneuver),
+            reference_samples=lane_center_reference,
         )
-        if road_envelope_payload_world is None:
-            road_envelope_payload_world = self._rolling_turn_envelope_payload_world(
-                behavior_decision=str(behavior_decision.maneuver),
-                reference_samples=lane_center_reference,
-            )
         cav_result = cav_resolution
         cav_constraint_rows = ()
         cav_constraint_revision = ""
@@ -3258,9 +3252,6 @@ class CPXMPCPlannerBridge:
                 ),
                 sim_time_s=float(sim_time_s),
                 route_revision=str(self.route_manager.route_revision),
-                road_envelope=(
-                    self._current_route_tracking_lane_change_envelope_payload_world
-                ),
                 validate_contract=self._validate_candidate_reference_contract,
             )
             decision = str(candidate_result.decision)
@@ -3509,21 +3500,6 @@ class CPXMPCPlannerBridge:
             maneuver_manager.reset(reason="turn_route_replanned")
         self.control_buffer.reset(reason="turn_route_replanned")
         return True, True, str(result.reason)
-
-    def _current_route_tracking_lane_change_envelope_payload_world(
-        self,
-    ) -> Optional[Mapping[str, object]]:
-        if (
-            not self.maneuver_manager.lane_change.envelope_blocks
-            or str(self.maneuver_manager.lane_change.phase)
-            != "executing"
-        ):
-            return None
-        return {
-            "blocks": self.maneuver_manager.lane_change.envelope_blocks,
-            "epsilon0": self.maneuver_manager.lane_change.envelope_epsilon0,
-            "rho": float(getattr(self.mpc, "road_envelope_rho", -8.0)),
-        }
 
     def _rolling_turn_envelope_payload_world(
         self,

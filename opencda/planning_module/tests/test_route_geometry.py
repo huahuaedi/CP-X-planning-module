@@ -161,6 +161,7 @@ class StableReferenceLineTests(unittest.TestCase):
         # owns both position and tangent.
         self.assertGreater(path[-1]["y_ref_m"], 4.8)
         self.assertGreater(path[-1]["heading_rad"], 0.1)
+        self.assertGreater(path[-1]["lane_change_target_heading_rad"], 0.1)
         self.assertEqual(path[-1]["lane_id"], 202)
 
     def test_frenet_lane_change_keeps_target_tail_after_short_source_ends(self):

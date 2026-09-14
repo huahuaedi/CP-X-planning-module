@@ -778,19 +778,13 @@ mpc:
       max_slack_m: 0.10
 
     # Road-envelope block-union hard constraint (Yu et al., "Spatial
-    # Envelope MPC," arXiv:2509.18506, Sec. III-B1). Off by default: only
-    # ever activates when the bridge explicitly supplies road_envelope
-    # blocks to plan_trajectory (during a locked route-tracking lane
-    # change) AND this flag is on. Replaces the single-reference-line
-    # road_boundary constraint above for that call only -- the union of two
-    # *static* blocks (source lane + target lane, fixed once at lock time)
-    # stays satisfiable even as the tracked reference switches lanes
-    # mid-maneuver, unlike a line tied to whichever reference sample is
-    # active that tick (the diagnosed cause of a primal-infeasible QP right
-    # at the reference-switch instant).
+    # Envelope MPC," arXiv:2509.18506, Sec. III-B1). It activates only when
+    # the bridge supplies rolling junction-turn blocks. Lane changes retain
+    # one geometry owner: their persistent reference plus the ordinary
+    # reference-relative road-boundary constraint above.
     road_envelope:
       # The constraint remains dormant unless the bridge supplies explicit
-      # lane-change or rolling-turn envelope blocks for the current horizon.
+      # rolling-turn envelope blocks for the current horizon.
       enabled: true
       # Quadratic penalty weight on the envelope slack.
       w_envelope: 10000.0

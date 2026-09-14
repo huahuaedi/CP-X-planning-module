@@ -276,6 +276,14 @@ def frenet_lane_change_path(
                 target_points[min(i, len(target_points) - 1)].y_m
                 if target_points else point.y_m
             ),
+            "lane_change_target_heading_rad": (
+                target_points[min(i, len(target_points) - 1)].heading_rad
+                if target_points else point.heading_rad
+            ),
+            "lane_change_target_curvature_1pm": (
+                target_points[min(i, len(target_points) - 1)].curvature_1pm
+                if target_points else point.curvature_1pm
+            ),
             "lane_transition_kind": "lateral_lane_change",
             "lane_id": int(target_lane_id if p >= 0.5 else reference_line.points[0].lane_id),
             "lane_width_m": point.lane_width_m,
@@ -322,6 +330,8 @@ def frenet_lane_change_path(
                 "lane_change_source_y_m": virtual_source_y,
                 "lane_change_target_x_m": target_point.x_m,
                 "lane_change_target_y_m": target_point.y_m,
+                "lane_change_target_heading_rad": target_point.heading_rad,
+                "lane_change_target_curvature_1pm": target_point.curvature_1pm,
                 "lane_transition_kind": "lateral_lane_change",
                 "lane_id": int(target_lane_id),
                 "lane_width_m": target_point.lane_width_m,

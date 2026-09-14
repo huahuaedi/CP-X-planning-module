@@ -37,8 +37,6 @@ class LaneChangeLifecycle:
     completion_debug: dict = field(default_factory=dict)
     completed_option: str = ""
     progress_pairs: list = field(default_factory=list)
-    envelope_blocks: object = None
-    envelope_epsilon0: float = 0.0
     commitment_invalid_frames: int = 0
     duration_comfort_reason: str = ""
     resolved_duration_s: float = 0.0
@@ -64,8 +62,8 @@ class LaneChangeLifecycle:
         self.geometry_completion_latched = False
         self.completion_reference, self.completion_debug = [], {}
         self.completed_option = completed
-        self.progress_pairs, self.envelope_blocks = [], None
-        self.envelope_epsilon0 = self.resolved_duration_s = 0.0
+        self.progress_pairs = []
+        self.resolved_duration_s = 0.0
         self.duration_comfort_reason = ""
         self.committed_at_s = -float("inf")
         self.transition_to_turn_arc_m = self.transition_to_turn_step_m = 0.0
