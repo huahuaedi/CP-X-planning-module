@@ -102,6 +102,7 @@ class ManeuverManager:
         self._route_lane_change_edge_id = ""
         self._completed_route_lane_change_edge_id = ""
         self._route_recovery_pending = False
+        self._route_recovery_target_lane_id = None
 
     def reset(self, reason="reset"):
         self.last_release = {"reason": str(reason), "outcome": "reset"}
@@ -110,6 +111,7 @@ class ManeuverManager:
         self._route_lane_change_edge_id = ""
         self._completed_route_lane_change_edge_id = ""
         self._route_recovery_pending = False
+        self._route_recovery_target_lane_id = None
 
     def observe_route_lane_change_edge(self, edge_id):
         """Track one immutable route edge and retire completion on advance."""
@@ -190,7 +192,11 @@ class ManeuverManager:
         if committed_at_s is not None:
             state.committed_at_s = float(committed_at_s)
         state.authorization_source = str(authorization_source or "")
-        state.returns_to_route = bool(self._route_recovery_pending)
+        state.returns_to_route = bool(
+            self._route_recovery_pending
+            and self._route_recovery_target_lane_id is not None
+            and int(target_lane_id) == int(self._route_recovery_target_lane_id)
+        )
         return state
 
     @property
@@ -198,6 +204,12 @@ class ManeuverManager:
         """Whether a completed opportunistic lane borrow must be undone."""
 
         return bool(self._route_recovery_pending)
+
+    @property
+    def route_recovery_target_lane_id(self):
+        """Physical lane that settles the outstanding lane-borrow debt."""
+
+        return self._route_recovery_target_lane_id
 
     def remember_required_lane_change(self, target_lane_id, target_ad_lane_id=None):
         self.lane_change.required_target_lane_id = int(target_lane_id)
@@ -540,6 +552,7 @@ class ManeuverManager:
             return False
         authorization_source = str(self.lane_change.authorization_source)
         returns_to_route = bool(self.lane_change.returns_to_route)
+        recovery_target_lane_id = int(self.lane_change.source_lane_id)
         self.last_release = {"reason": str(reason), "outcome": str(outcome),
                              "option": str(self.lane_change.option)}
         self.finish_lane_change_lifecycle(
@@ -547,6 +560,11 @@ class ManeuverManager:
         if str(outcome) == "complete":
             if returns_to_route:
                 self._route_recovery_pending = False
-            elif authorization_source == "opportunistic":
+                self._route_recovery_target_lane_id = None
+            elif (
+                authorization_source == "opportunistic"
+                and not self._route_recovery_pending
+            ):
                 self._route_recovery_pending = True
+                self._route_recovery_target_lane_id = recovery_target_lane_id
         return True

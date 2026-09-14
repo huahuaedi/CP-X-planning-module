@@ -68,6 +68,33 @@ class ManeuverManagerTests(unittest.TestCase):
         self.assertTrue(manager.complete_lane_change("return_complete"))
         self.assertFalse(manager.route_recovery_pending)
 
+    def test_unrelated_lane_change_does_not_settle_route_recovery_debt(self):
+        manager = ManeuverManager()
+        manager.begin_lane_change(
+            "lane_change_left", "executing", 1, 2, 7.0, [],
+            authorization_source="opportunistic",
+        )
+        self.assertTrue(manager.complete_lane_change("borrow_complete"))
+        self.assertEqual(manager.route_recovery_target_lane_id, 1)
+
+        unrelated = manager.begin_lane_change(
+            "lane_change_left", "executing", 2, 3, 7.0, [],
+            authorization_source="opportunistic",
+        )
+        self.assertFalse(unrelated.returns_to_route)
+        self.assertTrue(manager.complete_lane_change("avoidance_complete"))
+        self.assertTrue(manager.route_recovery_pending)
+        self.assertEqual(manager.route_recovery_target_lane_id, 1)
+
+        recovery = manager.begin_lane_change(
+            "lane_change_right", "executing", 3, 1, 7.0, [],
+            authorization_source="route",
+        )
+        self.assertTrue(recovery.returns_to_route)
+        self.assertTrue(manager.complete_lane_change("recovery_complete"))
+        self.assertFalse(manager.route_recovery_pending)
+        self.assertIsNone(manager.route_recovery_target_lane_id)
+
     def test_abandoned_opportunistic_change_does_not_request_route_recovery(self):
         manager = ManeuverManager()
         manager.begin_lane_change(
