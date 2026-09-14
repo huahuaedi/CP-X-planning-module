@@ -927,9 +927,21 @@ class MPC:
         return str(normalized_profile)
 
     def _minimum_progress_lower_bound_mps(
-        self, *, current_speed_mps: float, future_state_index: int
+        self,
+        *,
+        current_speed_mps: float,
+        future_state_index: int,
+        reachable_speed_ceiling_profile_mps: Sequence[float] | None = None,
     ) -> float:
-        """Return a dynamically reachable turn-progress speed floor."""
+        """Return a dynamically reachable turn-progress speed floor.
+
+        The nominal floor ramps toward the configured turn speed.  It must
+        also stay below the fastest speed reachable from the *current applied
+        acceleration* under the MPC jerk/acceleration bounds.  Without that
+        second projection, a braking vehicle can be required to accelerate
+        sooner than the jerk constraint permits, making an otherwise healthy
+        turn QP mathematically infeasible.
+        """
 
         if (
             not bool(getattr(self, "minimum_progress_enabled", False))
@@ -945,19 +957,40 @@ class MPC:
             ),
         )
         if float(current_speed_mps) >= float(target_mps):
-            return float(target_mps)
-        reachable_mps = (
-            max(float(self.constraints.min_velocity_mps), float(current_speed_mps))
-            + max(
-                0.0,
-                float(getattr(
-                    self, "turn_minimum_progress_ramp_accel_mps2", 0.0
-                )),
+            floor_mps = float(target_mps)
+        else:
+            reachable_mps = (
+                max(
+                    float(self.constraints.min_velocity_mps),
+                    float(current_speed_mps),
+                )
+                + max(
+                    0.0,
+                    float(
+                        getattr(
+                            self,
+                            "turn_minimum_progress_ramp_accel_mps2",
+                            0.0,
+                        )
+                    ),
+                )
+                * max(0, int(future_state_index))
+                * max(1.0e-6, float(self.dt_s))
             )
-            * max(0, int(future_state_index))
-            * max(1.0e-6, float(self.dt_s))
-        )
-        return float(min(float(target_mps), float(reachable_mps)))
+            floor_mps = min(float(target_mps), float(reachable_mps))
+        if (
+            reachable_speed_ceiling_profile_mps is not None
+            and len(reachable_speed_ceiling_profile_mps) > 0
+        ):
+            profile_idx = min(
+                max(0, int(future_state_index)),
+                len(reachable_speed_ceiling_profile_mps) - 1,
+            )
+            floor_mps = min(
+                float(floor_mps),
+                float(reachable_speed_ceiling_profile_mps[profile_idx]),
+            )
+        return float(max(float(self.constraints.min_velocity_mps), floor_mps))
 
     def blend_toward_horizon_s(
         self, target_horizon_s: float, *, blend_alpha: float | None = None
@@ -2353,6 +2386,49 @@ class MPC:
             a_prev_mps2 = float(a_k_mps2)
         return profile
 
+    def _maximum_reachable_speed_profile_mps(
+        self,
+        current_speed_mps: float,
+        current_acceleration_mps2: float,
+    ) -> List[float]:
+        """Fastest jerk-feasible speed at every future state.
+
+        This is the upper reachability envelope paired with
+        :meth:`_minimum_reachable_speed_profile_mps`.  It is used to keep
+        lower speed requirements, such as turn minimum progress, feasible
+        while an already-applied brake command is still unwinding.
+        """
+
+        min_velocity_mps = float(self.constraints.min_velocity_mps)
+        max_velocity_mps = float(self.constraints.max_velocity_mps)
+        profile = [
+            self._clamp(
+                float(current_speed_mps), min_velocity_mps, max_velocity_mps
+            )
+        ]
+        acceleration_mps2 = self._clamp(
+            float(current_acceleration_mps2),
+            float(self.constraints.min_acceleration_mps2),
+            float(self.constraints.max_acceleration_mps2),
+        )
+        jerk_delta_limit = (
+            float(self.constraints.max_jerk_mps3) * float(self.dt_s)
+        )
+        for _ in range(self.horizon_steps):
+            acceleration_mps2 = min(
+                float(self.constraints.max_acceleration_mps2),
+                float(acceleration_mps2) + float(jerk_delta_limit),
+            )
+            profile.append(
+                self._clamp(
+                    float(profile[-1])
+                    + float(self.dt_s) * float(acceleration_mps2),
+                    min_velocity_mps,
+                    max_velocity_mps,
+                )
+            )
+        return profile
+
     def _project_acceleration_seed_to_velocity_bounds(
         self,
         *,
@@ -2882,6 +2958,7 @@ class MPC:
         lane_center_reference: Sequence[Mapping[str, object]] | None,
         speed_upper_bound_mps: float | None,
         reachable_speed_floor_profile_mps: Sequence[float] | None,
+        reachable_speed_ceiling_profile_mps: Sequence[float] | None = None,
         road_envelope_blocks: Mapping[str, object] | None = None,
         speed_tracking_reference_mps: Sequence[float] | None = None,
         temporal_consistency_reference_u: np.ndarray | None = None,
@@ -3505,6 +3582,9 @@ class MPC:
             stage_speed_lower_bound_mps = self._minimum_progress_lower_bound_mps(
                 current_speed_mps=float(x0[2]),
                 future_state_index=int(k),
+                reachable_speed_ceiling_profile_mps=(
+                    reachable_speed_ceiling_profile_mps
+                ),
             )
             stage_speed_lower_bound_mps = min(
                 float(stage_speed_upper_bound_mps),
@@ -3997,6 +4077,10 @@ class MPC:
             current_speed_mps=float(x0[2]),
             current_acceleration_mps2=float(planning_current_acceleration_mps2),
         )
+        reachable_speed_ceiling_profile_mps = self._maximum_reachable_speed_profile_mps(
+            current_speed_mps=float(x0[2]),
+            current_acceleration_mps2=float(planning_current_acceleration_mps2),
+        )
 
         destination[3] = self._wrap_angle(float(destination[3]))
 
@@ -4132,6 +4216,9 @@ class MPC:
                     lane_center_reference=lane_center_reference,
                     speed_upper_bound_mps=float(active_speed_upper_bound_mps),
                     reachable_speed_floor_profile_mps=reachable_speed_floor_profile_mps,
+                    reachable_speed_ceiling_profile_mps=(
+                        reachable_speed_ceiling_profile_mps
+                    ),
                     road_envelope_blocks=road_envelope_blocks,
                     speed_tracking_reference_mps=(
                         fixed_speed_tracking_reference_mps

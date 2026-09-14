@@ -1498,12 +1498,16 @@ class MinimumProgressContractTests(unittest.TestCase):
         mpc.constraints = types.SimpleNamespace(
             min_velocity_mps=0.0,
             max_velocity_mps=15.0,
+            min_acceleration_mps2=-3.0,
+            max_acceleration_mps2=3.0,
+            max_jerk_mps3=10.0,
         )
         mpc.minimum_progress_enabled = True
         mpc.active_cost_profile_name = str(profile)
         mpc.turn_minimum_progress_speed_mps = 1.5
         mpc.turn_minimum_progress_ramp_accel_mps2 = 0.6
         mpc.dt_s = 0.1
+        mpc.horizon_steps = 24
         return mpc
 
     def test_turn_floor_holds_progress_when_already_moving(self):
@@ -1532,6 +1536,24 @@ class MinimumProgressContractTests(unittest.TestCase):
             future_state_index=4,
         )
         self.assertAlmostEqual(floor, 0.0)
+
+    def test_turn_floor_respects_braking_jerk_reachability(self):
+        mpc = self._mpc()
+        ceiling = mpc._maximum_reachable_speed_profile_mps(
+            current_speed_mps=1.546,
+            current_acceleration_mps2=-3.0,
+        )
+
+        floor = mpc._minimum_progress_lower_bound_mps(
+            current_speed_mps=1.546,
+            future_state_index=1,
+            reachable_speed_ceiling_profile_mps=ceiling,
+        )
+
+        # With dt=0.1 and a 10 m/s^3 jerk limit, the strongest acceleration
+        # recovery is -3 -> -2 m/s^2, so v1 cannot exceed 1.346 m/s.
+        self.assertAlmostEqual(ceiling[1], 1.346)
+        self.assertAlmostEqual(floor, ceiling[1])
 
 
 if __name__ == "__main__":
