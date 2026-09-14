@@ -1,0 +1,91 @@
+base_config: cpx_profile_full_default.yaml
+
+description: |-
+  Use case A: cooperative-perception warning for a potential red-light
+  violator at the verified Town05 crossing. The scripted cross-traffic car
+  ignores signal control and enters after an ego-position trigger. Ego's
+  local ground-truth sensing is range-limited to 20 m; a stationary CAV on
+  the far side sees the violator sooner and relays its state and trajectory.
+
+cpx_mature:
+  town: Town05
+  require_isolated_world: true
+  max_ticks: 900
+  destination_tolerance_m: 5.0
+  completion_mode: first_cav
+  run_opencda_evaluation: false
+
+carla_traffic_manager:
+  vehicle_list: []
+  range: ~
+
+vehicle_base:
+  sensing:
+    perception:
+      activate: false
+      deactivated_detection_range_m: 20.0
+    localization:
+      activate: false
+      debug_helper:
+        show_animation: false
+  behavior:
+    ignore_traffic_light: true
+    overtake_allowed: false
+  planner:
+    global_planner_xodr_path: Global_Planner/maps/Town05.xodr
+    target_speed_mps: 8.0
+    communication_range_m: 20.0
+    cav_conflict_enabled: true
+    publish_cp_message: true
+    require_native_opencda_cp: true
+    following_idm_enabled: false
+    prediction_lane_following_enabled: false
+    ignore_traffic_control: true
+    record_evaluation_metrics: true
+    debug_log_formats: [jsonl]
+    debug_output_dir: opencda/planning_module/opencda_bridge/debug_cp_red_light_on
+
+scenario:
+  single_cav_list:
+    - name: ego
+      spawn_position: [-173.802, 91.368, 0.6, 0, 0.057, 0]
+      destination: [-72.0, 91.368, 0.6]
+      v2x:
+        enabled: true
+        communication_range: 100
+      planner:
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_cp_red_light_on
+
+    - name: observer
+      # Opposite carriageway beyond the junction. It remains outside ego's
+      # path but starts within 20 m of the cross-traffic vehicle.
+      spawn_position: [-115.0, 94.868, 0.6, 0, 0, 0]
+      # CARLA lane 1863/2 travels east here; the destination must follow that
+      # topology even though max_speed=0 keeps this observer stationary.
+      destination: [-90.767, 94.963, 0.6]
+      v2x:
+        enabled: true
+        communication_range: 100
+      behavior:
+        max_speed: 0
+        overtake_allowed: false
+        local_planner:
+          debug_trajectory: false
+          debug: false
+      safety_manager:
+        print_message: false
+      planner:
+        enabled: false
+
+  scripted_actors:
+    - blueprint: vehicle.tesla.model3
+      path:
+        - [-124.475, 108.0]
+        - [-124.475, 91.368]
+        - [-124.475, 20.0]
+      speed_mps: 6.0
+      z: 0.6
+      trigger:
+        axis: x
+        cross: -150.0
+        from: below

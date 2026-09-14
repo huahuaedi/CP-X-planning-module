@@ -1,0 +1,41 @@
+base_config: cpx_cp_red_light_violator.yaml
+
+description: |-
+  CP-off control arm for use case A. Routes, actors, local sensing range and
+  trigger are identical to the ON arm; only ego CP publication/consumption is
+  disabled.
+
+vehicle_base:
+  planner:
+    publish_cp_message: false
+    require_native_opencda_cp: false
+
+scenario:
+  single_cav_list:
+    - name: ego
+      spawn_position: [-173.802, 91.368, 0.6, 0, 0.057, 0]
+      destination: [-72.0, 91.368, 0.6]
+      v2x:
+        enabled: true
+        communication_range: 100
+      planner:
+        publish_cp_message: false
+        require_native_opencda_cp: false
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_cp_red_light_off
+
+    - name: observer
+      spawn_position: [-115.0, 94.868, 0.6, 0, 0, 0]
+      destination: [-90.767, 94.963, 0.6]
+      v2x:
+        enabled: true
+        communication_range: 100
+      behavior:
+        max_speed: 0
+        overtake_allowed: false
+        local_planner:
+          debug_trajectory: false
+          debug: false
+      safety_manager:
+        print_message: false
+      planner:
+        enabled: false
