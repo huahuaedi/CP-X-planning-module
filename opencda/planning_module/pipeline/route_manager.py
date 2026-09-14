@@ -1297,9 +1297,17 @@ class CPXRouteManager:
             len(self._fallback_route_points),
             len(self._route_nodes()),
         )
-        # Mission completion is a localization/goal fact.  It must not become
-        # impossible merely because topology construction failed upstream.
-        reached = bool(remaining_known and remaining <= self.reached_distance_m)
+        # This entry point consumes a backend-owned route summary, so its
+        # remaining distance is meaningful only when that backend actually
+        # found a route. Some AD-map failure summaries carry the dataclass
+        # default 0.0; treating it as goal distance terminates the mission
+        # immediately after a failed build/reset. The localization-based
+        # no-topology completion path remains in get_route_info().
+        reached = bool(
+            route_found
+            and remaining_known
+            and remaining <= self.reached_distance_m
+        )
         self._last_status = RouteManagerStatus(
             route_found=route_found,
             route_point_count=int(route_point_count),

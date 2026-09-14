@@ -119,6 +119,18 @@ class RouteManagerADMapReferenceTest(unittest.TestCase):
 
         self.assertEqual(status.route_point_count, 3)
 
+    def test_failed_authoritative_route_cannot_complete_from_zero_default(self):
+        manager = CPXRouteManager(
+            global_planner=_planner([]), reached_distance_m=3.0
+        )
+
+        status = manager.accept_authoritative_route_summary(
+            {"route_found": False, "remaining_distance_m": 0.0}
+        )
+
+        self.assertFalse(status.route_found)
+        self.assertFalse(status.reached_destination)
+
     def test_destination_installs_only_admap_dense_route(self):
         planner = _planner([
             (0.0, 0.0, 1, "LANEFOLLOW"),
