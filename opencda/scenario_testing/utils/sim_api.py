@@ -366,6 +366,11 @@ class ScenarioManager:
                                              *cav_config['spawn_special'])
 
             cav_vehicle_bp.set_attribute('color', '0, 0, 255')
+            if cav_vehicle_bp.has_attribute('role_name'):
+                cav_vehicle_bp.set_attribute(
+                    'role_name',
+                    str(cav_config.get('role_name',
+                                       cav_config.get('name', 'cav_%d' % i))))
             try:
                 vehicle = self.world.spawn_actor(cav_vehicle_bp, spawn_transform)
             except RuntimeError:

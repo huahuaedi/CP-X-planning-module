@@ -232,7 +232,10 @@ def spawn_scripted_actors(world: Any, actor_cfgs: Sequence[dict]) -> List[Script
             )
             bp = blueprint_library.filter(pattern)[0]
         if bp.has_attribute("role_name"):
-            bp.set_attribute("role_name", "scripted_%d" % i)
+            bp.set_attribute(
+                "role_name",
+                str(cfg.get("role_name", "scripted_%d" % i)),
+            )
         if bp_name.startswith("walker.") and bp.has_attribute("is_invincible"):
             bp.set_attribute("is_invincible", "false")
         z = float(cfg.get("z", 0.3))

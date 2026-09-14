@@ -3,6 +3,7 @@
 
 import math
 import os
+import re
 from collections.abc import Mapping
 
 import carla
@@ -18,6 +19,77 @@ from opencda.planning_module.utility.cp_messages import (
 from opencda.scenario_testing.evaluations.evaluate_manager import EvaluationManager
 from opencda.scenario_testing.scripted_actor import spawn_scripted_actors
 from opencda.scenario_testing.utils.yaml_utils import add_current_time
+
+
+def _assign_scenario_actor_roles(scenario_params, script_name):
+    """Give every scenario-owned actor a stable, run-independent identity."""
+
+    scope = re.sub(r"[^a-zA-Z0-9_]+", "_", str(script_name)).strip("_").lower()
+    prefix = "opencda_cpx_%s" % (scope or "scenario")
+    scenario = scenario_params.get("scenario", {})
+    roles = []
+    for index, config in enumerate(scenario.get("single_cav_list", []) or []):
+        name = re.sub(
+            r"[^a-zA-Z0-9_]+",
+            "_",
+            str(config.get("name", "cav_%d" % index)),
+        ).strip("_").lower()
+        role = "%s_cav_%s" % (prefix, name or index)
+        config["role_name"] = role
+        roles.append(role)
+    for index, config in enumerate(scenario.get("scripted_actors", []) or []):
+        role = "%s_scripted_%d" % (prefix, index)
+        config["role_name"] = role
+        roles.append(role)
+    return tuple(roles)
+
+
+def _destroy_stale_scenario_actors(world, owned_roles):
+    """Remove only actors owned by an earlier run of this exact scenario."""
+
+    owned = {str(role).strip().lower() for role in owned_roles if str(role).strip()}
+    destroyed = []
+    if not owned:
+        return destroyed
+    for actor in world.get_actors():
+        role = str(getattr(actor, "attributes", {}).get("role_name", "")).strip().lower()
+        if role not in owned:
+            continue
+        actor_id = int(getattr(actor, "id", -1))
+        try:
+            actor.destroy()
+        except (RuntimeError, AttributeError):
+            continue
+        destroyed.append(actor_id)
+    if destroyed:
+        print(
+            "[CP-X scenario] removed %d stale owned actor(s): %s"
+            % (len(destroyed), destroyed)
+        )
+    return destroyed
+
+
+def _foreign_dynamic_actors(world, owned_roles):
+    """Describe vehicles/walkers not owned by the active isolated fixture."""
+
+    owned = {str(role).strip().lower() for role in owned_roles if str(role).strip()}
+    foreign = []
+    for actor in world.get_actors():
+        type_id = str(getattr(actor, "type_id", "")).strip().lower()
+        if not type_id.startswith(("vehicle.", "walker.")):
+            continue
+        role = str(getattr(actor, "attributes", {}).get("role_name", "")).strip()
+        if role.lower() in owned:
+            continue
+        location = actor.get_location()
+        foreign.append({
+            "id": int(getattr(actor, "id", -1)),
+            "type_id": type_id,
+            "role_name": role,
+            "x": round(float(location.x), 2),
+            "y": round(float(location.y), 2),
+        })
+    return foreign
 
 
 def _set_spectator_transform(spectator, ego_vehicle):
@@ -310,6 +382,9 @@ def run_mature_scenario(opt, scenario_params, *, script_name):
     try:
         scenario_params = add_current_time(scenario_params)
         _reset_cooperative_payloads(scenario_params)
+        owned_actor_roles = _assign_scenario_actor_roles(
+            scenario_params, script_name
+        )
         cav_world = CavWorld(opt.apply_ml)
         manager_kwargs, map_helper = _scenario_manager_kwargs(scenario_params)
         scenario_manager = sim_api.ScenarioManager(
@@ -319,6 +394,9 @@ def run_mature_scenario(opt, scenario_params, *, script_name):
             cav_world=cav_world,
             **manager_kwargs,
         )
+        _destroy_stale_scenario_actors(
+            scenario_manager.world, owned_actor_roles
+        )
         if opt.record:
             scenario_manager.client.start_recorder("%s.log" % script_name, True)
 
@@ -326,6 +404,20 @@ def run_mature_scenario(opt, scenario_params, *, script_name):
             application=["single"],
             map_helper=map_helper,
         )
+        if bool(
+            scenario_params.get("cpx_mature", {}).get(
+                "require_isolated_world", False
+            )
+        ):
+            foreign_actors = _foreign_dynamic_actors(
+                scenario_manager.world, owned_actor_roles
+            )
+            if foreign_actors:
+                raise RuntimeError(
+                    "isolated CP-X scenario found pre-existing dynamic "
+                    "actors; restart CARLA once to clear legacy untagged "
+                    "actors: %s" % foreign_actors
+                )
         _, bg_veh_list = scenario_manager.create_traffic_carla()
         scripted_actor_list = spawn_scripted_actors(
             scenario_manager.world,
