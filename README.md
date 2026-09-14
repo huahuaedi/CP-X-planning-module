@@ -10,8 +10,6 @@ The module has been tested locally with:
 
 - CARLA 0.9.12
 - Python 3.7
-- `town10` CARLA scenario (standalone `main.py` entry point)
-- MPC runtime loop generating `mpc_cost_history.csv` and `mpc_cost_plot.png`
 - behavior-planner tests for future trajectory risk and finite-state lane-change behavior
 - evaluation-metrics tests
 - the CP-X MPC planner integrated as an OpenCDA vehicle-manager planner
@@ -23,13 +21,14 @@ The module has been tested locally with:
 
 ## What This Repo Contains
 
-- `opencda/planning_module/main.py`: scenario entry point.
-- `opencda/planning_module/planning_runner.py`: shared CARLA runtime loop.
+- `opencda.py`: the only supported scenario entry point.
+- `opencda/scenario_testing/`: native OpenCDA scenario runners and YAML configurations.
 - `opencda/planning_module/MPC/`: MPC trajectory planner and local-goal logic.
 - `opencda/planning_module/behavior_planner/`: rule-based behavior planner.
 - `opencda/planning_module/utility/`: global planner, lane graph, tracker, metrics, and config helpers.
-- `opencda/planning_module/carla_scenario/`: CARLA-only scenarios.
-- `opencda/planning_module/opencda_scenario/`: OpenCDA/SUMO-style scenarios.
+- `opencda/planning_module/carla_scenario/` and `opencda_scenario/`: legacy
+  scenario definitions retained only while useful cases are migrated; they
+  are not executable entry points.
 - `opencda/planning_module/tests/`: unit tests for planner logic and scenario configuration.
 - `opencda/co_simulation/`: minimal SUMO bridge dependency used by `opencda_scenario`.
 
@@ -155,36 +154,13 @@ export CARLA_ROOT="$HOME/Downloads/MDrive/carla912"
 export PYTHONPATH="$CARLA_ROOT/PythonAPI:$CARLA_ROOT/PythonAPI/carla:$CARLA_ROOT/PythonAPI/carla/dist/carla-0.9.12-py3.7-linux-x86_64.egg:$PYTHONPATH"
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 
-cd opencda/planning_module
-python main.py town10
+python opencda.py -t cpx_cp_roadway_object -v 0.9.12
 ```
-
-List available scenarios:
-
-```bash
-python main.py
-```
-
-Useful scenarios:
-
-```bash
-python main.py town10
-python main.py roadway_hazard
-python main.py traffic_light_stop
-python main.py high_level_route_planning
-python main.py town10_scenario_1
-python main.py town10_scenario_5
-python main.py town10_scenario_6
-```
-
-The plain `town10` scenario can fall back to CARLA map spawn points if custom route anchors are missing from the loaded map.
 
 ## OpenCDA CP-X Entry Point
 
-`main.py` (above) runs standalone planner-development scenarios directly.
-Separately, the CP-X MPC planner also integrates as an OpenCDA vehicle
-manager planner, launched from the repository root with `opencda.py`
-instead:
+The CP-X MPC planner integrates as an OpenCDA vehicle-manager planner and is
+always launched from the repository root with `opencda.py`:
 
 ```bash
 conda activate opencda_planning
@@ -250,38 +226,6 @@ python -m opencda.planning_module.tools.export_full_run_plots <debug_csv> <outpu
 See [`opencda/planning_module/README.md`](opencda/planning_module/README.md)
 for the CP-X planning stack's architecture, directory layout, and behavior
 planner/MPC internals.
-
-## Scenarios
-
-There are two families of scenarios. Both are launched with `python main.py <name>` from `opencda/planning_module/`.
-
-### `carla_scenario/` — Pure CARLA (no SUMO, no dynamic traffic)
-
-These scenarios use only CARLA actors. Traffic is either static or scripted. They are good for validating a single planning feature in isolation.
-
-| Scenario | Difficulty | What it tests | Map |
-|----------|-----------|---------------|-----|
-| `town10` | ⭐ Easy | Baseline lane-keeping and MPC trajectory tracking with static obstacle cubes on Town10. Start here. | Town10HD_Opt |
-| `traffic_light_stop` | ⭐⭐ Medium | Stop-line detection, red-light compliance, and smooth deceleration profile at a signalised intersection. | Town10HD_Opt |
-| `roadway_hazard` | ⭐⭐ Medium | Obstacle avoidance when a parked vehicle partially blocks the lane. Tests lane-change trigger and re-merge. | Town10HD_Opt |
-| `high_level_route_planning` | ⭐⭐⭐ Hard | Multi-waypoint route with a scripted workzone marker. Validates global re-routing and CP-message handoff. | Town10HD_Opt |
-| `workzone` | ⭐⭐⭐ Hard | Narrow construction-zone passage on a custom map. Tests tight boundary constraints in the MPC. | Custom (workzone) |
-| `custom_map2` | ⭐⭐⭐ Hard | Free-drive on a custom map with no pre-configured route anchors. Requires the custom map to be loaded in CARLA. | Custom (custom_map2) |
-
-> `workzone` and `custom_map2` require their custom `.umap` files to be imported into the CARLA UE4 content folder. They will fail to launch if the map asset is missing.
-
-### `opencda_scenario/` — CARLA + SUMO (dynamic NPC traffic and pedestrians)
-
-These scenarios use the SUMO co-simulation bridge to spawn realistic background traffic. SUMO must be running (the runner starts it automatically if `sumo.enabled: true`).
-
-| Scenario | Difficulty | What it tests |
-|----------|-----------|---------------|
-| `town10_scenario_1` | ⭐⭐ Medium | Town10 with NPC vehicles and pedestrians. NPCs activate immediately at scenario start. |
-| `town10_scenario_2` | ⭐⭐ Medium | Same as scenario_1 but NPCs activate only when ego is within 20 m — tests late-appearing actors. |
-| `town10_scenario_3` | ⭐⭐⭐ Hard | NPCs activate at 50 m range. Tests longer-horizon prediction and earlier lane-change decisions. |
-| `town10_scenario_4` | ⭐⭐⭐ Hard | Intersection-focused route with triggered NPC vehicles. Tests gap-acceptance and yield behaviour. |
-| `town10_scenario_5` | ⭐⭐⭐⭐ Very Hard | Adds scripted hazard vehicles (dark Tesla Model 3) that cut into the ego lane at 60 m trigger range, on top of SUMO traffic and pedestrians. |
-| `town10_scenario_6` | ⭐⭐⭐⭐ Very Hard | Same hazard-vehicle setup as scenario_5 on a different Town10 route with more turns. |
 
 **Recommended test order:**
 1. `town10` — confirm the MPC loop works

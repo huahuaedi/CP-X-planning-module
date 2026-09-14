@@ -5,7 +5,10 @@ import types
 import unittest
 from unittest import mock
 
-from main import list_available_scenarios, load_any_scenario
+from opencda_scenario import (
+    list_available_scenarios,
+    load_carla_scenario as load_any_scenario,
+)
 from planning_runner import _resolve_route_anchor_transforms
 from opencda_scenario.town10_scenario_5 import scenario as town10_scenario_5
 

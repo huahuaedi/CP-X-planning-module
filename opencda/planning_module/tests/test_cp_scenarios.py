@@ -1,6 +1,9 @@
 import unittest
 
-from main import list_available_scenarios, load_any_scenario
+from opencda_scenario import (
+    list_available_scenarios,
+    load_carla_scenario as load_any_scenario,
+)
 
 
 class CpScenarioConfigTests(unittest.TestCase):

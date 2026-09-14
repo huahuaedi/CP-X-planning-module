@@ -3,7 +3,10 @@ import tempfile
 import unittest
 from unittest import mock
 
-from main import list_available_scenarios, load_any_scenario
+from opencda_scenario import (
+    list_available_scenarios,
+    load_carla_scenario as load_any_scenario,
+)
 from opencda_scenario.runner import _strip_static_obstacle_spawner, run_loaded_world
 from opencda_scenario.sumo_assets import ensure_sumo_assets, resolve_xodr_path
 

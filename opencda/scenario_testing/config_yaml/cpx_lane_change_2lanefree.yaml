@@ -32,8 +32,8 @@ cpx_mature:
   run_opencda_evaluation: false
 
 # Only override what genuinely differs from cpx_profile_full_default.yaml:
-# this scenario runs through cpx_mature_runner.py (not cpx_scenario_bridge.py
-# like the other cpx_* scenarios), on a custom xodr map with ground-truth
+# this scenario runs through the single native cpx_mature_runner.py path,
+# on a custom xodr map with ground-truth
 # perception and no localization noise model, and exercises the lane-change
 # candidate pipeline specifically.
 vehicle_base:

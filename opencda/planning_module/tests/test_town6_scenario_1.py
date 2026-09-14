@@ -5,7 +5,10 @@ import types
 import unittest
 from unittest import mock
 
-from main import list_available_scenarios, load_any_scenario
+from opencda_scenario import (
+    list_available_scenarios,
+    load_carla_scenario as load_any_scenario,
+)
 from opencda_scenario.sumo_assets import resolve_xodr_path
 from opencda_scenario.town6_scenario_1 import scenario as town6_scenario_1
 
