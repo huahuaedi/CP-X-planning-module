@@ -8,7 +8,10 @@ from typing import Any, Callable, Mapping, Optional
 
 from .perception_stage import PerceptionStage, PerceptionStageResult
 from .runtime_input_stage import RuntimeInputStage, RuntimeTickSnapshot
-from .speed_planner import effective_emergency_gap_m
+from .speed_planner import (
+    conflict_corridor_speed_constraint,
+    effective_emergency_gap_m,
+)
 from .cav_conflict_pipeline import resolve_conflicts as resolve_cav_conflicts
 from .conflict_classifier import ClassifierParams
 from .spatiotemporal_corridor import CorridorParams
@@ -223,6 +226,7 @@ class PlanningPipeline:
         rebuild_corridor=True, cached_corridor=None,
         max_braking_mps2=3.0,
         current_acceleration_mps2=0.0, max_jerk_mps3=10.0,
+        comfortable_deceleration_mps2=1.5,
     ):
         """Classify on proposal geometry and constrain the executable geometry.
 
@@ -309,10 +313,29 @@ class PlanningPipeline:
             ),
         )
         result.mpc_rows = list(longitudinal_rows) + list(lateral_rows)
+        result.speed_constraint = conflict_corridor_speed_constraint(
+            corridor=result.corridor,
+            reference_samples=reference_samples,
+            ego_x_m=float(ego_location.x),
+            ego_y_m=float(ego_location.y),
+            comfortable_deceleration_mps2=float(
+                comfortable_deceleration_mps2
+            ),
+        )
         result.diagnostics.update({
             "longitudinal_qp_row_count": len(longitudinal_rows),
             "homotopy_qp_row_count": len(lateral_rows),
             "total_qp_row_count": len(result.mpc_rows),
+            "anticipatory_speed_cap_mps": (
+                ""
+                if result.speed_constraint is None
+                else float(result.speed_constraint.maximum_mps)
+            ),
+            "anticipatory_speed_constraint_owner": (
+                ""
+                if result.speed_constraint is None
+                else str(result.speed_constraint.owner)
+            ),
             "shared_planned_paths": {
                 str(intent.actor_id): [
                     (float(sample[1]), float(sample[2]))
@@ -411,6 +434,9 @@ class PlanningPipeline:
             destination_state=destination_state,
             reference_samples=reference_samples,
         )
+
+    def constrain_speed_plan(self, speed_plan, constraint, **kwargs):
+        return self.speed.constrain_plan(speed_plan, constraint, **kwargs)
 
     def propose_speed(self, **kwargs):
         return self.speed.propose(**kwargs)

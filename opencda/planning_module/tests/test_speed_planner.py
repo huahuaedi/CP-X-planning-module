@@ -20,9 +20,77 @@ turn_approach_lookahead_m = speed_planner.turn_approach_lookahead_m
 SpeedTargetPlanner = speed_planner.SpeedTargetPlanner
 SpeedConstraint = speed_planner.SpeedConstraint
 SpeedPlan = speed_planner.SpeedPlan
+conflict_corridor_speed_constraint = (
+    speed_planner.conflict_corridor_speed_constraint
+)
 
 
 class SpeedPlannerTest(unittest.TestCase):
+    def test_open_conflict_corridor_does_not_change_speed_path(self):
+        constraint = conflict_corridor_speed_constraint(
+            corridor=SimpleNamespace(
+                s_hi=[1.0e9] * 4,
+                binding=[""] * 4,
+            ),
+            reference_samples=[
+                {"x_ref_m": 0.0, "y_ref_m": 0.0},
+                {"x_ref_m": 30.0, "y_ref_m": 0.0},
+            ],
+            ego_x_m=5.0,
+            ego_y_m=0.0,
+            comfortable_deceleration_mps2=1.5,
+        )
+
+        self.assertIsNone(constraint)
+
+    def test_conflict_corridor_creates_comfortable_approach_constraint(self):
+        constraint = conflict_corridor_speed_constraint(
+            corridor=SimpleNamespace(
+                s_hi=[1.0e9, 20.0, 20.0, 1.0e9],
+                binding=["", "peer-7", "peer-7", ""],
+            ),
+            reference_samples=[
+                {"x_ref_m": 0.0, "y_ref_m": 0.0},
+                {"x_ref_m": 30.0, "y_ref_m": 0.0},
+            ],
+            ego_x_m=5.0,
+            ego_y_m=0.0,
+            comfortable_deceleration_mps2=2.0,
+        )
+
+        self.assertIsNotNone(constraint)
+        self.assertEqual(constraint.owner, "cav_conflict")
+        self.assertAlmostEqual(constraint.maximum_mps, math.sqrt(60.0))
+        self.assertIn("binding=peer-7", constraint.reason)
+
+    def test_late_conflict_constraint_flows_through_single_speed_owner(self):
+        planner = SpeedTargetPlanner()
+        original = SpeedPlan(
+            target_speed_mps=12.0,
+            speed_cap_mps=12.0,
+            stop_goal_active=False,
+            requested_speed_mps=12.0,
+        )
+        constraint = SpeedConstraint(
+            owner="cav_conflict",
+            maximum_mps=6.0,
+            reason="cooperative_corridor_approach",
+        )
+
+        constrained = planner.constrain_plan(original, constraint)
+        target = planner.resolve(
+            behavior=SimpleNamespace(
+                requested_speed_mps=12.0, stop_required=False
+            ),
+            speed_plan=constrained,
+        )
+
+        self.assertEqual(original.target_speed_mps, 12.0)
+        self.assertEqual(constrained.target_speed_mps, 6.0)
+        self.assertEqual(constrained.external_constraints, (constraint,))
+        self.assertEqual(target.target_mps, 6.0)
+        self.assertEqual(target.limiting_owner, "cav_conflict")
+
     def test_speed_target_planner_is_single_final_ceiling_owner(self):
         behavior = SimpleNamespace(requested_speed_mps=12.0, stop_required=False)
         target = SpeedTargetPlanner().resolve(

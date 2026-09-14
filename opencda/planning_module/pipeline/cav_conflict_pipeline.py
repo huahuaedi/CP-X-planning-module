@@ -46,6 +46,7 @@ from opencda.planning_module.pipeline.spatiotemporal_corridor import (
     build_longitudinal_corridor,
     retain_pending_corridor,
 )
+from opencda.planning_module.pipeline.speed_planner import SpeedConstraint
 from opencda.planning_module.pipeline.prediction_modes import as_modes, single_mode
 from opencda.planning_module.pipeline.mpc_obstacle_relevance import (
     _polyline_xy,
@@ -62,6 +63,7 @@ class ConflictResolution:
     latch_state: Dict[str, ArbitrationLatchEntry]
     tag_state: Dict[str, str] = field(default_factory=dict)
     veto_state: Dict[str, Any] = field(default_factory=dict)
+    speed_constraint: Optional[SpeedConstraint] = None
     mpc_rows: List[Any] = field(default_factory=list)
     diagnostics: Dict[str, Any] = field(default_factory=dict)
 

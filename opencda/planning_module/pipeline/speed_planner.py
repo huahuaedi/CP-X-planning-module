@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from typing import TYPE_CHECKING, Mapping, Optional, Sequence
 
@@ -104,6 +104,61 @@ class SpeedConstraint:
     reason: str = ""
 
 
+def conflict_corridor_speed_constraint(
+    *,
+    corridor: object,
+    reference_samples: Sequence[Mapping[str, object]],
+    ego_x_m: float,
+    ego_y_m: float,
+    comfortable_deceleration_mps2: float,
+) -> Optional[SpeedConstraint]:
+    """Convert an active Stage-C progress bound into a nominal speed limit.
+
+    Stage D keeps the original per-stage half spaces as the final safety
+    constraint.  This envelope gives the longitudinal planner the same
+    information early enough to approach the bound with comfortable braking,
+    instead of asking the QP to wait and then use its hard deceleration limit.
+    An open corridor produces no constraint and therefore leaves the normal
+    single-vehicle speed path unchanged.
+    """
+
+    from opencda.planning_module.pipeline.mpc_obstacle_relevance import (
+        _polyline_xy,
+        project_to_extended_polyline,
+    )
+
+    polyline = _polyline_xy(reference_samples)
+    if len(polyline) < 2:
+        return None
+    upper_bounds = list(getattr(corridor, "s_hi", ()) or ())
+    bindings = list(getattr(corridor, "binding", ()) or ())
+    active = [
+        (float(upper), str(bindings[index]))
+        for index, upper in enumerate(upper_bounds)
+        if index < len(bindings)
+        and str(bindings[index])
+        and math.isfinite(float(upper))
+        and abs(float(upper)) < 1.0e8
+    ]
+    if not active:
+        return None
+    ego_station_m = project_to_extended_polyline(
+        float(ego_x_m), float(ego_y_m), polyline
+    )[1]
+    stop_station_m, binding = min(active, key=lambda item: item[0])
+    remaining_m = max(0.0, float(stop_station_m) - float(ego_station_m))
+    deceleration_mps2 = max(0.1, float(comfortable_deceleration_mps2))
+    maximum_mps = math.sqrt(2.0 * deceleration_mps2 * remaining_m)
+    return SpeedConstraint(
+        owner="cav_conflict",
+        maximum_mps=float(maximum_mps),
+        reason=(
+            "cooperative_corridor_approach:"
+            f"binding={binding},remaining_m={remaining_m:.3f}"
+        ),
+    )
+
+
 @dataclass(frozen=True)
 class SpeedTarget:
     """Final immutable longitudinal intent for one planning frame."""
@@ -167,6 +222,50 @@ class SpeedTargetPlanner:
         self._destination_route_revision = ""
         self._destination_approach_active = False
         self._destination_approach_cap_mps = float("inf")
+
+    @staticmethod
+    def constrain_plan(
+        speed_plan: SpeedPlan,
+        constraint: Optional[SpeedConstraint],
+    ) -> SpeedPlan:
+        """Return ``speed_plan`` with one named external ceiling applied.
+
+        Late planning stages, such as cooperative conflict resolution, may
+        discover a longitudinal limit only after the ordinary behavior speed
+        proposal has been built.  They submit that limit here instead of
+        editing ``speed_ref_mps`` or trajectory samples.  The final
+        :meth:`resolve` call remains the sole owner of the executable target.
+        """
+
+        if constraint is None:
+            return speed_plan
+        constraint_owner = str(constraint.owner)
+        maximum_mps = max(0.0, float(constraint.maximum_mps))
+        retained = tuple(
+            item
+            for item in speed_plan.external_constraints
+            if str(getattr(item, "owner", "")) != constraint_owner
+        )
+        constrained_target = min(
+            max(0.0, float(speed_plan.target_speed_mps)),
+            maximum_mps,
+        )
+        limiting_owner = str(speed_plan.limiting_owner)
+        if constrained_target < float(speed_plan.target_speed_mps) - 1.0e-9:
+            limiting_owner = constraint_owner
+        active_constraints = tuple(speed_plan.active_constraints)
+        if constraint_owner not in active_constraints:
+            active_constraints += (constraint_owner,)
+        return replace(
+            speed_plan,
+            target_speed_mps=float(constrained_target),
+            speed_cap_mps=min(
+                max(0.0, float(speed_plan.speed_cap_mps)), maximum_mps
+            ),
+            limiting_owner=limiting_owner,
+            active_constraints=active_constraints,
+            external_constraints=retained + (constraint,),
+        )
 
     def destination_approach_constraint(
         self,

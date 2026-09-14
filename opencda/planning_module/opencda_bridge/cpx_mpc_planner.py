@@ -3141,6 +3141,9 @@ class CPXMPCPlannerBridge:
                 max_braking_mps2=abs(float(self.mpc.constraints.min_acceleration_mps2)),
                 current_acceleration_mps2=float(self._last_accel_mps2),
                 max_jerk_mps3=float(self.mpc.constraints.max_jerk_mps3),
+                comfortable_deceleration_mps2=float(self.config.get(
+                    "cav_conflict_comfort_deceleration_mps2", 1.5
+                )),
             )
             self._cav_schedule.observe(
                 sim_time_s=float(sim_time_s), result=cav_result,
@@ -3283,6 +3286,17 @@ class CPXMPCPlannerBridge:
             reference_debug = dict(candidate_result.diagnostics)
         else:
             reference_debug["candidate_pipeline_enabled"] = False
+
+        # Stage C owns the time-indexed safety corridor; SpeedTargetPlanner
+        # owns nominal longitudinal intent.  Feed the corridor's approach
+        # envelope into that single speed owner, while retaining the original
+        # Stage-D half spaces as the final safety constraint.
+        if cav_result is not None:
+            speed_plan = self.pipeline.constrain_speed_plan(
+                speed_plan,
+                cav_result.speed_constraint,
+            )
+            planned_speed_mps = float(speed_plan.target_speed_mps)
 
         boundary_recovery_active = bool(
             self.config.get("boundary_recovery_enabled", False)
