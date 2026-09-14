@@ -376,6 +376,14 @@ class PerceptionManager:
         self.id = infra_id if infra_id is not None else vehicle.id
 
         self.activate = config_yaml['activate']
+        # Ground-truth mode is a sensor adapter, not omniscient world state.
+        # Keep the historical 50 m default while allowing validation scenes
+        # to model a shorter usable sight distance without planner-side actor
+        # filters or scenario-specific IDs.
+        self.deactivated_detection_range_m = max(
+            0.0,
+            float(config_yaml.get('deactivated_detection_range_m', 50.0)),
+        )
 
         # OpenCDA scenario YAMLs in this repository use two slightly different
         # perception schemas.  Normalize both here so legacy cooperative
@@ -681,8 +689,10 @@ class PerceptionManager:
         world = self.carla_world
 
         vehicle_list = world.get_actors().filter("*vehicle*")
-        # todo: hard coded
-        thresh = 50 if not self.data_dump else 120
+        thresh = (
+            float(self.deactivated_detection_range_m)
+            if not self.data_dump else 120.0
+        )
 
         vehicle_list = [v for v in vehicle_list if self.dist(v) < thresh and
                         v.id != self.id]

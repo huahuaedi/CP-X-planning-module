@@ -1,0 +1,101 @@
+base_config: cpx_single_right_lane_turn.yaml
+
+description: |-
+  Use case B on the validated Town06 right-turn route. A scripted opposing
+  vehicle enters the ego route from beyond the bend. A second CAV travels
+  away on the adjacent outgoing lane and supplies the remote viewpoint.
+  The ego must receive that prediction, classify ONCOMING, and yield through
+  the ordinary Stage A-D space-time corridor before continuing its turn.
+
+cpx_mature:
+  town: Town06
+  require_isolated_world: true
+  max_ticks: 1500
+  destination_tolerance_m: 3.0
+  completion_mode: first_cav
+  run_opencda_evaluation: false
+
+carla_traffic_manager:
+  vehicle_list: []
+
+vehicle_base:
+  sensing:
+    perception:
+      # Emulate the limited usable sight distance around the bend. This is an
+      # input-adapter property; the planner receives no scenario/actor hint.
+      deactivated_detection_range_m: 20.0
+  planner:
+    global_planner_mode: dij
+    global_planner_xodr_path: Global_Planner/maps/Town06.xodr
+    global_planner_strict: true
+    functional_test_ignore_dynamic_objects: false
+    ignore_traffic_control: true
+    max_mpc_obstacles: 4
+    cav_conflict_enabled: true
+    following_idm_enabled: false
+    publish_cp_message: true
+    require_native_opencda_cp: true
+    prediction_lane_following_enabled: false
+    target_speed_mps: 8.0
+    communication_range_m: 60.0
+    record_evaluation_metrics: true
+    debug_log_formats: [jsonl]
+    debug_output_dir: opencda/planning_module/opencda_bridge/debug_cp_bend_oncoming_on
+
+scenario:
+  single_cav_list:
+    - name: ego
+      spawn_position: [225.10, -20.1, 0.3, 0, 179.8, 0]
+      destination: [9.8, -46.9, 0.3]
+      destination_lane_extension_m: 50.0
+      v2x:
+        enabled: true
+        communication_range: 250
+      planner:
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_cp_bend_oncoming_on
+
+    - name: observer
+      # A stationary roadside/adjacent-lane observer beyond the bend. Keeping
+      # this vantage fixed is essential: the scripted actor is event-triggered
+      # by ego progress, so a moving observer could leave before the event and
+      # silently turn the CP arm into the same local-perception experiment as
+      # the OFF arm.
+      spawn_position: [6.3, -80.0, 0.3, 0, -90, 0]
+      destination: [6.3, -150.0, 0.3]
+      v2x:
+        enabled: true
+        communication_range: 250
+      behavior:
+        max_speed: 0
+      sensing:
+        perception:
+          deactivated_detection_range_m: 60.0
+        overtake_allowed: false
+        local_planner:
+          debug_trajectory: false
+          debug: false
+      safety_manager:
+        print_message: false
+      planner:
+        enabled: false
+
+  scripted_actors:
+    - blueprint: vehicle.tesla.model3
+      # Reverse of the ego's validated outgoing connector and approach.
+      path:
+        - [9.8, -65.0]
+        - [9.8, -35.0]
+        - [12.1, -25.9]
+        - [18.0, -22.8]
+        # Clear the shared connector into the adjacent westbound lane. An
+        # opposing actor that continued down ego's lane forever would make
+        # the encounter unsolvable by any stop/yield policy.
+        - [21.0, -19.6]
+        - [75.0, -19.6]
+      speed_mps: 6.0
+      acceleration_mps2: 2.0
+      z: 0.3
+      trigger:
+        axis: x
+        cross: 70.0
+        from: above

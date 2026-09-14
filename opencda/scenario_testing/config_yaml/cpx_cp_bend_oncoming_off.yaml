@@ -1,0 +1,44 @@
+base_config: cpx_cp_bend_oncoming.yaml
+
+description: |-
+  CP-off control arm for use case B. Actor paths, routes, and trigger are
+  inherited unchanged; only ego's CP transport is disabled.
+
+vehicle_base:
+  planner:
+    publish_cp_message: false
+    require_native_opencda_cp: false
+
+scenario:
+  single_cav_list:
+    - name: ego
+      spawn_position: [225.10, -20.1, 0.3, 0, 179.8, 0]
+      destination: [9.8, -46.9, 0.3]
+      destination_lane_extension_m: 50.0
+      v2x:
+        enabled: true
+        communication_range: 250
+      planner:
+        publish_cp_message: false
+        require_native_opencda_cp: false
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_cp_bend_oncoming_off
+
+    - name: observer
+      spawn_position: [6.3, -80.0, 0.3, 0, -90, 0]
+      destination: [6.3, -150.0, 0.3]
+      v2x:
+        enabled: true
+        communication_range: 250
+      behavior:
+        max_speed: 0
+      sensing:
+        perception:
+          deactivated_detection_range_m: 60.0
+        overtake_allowed: false
+        local_planner:
+          debug_trajectory: false
+          debug: false
+      safety_manager:
+        print_message: false
+      planner:
+        enabled: false
