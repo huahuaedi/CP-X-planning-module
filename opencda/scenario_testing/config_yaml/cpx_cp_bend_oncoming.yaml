@@ -10,7 +10,10 @@ description: |-
 cpx_mature:
   town: Town06
   require_isolated_world: true
-  max_ticks: 1500
+  # The CP encounter deliberately holds the ego before a long right-turn
+  # route.  Keep enough horizon to validate the terminal-stop contract too,
+  # rather than ending about 20 m short while the vehicle is still moving.
+  max_ticks: 1800
   destination_tolerance_m: 3.0
   completion_mode: first_cav
   run_opencda_evaluation: false

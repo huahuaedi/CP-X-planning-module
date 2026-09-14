@@ -53,6 +53,7 @@ def test_oncoming_path_reverses_the_ego_bend_and_is_event_aligned():
     assert float(path[-1][1]) > float(path[3][1])
     assert cfg["cpx_mature"]["town"] == "Town06"
     assert cfg["cpx_mature"]["require_isolated_world"] is True
+    assert cfg["cpx_mature"]["max_ticks"] >= 1800
     assert cfg["vehicle_base"]["planner"]["cav_conflict_enabled"] is True
     assert cfg["vehicle_base"]["planner"]["global_planner_mode"] == "dij"
     assert cfg["vehicle_base"]["planner"]["ignore_traffic_control"] is True
