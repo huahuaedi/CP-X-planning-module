@@ -48,19 +48,17 @@ def _distance_to_destination(vehicle, destination):
 
 
 def _manager_reached_destination(manager, destination, tolerance_m):
-    """Use the active planner's route contract when it is available.
+    """Use the active planner's terminal-stop contract when available.
 
-    Euclidean goal distance and distance along the AD-map route differ on a
-    curve.  Ending the harness from the former while the planner still owns
-    the latter can truncate the final planning tick.  Non-CP-X managers keep
-    the ordinary Euclidean completion rule.
+    RouteManager owns progress, but entering its distance threshold is not a
+    completed driving task: DestinationSpeedStage must still bring the
+    vehicle to rest. CP-X publishes that single terminal fact on its vehicle
+    manager. Non-CP-X managers keep the ordinary Euclidean completion rule.
     """
 
     planner = getattr(manager, "cpx_planner", None)
-    route_manager = getattr(planner, "route_manager", None)
-    status = getattr(route_manager, "last_status", None)
-    if bool(getattr(status, "route_found", False)):
-        return bool(getattr(status, "reached_destination", False))
+    if planner is not None:
+        return bool(getattr(manager, "_opencda_agent_finished", False))
     return _distance_to_destination(
         manager.vehicle, destination
     ) <= float(tolerance_m)

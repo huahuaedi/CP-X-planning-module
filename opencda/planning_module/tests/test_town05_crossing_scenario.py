@@ -204,19 +204,21 @@ def test_runner_preserves_existing_cav_target_binding():
     assert target.cpx_planner._cav_intent_broadcast_enabled is False
 
 
-def test_runner_uses_active_route_completion_contract():
+def test_runner_uses_cpx_terminal_stop_completion_contract():
     manager = type("Manager", (), {})()
     manager.vehicle = _LocationVehicle(0.1, 0.0)
     status = type(
-        "Status", (), {"route_found": True, "reached_destination": False}
+        "Status", (), {"route_found": True, "reached_destination": True}
     )()
     route_manager = type("RouteManager", (), {"last_status": status})()
     manager.cpx_planner = type(
         "Planner", (), {"route_manager": route_manager}
     )()
 
+    # Neither route proximity nor Euclidean proximity can bypass the final
+    # stopped-state acknowledgement owned by DestinationSpeedStage.
     assert not _manager_reached_destination(manager, [0.0, 0.0], 3.0)
-    status.reached_destination = True
+    manager._opencda_agent_finished = True
     assert _manager_reached_destination(manager, [100.0, 0.0], 3.0)
 
 
