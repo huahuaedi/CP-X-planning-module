@@ -53,6 +53,23 @@ def test_evaluator_requires_requested_cooperative_role():
     assert present["verdict"] == "PASS"
 
 
+def test_evaluator_accepts_claim_role_without_geometric_conflict_tag():
+    result = analyze_conflict_run(
+        [_row(
+            0,
+            tag="IGNORE",
+            rows=0,
+            cav_conflict_roles={"peer": "proceed"},
+        )],
+        expected_roles=["proceed"],
+        require_constraint=False,
+    )
+
+    assert not result["conflict_observed"]
+    assert result["scenario_valid"]
+    assert result["verdict"] == "PASS"
+
+
 def test_evaluator_distinguishes_collision_and_planner_failure():
     collision = analyze_conflict_run(
         [_row(0, collision_count=1)], expected_tags=["LEAD_BRAKE"]

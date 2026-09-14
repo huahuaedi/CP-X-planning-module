@@ -86,8 +86,23 @@ def analyze_conflict_run(
     conflict_observed = bool(observed.difference({"IGNORE"}))
     expected_role_set = {str(role).lower() for role in expected_roles}
     observed_roles = {str(role).lower() for role in role_counts}
-    scenario_valid = bool(rows) and conflict_observed and expected.issubset(observed) and (
-        expected_role_set.issubset(observed_roles)
+    tag_contract_valid = expected.issubset(observed) and (
+        conflict_observed if expected else True
+    )
+    role_contract_valid = expected_role_set.issubset(observed_roles)
+    # Geometric conflict tags and cooperative resource claims are independent
+    # evidence.  A peer may be outside ego's path (IGNORE) while both vehicles
+    # still claim the same lane-transition resource; in that case a latched
+    # proceed/make-gap role is the interaction contract to validate.
+    interaction_observed = bool(
+        conflict_observed
+        or (expected_role_set and role_contract_valid)
+    )
+    scenario_valid = bool(
+        rows
+        and interaction_observed
+        and tag_contract_valid
+        and role_contract_valid
     )
     constraint_valid = bool(constraint_indices) if require_constraint else True
     if not rows:
