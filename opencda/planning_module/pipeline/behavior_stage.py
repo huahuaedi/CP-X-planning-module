@@ -239,6 +239,7 @@ class BehaviorCommandFrameRequest:
     front_distance_by_lane: Mapping[int, float]
     lane_safety_scores: Mapping[int, float]
     object_snapshots: Sequence[Mapping[str, object]]
+    route_lane_change_context: RouteLaneChangeContext
     lane_change_authorization: Any
     opportunistic_lane_change_allowed: bool
     behavior_traffic_state: str
@@ -300,16 +301,35 @@ class BehaviorStage:
 
     @staticmethod
     def _cooperative_proposal_from_candidate(
-        *, authorization: Any, candidate_frame: Any, current_lane_id: int,
+        *, authorization: Any, route_context: Optional[RouteLaneChangeContext] = None,
+        candidate_frame: Any, current_lane_id: int,
         opportunistic_lane_change_allowed: bool,
+        proposal_lookahead_m: float = 60.0,
     ) -> CooperativeManeuverProposal:
-        """Preserve the pre-safety maneuver request for peer negotiation."""
+        """Preserve topology intent independently of execution readiness.
+
+        Route authorization answers whether lateral motion may start *now*.
+        Cooperative proposal is deliberately earlier: peers need time to
+        negotiate a shared corridor before either vehicle reaches that gate.
+        Only a locally resolved AD-map transition can use this early path;
+        invalid or out-of-frame topology is never advertised.
+        """
 
         if bool(authorization.allowed):
             maneuver = str(authorization.maneuver)
             target_lane_id = int(authorization.target_lane_id)
             route_required = bool(authorization.required_by_route)
             reason = str(authorization.reason)
+        elif BehaviorStage._route_intent_is_proposable(
+            route_context=route_context,
+            current_lane_id=int(current_lane_id),
+            lookahead_m=float(proposal_lookahead_m),
+        ):
+            direction = str(route_context.geometry_direction).strip().lower()
+            maneuver = "lane_change_" + direction
+            target_lane_id = int(route_context.physical_target_lane_id)
+            route_required = True
+            reason = "route_topology_proposal_ahead_of_execution"
         elif bool(opportunistic_lane_change_allowed):
             selected = candidate_frame.selected
             maneuver = str(selected.decision)
@@ -329,6 +349,29 @@ class BehaviorStage:
             maneuver_active=False,
             committed_at_s=0.0,
             reason=str(reason),
+        )
+
+    @staticmethod
+    def _route_intent_is_proposable(
+        *, route_context: Optional[RouteLaneChangeContext], current_lane_id: int,
+        lookahead_m: float,
+    ) -> bool:
+        """Return whether AD-map topology supports an early peer proposal."""
+
+        if route_context is None:
+            return False
+        request = route_context.request
+        direction = str(route_context.geometry_direction).strip().lower()
+        target_lane_id = int(route_context.physical_target_lane_id or 0)
+        distance_m = float(route_context.geometry_distance_m)
+        return bool(
+            request.route_lane_change_allowed
+            and route_context.topology_target_in_local_frame
+            and direction in {"left", "right"}
+            and target_lane_id != 0
+            and target_lane_id != int(current_lane_id)
+            and math.isfinite(distance_m)
+            and 0.0 <= distance_m <= max(0.0, float(lookahead_m))
         )
 
     def produce_command_from_frame(
@@ -433,10 +476,14 @@ class BehaviorStage:
             candidate_lane_ids=tuple(candidate_lane_ids),
             cooperative_proposal=self._cooperative_proposal_from_candidate(
                 authorization=authorization,
+                route_context=request.route_lane_change_context,
                 candidate_frame=candidate_frame,
                 current_lane_id=int(request.current_lane_id),
                 opportunistic_lane_change_allowed=bool(
                     request.opportunistic_lane_change_allowed
+                ),
+                proposal_lookahead_m=float(
+                    request.config.get("cav_proposal_lookahead_m", 60.0)
                 ),
             ),
         )

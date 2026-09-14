@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from opencda.planning_module.pipeline.conflict_classifier import (
     IGNORE,
+    MERGE,
     ClassifierParams,
     ConflictTag,
     classify_conflicts,
@@ -178,8 +179,25 @@ def _build_effective_corridor(
         if "::mode" in aid:
             continue
         tag = tag_by_id.get(aid)
+        assignment = assign_by_id.get(aid)
         if tag is not None and tag.tag != IGNORE:
-            items.append((agent, tag, assign_by_id.get(aid)))
+            items.append((agent, tag, assignment))
+        elif tag is not None and str(getattr(assignment, "role", "")) == "make_gap":
+            # A spatially-overlapping resource claim is future topology
+            # evidence even while the peer is still geometrically adjacent.
+            # Stage A remains an honest IGNORE for physical collision risk;
+            # Stage C receives the negotiated merge semantic only for the
+            # losing vehicle's make-gap corridor.
+            items.append((agent, ConflictTag(
+                agent_id=tag.agent_id,
+                tag=MERGE,
+                conflict_s_m=None,
+                conflict_t_s=None,
+                min_gap_m=tag.min_gap_m,
+                min_lateral_m=tag.min_lateral_m,
+                cooperative=True,
+                reason="conflicting_resource_claim",
+            ), assignment))
     corridor = build_longitudinal_corridor(
         reference_samples, ego_snapshot, items, corridor_params, rss_params
     )
@@ -372,14 +390,11 @@ def resolve_conflicts(
             if int(assignment.cav_actor_id) in live_ids
         ]
     elif my_claim is not None and bool(my_claim.participates):
-        conflicting_cavs = []
-        for c in cavs:
-            if not bool(c.cooperative):
-                continue
-            t = tag_by_id.get(str(c.actor_id))
-            if t is None or t.tag == IGNORE:
-                continue
-            conflicting_cavs.append(c)
+        # Resource claims describe a future shared topology and therefore
+        # enter arbitration before current geometry becomes a Stage-A
+        # conflict. ``assign_conflict_roles`` remains the sole owner of
+        # cooperative/active/spatial eligibility.
+        conflicting_cavs = [c for c in cavs if bool(c.cooperative)]
         assignments, new_latch = assign_conflict_roles(
             my_claim=my_claim,
             my_actor_id=int(my_actor_id),

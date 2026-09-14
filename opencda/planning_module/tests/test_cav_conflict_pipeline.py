@@ -166,6 +166,41 @@ def test_cooperative_merge_cav_loses_ego_proceeds():
     assert all(h >= _BIG for h in r.corridor.s_hi)
 
 
+def test_conflicting_claims_arbitrate_before_geometric_merge_begins():
+    # Both vehicles are still on adjacent parallel lanes, so Stage A is
+    # correctly IGNORE. Their overlapping same-target claims nevertheless
+    # need an early, deterministic role assignment before lateral motion.
+    path = [(20.0 + 0.8 * k, 3.6) for k in range(21)]
+    peer_claim = ResourceClaim(
+        kind="lane_change", resource_id="lane_change:10:20",
+        committed_at_s=1.0, active=True, require_ahead=False,
+        phase="proposed", source_corridor_id=10, target_corridor_id=20,
+        station_corridor_id=20, s_begin_m=0.0, s_end_m=80.0,
+    )
+    ego_claim = ResourceClaim(
+        kind="lane_change", resource_id="lane_change:10:20",
+        committed_at_s=2.0, active=True, require_ahead=False,
+        phase="proposed", source_corridor_id=10, target_corridor_id=20,
+        station_corridor_id=20, s_begin_m=0.0, s_end_m=80.0,
+    )
+    peer = CavIntent(
+        actor_id=2, position_xy=(20.0, 3.6), claim=peer_claim,
+        heading_rad=0.0, speed_mps=8.0,
+        planned_path=tuple(
+            (0.1 * k, x, y, 8.0) for k, (x, y) in enumerate(path)
+        ),
+    )
+
+    result = resolve_conflicts(
+        reference_samples=REF, ego_snapshot=EGO, my_actor_id=1,
+        my_claim=ego_claim, cav_intents=[peer],
+    )
+
+    assert result.diagnostics["tags"]["2"] == IGNORE
+    assert result.diagnostics["roles"]["2"] == "make_gap"
+    assert any(value < _BIG for value in result.corridor.s_hi)
+
+
 def test_non_connected_crosser_defaults_to_yield_without_assignment():
     path = [(30.0, -6.0 + 1.0 * k) for k in range(20)]
     crosser = {

@@ -83,6 +83,18 @@ def test_homotopy_half_space_uses_the_mpc_linear_row_schema():
     assert row.upper >= _BIG
 
 
+def test_homotopy_half_space_skips_longitudinally_ordered_merge():
+    assignment = ConflictAssignment(
+        cav_actor_id=2, role="proceed", homotopy_side="left",
+        cav_wins=False, reason="",
+    )
+    rows = homotopy_keepout_rows(
+        [assignment], {2: [(10.0, 3.5), (12.0, 3.5)]},
+        ego_heading_rad=0.0, lateral_conflict_actor_ids=(),
+    )
+    assert rows == []
+
+
 def test_homotopy_row_is_shifted_into_ego_origin_frame():
     assignment = ConflictAssignment(
         cav_actor_id=3, role="proceed", homotopy_side="right",

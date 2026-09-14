@@ -138,11 +138,23 @@ def homotopy_keepout_rows(
     *,
     d_safe_m: float = 3.0,
     slack_group: str = "cav_homotopy",
+    lateral_conflict_actor_ids: Optional[Sequence[int]] = None,
 ) -> List[LinearRow]:
-    """Encode latched pass sides as lower-only MPC ``LinearRow`` values."""
+    """Encode latched pass sides for genuinely lateral conflicts only.
+
+    A same-direction lane merge is ordered longitudinally by ``make_gap``;
+    placing its winner on one side of the loser would prevent both vehicles
+    from converging to their shared target lane.  The caller therefore
+    supplies the actor ids Stage A classified as crossing/oncoming.  ``None``
+    retains the standalone helper's historical all-assignment behavior.
+    """
 
     ox, oy = float(ego_origin_xy[0]), float(ego_origin_xy[1])
     ch, sh = math.cos(float(ego_heading_rad)), math.sin(float(ego_heading_rad))
+    eligible = (
+        None if lateral_conflict_actor_ids is None
+        else {int(actor_id) for actor_id in lateral_conflict_actor_ids}
+    )
     rows: List[LinearRow] = []
     for assignment in list(assignments or []):
         # yield/make_gap already own a longitudinal constraint. Adding a
@@ -154,6 +166,8 @@ def homotopy_keepout_rows(
         if side not in ("left", "right"):
             continue
         actor_id = int(getattr(assignment, "cav_actor_id", -1))
+        if eligible is not None and actor_id not in eligible:
+            continue
         track = list(cav_positions_by_stage.get(actor_id, ()) or ())
         nx, ny = (-sh, ch) if side == "left" else (sh, -ch)
         for stage, point in enumerate(track):

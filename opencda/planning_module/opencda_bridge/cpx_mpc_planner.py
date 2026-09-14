@@ -2730,6 +2730,7 @@ class CPXMPCPlannerBridge:
                 front_distance_by_lane=front_dist_by_lane,
                 lane_safety_scores=lane_safety_scores,
                 object_snapshots=object_snapshots,
+                route_lane_change_context=lane_change_context,
                 lane_change_authorization=lane_change_authorization,
                 opportunistic_lane_change_allowed=bool(
                     opportunistic_lane_change_allowed

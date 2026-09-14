@@ -171,6 +171,68 @@ def test_prepare_route_lane_change_scales_trigger_windows_with_speed():
     assert fast.preparation_start_distance_m == fast.request.preparation_start_distance_m
 
 
+def test_route_intent_can_be_proposed_before_execution_window():
+    context = _prepare(
+        route_manager=_FakeRouteManager(
+            direction="right", distance_m=48.0,
+            reason="route_geometry_lane_change_ahead", edge_id="edge-8",
+        ),
+    )
+
+    assert BehaviorStage._route_intent_is_proposable(
+        route_context=context,
+        current_lane_id=100,
+        lookahead_m=60.0,
+    )
+
+    proposal = BehaviorStage._cooperative_proposal_from_candidate(
+        authorization=SimpleNamespace(
+            allowed=False,
+            maneuver="lane_change_right",
+            target_lane_id=340155,
+            required_by_route=False,
+            reason="explicit_lane_change_trigger_too_far",
+        ),
+        route_context=context,
+        candidate_frame=SimpleNamespace(selected=None),
+        current_lane_id=100,
+        opportunistic_lane_change_allowed=False,
+        proposal_lookahead_m=60.0,
+    )
+    assert proposal.requested
+    assert proposal.route_required
+    assert not proposal.committed
+    assert proposal.maneuver == "lane_change_right"
+    assert proposal.target_corridor_id == 340155
+    assert proposal.reason == "route_topology_proposal_ahead_of_execution"
+
+
+def test_route_intent_proposal_rejects_out_of_frame_or_distant_topology():
+    distant = _prepare(
+        route_manager=_FakeRouteManager(
+            direction="right", distance_m=61.0,
+            reason="route_geometry_lane_change_ahead", edge_id="edge-9",
+        ),
+    )
+    out_of_frame = _prepare(
+        local_map_snapshot=_FakeSnapshot(
+            frame_id=5, ego_lane_id=100, target_lane_id=340154, offset=-1,
+            in_frame=False, lane_by_offset={-1: 340155},
+        ),
+    )
+
+    assert not BehaviorStage._route_intent_is_proposable(
+        route_context=distant,
+        current_lane_id=100,
+        lookahead_m=60.0,
+    )
+    assert not BehaviorStage._route_intent_is_proposable(
+        route_context=out_of_frame,
+        current_lane_id=100,
+        lookahead_m=60.0,
+    )
+
+
 def test_turn_context_keeps_route_geometry_as_authoritative_source():
     route = _FakeTurnRouteManager(
         ("right", 18.0, "route_geometry_turn_ahead"),

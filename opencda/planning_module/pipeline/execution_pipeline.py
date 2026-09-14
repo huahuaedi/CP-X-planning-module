@@ -298,6 +298,12 @@ class PlanningPipeline:
             tracks,
             ego_heading_rad=float(ego_yaw_rad),
             ego_origin_xy=origin,
+            lateral_conflict_actor_ids=tuple(
+                int(tag.agent_id)
+                for tag in result.tags
+                if str(tag.tag) in {"CROSSING", "ONCOMING"}
+                and str(tag.agent_id).lstrip("-").isdigit()
+            ),
         )
         result.mpc_rows = list(longitudinal_rows) + list(lateral_rows)
         result.diagnostics.update({

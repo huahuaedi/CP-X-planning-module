@@ -126,7 +126,7 @@ class CavConflictIntegrationTests(unittest.TestCase):
         # ego holds back behind the cav's projected station (starts at y=12)
         self.assertLess(capped, free - 1.0)
 
-    def test_runtime_pipeline_sends_longitudinal_and_homotopy_rows_to_mpc(self):
+    def test_runtime_pipeline_keeps_merge_longitudinal_only(self):
         mpc = _mpc(corridor_enabled=True)
         cav_path = tuple(
             (mpc.dt_s * k, 3.4 - 0.12 * k, 12.0 + 0.9 * k, 9.0)
@@ -162,9 +162,7 @@ class CavConflictIntegrationTests(unittest.TestCase):
             horizon_steps=mpc.horizon_steps, dt_s=mpc.dt_s,
         )
         self.assertGreater(result.diagnostics["longitudinal_qp_row_count"], 0)
-        self.assertEqual(
-            result.diagnostics["homotopy_qp_row_count"], mpc.horizon_steps
-        )
+        self.assertEqual(result.diagnostics["homotopy_qp_row_count"], 0)
         self.assertEqual(
             len(result.mpc_rows), result.diagnostics["total_qp_row_count"]
         )
@@ -185,12 +183,46 @@ class CavConflictIntegrationTests(unittest.TestCase):
             result.diagnostics["prediction_validation_y_m"],
             cav_path[validation_stage][2],
         )
+
+    def test_runtime_pipeline_keeps_homotopy_for_crossing_cav(self):
+        mpc = _mpc(corridor_enabled=True)
+        cav_path = tuple(
+            (mpc.dt_s * k, -8.0 + 0.7 * k, 18.0, 7.0)
+            for k in range(mpc.horizon_steps + 1)
+        )
+        claim = ResourceClaim(
+            kind="junction", resource_id="junction:1",
+            committed_at_s=20.0, active=True, require_ahead=False,
+        )
+        result = PlanningPipeline.resolve_cav_interaction(
+            reference_samples=REF,
+            ego_location=SimpleNamespace(x=0.0, y=0.0),
+            ego_yaw_rad=np.pi / 2.0,
+            ego_speed_mps=9.0,
+            actor_id=1,
+            claim=ResourceClaim(
+                kind="junction", resource_id="junction:1",
+                committed_at_s=10.0, active=True, require_ahead=False,
+            ),
+            cav_intents=[CavIntent(
+                actor_id=2, position_xy=(-8.0, 18.0), claim=claim,
+                heading_rad=0.0, speed_mps=7.0, planned_path=cav_path,
+            )],
+            obstacle_snapshots=[], latch_state={},
+            horizon_steps=mpc.horizon_steps, dt_s=mpc.dt_s,
+        )
+
+        self.assertEqual(result.diagnostics["tags"]["2"], "CROSSING")
+        self.assertEqual(result.diagnostics["roles"]["2"], "proceed")
+        self.assertEqual(
+            result.diagnostics["homotopy_qp_row_count"], mpc.horizon_steps
+        )
         self.assertEqual(
             result.diagnostics["shared_planned_paths"]["2"][0],
             (cav_path[0][1], cav_path[0][2]),
         )
         groups = {row.slack_group for row in result.mpc_rows}
-        self.assertEqual(groups, {"corridor", "cav_homotopy"})
+        self.assertEqual(groups, {"cav_homotopy"})
 
         _solve_progress(mpc, (0.0, 0.0), 9.0, result.mpc_rows)
         self.assertEqual(mpc._last_status, "solved")
