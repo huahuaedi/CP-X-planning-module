@@ -1835,6 +1835,22 @@ class MPC:
         return float(min(base_speed_mps, stop_speed_limit_mps))
 
     @staticmethod
+    def _repulsive_weight_at_stage(
+        object_snapshot: Mapping[str, object],
+        stage: int,
+    ) -> float:
+        """Resolve the obstacle cost weight for one MPC decision stage."""
+
+        base = float(object_snapshot.get("repulsive_class_weight", 1.0))
+        stage_weights = object_snapshot.get("repulsive_stage_weights", {})
+        if not isinstance(stage_weights, Mapping):
+            return base
+        override = stage_weights.get(
+            int(stage), stage_weights.get(str(int(stage)), base)
+        )
+        return float(override)
+
+    @staticmethod
     def _cross_track_lateral_scale(
         *,
         cross_track_abs_m: float,
@@ -3294,7 +3310,9 @@ class MPC:
                         dt_s=float(self.dt_s),
                     )
 
-                    repulsive_weight = float(object_snapshot.get("repulsive_class_weight", 1.0))
+                    repulsive_weight = self._repulsive_weight_at_stage(
+                        object_snapshot, k
+                    )
                     if repulsive_weight <= 0.0:
                         continue
 
@@ -3788,7 +3806,9 @@ class MPC:
                         stage_index=stage_idx,
                         dt_s=float(self.dt_s),
                     )
-                    repulsive_weight = float(object_snapshot.get("repulsive_class_weight", 1.0))
+                    repulsive_weight = self._repulsive_weight_at_stage(
+                        object_snapshot, k
+                    )
                     if repulsive_weight <= 0.0:
                         continue
 

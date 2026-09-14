@@ -14,38 +14,44 @@ def _object_id(snapshot):
     return ""
 
 
-def _corridor_owned_actor_ids(rows):
-    """Physical actors whose interaction is already encoded by Stage D."""
+def _corridor_owned_actor_stages(rows):
+    """Decision stages where Stage D owns each physical actor."""
 
-    actor_ids = set()
+    actor_stages = {}
     for row in list(rows or ()):
         tag = str(getattr(row, "tag", "") or "").strip()
         if not tag:
             continue
         actor_id = tag.split("::mode", 1)[0]
         if actor_id:
-            actor_ids.add(actor_id)
-    return actor_ids
+            actor_stages.setdefault(actor_id, set()).add(
+                int(getattr(row, "stage", 0))
+            )
+    return actor_stages
 
 
-def _exclusive_interaction_objects(object_snapshots, corridor_rows):
+def _stage_owned_interaction_objects(object_snapshots, corridor_rows):
     """Prevent two MPC mechanisms from controlling the same obstacle.
 
-    A Stage-D longitudinal corridor is the complete geometric interaction
-    contract for its actor.  Keeping that actor's repulsive potential active
-    at the same time creates a second, implicit lateral decision inside MPC:
-    a yielding lane-follow solution can turn sideways instead of braking.
-    Objects without an active corridor retain their normal collision cost.
+    A Stage-D row owns its actor only at that row's decision stage.  At those
+    stages the repulsive potential would create a second, implicit lateral
+    decision, so its weight is zero.  Before/after the finite corridor window
+    the normal collision cost remains active.
     """
 
-    owned = _corridor_owned_actor_ids(corridor_rows)
-    if not owned:
+    owned_stages = _corridor_owned_actor_stages(corridor_rows)
+    if not owned_stages:
         return list(object_snapshots or ())
     result = []
     for original in list(object_snapshots or ()):
         snapshot = dict(original)
-        if _object_id(snapshot) in owned:
-            snapshot["repulsive_class_weight"] = 0.0
+        stages = owned_stages.get(_object_id(snapshot), set())
+        if stages:
+            stage_weights = dict(
+                snapshot.get("repulsive_stage_weights", {}) or {}
+            )
+            stage_weights.update({int(stage): 0.0 for stage in stages})
+            snapshot["repulsive_stage_weights"] = stage_weights
         result.append(snapshot)
     return result
 
@@ -195,7 +201,7 @@ class MPCExecutionStage:
                 self._mpc.plan_trajectory(
                     current_state=request.current_state,
                     destination_state=request.destination_state,
-                    object_snapshots=_exclusive_interaction_objects(
+                    object_snapshots=_stage_owned_interaction_objects(
                         request.object_snapshots, request.corridor_rows
                     ),
                     current_acceleration_mps2=float(

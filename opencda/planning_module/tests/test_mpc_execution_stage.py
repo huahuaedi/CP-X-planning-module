@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from MPC.mpc import MPC
 from pipeline.mpc_execution_stage import (
     MPCExecutionRequest,
     MPCExecutionStage,
@@ -106,7 +107,7 @@ def test_constraint_revision_change_forces_immediate_resolve():
     assert not second.replan_executed
 
 
-def test_corridor_owned_actor_is_not_also_a_repulsive_cost_source():
+def test_corridor_owned_actor_suppresses_repulsion_only_at_owned_stage():
     mpc = _MPC()
     rows = [LinearRow(
         stage=1, a_x=1.0, a_y=0.0, lower=-1.0e9, upper=8.0,
@@ -123,9 +124,15 @@ def test_corridor_owned_actor_is_not_also_a_repulsive_cost_source():
     )
 
     passed = mpc.plan_kwargs["object_snapshots"]
-    assert passed[0]["repulsive_class_weight"] == 0.0
+    assert passed[0]["repulsive_class_weight"] == 1.0
+    assert passed[0]["repulsive_stage_weights"] == {1: 0.0}
     assert passed[1]["repulsive_class_weight"] == 0.5
     assert objects[0]["repulsive_class_weight"] == 1.0
+    assert "repulsive_stage_weights" not in objects[0]
+
+    assert MPC._repulsive_weight_at_stage(passed[0], 1) == 0.0
+    assert MPC._repulsive_weight_at_stage(passed[0], 2) == 1.0
+    assert MPC._repulsive_weight_at_stage(passed[1], 1) == 0.5
 
 
 def test_failed_solve_reuses_only_valid_buffered_control():
