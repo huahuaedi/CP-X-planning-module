@@ -718,3 +718,58 @@ def test_lane_change_completion_installs_target_lane_follow_master():
     assert snapshot.target_lane_id == 11
     assert all(abs(float(row["y_ref_m"]) - 3.5) < 1.0e-6
                for row in snapshot.samples)
+
+
+def test_lane_follow_publish_replaces_master_owned_by_previous_corridor():
+    """A same-route lateral handoff is an explicit lifecycle transition."""
+    geometries = {
+        10: _local_geometry(10, [(float(x), 0.0) for x in range(31)]),
+        11: _local_geometry(11, [(float(x), 3.5) for x in range(31)]),
+    }
+    local_map = SimpleNamespace(
+        valid=True,
+        ego_lane_id=11,
+        route_lane_sequence=(10, 11),
+        geometry_for_lane=lambda lane_id: geometries.get(int(lane_id)),
+    )
+    behavior = BehaviorDecision.from_mapping({
+        "decision": "lane_follow",
+        "current_lane_id": 11,
+        "target_lane_id": 11,
+        "target_speed_mps": 4.0,
+    }, default_speed_mps=4.0)
+    provider = ReferenceLineProvider()
+    provider.install(
+        LANE_FOLLOW,
+        [dict(row, lane_id=10) for row in _line(y_m=0.0)],
+        route_revision="route-1",
+        map_epoch="town05",
+        event="initial_route",
+        source_lane_id=10,
+        target_lane_id=10,
+    )
+    previous_revision = provider.snapshot(LANE_FOLLOW).geometry_revision
+
+    result = provider.publish(
+        ReferenceLineRequest(
+            local_map=local_map,
+            route_cursor=SimpleNamespace(segment_kind="lane_follow"),
+            behavior=behavior,
+            route_revision="route-1",
+            map_epoch="town05",
+            ego_x_m=5.0,
+            ego_y_m=3.5,
+        ),
+        [dict(row, lane_id=11) for row in _line(y_m=3.5)[:12]],
+        valid=True,
+        build_reason="admap_current_lane_center_preturn",
+    )
+
+    snapshot = provider.snapshot(LANE_FOLLOW)
+    assert result.accepted
+    assert snapshot.install_event == "phase_transition"
+    assert snapshot.geometry_revision == previous_revision + 1
+    assert snapshot.source_lane_id == 11
+    assert all(int(row["lane_id"]) == 11 for row in snapshot.samples)
+    assert all(abs(float(row["y_ref_m"]) - 3.5) < 1.0e-6
+               for row in result.samples)

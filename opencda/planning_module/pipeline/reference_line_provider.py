@@ -363,6 +363,27 @@ class ReferenceLineProvider(StableReferenceLineProvider):
         map_changed = bool(
             current.active and str(current.map_epoch) != str(request.map_epoch)
         )
+        authoritative_lane_id = int(
+            getattr(request.local_map, "ego_lane_id", 0) or 0
+        )
+        owned_lane_ids = {
+            int(value)
+            for value in (current.source_lane_id, current.target_lane_id)
+            if int(value or 0) != 0
+        }
+        for sample in current.samples:
+            try:
+                lane_id = int(sample.get("lane_id", 0) or 0)
+            except (TypeError, ValueError):
+                lane_id = 0
+            if lane_id:
+                owned_lane_ids.add(lane_id)
+        lane_follow_owner_changed = bool(
+            current.active
+            and mode == LANE_FOLLOW
+            and authoritative_lane_id != 0
+            and authoritative_lane_id not in owned_lane_ids
+        )
         if not current.active:
             event = (
                 "maneuver_started"
@@ -373,6 +394,13 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             event = "route_changed"
         elif map_changed:
             event = "map_epoch_changed"
+        elif lane_follow_owner_changed:
+            # A completed lateral maneuver can keep the same route revision.
+            # In that case the old lane-follow master belongs to the previous
+            # corridor and must not override the freshly built current-lane
+            # reference.  Longitudinal AD-lane transitions remain stable
+            # because successor lane ids are already present in the master.
+            event = "phase_transition"
         else:
             # A planning tick is not a lifecycle event.  The submitted rows
             # have already served as a validity probe; they must not become a
