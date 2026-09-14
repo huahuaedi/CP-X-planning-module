@@ -195,6 +195,41 @@ def test_preturn_lane_stops_at_route_topology_boundary_then_extends_tangent():
     )
 
 
+def test_preturn_lane_never_restores_uncropped_reference_at_boundary():
+    snapshot = build_local_map_snapshot(
+        frame_id=1,
+        timestamp_s=1.0,
+        match={"valid": True, "ad_lane_id": 10},
+        local_graph={
+            "corridors": {0: [10]},
+            "lane_to_offset": {10: 0},
+            "route_lane_sequence": [10],
+            "lane_centerlines": {
+                10: [
+                    {"x_m": 0.0, "y_m": 0.0},
+                    {"x_m": 5.0, "y_m": 0.0},
+                    {"x_m": 8.0, "y_m": 3.0},
+                ],
+            },
+        },
+    )
+
+    reference, reason = StableReferenceLineProvider().preturn_lane_reference(
+        snapshot,
+        lane_id=10,
+        ego_x_m=0.0,
+        ego_y_m=0.0,
+        target_speed_mps=4.0,
+        first_forward_m=2.0,
+        spacing_m=2.0,
+        horizon_steps=8,
+        topology_forward_limit_m=1.0,
+    )
+
+    assert reference == []
+    assert reason.startswith("preturn_topology_boundary_before_reference_anchor")
+
+
 def test_lane_chain_joins_physical_adjacent_segment_to_route_successor():
     snapshot = build_local_map_snapshot(
         frame_id=1,

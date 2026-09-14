@@ -393,7 +393,7 @@ class StableReferenceLineProvider:
                     sample_x_m - previous_x_m,
                     sample_y_m - previous_y_m,
                 )
-                if retained and travelled_m + step_m > forward_limit_m + 1.0e-6:
+                if travelled_m + step_m > forward_limit_m + 1.0e-6:
                     break
                 retained.append(dict(sample))
                 travelled_m += float(step_m)
@@ -401,6 +401,14 @@ class StableReferenceLineProvider:
                 previous_y_m = sample_y_m
             if len(retained) >= 2:
                 reference = retained
+            else:
+                # No valid MPC polyline fits before the topology boundary.
+                # Returning the original window here reintroduces connector
+                # samples precisely when the explicit handoff must take over.
+                return [], (
+                    "preturn_topology_boundary_before_reference_anchor:"
+                    + str(reason)
+                )
         # Do not cross a topology boundary just to fill the fixed MPC horizon.
         # Extend the terminal AD-map tangent while the connector is still
         # outside its fixed handoff arc.
