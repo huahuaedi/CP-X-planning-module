@@ -158,6 +158,12 @@ class ManeuverManager:
                                 turn_reference_active, post_turn_reference_active,
                                 travelled_s_m, required_s_m, exit_aligned):
         lane_follow = str(decision).strip().lower() == "lane_follow"
+        if post_turn_reference_active and not lane_follow:
+            # A newly committed maneuver is an explicit reference ownership
+            # transition. The post-turn hold must not remain active and
+            # overwrite that maneuver's geometry downstream.
+            self.clear_turn(reason="post_turn_superseded_by_maneuver")
+            return "supersede"
         if (lane_follow and str(scenario_state).strip().upper() == "LANE_FOLLOW"
                 and not post_turn_reference_active and turn_reference_active):
             self.turn.phase = "post_turn"

@@ -2,6 +2,7 @@ import pytest
 from types import SimpleNamespace
 
 from pipeline.behavior_decision import BehaviorDecision
+from pipeline.maneuver_manager import ManeuverManager
 
 from pipeline.reference_line_provider import (
     CONNECTOR,
@@ -771,5 +772,56 @@ def test_lane_follow_publish_replaces_master_owned_by_previous_corridor():
     assert snapshot.geometry_revision == previous_revision + 1
     assert snapshot.source_lane_id == 11
     assert all(int(row["lane_id"]) == 11 for row in snapshot.samples)
+    assert all(abs(float(row["y_ref_m"]) - 3.5) < 1.0e-6
+               for row in result.samples)
+
+
+def test_active_lane_change_supersedes_post_turn_reference_output():
+    provider = ReferenceLineProvider()
+    provider.install(
+        POST_TURN,
+        [dict(row, lane_id=20) for row in _line(y_m=0.0)],
+        route_revision="route-1",
+        map_epoch="town05",
+        event="phase_transition",
+        source_lane_id=20,
+        target_lane_id=20,
+    )
+    maneuver = ManeuverManager()
+    maneuver.turn.decision = "intersection_turn_left"
+    maneuver.turn.phase = "post_turn"
+    lane_change_reference = [
+        dict(row, lane_id=21) for row in _line(y_m=3.5)[:12]
+    ]
+
+    result = provider.resolve_post_turn_reference(
+        maneuver_manager=maneuver,
+        decision="lane_change_right",
+        scenario_state="TARGET_LANE_STABILIZATION",
+        exit_alignment_valid=True,
+        exit_lateral_error_m=0.0,
+        exit_heading_error_rad=0.0,
+        local_map=None,
+        ego_x_m=5.0,
+        ego_y_m=3.5,
+        current_state=[5.0, 3.5, 4.0, 0.0],
+        current_lane_id=21,
+        target_speed_mps=4.0,
+        horizon_steps=12,
+        dt_s=0.1,
+        route_revision="route-1",
+        map_epoch="town05",
+        config={},
+        destination_state=[10.0, 3.5, 4.0, 0.0, 21],
+        reference_samples=lane_change_reference,
+        debug_fields={"reference_source": "target_lane_stabilization_reference"},
+    )
+
+    assert not result.active
+    assert result.clear_turn_reference
+    assert not provider.snapshot(POST_TURN).active
+    assert result.debug_fields["reference_source"] == (
+        "target_lane_stabilization_reference"
+    )
     assert all(abs(float(row["y_ref_m"]) - 3.5) < 1.0e-6
                for row in result.samples)

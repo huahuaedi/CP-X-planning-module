@@ -1678,6 +1678,17 @@ class ReferenceLineProvider(StableReferenceLineProvider):
                 route_revision=str(route_revision), map_epoch=str(map_epoch),
             )
 
+        if str(action) == "supersede":
+            self.release(POST_TURN, event="phase_transition")
+            debug = dict(debug_fields or {})
+            debug["post_turn_exit_reason"] = "superseded_by_active_maneuver"
+            return PostTurnReferenceResult(
+                active=False, destination_state=tuple(destination_state or ()),
+                samples=tuple(dict(row) for row in reference_samples or ()),
+                debug_fields=MappingProxyType(debug),
+                clear_turn_reference=True,
+            )
+
         snapshot = self.snapshot(POST_TURN)
         if not snapshot.active:
             return PostTurnReferenceResult(

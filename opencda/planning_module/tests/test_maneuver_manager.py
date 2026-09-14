@@ -210,6 +210,23 @@ class ManeuverManagerTests(unittest.TestCase):
             "lane_follow", "LANE_FOLLOW", False, True, 12.0, 12.0, True), "complete")
         self.assertFalse(manager.turn.active)
 
+    def test_new_maneuver_supersedes_post_turn_lifecycle(self):
+        manager = ManeuverManager()
+        manager.turn.decision = "intersection_turn_left"
+        manager.turn.phase = "post_turn"
+
+        action = manager.resolve_post_turn_phase(
+            "lane_change_right", "TARGET_LANE_STABILIZATION",
+            False, True, 4.0, 12.0, True,
+        )
+
+        self.assertEqual(action, "supersede")
+        self.assertFalse(manager.turn.active)
+        self.assertEqual(
+            manager.last_release["reason"],
+            "post_turn_superseded_by_maneuver",
+        )
+
     def test_new_lane_change_requires_geometry_and_handoff_before_turn(self):
         manager = ManeuverManager()
 
