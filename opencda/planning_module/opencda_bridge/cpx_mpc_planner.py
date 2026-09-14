@@ -3890,6 +3890,7 @@ class CPXMPCPlannerBridge:
         current_state: Sequence[float],
         destination_state: Sequence[float],
         lane_center_reference: Sequence[Mapping[str, object]],
+        committed_lane_change_tracking_active: bool = False,
     ):
         from opencda.planning_module.pipeline.reference_contract import (
             contract_from_config,
@@ -3955,6 +3956,9 @@ class CPXMPCPlannerBridge:
             contract=contract,
             check_destination_body_lateral=not bool(
                 lane_change_active or turn_active or recovery_reference_active
+            ),
+            check_first_lateral=not bool(
+                committed_lane_change_tracking_active and lane_change_active
             ),
         )
         if (

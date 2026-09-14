@@ -1138,6 +1138,41 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         self.assertTrue(result.valid, result.reason())
         self.assertGreater(result.destination_body_lateral_m, 1.5)
 
+    def test_candidate_contract_treats_committed_lane_change_offset_as_tracking(self):
+        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
+        bridge.config = {}
+        bridge.target_speed_mps = 3.0
+        bridge.mpc = types.SimpleNamespace(horizon_steps=4)
+        reference = [
+            {
+                "x_ref_m": float(index + 1),
+                "y_ref_m": 1.5,
+                "heading_rad": 0.0,
+                "lane_id": 2,
+                "speed_ref_mps": 2.0,
+            }
+            for index in range(4)
+        ]
+        arguments = {
+            "decision": "lane_change_left",
+            "lc_state": "EXECUTE_LANE_CHANGE_LEFT",
+            "current_lane_id": 1,
+            "speed_ref_mps": 2.0,
+            "stop_goal_active": False,
+            "current_state": [0.0, 0.0, 2.0, 0.0],
+            "destination_state": [4.0, 1.5, 2.0, 0.0, 2],
+            "lane_center_reference": reference,
+        }
+
+        candidate = bridge._validate_candidate_reference_contract(**arguments)
+        committed = bridge._validate_candidate_reference_contract(
+            **dict(arguments, committed_lane_change_tracking_active=True)
+        )
+
+        self.assertFalse(candidate.valid)
+        self.assertIn("first_lateral_out_of_contract", candidate.violations)
+        self.assertTrue(committed.valid, committed.reason())
+
     def test_fuses_local_and_cp_obstacles_with_source_priority_and_ttl(self):
         bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
         bridge.max_mpc_obstacles = 10

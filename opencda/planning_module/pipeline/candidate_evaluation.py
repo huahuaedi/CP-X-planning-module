@@ -362,6 +362,9 @@ class CandidateTrajectoryEvaluator:
             current_state=current_state,
             destination_state=destination,
             lane_center_reference=reference,
+            committed_lane_change_tracking_active=bool(
+                phase == "executing" and lifecycle.envelope_blocks
+            ),
         )
         intent = CandidateBehaviorIntent(
             name="committed_lane_change_continuation",
