@@ -984,7 +984,7 @@ class CandidateTrajectoryEvaluator:
 
 def mpc_cost_profile_for_behavior(
     *, behavior: str, planner_lc_state: str, planner_mode: str,
-    next_macro_maneuver: str
+    next_macro_maneuver: str, reference_tracking_mode: str = ""
 ) -> str:
     from opencda.planning_module.behavior_planner import (
         is_emergency_brake_decision,
@@ -1001,6 +1001,12 @@ def mpc_cost_profile_for_behavior(
         return "recovery"
     if state.startswith("PREPARE_LANE_CHANGE"):
         return "prepare_lane_change"
+    # The tracking objective follows the selected geometry, not merely the
+    # higher-level behavior label.  A pre-turn connector is intentionally
+    # published while behavior is still lane_follow; it must nevertheless
+    # use the turn tracking profile from its first curved sample.
+    if str(reference_tracking_mode or "").strip().lower() == "intersection_turn":
+        return "intersection_turn"
     if raw in {"intersection_turn_left", "intersection_turn_right"}:
         return "intersection_turn"
     if state.startswith("EXECUTE_LANE_CHANGE") or normalized in {"lane_change_left", "lane_change_right"}:

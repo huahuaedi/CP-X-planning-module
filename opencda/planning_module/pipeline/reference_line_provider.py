@@ -1064,6 +1064,7 @@ class ReferenceLineProvider(StableReferenceLineProvider):
                 "reference_pipeline_stage": "waypoint_turn",
                 "reference_pipeline_intent": str(decision),
                 "reference_pipeline_intent_mode": "intersection_turn",
+                "reference_tracking_mode": "intersection_turn",
                 "reference_pipeline_follow_global_route_lane": 1,
                 "reference_source": "admap_waypoint_turn",
                 "fallback_reason": "",
@@ -1117,6 +1118,7 @@ class ReferenceLineProvider(StableReferenceLineProvider):
                     + math.cos(float(request.ego_yaw_rad)) * dy_m
                 ),
                 "reference_source": "admap_current_lane_center_preturn",
+                "reference_tracking_mode": "lane_follow",
             })
 
         transition_arc_m = max(
@@ -1129,12 +1131,13 @@ class ReferenceLineProvider(StableReferenceLineProvider):
         )
         direction = str(request.turn_direction or "").strip().lower()
         transition_reference = []
+        transition_destination = []
         transition_reason = ""
         if float(upcoming_turn_distance_m) <= float(transition_arc_m):
             snapshot = self.snapshot(TURN)
             if snapshot.active and str(snapshot.maneuver_direction) != direction:
                 self.release(TURN, event="reset")
-            transition_reference, _unused_destination, transition_reason = (
+            transition_reference, transition_destination, transition_reason = (
                 self.turn_reference(replace(
                     request,
                     lock_master=True,
@@ -1148,18 +1151,30 @@ class ReferenceLineProvider(StableReferenceLineProvider):
                 sample["speed_mps"] = float(request.target_speed_mps)
         if transition_reference:
             reference = [dict(sample) for sample in transition_reference]
+            destination = list(
+                transition_destination or request.destination_state or ()
+            )
+            # ReferenceLineProvider owns the geometric target.  PREPARE_TURN
+            # remains longitudinally owned by SpeedPlanner, so retain its
+            # resolved speed while using the connector destination position,
+            # heading and lane identity.
+            if len(destination) >= 3:
+                destination[2] = float(request.target_speed_mps)
             diagnostics.update({
                 "reference_source": "admap_preturn_connector_transition",
+                "reference_tracking_mode": "intersection_turn",
                 "route_turn_reference_reason": str(transition_reason),
                 "lane_follow_turn_geometry_hold_reason": (
                     "lane_follow_to_turn_locked_master_window"
                 ),
             })
+        else:
+            destination = list(request.destination_state or ())
         return CandidateReferenceOverrideResult(
             samples=tuple(
                 MappingProxyType(dict(sample)) for sample in reference
             ),
-            destination_state=tuple(request.destination_state or ()),
+            destination_state=tuple(destination),
             diagnostics=MappingProxyType(diagnostics),
         )
 
@@ -1457,6 +1472,7 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             )
             if override.samples:
                 reference = override.mutable_samples()
+                destination = override.mutable_destination_state()
             diagnostics.update(dict(override.diagnostics))
 
         if decision in {"lane_change_left", "lane_change_right"} and keep_lane_reference:

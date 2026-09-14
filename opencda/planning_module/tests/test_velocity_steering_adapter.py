@@ -115,6 +115,24 @@ class VelocitySteeringAdapterTest(unittest.TestCase):
         self.assertEqual(control.throttle, 0.0)
         self.assertEqual(control.brake, 0.0)
 
+    def test_small_overspeed_inside_deadband_cannot_trigger_pid_brake(self):
+        adapter = OpenCDAVelocitySteeringAdapter(
+            self.manager, speed_deadband_mps=0.15
+        )
+        self.manager.controller.lon_run_step = lambda _target_speed_kmh: -1.0
+
+        control, reason = adapter.run_step(
+            command=VelocitySteeringCommand(2.2, 0.0),
+            actual_speed_mps=2.31,
+            sim_time_s=1.0,
+            max_steering_rad=0.6,
+            carla_module=_Carla,
+        )
+
+        self.assertEqual(reason, "opencda_pid_deadband_coast")
+        self.assertEqual(control.throttle, 0.0)
+        self.assertEqual(control.brake, 0.0)
+
     def test_stop_hold_uses_opencda_brake_limit(self):
         control, reason = self._run(
             VelocitySteeringCommand(0.0, 0.0, stop_goal_active=True),

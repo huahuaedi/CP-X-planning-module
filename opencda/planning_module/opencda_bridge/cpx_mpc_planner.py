@@ -646,7 +646,8 @@ class CPXMPCPlannerBridge:
             candidate_selection=candidate_selection_stage,
         )
         self.velocity_steering_adapter = OpenCDAVelocitySteeringAdapter(
-            self.vehicle_manager.controller
+            self.vehicle_manager.controller,
+            speed_deadband_mps=float(self.actuator_mapper.speed_deadband_mps),
         )
         self.mpc_command_extractor = MPCCommandExtractor(
             preview_time_s=float(
@@ -3309,6 +3310,9 @@ class CPXMPCPlannerBridge:
             behavior=str(decision),
             planner_lc_state=str(lc_state),
             planner_mode=str(planner_mode),
+            reference_tracking_mode=str(
+                reference_debug.get("reference_tracking_mode", "")
+            ),
             next_macro_maneuver=str(
                 planner_input_frame.planning.route.next_macro_maneuver
             ),
@@ -4664,6 +4668,7 @@ class CPXMPCPlannerBridge:
         planner_lc_state: str,
         planner_mode: str,
         next_macro_maneuver: str,
+        reference_tracking_mode: str = "",
         sim_time_s: float,
         nearest_obstacle_distance_m: Optional[float] = None,
         ego_speed_mps: float = 0.0,
@@ -4673,6 +4678,7 @@ class CPXMPCPlannerBridge:
             planner_lc_state=planner_lc_state,
             planner_mode=planner_mode,
             next_macro_maneuver=next_macro_maneuver,
+            reference_tracking_mode=reference_tracking_mode,
         )
         (
             self.active_mpc_cost_profile,

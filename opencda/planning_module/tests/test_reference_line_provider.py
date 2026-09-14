@@ -2,6 +2,7 @@ import pytest
 from types import SimpleNamespace
 
 from pipeline.behavior_decision import BehaviorDecision
+from pipeline.candidate_evaluation import mpc_cost_profile_for_behavior
 from pipeline.maneuver_manager import ManeuverManager
 
 from pipeline.reference_line_provider import (
@@ -10,6 +11,7 @@ from pipeline.reference_line_provider import (
     LANE_FOLLOW,
     POST_TURN,
     TURN,
+    CandidateReferenceBuildContext,
     ReferenceLineProvider,
     ReferenceLineRequest,
     TurnReferenceRequest,
@@ -432,8 +434,86 @@ def test_preturn_candidate_locks_connector_and_preserves_speed_owner():
     assert result.diagnostics["reference_source"] == (
         "admap_preturn_connector_transition"
     )
+    assert result.diagnostics["reference_tracking_mode"] == "intersection_turn"
     assert all(row["speed_ref_mps"] == pytest.approx(5.0) for row in result.samples)
+    assert result.destination_state[0] == pytest.approx(8.0)
+    assert result.destination_state[1] == pytest.approx(-1.0)
     assert result.destination_state[2] == pytest.approx(5.0)
+    assert result.destination_state[3] == pytest.approx(0.0)
+    assert result.destination_state[4] == 20
+
+
+def test_preturn_geometry_selects_turn_tracking_profile_before_behavior_switch():
+    assert mpc_cost_profile_for_behavior(
+        behavior="lane_follow",
+        planner_lc_state="LANE_KEEP",
+        planner_mode="NORMAL",
+        next_macro_maneuver="right",
+        reference_tracking_mode="intersection_turn",
+    ) == "intersection_turn"
+
+
+def test_candidate_intent_propagates_preturn_connector_destination():
+    provider = ReferenceLineProvider()
+    provider.preturn_lane_reference = lambda *_args, **_kwargs: (
+        _line(1.0)[:8], "current_lane"
+    )
+    provider.turn_reference = lambda request: (
+        _line(-1.0)[:8], [8.0, -1.0, 2.2, -0.4, 20], "turn_locked"
+    )
+    context = CandidateReferenceBuildContext(
+        map_planner=None,
+        local_map=SimpleNamespace(valid=True),
+        planner_config={"lane_follow_to_turn_reference_transition_arc_m": 12.0},
+        ego_pose={},
+        current_state=[0.0, 0.0, 5.0, 0.0],
+        ego_location=SimpleNamespace(x=0.0, y=0.0),
+        ego_yaw_rad=0.0,
+        ego_speed_mps=5.0,
+        route_points=(),
+        previous_reference=(),
+        previous_target_state=(),
+        behavior_runtime_config={},
+        baseline_decision="lane_follow",
+        baseline_target_lane_id=10,
+        baseline_speed_mps=5.0,
+        baseline_destination_state=[8.0, 1.0, 5.0, 0.0, 10],
+        baseline_reference=_line(1.0)[:8],
+        baseline_debug={},
+        current_lane_id=10,
+        route_optimal_lane_id=20,
+        route_reference_allowed=True,
+        route_reference_gate_reason="",
+        in_junction=False,
+        next_macro_maneuver="turn_right",
+        planner_mode="NORMAL",
+        lookahead_m=20.0,
+        horizon_steps=8,
+        dt_s=0.1,
+        reference_freeze_count=0,
+        sim_time_s=1.0,
+        stop_release_smooth_until_s=0.0,
+        authoritative_ego_waypoint=None,
+        route_revision="route-1",
+        map_epoch="admap",
+        upcoming_turn_direction="right",
+        upcoming_turn_distance_m=8.0,
+        lane_change_duration_s=4.0,
+        lane_change_duration_reason="",
+        lane_width_m=3.5,
+    )
+
+    result = provider.candidate_intent_reference(
+        intent=SimpleNamespace(
+            decision="lane_follow", target_lane_id=10, target_speed_mps=5.0
+        ),
+        context=context,
+        lane_change_state="idle",
+        geometry_plan=SimpleNamespace(step_m=0.5),
+        keep_lane_reference=(),
+    )
+
+    assert result.destination_state == pytest.approx((8.0, -1.0, 5.0, -0.4, 20))
 
 
 def test_modes_do_not_overwrite_each_other():

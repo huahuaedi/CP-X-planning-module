@@ -25,7 +25,7 @@ class OpenCDAVelocitySteeringAdapter:
     MPC steering command.
     """
 
-    def __init__(self, control_manager: Any):
+    def __init__(self, control_manager: Any, *, speed_deadband_mps: float = 0.0):
         if control_manager is None:
             raise ValueError("OpenCDA ControlManager is required")
         controller = getattr(control_manager, "controller", control_manager)
@@ -33,6 +33,7 @@ class OpenCDAVelocitySteeringAdapter:
             raise TypeError("OpenCDA controller must provide lon_run_step()")
         self.control_manager = control_manager
         self.controller = controller
+        self.speed_deadband_mps = max(0.0, float(speed_deadband_mps))
 
     def run_step(
         self,
@@ -64,10 +65,30 @@ class OpenCDAVelocitySteeringAdapter:
             # future external platform adapter.
             self.controller.current_speed = 3.6 * actual_speed_mps
             pid_output = float(self.controller.lon_run_step(target_speed_kmh))
+            speed_error_mps = float(target_speed_mps) - float(actual_speed_mps)
             if target_speed_mps <= 0.0 and actual_speed_mps <= 0.05:
                 throttle = 0.0
                 brake = min(0.3, float(self.controller.max_brake))
                 reason = "opencda_pid_stop_hold"
+            elif (
+                not bool(command.stop_goal_active)
+                and abs(float(speed_error_mps)) <= float(self.speed_deadband_mps)
+            ):
+                # A preview target changes every planning tick.  Inside the
+                # configured tracking band, its derivative must not become a
+                # physical brake pulse.  Preserve positive PID effort needed
+                # to counter drag, but coast instead of applying negative
+                # effort until the measured error leaves the band.
+                throttle = min(
+                    max(0.0, float(pid_output)),
+                    float(self.controller.max_throttle),
+                )
+                brake = 0.0
+                reason = (
+                    "opencda_pid_deadband_hold"
+                    if float(throttle) > 0.0
+                    else "opencda_pid_deadband_coast"
+                )
             elif target_speed_mps > actual_speed_mps:
                 # OpenCDA's longitudinal PID contains a derivative term.  A
                 # downward update of an MPC preview setpoint can therefore
