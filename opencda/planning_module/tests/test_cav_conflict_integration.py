@@ -93,6 +93,10 @@ class CavConflictIntegrationTests(unittest.TestCase):
 
         self.assertLess(capped, 18.0)           # did not reach the crossing point
         self.assertLess(capped, free - 2.0)     # and clearly less than unyielded
+        self.assertLess(
+            float(np.max(np.abs(np.asarray(mpc._last_x_solution)[:, 0]))),
+            0.25,
+        )  # yielding remains longitudinal; it cannot escape across the lane
 
     def test_ego_opens_a_gap_for_a_cooperative_merging_cav(self):
         mpc = _mpc(corridor_enabled=True)

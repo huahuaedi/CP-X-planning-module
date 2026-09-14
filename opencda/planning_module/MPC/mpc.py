@@ -2917,6 +2917,9 @@ class MPC:
             r for r in list(corridor_rows or [])
             if 1 <= int(_row_attr(r, "stage")) <= int(self.horizon_steps)
         ]
+        corridor_stages = {
+            int(_row_attr(row, "stage")) for row in corridor_row_list
+        }
         corridor_term_active = (
             bool(getattr(self, "corridor_constraint_enabled", False))
             and len(corridor_row_list) > 0
@@ -3164,7 +3167,8 @@ class MPC:
                     if lane_heading_weight > 0.0:
                         add_tracking(index.state_index(k, 3), lane_heading_weight, lane_heading_ref_aligned)
 
-                if corridor_term_active:
+                corridor_stage_active = int(k) in corridor_stages
+                if corridor_stage_active:
                     # A longitudinal progress cap must not be satisfiable by
                     # rotating across the Behavior-selected reference.  The
                     # nominal reference may itself turn or change lanes; this
@@ -3207,7 +3211,7 @@ class MPC:
                     right_slack_idx = index.road_boundary_right_slack_index(k)
                     road_weight = float(
                         self.corridor_lane_boundary_slack_weight
-                        if corridor_term_active
+                        if corridor_stage_active
                         else getattr(
                             self,
                             "road_boundary_weight",
@@ -3240,7 +3244,7 @@ class MPC:
                     )
                     road_max_slack_m = float(
                         self.corridor_max_lane_boundary_slack_m
-                        if corridor_term_active
+                        if corridor_stage_active
                         else getattr(self, "road_boundary_max_slack_m", np.inf)
                     )
                     road_slack_upper = (
