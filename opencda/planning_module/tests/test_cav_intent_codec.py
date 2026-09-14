@@ -32,6 +32,7 @@ def test_codec_roundtrip():
     intent = build_ego_cav_intent(
         actor_id=3, position_xy=(12.0, -1.5), heading_rad=1.57, speed_mps=8.0,
         claim=_claim(6.0), planned_states=[[12.0, -1.5, 8.0, 1.57], [12.1, 0.4, 8.0, 1.57]],
+        length_m=4.8, width_m=2.0,
     )
     payload = cav_intent_to_payload(intent)
     assert payload["schema"] == SCHEMA_VERSION
@@ -43,6 +44,8 @@ def test_codec_roundtrip():
     assert back.claim.kind == "lane_change"
     assert back.claim.phase == "committed"
     assert len(back.planned_path) == 2
+    assert back.length_m == 4.8
+    assert back.width_m == 2.0
 
 
 def test_from_payload_rejects_garbage():

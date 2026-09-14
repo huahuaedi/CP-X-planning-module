@@ -1,3 +1,5 @@
+import math
+
 import pytest
 
 from pipeline.conflict_classifier import (
@@ -117,6 +119,22 @@ def test_crossing_yield_caps_s_hi_near_conflict_point_only_in_the_window():
     assert cor.s_hi[10] == pytest.approx(30.0 - 4.0 - 2.45)
     assert cor.s_hi[0] >= _BIG      # before the window: uncapped
     assert cor.s_hi[25] >= _BIG     # after the window: uncapped
+
+
+def test_crossing_cap_reserves_the_agents_projected_footprint():
+    # The peer crosses a +x ego reference at 90 degrees. Its 2 m width, not
+    # its 4.8 m length, occupies the reference direction: reserve 1 m more
+    # centre-to-centre clearance than the legacy point-agent contract.
+    peer = {"x": 30.0, "v": 8.0, "psi": 0.5 * math.pi,
+            "length_m": 4.8, "width_m": 2.0}
+    cor = build_longitudinal_corridor(
+        REF, EGO,
+        [(peer, _tag("x", CROSSING, s=30.0, t=1.0), _assign("yield"))],
+        CorridorParams(horizon_steps=30, dt_s=0.1,
+                       crossing_clearance_time_s=0.5,
+                       conflict_stop_buffer_m=4.0),
+    )
+    assert cor.s_hi[10] == pytest.approx(30.0 - 4.0 - 2.45 - 1.0)
 
 
 def test_crossing_proceed_adds_no_bound():

@@ -80,6 +80,8 @@ def _cav_to_agent_snapshot(cav: CavIntent) -> dict:
         "y": float(cav.position_xy[1]),
         "v": float(cav.speed_mps),
         "psi": float(cav.heading_rad),
+        "length_m": float(cav.length_m),
+        "width_m": float(cav.width_m),
         "cooperative": bool(cav.cooperative),
         "predicted_trajectory": track,
         "trajectory_source": "broadcast" if track else "current_pose",

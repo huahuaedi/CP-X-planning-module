@@ -304,6 +304,50 @@ def _agent_station_series(
     return out
 
 
+def _reference_heading_at_station(poly: Sequence[XY], station_m: float) -> float:
+    """Return the local reference tangent at an arc-length station."""
+
+    target = max(0.0, float(station_m))
+    traversed = 0.0
+    last_heading = 0.0
+    for a, b in zip(poly[:-1], poly[1:]):
+        dx = float(b[0]) - float(a[0])
+        dy = float(b[1]) - float(a[1])
+        segment_length = math.hypot(dx, dy)
+        if segment_length <= 1.0e-9:
+            continue
+        last_heading = math.atan2(dy, dx)
+        if target <= traversed + segment_length:
+            return last_heading
+        traversed += segment_length
+    return last_heading
+
+
+def _projected_agent_half_extent_m(
+    agent: Mapping[str, Any], poly: Sequence[XY], conflict_station_m: float,
+) -> float:
+    """Project an oriented agent rectangle onto the reference tangent.
+
+    Stage-C station describes vehicle centres.  A crossing stop line must
+    therefore reserve not only the ego front half-length but also the part of
+    the other road user's body occupying the ego path.  Missing dimensions
+    deliberately return zero for compatibility with legacy perception/V2X
+    messages.
+    """
+
+    length_m = max(0.0, _f(agent, "length_m", "length", default=0.0))
+    width_m = max(0.0, _f(agent, "width_m", "width", default=0.0))
+    if length_m <= 0.0 or width_m <= 0.0:
+        return 0.0
+    agent_heading = _f(agent, "psi", "heading_rad", "yaw_rad", default=0.0)
+    reference_heading = _reference_heading_at_station(poly, conflict_station_m)
+    delta = agent_heading - reference_heading
+    return (
+        0.5 * length_m * abs(math.cos(delta))
+        + 0.5 * width_m * abs(math.sin(delta))
+    )
+
+
 def build_longitudinal_corridor(
     reference_samples: Sequence[Any],
     ego_snapshot: Mapping[str, Any],
@@ -450,6 +494,9 @@ def build_longitudinal_corridor(
                 float(tag.conflict_s_m)
                 - max(0.0, float(p.conflict_stop_buffer_m))
                 - max(0.0, float(p.ego_half_length_m))
+                - _projected_agent_half_extent_m(
+                    agent, poly, float(tag.conflict_s_m)
+                )
             )
             for k in range(lo_k, hi_k + 1):
                 _cap(k, centre_stop_station, tag.agent_id)

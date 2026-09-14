@@ -69,6 +69,8 @@ def build_ego_cav_intent(
     valid_for_s: float = 0.5,
     sequence: int = 0,
     probability: float = 1.0,
+    length_m: float = 0.0,
+    width_m: float = 0.0,
 ) -> CavIntent:
     """Assemble the ego's broadcast.
 
@@ -101,6 +103,8 @@ def build_ego_cav_intent(
         valid_until_s=float(generated_at_s) + max(0.0, float(valid_for_s)),
         sequence=max(0, int(sequence)),
         probability=min(1.0, max(0.0, float(probability))),
+        length_m=max(0.0, float(length_m)),
+        width_m=max(0.0, float(width_m)),
     )
 
 
@@ -121,6 +125,8 @@ def cav_intent_to_payload(intent: CavIntent) -> dict:
         "valid_until_s": float(intent.valid_until_s),
         "sequence": int(intent.sequence),
         "probability": float(intent.probability),
+        "length_m": float(intent.length_m),
+        "width_m": float(intent.width_m),
         "claim": {
             "kind": str(c.kind),
             "resource_id": str(c.resource_id),
@@ -200,6 +206,8 @@ def cav_intent_from_payload(payload: Mapping[str, Any]) -> Optional[CavIntent]:
         probability=min(1.0, max(0.0, _f(
             payload, "probability", "confidence", default=1.0
         ))),
+        length_m=max(0.0, _f(payload, "length_m", "length", default=0.0)),
+        width_m=max(0.0, _f(payload, "width_m", "width", default=0.0)),
     )
 
 

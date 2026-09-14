@@ -150,6 +150,11 @@ class CavIntent:
     valid_until_s: float = float("inf")
     sequence: int = 0
     probability: float = 1.0
+    # Physical footprint is part of the prediction contract.  Zero means an
+    # older sender did not publish dimensions; consumers must then preserve
+    # the legacy point-object behaviour rather than inventing a vehicle size.
+    length_m: float = 0.0
+    width_m: float = 0.0
 
 
 @dataclass(frozen=True)

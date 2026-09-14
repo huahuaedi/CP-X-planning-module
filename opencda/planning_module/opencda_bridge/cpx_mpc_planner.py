@@ -3410,6 +3410,10 @@ class CPXMPCPlannerBridge:
             else [[float(s[0]), float(s[1]), float(s[2]), float(s[3])] for s in states]
         )
         self._cav_intent_sequence += 1
+        extent = getattr(
+            getattr(self.vehicle_manager.vehicle, "bounding_box", None),
+            "extent", None,
+        )
         intent = build_ego_cav_intent(
             actor_id=int(getattr(self.vehicle_manager.vehicle, "id", -1)),
             position_xy=(float(ego_location.x), float(ego_location.y)),
@@ -3421,6 +3425,8 @@ class CPXMPCPlannerBridge:
             generated_at_s=float(sim_time_s),
             valid_for_s=float(self.config.get("cav_intent_valid_for_s", 0.5)),
             sequence=int(self._cav_intent_sequence),
+            length_m=2.0 * float(getattr(extent, "x", 0.0)),
+            width_m=2.0 * float(getattr(extent, "y", 0.0)),
         )
         self.last_cav_intent_payload = cav_intent_to_payload(intent)
 
