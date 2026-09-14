@@ -172,7 +172,8 @@ class ManeuverManager:
 
     def begin_lane_change(self, option, phase, source_lane_id, target_lane_id,
                           target_speed_mps, completion_reference,
-                          committed_at_s=None, authorization_source=""):
+                          committed_at_s=None, authorization_source="",
+                          progress_pairs=None):
         state = self.lane_change
         state.reset(preserve_completed_option=True)
         state.option, state.phase = str(option), str(phase or "executing")
@@ -180,6 +181,14 @@ class ManeuverManager:
         state.target_speed_mps = max(0.0, float(target_speed_mps))
         # Diagnostic completion snapshot only; never returned as control geometry.
         state.completion_reference = [dict(x) for x in completion_reference or []]
+        # Progress is a measured geometric state, not the nominal d(s) tag on
+        # the reference.  Keep the station-aligned source/target pairs that
+        # were accepted with this commitment so every later window measures
+        # where the vehicle actually is between the two corridors.
+        state.progress_pairs = [
+            (dict(source), dict(target))
+            for source, target in list(progress_pairs or [])
+        ]
         if committed_at_s is not None:
             state.committed_at_s = float(committed_at_s)
         state.authorization_source = str(authorization_source or "")

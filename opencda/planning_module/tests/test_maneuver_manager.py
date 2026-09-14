@@ -4,6 +4,22 @@ from pipeline.maneuver_manager import ManeuverManager
 
 
 class ManeuverManagerTests(unittest.TestCase):
+    def test_begin_lane_change_owns_station_aligned_progress_pairs(self):
+        manager = ManeuverManager()
+        pairs = [
+            ({"x_ref_m": 1.0, "y_ref_m": 0.0},
+             {"x_ref_m": 1.0, "y_ref_m": 3.5}),
+        ]
+
+        state = manager.begin_lane_change(
+            "lane_change_left", "executing", 1, 2, 8.0, [],
+            progress_pairs=pairs,
+        )
+        pairs[0][0]["y_ref_m"] = 99.0
+
+        self.assertEqual(len(state.progress_pairs), 1)
+        self.assertEqual(state.progress_pairs[0][0]["y_ref_m"], 0.0)
+
     def test_lane_change_identity_is_installed_atomically(self):
         manager = ManeuverManager()
         state = manager.begin_lane_change(

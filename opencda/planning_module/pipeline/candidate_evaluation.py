@@ -516,6 +516,24 @@ class CandidateTrajectoryEvaluator:
                 ego_y_m=float(current_state[1]),
             )
             if installed:
+                progress_pairs = []
+                for sample in selected_reference:
+                    required = (
+                        "lane_change_source_x_m", "lane_change_source_y_m",
+                        "lane_change_target_x_m", "lane_change_target_y_m",
+                    )
+                    if not all(key in sample for key in required):
+                        continue
+                    progress_pairs.append((
+                        {
+                            "x_ref_m": float(sample["lane_change_source_x_m"]),
+                            "y_ref_m": float(sample["lane_change_source_y_m"]),
+                        },
+                        {
+                            "x_ref_m": float(sample["lane_change_target_x_m"]),
+                            "y_ref_m": float(sample["lane_change_target_y_m"]),
+                        },
+                    ))
                 lifecycle = maneuver_manager.begin_lane_change(
                     option=route_option,
                     phase="executing",
@@ -529,7 +547,15 @@ class CandidateTrajectoryEvaluator:
                             "lane_change_authorization_source", ""
                         )
                     ),
+                    progress_pairs=progress_pairs,
                 )
+                # The stored rollout belongs to the previous reference mode.
+                # Reusing it as the nonlinear seed after a lane-change master
+                # is installed can trap sequential QP iterations around the
+                # old lane-follow homotopy even though the new QP is feasible.
+                clear_seed = getattr(mpc, "clear_previous_solution_seed", None)
+                if callable(clear_seed):
+                    clear_seed()
                 # The accepted nominal trajectory already carries the
                 # station-aligned source and target centre points.  Build the
                 # continuous two-lane road envelope once at commitment; MPC
