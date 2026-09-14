@@ -3,12 +3,13 @@ base_config: cpx_lane_change_2lanefree.yaml
 description: |-
   Two-CAV cooperative merge experiment on 2lane_freeway_simplified.
 
-  Both CAVs start in lane y=8.3 behind one slow traffic vehicle and may use
-  the clear adjacent lane y=4.8. The faster rear CAV closes on the leader, so
-  both can claim the same passing corridor. With cooperation enabled they
+  Both CAVs start in lane y=8.3 with route destinations in the adjacent lane
+  y=4.8. Their route-required changes therefore claim the same transition at
+  overlapping AD-map station intervals. With cooperation enabled they
   exchange MPC trajectories and ResourceClaims: the deterministic winner
   proceeds while the loser opens an RSS longitudinal gap. The winner's
-  latched pass side becomes QP homotopy half-spaces.
+  receives a longitudinal make-gap corridor; pass-side half-spaces remain
+  reserved for crossing/oncoming conflicts.
 
   The baseline inherits this exact physical setup and changes only
   cav_conflict_enabled and artifact directories. Use
@@ -16,15 +17,13 @@ description: |-
 
 
 cpx_mature:
-  max_ticks: 900
+  max_ticks: 1200
   destination_tolerance_m: 6.0
   # Preserve both trajectories through the complete experiment.
   completion_mode: all_cavs
 
 carla_traffic_manager:
-  vehicle_list:
-    - spawn_position: [-205.0, 8.3, 0.3, 0, 0, 0]
-      vehicle_speed_perc: 90
+  vehicle_list: []
 
 vehicle_base:
   behavior:
@@ -32,8 +31,10 @@ vehicle_base:
     ignore_traffic_light: true
     overtake_allowed: false
   planner:
-    # Both CAVs may claim the same adjacent-lane passing corridor.
-    full_allow_opportunistic_lane_change: true
+    # This is a resource-arbitration test, so route topology is the sole
+    # maneuver trigger. Opportunistic overtaking would create an unrelated,
+    # earlier claim and make overlap dependent on traffic timing.
+    full_allow_opportunistic_lane_change: false
     full_candidate_pipeline_enabled: true
     candidate_mpc_probe_enabled: true
     # master switch: peer intents -> classify -> assign -> corridor -> QP row.
@@ -44,7 +45,7 @@ scenario:
   single_cav_list:
     - name: cav1
       spawn_position: [-300.0, 8.3, 0.3, 0, 0, 0]
-      destination: [-70.0, 8.3, 0.3]
+      destination: [-70.0, 4.8, 0.3]
       v2x:
         enabled: true
         communication_range: 80
@@ -57,10 +58,10 @@ scenario:
         debug_output_dir: opencda/planning_module/opencda_bridge/debug_two_cav_merge_cav1
 
     - name: cav2
-      # Keep the faster follower inside the 45 m physical relevance horizon
-      # while both vehicles' opportunistic lane-change claims overlap.
-      spawn_position: [-315.0, 8.3, 0.3, 0, 0, 0]
-      destination: [-70.0, 8.3, 0.3]
+      # Twelve metres preserves a safe spawn gap while keeping both claim
+      # intervals and prediction horizons overlapped.
+      spawn_position: [-312.0, 8.3, 0.3, 0, 0, 0]
+      destination: [-82.0, 4.8, 0.3]
       v2x:
         enabled: true
         communication_range: 80
@@ -69,5 +70,5 @@ scenario:
           debug_trajectory: true
           debug: true
       planner:
-        target_speed_mps: 10.0
+        target_speed_mps: 8.0
         debug_output_dir: opencda/planning_module/opencda_bridge/debug_two_cav_merge_cav2
