@@ -306,9 +306,6 @@ def build_longitudinal_corridor(
     ego_v = max(0.0, _f(ego_snapshot, "v", "speed", "speed_mps"))
     ego_x = _f(ego_snapshot, "x", "x_m")
     ego_y = _f(ego_snapshot, "y", "y_m")
-    ego_heading = _f(ego_snapshot, "psi", "heading_rad", "yaw")
-    ego_tx, ego_ty = math.cos(ego_heading), math.sin(ego_heading)
-
     # Per-stage floor: the least station reachable by braking at the MPC's
     # own hard limit, starting now. A cap below this is not a row Stage D
     # can honor honestly (see _min_reachable_station_m); flooring it there
@@ -318,6 +315,13 @@ def build_longitudinal_corridor(
         _min_reachable_station_m(ego_v, p.max_braking_mps2, k * dt)
         for k in range(n + 1)
     ]
+
+    # Ego's own unconstrained (constant-velocity) forward projection, used
+    # only to test whether a currently-behind agent's predicted station has
+    # overtaken ego by stage k -- the same nominal-progress approximation
+    # cav_conflict_pipeline.py uses when reducing multimodal corridors.
+    ego_s0 = project_to_extended_polyline(ego_x, ego_y, poly)[1]
+    ego_nominal_station = [ego_s0 + ego_v * k * dt for k in range(n + 1)]
 
     def _cap(k: int, value: float, agent_id: str) -> None:
         floor = braking_floor[k]
@@ -340,10 +344,13 @@ def build_longitudinal_corridor(
         agent_v = max(0.0, _f(agent, "v", "speed", "speed_mps"))
         gap = longitudinal_safe_distance(ego_v, agent_v, rss) + p.follow_extra_buffer_m
         station = _agent_station_series(agent, poly, n + 1)
-        agent_starts_behind = (
-            (_f(agent, "x", "x_m") - ego_x) * ego_tx
-            + (_f(agent, "y", "y_m") - ego_y) * ego_ty
-        ) < 0.0
+        # Longitudinal ordering belongs to this corridor's reference
+        # coordinate.  A body-frame dot product disagrees with station near
+        # turns and during lane-change heading transients, which can activate
+        # a rear-agent cap before that agent actually passes ego's path.
+        agent_starts_behind = bool(
+            station and float(station[0]) < float(ego_s0) - 1.0e-6
+        )
 
         # A negotiated make-gap role is not ordinary following: it is the
         # cooperative longitudinal contract and therefore owns a corridor
@@ -368,12 +375,7 @@ def build_longitudinal_corridor(
                         _cap(k, station[k] - gap, tag.agent_id)
             continue
 
-        if tag.tag == CUT_IN:
-            # A rear vehicle owns its approach to the lead vehicle. Giving the
-            # lead vehicle an upper bound behind that rear vehicle reverses
-            # longitudinal ordering and lets the QP evade the cap laterally.
-            if agent_starts_behind:
-                continue
+        if tag.tag in (CUT_IN, MERGE):
             # A cooperative cav that lost the arbitration (role proceed) is
             # expected to yield to ego, so ego takes no bound from it.
             if proceed and not imminent:
@@ -381,9 +383,23 @@ def build_longitudinal_corridor(
             start = 0
             if tag.conflict_t_s is not None:
                 start = max(0, int(tag.conflict_t_s / dt))
-            for k in range(start, n + 1):
-                if k < len(station):
-                    _cap(k, station[k] - gap, tag.agent_id)
+            if agent_starts_behind:
+                # A rear vehicle owns its approach to the lead vehicle:
+                # capping ego behind a point that is itself still behind ego
+                # reverses longitudinal ordering and lets the QP evade the
+                # cap laterally instead of admitting it. But "starts behind"
+                # is only true at k=0 -- a fast cut-in can still overtake
+                # ego's own unconstrained path within the horizon, and from
+                # the stage it does, it is exactly the lead vehicle this
+                # branch exists to cap. Test each stage on its own station,
+                # not the single snapshot at k=0.
+                for k in range(start, n + 1):
+                    if k < len(station) and station[k] > ego_nominal_station[k]:
+                        _cap(k, station[k] - gap, tag.agent_id)
+            else:
+                for k in range(start, n + 1):
+                    if k < len(station):
+                        _cap(k, station[k] - gap, tag.agent_id)
 
         elif tag.tag in (CROSSING, ONCOMING):
             if ((proceed and not imminent)
@@ -393,23 +409,6 @@ def build_longitudinal_corridor(
             hi_k = min(n, int((tag.conflict_t_s + p.crossing_clearance_time_s) / dt))
             for k in range(lo_k, hi_k + 1):
                 _cap(k, float(tag.conflict_s_m) - p.conflict_stop_buffer_m, tag.agent_id)
-
-        elif tag.tag == MERGE:
-            if agent_starts_behind:
-                continue
-            # Without a valid cooperative assignment, MERGE still needs a
-            # safety owner.  Cap progress behind the predicted merge station;
-            # a later CUT_IN classification will naturally continue the same
-            # constraint.  Explicit proceed may skip it until safety becomes
-            # imminent.
-            if proceed and not imminent:
-                continue
-            start = 0
-            if tag.conflict_t_s is not None:
-                start = max(0, int(tag.conflict_t_s / dt))
-            for k in range(start, n + 1):
-                if k < len(station):
-                    _cap(k, station[k] - gap, tag.agent_id)
 
     cor.clamp_and_check()
     return cor

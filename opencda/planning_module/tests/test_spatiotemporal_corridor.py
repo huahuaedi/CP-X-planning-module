@@ -1,5 +1,8 @@
+import pytest
+
 from pipeline.conflict_classifier import (
     CROSSING,
+    CUT_IN,
     FOLLOW,
     MERGE,
     ConflictTag,
@@ -162,6 +165,51 @@ def test_rear_merge_cannot_reverse_lead_vehicle_longitudinal_order():
         REF, EGO, [(rear, _tag("rear", MERGE, s=12.0, t=1.5), None)], P
     )
     assert all(h >= _BIG for h in cor.s_hi)
+
+
+@pytest.mark.parametrize("conflict_tag", [CUT_IN, MERGE])
+def test_rear_conflict_is_capped_once_it_overtakes_egos_own_path(
+    conflict_tag,
+):
+    # "Starts behind" was a single snapshot at k=0 that exempted the whole
+    # horizon -- a fast cut-in starting just behind ego still overtakes
+    # ego's own unconstrained (constant-velocity) path partway through a
+    # 2.0 s horizon and must pick up a cap from the stage that happens,
+    # not never. EGO is at x=0, v=10 -> nominal station 1.0*k. This agent
+    # starts 5 m behind at 16 m/s (station -5+1.6*k), crossing ego's
+    # nominal path at k = 5/0.6 ~= 8.33, i.e. stage 9.
+    agent = {
+        "x": -5.0, "y": 0.0, "v": 16.0,
+        "predicted_trajectory": [
+            {"x": -5.0 + 1.6 * k, "y": 0.0} for k in range(21)
+        ],
+    }
+    cor = build_longitudinal_corridor(
+        REF, EGO, [(agent, _tag("agent", conflict_tag), None)], P
+    )
+    for k in range(0, 9):
+        assert cor.s_hi[k] >= _BIG, f"stage {k}: still behind, must not be capped"
+    for k in range(9, 21):
+        assert cor.s_hi[k] < _BIG, f"stage {k}: has overtaken ego's own path, must be capped"
+        assert cor.binding[k] == "agent"
+
+
+def test_rear_ordering_uses_reference_station_not_transient_ego_heading():
+    agent = {
+        "x": -5.0, "y": 0.0, "v": 16.0,
+        "predicted_trajectory": [
+            {"x": -5.0 + 1.6 * k, "y": 0.0} for k in range(21)
+        ],
+    }
+    # Ego heading is temporarily perpendicular to the reference, as can
+    # happen at a reference handoff. In body coordinates the agent is neither
+    # ahead nor behind; its reference station still unambiguously starts rear.
+    ego = {**EGO, "psi": 0.5 * 3.141592653589793}
+    cor = build_longitudinal_corridor(
+        REF, ego, [(agent, _tag("agent", CUT_IN), None)], P
+    )
+    assert all(cor.s_hi[k] >= _BIG for k in range(0, 9))
+    assert all(cor.s_hi[k] < _BIG for k in range(9, 21))
 
 
 def test_unassigned_merge_has_a_safety_corridor_owner():
