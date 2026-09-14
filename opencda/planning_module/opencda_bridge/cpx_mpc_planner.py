@@ -1731,7 +1731,19 @@ class CPXMPCPlannerBridge:
                 mpc_object_snapshots=list(mpc_object_snapshots or []),
                 mpc_rows=list(cav_constraint_rows or ()),
                 cav_diagnostics=dict(cav_diagnostics or {}),
+                prev_x_solution=getattr(self.mpc, "_last_x_solution", None),
                 prev_u_solution=getattr(self.mpc, "_last_u_solution", None),
+                mpc_runtime_state={
+                    **(
+                        self.mpc._capture_mode_cost_state()
+                        if hasattr(self.mpc, "_capture_mode_cost_state")
+                        else {}
+                    ),
+                    "horizon_steps": int(getattr(self.mpc, "horizon_steps", 0)),
+                    "active_cost_profile_name": str(getattr(
+                        self.mpc, "active_cost_profile_name", "base"
+                    )),
+                },
                 mpc_config_path=str(self.config.get("mpc_config_path", "") or "")
                 or None,
             )

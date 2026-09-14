@@ -94,7 +94,9 @@ def dump_execute_mpc_frame(
     mpc_rows: Sequence[Any],
     cav_diagnostics: Optional[Mapping[str, Any]] = None,
     corridor: Any = None,
+    prev_x_solution: Any = None,
     prev_u_solution: Any = None,
+    mpc_runtime_state: Optional[Mapping[str, Any]] = None,
     mpc_config_path: Optional[str] = None,
 ) -> Optional[Path]:
     """Serialize this tick if the window is armed and the cap is not hit."""
@@ -120,12 +122,16 @@ def dump_execute_mpc_frame(
         s_hi = [float(v) for v in getattr(corridor, "s_hi", []) or []]
         binding = [str(v) for v in getattr(corridor, "binding", []) or []]
 
-    prev_u = None
-    if prev_u_solution is not None:
+    def _matrix(value):
+        if value is None:
+            return None
         try:
-            prev_u = [[float(c) for c in row] for row in list(prev_u_solution)]
+            return [[float(c) for c in row] for row in list(value)]
         except TypeError:
-            prev_u = None
+            return None
+
+    prev_x = _matrix(prev_x_solution)
+    prev_u = _matrix(prev_u_solution)
 
     capture = FrameCapture(
         tick=-1,
@@ -148,7 +154,9 @@ def dump_execute_mpc_frame(
         corridor_s_hi=s_hi,
         corridor_binding=binding,
         mpc_rows=_rows_to_dicts(mpc_rows),
+        prev_x_solution=prev_x,
         prev_u_solution=prev_u,
+        mpc_runtime_state=dict(mpc_runtime_state or {}),
         mpc_config_path=mpc_config_path,
     )
     path = out_dir / f"frame_t{float(sim_time_s):09.3f}.json"

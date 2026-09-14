@@ -124,7 +124,13 @@ class FrameCapture:
     mpc_rows: List[Dict[str, Any]] = field(default_factory=list)
 
     # Previous tick's control solution, for a faithful warm start.
+    prev_x_solution: Optional[List[List[float]]] = None
     prev_u_solution: Optional[List[List[float]]] = None
+
+    # Mutable MPC state that changes with behavior-mode blending.  Capturing
+    # only mpc.yaml is insufficient: the live optimizer may have a different
+    # horizon and effective weights after many ticks of profile blending.
+    mpc_runtime_state: Dict[str, Any] = field(default_factory=dict)
 
     # MPC config. ``mpc_config`` inline wins; else ``mpc_config_path``; else
     # the repo default MPC/mpc.yaml.
@@ -464,8 +470,45 @@ def replay(
     )
     mpc = MPC(cfg["mpc"], cfg.get("road", {}))
 
-    if warm_start and capture.prev_u_solution:
-        mpc._last_u_solution = np.asarray(capture.prev_u_solution, dtype=float)
+    runtime = dict(capture.mpc_runtime_state or {})
+    numeric_attributes = {
+        "w_attractive": ("safety_cost", "w_safe"),
+        "q_x": ("comfort_cost", "qx"),
+        "q_y": ("comfort_cost", "qy"),
+        "q_v": ("comfort_cost", "qv"),
+        "q_psi": ("comfort_cost", "qpsi"),
+        "w_control": ("comfort_cost", "w_comf"),
+        "q_a": ("comfort_cost", "qa"),
+        "q_delta": ("comfort_cost", "qdelta"),
+        "lane_center_w0": (None, "lane_center_follow_weight"),
+        "lane_center_xy_w0": (None, "lane_center_follow_xy_weight"),
+        "lane_center_q_psi": (None, "lane_center_follow_qpsi"),
+        "road_boundary_w": (None, "road_boundary_weight"),
+        "road_boundary_margin_m": (None, "road_boundary_margin_m"),
+        "road_boundary_max_slack_m": (None, "road_boundary_max_slack_m"),
+        "road_envelope_w": (None, "road_envelope_weight"),
+        "road_envelope_max_slack_m": (None, "road_envelope_max_slack_m"),
+        "speed_soft_constraint_w": (None, "speed_soft_constraint_weight"),
+        "speed_soft_max_slack_mps": (None, "speed_soft_max_slack_mps"),
+    }
+    for key, (owner_name, attribute_name) in numeric_attributes.items():
+        if key not in runtime:
+            continue
+        owner = mpc if owner_name is None else getattr(mpc, owner_name)
+        setattr(owner, attribute_name, float(runtime[key]))
+    if "horizon_steps" in runtime:
+        mpc.horizon_steps = max(1, int(runtime["horizon_steps"]))
+        mpc.horizon_s = float(mpc.horizon_steps) * float(mpc.dt_s)
+    if runtime.get("active_cost_profile_name"):
+        mpc.active_cost_profile_name = str(runtime["active_cost_profile_name"])
+
+    if warm_start and capture.prev_x_solution and capture.prev_u_solution:
+        previous_x = np.asarray(capture.prev_x_solution, dtype=float)
+        previous_u = np.asarray(capture.prev_u_solution, dtype=float)
+        mpc._last_x_solution = previous_x.copy()
+        mpc._last_u_solution = previous_u.copy()
+        mpc._previous_x_solution = previous_x.copy()
+        mpc._previous_u_solution = previous_u.copy()
     else:
         if hasattr(mpc, "clear_previous_solution_seed"):
             mpc.clear_previous_solution_seed()

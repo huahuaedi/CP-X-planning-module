@@ -185,6 +185,16 @@ def test_replay_single_combo_baseline(divergence_capture):
 
 
 def test_capture_json_round_trip(divergence_capture, tmp_path: Path):
+    divergence_capture.prev_x_solution = [
+        [0.0, 0.0, 9.0, math.pi / 2.0],
+        [0.0, 0.9, 9.0, math.pi / 2.0],
+    ]
+    divergence_capture.prev_u_solution = [[0.0, 0.0]]
+    divergence_capture.mpc_runtime_state = {
+        "horizon_steps": 20,
+        "active_cost_profile_name": "execute_lane_change",
+        "q_delta": 160.0,
+    }
     path = divergence_capture.to_json(tmp_path / "frame.json")
     loaded = FrameCapture.from_json(path)
     assert loaded.tick == divergence_capture.tick
@@ -192,6 +202,9 @@ def test_capture_json_round_trip(divergence_capture, tmp_path: Path):
     assert len(loaded.pre_publication_reference) == len(
         divergence_capture.pre_publication_reference
     )
+    assert loaded.prev_x_solution == divergence_capture.prev_x_solution
+    assert loaded.prev_u_solution == divergence_capture.prev_u_solution
+    assert loaded.mpc_runtime_state == divergence_capture.mpc_runtime_state
     a = audit_rows(
         _rows(loaded, "pre"),
         loaded.ego_origin_xy,

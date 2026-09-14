@@ -798,6 +798,7 @@ class MPC:
         self._previous_u_solution: np.ndarray | None = None
         self._consecutive_solver_failure_count: int = 0
         self._last_failure_reset_triggered: bool = False
+        self._last_warm_start_retry_triggered: bool = False
         # Track whether the previous plan_trajectory call was a stop goal.
         # Used to detect the stop→resume transition and prevent the v=0 stop
         # plan from being reused as a linearisation seed, which would cause a
@@ -2122,6 +2123,9 @@ class MPC:
                 self.reference_consecutive_solver_failure_reset_threshold
             ),
             "failure_reset_triggered": bool(self._last_failure_reset_triggered),
+            "warm_start_retry_triggered": bool(
+                self._last_warm_start_retry_triggered
+            ),
         }
 
     def get_last_cost_terms(self) -> Dict[str, float]:
@@ -4161,9 +4165,27 @@ class MPC:
         )
 
         solved_initially = best_x_solution is not None and best_u_solution is not None
-        if self._record_solver_failure_state(solved=bool(solved_initially)):
+        failure_reset_due = self._record_solver_failure_state(
+            solved=bool(solved_initially)
+        )
+        # A shifted solution is only a linearisation hint; it must never make
+        # an otherwise feasible planning frame fail.  If the seeded QP is
+        # infeasible, retry once from the current reference in this same tick.
+        # Waiting for the generic consecutive-failure threshold used to turn
+        # one stale lane-change seed into several seconds of fallback braking.
+        retry_without_seed = bool(
+            not solved_initially
+            and (shifted_seed is not None or failure_reset_due)
+        )
+        self._last_warm_start_retry_triggered = bool(
+            retry_without_seed and shifted_seed is not None
+        )
+        if retry_without_seed:
             self._clear_all_solution_memory()
-            if bool(getattr(self, "log_solution_memory_resets", False)):
+            if (
+                bool(failure_reset_due)
+                and bool(getattr(self, "log_solution_memory_resets", False))
+            ):
                 print(
                     "[MPC] Solver failed "
                     f"{int(self.reference_consecutive_solver_failure_reset_threshold)} consecutive replans; "
@@ -4314,6 +4336,7 @@ class MPC:
             "_previous_u_solution",
             "_consecutive_solver_failure_count",
             "_last_failure_reset_triggered",
+            "_last_warm_start_retry_triggered",
             "_last_was_stop_goal",
             "_solver_failure_log_event_count",
             "_solver_failure_emergency_logged",
