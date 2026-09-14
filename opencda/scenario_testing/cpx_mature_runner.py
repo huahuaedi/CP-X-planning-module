@@ -431,6 +431,8 @@ def run_mature_scenario(opt, scenario_params, *, script_name):
         for vehicle in bg_veh_list:
             vehicle.destroy()
         for scripted_actor in scripted_actor_list:
-            scripted_actor.vehicle.destroy()
+            actor = scripted_actor.vehicle
+            if bool(getattr(actor, "is_alive", True)):
+                actor.destroy()
         if scenario_manager is not None:
             scenario_manager.close()

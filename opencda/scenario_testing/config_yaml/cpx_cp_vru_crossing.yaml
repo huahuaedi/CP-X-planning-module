@@ -1,0 +1,84 @@
+base_config: cpx_profile_full_default.yaml
+
+description: |-
+  Use case C, native OpenCDA entry point. A pedestrian crosses the ego lane
+  after an ego-position trigger. An auxiliary CAV is close enough to observe
+  and share the VRU before ego enters its own sensing/communication range.
+  The scenario validates pedestrian CP ingestion, prediction, CROSSING
+  classification, space-time corridor construction, and MPC response.
+
+cpx_mature:
+  map_mode: 2lane_freeway_simplified
+  max_ticks: 850
+  destination_tolerance_m: 3.0
+  completion_mode: first_cav
+  run_opencda_evaluation: false
+
+carla_traffic_manager:
+  vehicle_list: []
+
+vehicle_base:
+  sensing:
+    perception:
+      activate: false
+    localization:
+      activate: false
+      debug_helper:
+        show_animation: false
+  behavior:
+    ignore_traffic_light: true
+    overtake_allowed: false
+  planner:
+    global_planner_xodr_path: ../assets/2lane_freeway_simplified/2lane_freeway_simplified.xodr
+    target_speed_mps: 8.0
+    communication_range_m: 60.0
+    cav_conflict_enabled: true
+    publish_cp_message: true
+    require_native_opencda_cp: true
+    full_allow_opportunistic_lane_change: false
+    following_idm_enabled: true
+    record_evaluation_metrics: true
+    debug_log_formats: [jsonl]
+    debug_output_dir: opencda/planning_module/opencda_bridge/debug_cp_vru_crossing_on
+
+scenario:
+  single_cav_list:
+    - name: ego
+      spawn_position: [-290.0, 8.3, 0.3, 0, 0, 0]
+      destination: [-80.0, 8.3, 0.3]
+      v2x:
+        enabled: true
+        communication_range: 150
+      planner:
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_cp_vru_crossing_on
+
+    - name: observer
+      # Starts beyond the crossing point, so it supplies a remote viewpoint
+      # without becoming part of the pedestrian interaction itself.
+      spawn_position: [-165.0, 4.8, 0.3, 0, 0, 0]
+      destination: [100.0, 4.8, 0.3]
+      v2x:
+        enabled: true
+        communication_range: 150
+      behavior:
+        max_speed: 15
+        overtake_allowed: false
+        local_planner:
+          debug_trajectory: false
+          debug: false
+      planner:
+        enabled: false
+
+  scripted_actors:
+    - blueprint: walker.pedestrian.0001
+      path:
+        - [-180.0, 16.0]
+        - [-180.0, 8.3]
+        - [-180.0, 0.0]
+      speed_mps: 1.2
+      acceleration_mps2: 1.5
+      z: 0.5
+      trigger:
+        axis: x
+        cross: -230.0
+        from: below

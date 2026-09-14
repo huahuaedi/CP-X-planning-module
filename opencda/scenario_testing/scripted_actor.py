@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Deterministic, ego-blind scripted background actors.
+"""Deterministic, ego-blind scripted background road users.
 
 Used by the prediction-knowledge ablation: for a clean A/B the only thing
 that may differ between the ``blind`` and ``oracle`` runs is what the ego
@@ -9,8 +9,9 @@ reacts to ego and jitters its own speed; this driver does neither.
 
 Each actor is advanced deterministically along a fixed world-XY polyline at a
 fixed speed with ``set_transform`` (no autopilot). Physics remains enabled so
-CARLA exposes the commanded velocity to perception; the next scripted pose
-still owns the trajectory and removes accumulated physical drift.
+CARLA exposes the vehicle velocity or walker control to perception; the next
+scripted pose still owns the trajectory and removes accumulated physical
+drift.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from typing import Any, List, Sequence
 
 
 class ScriptedActor:
-    """One kinematic waypoint-follower."""
+    """One kinematic waypoint-follower for a vehicle or pedestrian."""
 
     def __init__(
         self,
@@ -35,6 +36,9 @@ class ScriptedActor:
         trigger: Any = None,
     ):
         self.vehicle = vehicle
+        self._is_walker = str(getattr(vehicle, "type_id", "")).startswith(
+            "walker."
+        )
         self._path = [(float(p[0]), float(p[1])) for p in path_xy]
         self._speed = max(0.0, float(speed_mps))
         self._acceleration = (
@@ -86,10 +90,24 @@ class ScriptedActor:
                 carla.Rotation(yaw=math.degrees(float(heading_rad))),
             )
         )
-        try:  # keep reported velocity consistent with the scripted motion
-            reported_speed = (
-                self._current_speed if speed_mps is None else float(speed_mps)
-            )
+        # Keep CARLA's reported velocity consistent with scripted motion so
+        # prediction consumes real kinematics rather than inferring them from
+        # teleports. Walkers and vehicles expose different command APIs.
+        reported_speed = (
+            self._current_speed if speed_mps is None else float(speed_mps)
+        )
+        try:
+            if self._is_walker:
+                self.vehicle.apply_control(carla.WalkerControl(
+                    direction=carla.Vector3D(
+                        x=float(math.cos(heading_rad)),
+                        y=float(math.sin(heading_rad)),
+                        z=0.0,
+                    ),
+                    speed=float(reported_speed),
+                    jump=False,
+                ))
+                return
             self.vehicle.set_target_velocity(
                 carla.Vector3D(
                     x=float(reported_speed * math.cos(heading_rad)),
@@ -207,8 +225,16 @@ def spawn_scripted_actors(world: Any, actor_cfgs: Sequence[dict]) -> List[Script
         try:
             bp = blueprint_library.find(bp_name)
         except Exception:
-            bp = blueprint_library.filter("vehicle.*")[0]
-        bp.set_attribute("role_name", "scripted_%d" % i)
+            pattern = (
+                "walker.pedestrian.*"
+                if bp_name.startswith("walker.")
+                else "vehicle.*"
+            )
+            bp = blueprint_library.filter(pattern)[0]
+        if bp.has_attribute("role_name"):
+            bp.set_attribute("role_name", "scripted_%d" % i)
+        if bp_name.startswith("walker.") and bp.has_attribute("is_invincible"):
+            bp.set_attribute("is_invincible", "false")
         z = float(cfg.get("z", 0.3))
         heading0 = math.atan2(path[1][1] - path[0][1], path[1][0] - path[0][0])
         spawn_tf = carla.Transform(
