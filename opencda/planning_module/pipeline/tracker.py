@@ -216,7 +216,7 @@ class CPXObstacleTracker:
         prev_speed = _speed_mps(prev_snapshot)
         acceleration = (float(speed) - float(prev_speed)) / float(dt_s)
         if (
-            current.get("kinematics_source") != "position_finite_difference"
+            bool(current.get("acceleration_observable", True))
             and self.max_acceleration_mps2 > 0.0
             and abs(float(acceleration)) > float(self.max_acceleration_mps2)
         ):
@@ -254,6 +254,15 @@ class CPXObstacleTracker:
         current["v"] = float(distance_m / dt_s)
         current["psi"] = float(math.atan2(dy_m, dx_m))
         current["kinematics_source"] = "position_finite_difference"
+        # A finite-difference speed is a real kinematic observation, not a
+        # blanket exemption from acceleration validation.  Only its first
+        # sample lacks a previous comparable velocity; from the next sample
+        # onward the acceleration gate applies normally.
+        current["acceleration_observable"] = bool(
+            str(prior.get("kinematics_source", ""))
+            == "position_finite_difference"
+            or abs(_speed_mps(prior)) > 0.05
+        )
 
     @staticmethod
     def _track_key(snapshot: Mapping[str, object]) -> str:

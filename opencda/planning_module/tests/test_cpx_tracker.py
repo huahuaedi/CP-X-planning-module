@@ -89,6 +89,62 @@ class CPXObstacleTrackerTest(unittest.TestCase):
         )
         self.assertIn("slow", prediction.obstacle_future_trajectories)
 
+    def test_finite_difference_source_does_not_bypass_acceleration_gate(self):
+        tracker = CPXObstacleTracker(
+            max_stale_s=0.5,
+            max_acceleration_mps2=2.0,
+        )
+        tracker.update(
+            obstacle_snapshots=[{
+                "id": "scripted", "x": 0.0, "y": 0.0, "v": 0.0,
+            }],
+            timestamp_s=1.0,
+        )
+        first_recovered = tracker.update(
+            obstacle_snapshots=[{
+                "id": "scripted", "x": 0.1, "y": 0.0, "v": 0.0,
+            }],
+            timestamp_s=1.1,
+        )
+        self.assertFalse(first_recovered[0]["acceleration_observable"])
+
+        rejected = tracker.update(
+            obstacle_snapshots=[{
+                "id": "scripted", "x": 1.1, "y": 0.0, "v": 0.0,
+            }],
+            timestamp_s=1.2,
+        )
+        self.assertTrue(rejected[0]["track_stale"])
+        self.assertIn(
+            "acceleration_gate",
+            tracker.diagnostics["prediction_validity_reason"],
+        )
+
+    def test_stationary_finite_difference_sample_is_acceleration_checked(self):
+        tracker = CPXObstacleTracker(
+            max_stale_s=0.5,
+            max_acceleration_mps2=2.0,
+        )
+        tracker.update(
+            obstacle_snapshots=[{
+                "id": "stopping", "x": 0.0, "y": 0.0, "v": 5.0,
+            }],
+            timestamp_s=1.0,
+        )
+        held = tracker.update(
+            obstacle_snapshots=[{
+                "id": "stopping", "x": 0.0, "y": 0.0, "v": 0.0,
+                "kinematics_source": "position_finite_difference",
+            }],
+            timestamp_s=1.1,
+        )
+
+        self.assertTrue(held[0]["track_stale"])
+        self.assertIn(
+            "acceleration_gate",
+            tracker.diagnostics["prediction_validity_reason"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
