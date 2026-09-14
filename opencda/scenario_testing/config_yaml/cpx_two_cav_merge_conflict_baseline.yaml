@@ -2,7 +2,7 @@ base_config: cpx_two_cav_merge_conflict.yaml
 
 description: |-
   Physical-control baseline for cpx_two_cav_merge_conflict. It inherits the
-  same CAV spawns, destinations and route-required lane-change policy;
+  same opposing-lane spawns, destinations and route-required lane-change policy;
   only the prediction-aware cooperative conflict pipeline is OFF
   (cav_conflict_enabled: false). Peers therefore create no role assignment,
   predicted-station corridor, or QP homotopy half-space.
@@ -33,8 +33,8 @@ scenario:
         debug_output_dir: opencda/planning_module/opencda_bridge/debug_two_cav_merge_off_cav1
 
     - name: cav2
-      spawn_position: [-312.0, 8.3, 0.3, 0, 0, 0]
-      destination: [-82.0, 4.8, 0.3]
+      spawn_position: [-306.0, 4.8, 0.3, 0, 0, 0]
+      destination: [-76.0, 8.3, 0.3]
       v2x:
         enabled: true
         communication_range: 80
