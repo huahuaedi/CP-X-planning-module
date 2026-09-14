@@ -902,6 +902,40 @@ class CandidatePipelineTest(unittest.TestCase):
         self.assertAlmostEqual(later[0].x_center_m, blocks[1].x_center_m)
         self.assertAlmostEqual(later[0].y_center_m, blocks[1].y_center_m)
 
+    def test_turn_envelope_anchors_a_rolling_window_ahead_of_stopped_ego(self):
+        reference = [
+            {
+                "x_ref_m": 2.0,
+                "y_ref_m": 0.0,
+                "heading_rad": 0.0,
+                "lane_width_m": 3.5,
+                "road_left_width_m": 1.75,
+                "road_right_width_m": 1.75,
+            },
+            {
+                "x_ref_m": 2.35,
+                "y_ref_m": 0.0,
+                "heading_rad": 0.0,
+                "lane_width_m": 3.5,
+                "road_left_width_m": 1.75,
+                "road_right_width_m": 1.75,
+            },
+        ]
+
+        blocks = candidate_pipeline.build_turn_reference_envelope_blocks(
+            reference_samples=reference,
+            ego_half_width_m=1.05,
+            ego_x_m=0.0,
+            ego_y_m=0.0,
+            safety_margin_m=0.15,
+            longitudinal_overlap_m=0.75,
+        )
+
+        self.assertEqual(len(blocks), 2)
+        first = blocks[0]
+        self.assertLessEqual(first.x_center_m - first.half_length_m, 0.0)
+        self.assertGreaterEqual(first.x_center_m + first.half_length_m, 0.0)
+
     def test_selected_lane_change_has_only_configured_variants(self):
         intents = candidate_pipeline.build_candidate_intents(
             selected_decision="lane_change_left",

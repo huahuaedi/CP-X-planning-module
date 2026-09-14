@@ -73,6 +73,10 @@ class CorridorParams:
     # solution via a heading rotation than via the (already maxed-out) brake
     # -- see build_longitudinal_corridor's kinematic floor below.
     max_braking_mps2: float = 3.0
+    # Must match MPCConstraints.max_jerk_mps3.  Stage C and the MPC must use
+    # the same reachable set; assuming instantaneous full braking here makes
+    # early corridor rows longitudinally impossible under the MPC jerk bound.
+    max_jerk_mps3: float = 10.0
 
 
 @dataclass
@@ -245,24 +249,38 @@ def _f(m: Mapping[str, Any], *keys: str, default: float = 0.0) -> float:
     return default
 
 
-def _min_reachable_station_m(v0_mps: float, decel_mps2: float, t_s: float) -> float:
-    """Least station the ego can be at after ``t_s`` s, braking as hard as
-    ``decel_mps2`` (magnitude) starting now.
+def _minimum_reachable_station_profile_m(
+    *,
+    v0_mps: float,
+    current_acceleration_mps2: float,
+    max_braking_mps2: float,
+    max_jerk_mps3: float,
+    horizon_steps: int,
+    dt_s: float,
+) -> List[float]:
+    """Return the MPC-consistent minimum forward-station profile.
 
-    A longitudinal cap tighter than this asks for more deceleration than the
-    vehicle has; the corridor cannot honor it by slowing down, and Stage D's
-    direction-only row lets the QP satisfy the number anyway by rotating
-    heading away from the reference tangent instead of admitting the row is
-    unreachable. This is the floor that keeps a cap physically honest.
+    The MPC uses forward Euler position dynamics (the current speed advances
+    position before the stage acceleration changes the next speed) and limits
+    ``a[k] - a[k-1]`` by ``max_jerk * dt``.  Reproduce those two contracts
+    here so Stage C never publishes a cap that can only be met by turning away
+    from the reference tangent.
     """
 
-    v0 = max(0.0, float(v0_mps))
-    decel = max(1.0e-6, float(decel_mps2))
-    t = max(0.0, float(t_s))
-    t_stop = v0 / decel
-    if t >= t_stop:
-        return (v0 * v0) / (2.0 * decel)
-    return v0 * t - 0.5 * decel * t * t
+    steps = max(0, int(horizon_steps))
+    dt = max(1.0e-6, float(dt_s))
+    max_braking = max(1.0e-6, abs(float(max_braking_mps2)))
+    jerk_step = max(0.0, abs(float(max_jerk_mps3))) * dt
+    velocity = max(0.0, float(v0_mps))
+    acceleration = max(-max_braking, float(current_acceleration_mps2))
+    station = 0.0
+    profile = [station]
+    for _ in range(steps):
+        acceleration = max(-max_braking, acceleration - jerk_step)
+        station += velocity * dt
+        velocity = max(0.0, velocity + acceleration * dt)
+        profile.append(station)
+    return profile
 
 
 def _agent_station_series(
@@ -304,17 +322,22 @@ def build_longitudinal_corridor(
         return cor
 
     ego_v = max(0.0, _f(ego_snapshot, "v", "speed", "speed_mps"))
+    ego_a = _f(ego_snapshot, "a", "acceleration", "acceleration_mps2")
     ego_x = _f(ego_snapshot, "x", "x_m")
     ego_y = _f(ego_snapshot, "y", "y_m")
     # Per-stage floor: the least station reachable by braking at the MPC's
     # own hard limit, starting now. A cap below this is not a row Stage D
-    # can honor honestly (see _min_reachable_station_m); flooring it there
+    # can honor honestly (see _minimum_reachable_station_profile_m); flooring it there
     # keeps every row solvable by slowing down, and flags the corridor so a
     # held warm-start solution is not reused across the transition.
-    braking_floor = [
-        _min_reachable_station_m(ego_v, p.max_braking_mps2, k * dt)
-        for k in range(n + 1)
-    ]
+    braking_floor = _minimum_reachable_station_profile_m(
+        v0_mps=ego_v,
+        current_acceleration_mps2=ego_a,
+        max_braking_mps2=p.max_braking_mps2,
+        max_jerk_mps3=p.max_jerk_mps3,
+        horizon_steps=n,
+        dt_s=dt,
+    )
 
     # Ego's own unconstrained (constant-velocity) forward projection, used
     # only to test whether a currently-behind agent's predicted station has

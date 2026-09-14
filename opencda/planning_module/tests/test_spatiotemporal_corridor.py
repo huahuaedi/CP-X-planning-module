@@ -15,6 +15,7 @@ from pipeline.spatiotemporal_corridor import (
     build_longitudinal_corridor,
     retain_pending_corridor,
     rebase_corridor,
+    _minimum_reachable_station_profile_m,
 )
 
 REF = [{"x_ref_m": float(x), "y_ref_m": 0.0} for x in range(0, 121, 2)]
@@ -253,17 +254,60 @@ def test_crossing_cap_tighter_than_braking_is_floored_at_the_reachable_station()
     assert any(h > geometric_cap + 1.0e-6 for h in cor.s_hi[1:]), (
         "expected at least one early stage floored above the geometric cap"
     )
+    floor_profile = _minimum_reachable_station_profile_m(
+        v0_mps=6.791947,
+        current_acceleration_mps2=0.0,
+        max_braking_mps2=3.0,
+        max_jerk_mps3=params.max_jerk_mps3,
+        horizon_steps=params.horizon_steps,
+        dt_s=params.dt_s,
+    )
     for k, value in enumerate(cor.s_hi):
-        t = k * params.dt_s
-        floor = 6.791947 * t - 0.5 * 3.0 * t * t if t < 6.791947 / 3.0 else (
-            6.791947 ** 2 / (2 * 3.0)
-        )
+        floor = floor_profile[k]
         assert value >= min(floor, geometric_cap) - 1.0e-6
     # Full stopping distance (v^2 / 2a) is reached well before the horizon
     # ends; from there the floor plateaus and stays below the geometric cap
     # forever, so the corridor is correctly and permanently flagged.
     assert not cor.feasible
     assert cor.first_infeasible_stage is not None
+
+
+def test_reachable_station_profile_matches_mpc_discrete_jerk_contract():
+    profile = _minimum_reachable_station_profile_m(
+        v0_mps=6.0,
+        current_acceleration_mps2=0.0,
+        max_braking_mps2=3.0,
+        max_jerk_mps3=10.0,
+        horizon_steps=3,
+        dt_s=0.05,
+    )
+    # MPC forward Euler: x[1] advances by v[0]*dt even though a[0] is
+    # already ramping down. Subsequent speeds reflect -0.5, -1.0, -1.5 m/s2.
+    assert profile == pytest.approx([0.0, 0.3, 0.59875, 0.895])
+
+
+def test_corridor_floor_accounts_for_positive_acceleration_jerk_seed():
+    params = CorridorParams(
+        horizon_steps=4, dt_s=0.1, crossing_clearance_time_s=5.0,
+        conflict_stop_buffer_m=4.0, max_braking_mps2=3.0,
+        max_jerk_mps3=2.0,
+    )
+    ego = {"x": 0.0, "y": 0.0, "v": 6.0, "a": 1.0, "psi": 0.0}
+    cor = build_longitudinal_corridor(
+        REF, ego,
+        [({"x": 4.0, "v": 0.0}, _tag("x", CROSSING, s=4.0, t=0.0), _assign("yield"))],
+        params,
+    )
+    expected_floor = _minimum_reachable_station_profile_m(
+        v0_mps=6.0,
+        current_acceleration_mps2=1.0,
+        max_braking_mps2=3.0,
+        max_jerk_mps3=2.0,
+        horizon_steps=4,
+        dt_s=0.1,
+    )
+    assert cor.s_hi == pytest.approx(expected_floor)
+    assert not cor.feasible
 
 
 def test_crossing_cap_within_braking_limits_is_left_untouched():

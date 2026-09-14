@@ -1405,6 +1405,8 @@ class CPXMPCPlannerBridge:
         road_envelope_payload_world = self._rolling_turn_envelope_payload_world(
             behavior_decision=str(behavior_decision.maneuver),
             reference_samples=lane_center_reference,
+            ego_x_m=float(ego_location.x),
+            ego_y_m=float(ego_location.y),
         )
         cav_result = cav_resolution
         cav_constraint_rows = ()
@@ -3137,6 +3139,8 @@ class CPXMPCPlannerBridge:
                 rebuild_corridor=bool(schedule.refresh_roles),
                 cached_corridor=cached_corridor,
                 max_braking_mps2=abs(float(self.mpc.constraints.min_acceleration_mps2)),
+                current_acceleration_mps2=float(self._last_accel_mps2),
+                max_jerk_mps3=float(self.mpc.constraints.max_jerk_mps3),
             )
             self._cav_schedule.observe(
                 sim_time_s=float(sim_time_s), result=cav_result,
@@ -3519,6 +3523,8 @@ class CPXMPCPlannerBridge:
         *,
         behavior_decision: str,
         reference_samples: Sequence[Mapping[str, object]],
+        ego_x_m: float,
+        ego_y_m: float,
     ) -> Optional[Mapping[str, object]]:
         """Build an MPC road envelope for only the current turn horizon."""
 
@@ -3551,6 +3557,8 @@ class CPXMPCPlannerBridge:
         blocks = build_turn_reference_envelope_blocks(
             reference_samples=reference_samples,
             ego_half_width_m=float(ego_half_width_m),
+            ego_x_m=float(ego_x_m),
+            ego_y_m=float(ego_y_m),
             safety_margin_m=max(
                 0.0,
                 float(

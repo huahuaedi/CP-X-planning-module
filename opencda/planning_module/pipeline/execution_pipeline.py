@@ -222,6 +222,7 @@ class PlanningPipeline:
         refresh_assignments=True, cached_assignments=(),
         rebuild_corridor=True, cached_corridor=None,
         max_braking_mps2=3.0,
+        current_acceleration_mps2=0.0, max_jerk_mps3=10.0,
     ):
         """Classify on proposal geometry and constrain the executable geometry.
 
@@ -242,6 +243,7 @@ class PlanningPipeline:
             ego_snapshot={
                 "x": float(ego_location.x), "y": float(ego_location.y),
                 "v": float(ego_speed_mps), "psi": float(ego_yaw_rad),
+                "a": float(current_acceleration_mps2),
             },
             my_actor_id=int(actor_id), my_claim=claim,
             obstacle_snapshots=obstacle_snapshots, cav_intents=cav_intents,
@@ -252,6 +254,7 @@ class PlanningPipeline:
             corridor_params=CorridorParams(
                 horizon_steps=max(1, int(horizon_steps)), dt_s=float(dt_s),
                 max_braking_mps2=max(1.0e-3, abs(float(max_braking_mps2))),
+                max_jerk_mps3=max(0.0, abs(float(max_jerk_mps3))),
             ),
             mode_probability_floor=float(mode_probability_floor),
             credible_mode_probability_min=float(credible_mode_probability_min),

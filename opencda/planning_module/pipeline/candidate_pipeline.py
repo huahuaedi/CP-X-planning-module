@@ -1109,6 +1109,8 @@ def build_turn_reference_envelope_blocks(
     *,
     reference_samples: Sequence[Mapping[str, object]],
     ego_half_width_m: float,
+    ego_x_m: Optional[float] = None,
+    ego_y_m: Optional[float] = None,
     safety_margin_m: float = 0.15,
     default_lane_width_m: float = 3.5,
     longitudinal_overlap_m: float = 0.75,
@@ -1123,12 +1125,38 @@ def build_turn_reference_envelope_blocks(
     the full swept-body contract remains the reference admission check.
     """
 
+    rows = [dict(sample) for sample in list(reference_samples or [])]
+    if (
+        rows
+        and ego_x_m is not None
+        and ego_y_m is not None
+        and math.isfinite(float(ego_x_m))
+        and math.isfinite(float(ego_y_m))
+    ):
+        first_x_m = float(rows[0].get("x_ref_m", rows[0].get("x", ego_x_m)))
+        first_y_m = float(rows[0].get("y_ref_m", rows[0].get("y", ego_y_m)))
+        if math.hypot(first_x_m - float(ego_x_m), first_y_m - float(ego_y_m)) > 1.0e-4:
+            # The rolling window may legitimately start ahead of a stopped
+            # vehicle.  Anchor the spatial tube at the current feasible state
+            # so its first block cannot leave X_0 outside the union.
+            anchor = dict(rows[0])
+            anchor.update({
+                "x_ref_m": float(ego_x_m),
+                "y_ref_m": float(ego_y_m),
+                "x": float(ego_x_m),
+                "y": float(ego_y_m),
+                "heading_rad": math.atan2(
+                    first_y_m - float(ego_y_m),
+                    first_x_m - float(ego_x_m),
+                ),
+            })
+            rows.insert(0, anchor)
     normalized = [
         normalize_lane_reference_sample(
             sample,
             default_lane_width_m=float(default_lane_width_m),
         )
-        for sample in list(reference_samples or [])
+        for sample in rows
     ]
     normalized = [sample for sample in normalized if sample is not None]
     if len(normalized) < 2:
