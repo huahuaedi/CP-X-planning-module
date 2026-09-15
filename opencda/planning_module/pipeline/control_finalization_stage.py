@@ -22,6 +22,12 @@ class ControlFinalizationRequest:
     safety_manager: Any
     carla_module: Any
     sim_time_s: float
+    # The optimized near-term velocity is a platform safety ceiling only when
+    # Stage D installed a longitudinal space-time corridor.  In an ordinary
+    # single-vehicle tick, SpeedTargetPlanner is the velocity owner; feeding
+    # MPC's near-term state to the downstream PID would apply acceleration
+    # dynamics twice and make turns unnecessarily slow.
+    mpc_velocity_safety_cap_active: bool = False
 
 
 @dataclass(frozen=True)
@@ -133,7 +139,10 @@ class ControlFinalizationStage:
                 emergency_stop=emergency,
                 mpc_safety_cap_mps=(
                     float(tracking.target_velocity_mps)
-                    if bool(tracking.valid)
+                    if (
+                        bool(tracking.valid)
+                        and bool(request.mpc_velocity_safety_cap_active)
+                    )
                     else None
                 ),
             )
@@ -153,9 +162,17 @@ class ControlFinalizationStage:
                 "mpc_optimized_velocity_mps": float(tracking.target_velocity_mps),
                 "nominal_speed_ref_mps": float(request.target_speed_mps),
                 "pid_target_velocity_mps": float(platform_target),
+                "mpc_velocity_safety_cap_active": bool(
+                    request.mpc_velocity_safety_cap_active
+                ),
                 "velocity_command_source": (
-                    "mpc_optimized_velocity_preview"
-                    if bool(tracking.valid)
+                    "mpc_corridor_velocity_safety_cap"
+                    if (
+                        bool(tracking.valid)
+                        and bool(request.mpc_velocity_safety_cap_active)
+                        and float(platform_target)
+                        < float(request.target_speed_mps) - 1.0e-9
+                    )
                     else "speed_target_planner"
                 ),
                 "velocity_command_valid": bool(tracking.valid),

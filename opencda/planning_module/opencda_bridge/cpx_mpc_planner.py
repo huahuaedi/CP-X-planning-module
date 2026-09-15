@@ -1511,6 +1511,10 @@ class CPXMPCPlannerBridge:
                 safety_manager=latest_update.get("safety_manager"),
                 carla_module=self.carla,
                 sim_time_s=float(sim_time_s),
+                mpc_velocity_safety_cap_active=any(
+                    str(getattr(row, "slack_group", "")) == "corridor"
+                    for row in cav_constraint_rows
+                ),
             ),
             set_actuator_context=self._set_actuator_context,
             acceleration_from_control=self._accel_from_control,
