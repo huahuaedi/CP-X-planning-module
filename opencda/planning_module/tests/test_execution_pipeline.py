@@ -311,11 +311,13 @@ def test_resolve_cav_interaction_builds_corridor_rows_on_the_constraint_referenc
         assert row.a_x == pytest.approx(half_sqrt2, abs=1.0e-6)
         assert row.a_y == pytest.approx(half_sqrt2, abs=1.0e-6)
     assert result.constraint_corridor is not None
-    # The same physical cap is 10 m smaller in the executed reference whose
-    # origin is 10 m farther along. The old bug emitted source value 21.55.
-    assert result.corridor.s_hi[1] == pytest.approx(21.55)
-    assert result.constraint_corridor.s_hi[1] == pytest.approx(11.55)
-    assert longitudinal_rows[0].upper == pytest.approx(11.55)
+    # Stage C and Stage D now share the executed-reference coordinate owner.
+    # The old classification-station leak produced a cap above 20 m here.
+    assert result.constraint_corridor is result.corridor
+    assert result.corridor.s_hi[1] < 10.0
+    assert longitudinal_rows[0].upper == pytest.approx(
+        result.corridor.s_hi[1]
+    )
 
 
 def test_resolve_cav_interaction_defaults_constraint_reference_to_reference_samples():

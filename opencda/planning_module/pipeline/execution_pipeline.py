@@ -242,8 +242,14 @@ class PlanningPipeline:
         to prevent (corridor tangent built on a curve the vehicle isn't on).
         """
 
+        corridor_reference = (
+            reference_samples
+            if constraint_reference_samples is None
+            else constraint_reference_samples
+        )
         result = resolve_cav_conflicts(
             reference_samples=reference_samples,
+            corridor_reference_samples=corridor_reference,
             ego_snapshot={
                 "x": float(ego_location.x), "y": float(ego_location.y),
                 "v": float(ego_speed_mps), "psi": float(ego_yaw_rad),
@@ -272,7 +278,6 @@ class PlanningPipeline:
         )
         from .cav_intent_codec import sample_cav_path_at
         from .mpc_corridor_constraints import corridor_rows, homotopy_keepout_rows
-        from .spatiotemporal_corridor import rebase_corridor
 
         steps = max(1, int(horizon_steps))
         step_s = max(1.0e-3, float(dt_s))
@@ -293,23 +298,10 @@ class PlanningPipeline:
                 points.append((float(sampled[0]), float(sampled[1])))
             tracks[int(intent.actor_id)] = points
         origin = (float(ego_location.x), float(ego_location.y))
-        corridor_reference = (
-            reference_samples
-            if constraint_reference_samples is None
-            else constraint_reference_samples
-        )
-        # Stage C stations belong to ``reference_samples`` (possibly a
-        # cooperative maneuver preview). MPC may still execute a different
-        # reference. Tangent alignment is insufficient: the numeric station
-        # origin must also be moved into the executed reference frame.
-        constraint_corridor = rebase_corridor(
-            result.corridor,
-            source_reference=reference_samples,
-            current_reference=corridor_reference,
-            current_ego_xy=origin,
-            age_s=0.0,
-            dt_s=step_s,
-        )
+        # Stage C already owns longitudinal station in the executed-reference
+        # frame. Stage D consumes exactly that object; there is no second
+        # coordinate conversion or parallel corridor owner here.
+        constraint_corridor = result.corridor
         result.constraint_corridor = constraint_corridor
         longitudinal_rows = corridor_rows(
             constraint_corridor, corridor_reference, ego_origin_xy=origin
@@ -329,7 +321,7 @@ class PlanningPipeline:
         result.mpc_rows = list(longitudinal_rows) + list(lateral_rows)
         result.speed_constraint = conflict_corridor_speed_constraint(
             corridor=result.corridor,
-            reference_samples=reference_samples,
+            reference_samples=corridor_reference,
             ego_x_m=float(ego_location.x),
             ego_y_m=float(ego_location.y),
             comfortable_deceleration_mps2=float(
@@ -340,9 +332,7 @@ class PlanningPipeline:
             "longitudinal_qp_row_count": len(longitudinal_rows),
             "homotopy_qp_row_count": len(lateral_rows),
             "total_qp_row_count": len(result.mpc_rows),
-            "constraint_corridor_rebased": bool(
-                constraint_reference_samples is not None
-            ),
+            "corridor_coordinate_owner": "mpc_executed_reference",
             "anticipatory_speed_cap_mps": (
                 ""
                 if result.speed_constraint is None

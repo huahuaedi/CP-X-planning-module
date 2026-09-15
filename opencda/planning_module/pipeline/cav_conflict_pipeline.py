@@ -22,7 +22,7 @@ MPC constraint builder.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from opencda.planning_module.pipeline.conflict_classifier import (
@@ -53,6 +53,7 @@ from opencda.planning_module.pipeline.mpc_obstacle_relevance import (
     project_to_extended_polyline,
 )
 from opencda.planning_module.pipeline.rss import RSSParams
+from opencda.planning_module.pipeline.reference_geometry import pose_at_arc
 
 
 @dataclass
@@ -121,6 +122,40 @@ def _prediction_evidence(agent: Mapping[str, Any]) -> dict:
             "end_y": float(last.get("y", last.get("y_m", 0.0)) or 0.0),
         }
     return {"sample_count": len(path)}
+
+
+def _tags_on_corridor_reference(
+    tags: Sequence[ConflictTag],
+    source_reference: Sequence[Any],
+    corridor_reference: Sequence[Any],
+) -> Dict[str, ConflictTag]:
+    """Express Stage-A conflict stations on Stage C's reference.
+
+    Classification may intentionally use a proposed maneuver reference, but
+    longitudinal ordering must use the path the ego is actually executing.
+    Convert the one station-valued field through world XY; all semantic tag
+    data and timing remain owned by Stage A.
+    """
+
+    source_poly = _polyline_xy(source_reference)
+    corridor_poly = _polyline_xy(corridor_reference)
+    out: Dict[str, ConflictTag] = {}
+    for tag in tags:
+        converted = tag
+        if (
+            tag.conflict_s_m is not None
+            and len(source_poly) >= 2
+            and len(corridor_poly) >= 2
+        ):
+            x_m, y_m, _ = pose_at_arc(
+                source_poly, float(tag.conflict_s_m)
+            )
+            corridor_s_m = project_to_extended_polyline(
+                float(x_m), float(y_m), corridor_poly
+            )[1]
+            converted = replace(tag, conflict_s_m=float(corridor_s_m))
+        out[str(converted.agent_id)] = converted
+    return out
 
 
 def _claim_diagnostics(claim: Optional[ResourceClaim]) -> dict:
@@ -312,6 +347,7 @@ def resolve_conflicts(
     cached_assignments: Sequence[ConflictAssignment] = (),
     rebuild_corridor: bool = True,
     cached_corridor: Optional[Corridor] = None,
+    corridor_reference_samples: Optional[Sequence[Any]] = None,
 ) -> ConflictResolution:
     cavs = list(cav_intents or [])
     # Only a peer carrying an actual shared plan owns future-trajectory data.
@@ -381,6 +417,14 @@ def resolve_conflicts(
         previous_tags=tag_state,
     )
     tag_by_id = {t.agent_id: t for t in tags}
+    corridor_reference = (
+        reference_samples
+        if corridor_reference_samples is None
+        else corridor_reference_samples
+    )
+    corridor_tag_by_id = _tags_on_corridor_reference(
+        tags, reference_samples, corridor_reference
+    )
 
     # Stage B (only cooperative cavs, only when ego holds an active claim) ---
     assignments: List[ConflictAssignment] = []
@@ -431,9 +475,9 @@ def resolve_conflicts(
     if corridor_rebuilt or cached_corridor is None:
         (corridor, credible_veto_count, held_veto_count,
          new_veto_state) = _build_effective_corridor(
-            reference_samples=reference_samples, ego_snapshot=ego_snapshot,
+            reference_samples=corridor_reference, ego_snapshot=ego_snapshot,
             all_agents=all_agents, mode_groups=mode_groups,
-            tag_by_id=tag_by_id, assign_by_id=assign_by_id,
+            tag_by_id=corridor_tag_by_id, assign_by_id=assign_by_id,
             corridor_params=corridor_params, rss_params=rss_params,
             credible_mode_probability_min=credible_mode_probability_min,
             credible_mode_ttc_s=credible_mode_ttc_s,
