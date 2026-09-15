@@ -44,12 +44,10 @@ mpc:
     min_steer_rad: -0.6
     max_steer_rad: 0.6
 
-    # Physical steering-rate envelope.  The Town06 turn master reaches about
-    # 0.16 1/m over 0.7--0.8 s, which requires roughly 0.43 rad of bicycle
-    # steer.  A 0.35 rad/s bound cannot establish that steering before the
-    # connector tangent changes, regardless of MPC weights or solve rate.
-    min_steer_rate_rps: -0.60
-    max_steer_rate_rps: 0.60
+    # The former implicit default of 0.02 rad/s prevented steering reversal
+    # across an S-shaped lane-change connector for several seconds.
+    min_steer_rate_rps: -0.35
+    max_steer_rate_rps: 0.35
 
     # Raised from the code default (15.0) to test cruise speeds up to
     # ~35-60mph (15.6-26.8 m/s). Give some headroom above the highest
