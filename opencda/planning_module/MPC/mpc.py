@@ -2705,7 +2705,15 @@ class MPC:
                 # on a straight reference built at exactly the nominal step
                 # distance; on a curve, array position and true along-path
                 # distance diverge.
-                next_progress_estimate_m = float(current_progress_m) + max(0.5, float(v_mps) * float(self.dt_s))
+                # Advance by the rollout's physical distance for this stage.
+                # A former 0.5 m floor made a 2 m/s turn at dt=0.1 s consume
+                # reference arc length 2.5x faster than the vehicle could
+                # travel, so the optimizer tracked a tangent from too far
+                # around the corner.
+                next_progress_estimate_m = (
+                    float(current_progress_m)
+                    + max(0.0, float(v_mps) * float(self.dt_s))
+                )
                 stage_ref = self._get_lane_center_stage_ref_by_progress(
                     lane_center_reference=lane_center_reference,
                     query_progress_m=next_progress_estimate_m,

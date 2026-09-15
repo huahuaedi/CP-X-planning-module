@@ -753,7 +753,7 @@ mpc:
       # distance. Off by default, preserving today's index/local-window
       # lookup exactly. Falls back to the index lookup automatically if any
       # reference sample lacks a progress_m tag.
-      use_progress_lookup: false
+      use_progress_lookup: true
 
       # When true, xy_w0's pull is decomposed into lane-local
       # longitudinal/lateral components instead of independently attracting

@@ -219,6 +219,69 @@ class MPCLaneReferenceTests(unittest.TestCase):
         self.assertAlmostEqual(progress_ref[1], 0.0)
         self.assertNotAlmostEqual(index_ref[0], progress_ref[0])
 
+    def test_rollout_progress_has_no_nonphysical_minimum_step(self):
+        """Low-speed turns must consume reference arc length at v * dt."""
+
+        mpc = object.__new__(MPC)
+        mpc.horizon_steps = 1
+        mpc.nx = 4
+        mpc.nu = 2
+        mpc.dt_s = 0.1
+        mpc.wheelbase_m = 2.8
+        mpc.l_r_m = 1.4
+        mpc.reference_prefer_lane_center_path = True
+        mpc.lane_center_follow_use_progress_lookup = True
+        mpc.reference_path_los_heading_blend = 0.0
+        mpc.reference_heading_gain = 0.0
+        mpc.reference_speed_gain = 0.0
+        mpc.speed_soft_constraint_enabled = False
+        mpc.constraints = type("Constraints", (), {
+            "min_velocity_mps": 0.0,
+            "max_velocity_mps": 10.0,
+            "min_acceleration_mps2": -3.0,
+            "max_acceleration_mps2": 3.0,
+            "min_steer_rad": -0.6,
+            "max_steer_rad": 0.6,
+        })()
+        observed_progress = []
+
+        def sample_by_progress(*, lane_center_reference, query_progress_m):
+            del lane_center_reference
+            observed_progress.append(float(query_progress_m))
+            return (float(query_progress_m), 0.0, 0.0)
+
+        mpc._get_lane_center_stage_ref_by_progress = sample_by_progress
+        mpc._compute_reference_rollout_speed_limit = (
+            lambda **kwargs: float(kwargs["base_speed_mps"])
+        )
+        mpc._future_speed_upper_bound_mps = (
+            lambda **kwargs: float(kwargs["active_speed_upper_bound_mps"])
+        )
+        reference = [
+            {
+                "x_ref_m": 0.0,
+                "y_ref_m": 0.0,
+                "heading_rad": 0.0,
+                "progress_m": 0.0,
+            },
+            {
+                "x_ref_m": 1.0,
+                "y_ref_m": 0.0,
+                "heading_rad": 0.0,
+                "progress_m": 1.0,
+            },
+        ]
+
+        mpc._reference_rollout(
+            x0=np.array([0.0, 0.0, 2.0, 0.0]),
+            x_ref_target=np.array([1.0, 0.0, 2.0, 0.0]),
+            lane_center_reference=reference,
+            object_snapshots=[],
+        )
+
+        self.assertEqual(len(observed_progress), 1)
+        self.assertAlmostEqual(observed_progress[0], 0.2)
+
 
 class SignedLongitudinalProgressAffineFormTests(unittest.TestCase):
     def test_zero_at_the_reference_point_itself(self):
