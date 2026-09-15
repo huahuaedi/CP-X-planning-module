@@ -248,12 +248,6 @@ class OpenCDADebugViewer:
             mpc_points = self._project_points(cpx_debug.get("mpc_trajectory_points", []), project)
 
             self._draw_dotted_polyline(surface, mpc_points, color=(45, 185, 75), radius_px=3, dot_spacing_px=9)
-            self._draw_peer_prediction_paths(
-                surface=surface,
-                paths=cpx_debug.get("cav_shared_planned_paths", {}),
-                vehicle_managers=vehicle_managers,
-                project=project,
-            )
 
             # The global-route inset obscures vehicles and adds no useful
             # cooperative-planning evidence. Retain it for single-CAV debug.
@@ -326,32 +320,6 @@ class OpenCDADebugViewer:
                     surface.blit(label, (center_px[0] + 7, center_px[1] - 18))
             except (AttributeError, RuntimeError, TypeError, ValueError):
                 continue
-
-    def _draw_peer_prediction_paths(
-        self,
-        *,
-        surface: Any,
-        paths: Any,
-        vehicle_managers: Sequence[Any],
-        project: Any,
-    ) -> None:
-        """Draw peer trajectories received by CAV1, not inferred actor motion."""
-
-        actor_colors = {
-            str(getattr(getattr(manager, "vehicle", None), "id", "")):
-            _CAV_COLORS[index % len(_CAV_COLORS)]
-            for index, manager in enumerate(list(vehicle_managers or []))
-        }
-        for actor_id, points in dict(paths or {}).items():
-            projected = self._project_points(points, project)
-            color = actor_colors.get(str(actor_id), (255, 255, 255))
-            self._draw_dotted_polyline(
-                surface,
-                projected,
-                color=color,
-                radius_px=2,
-                dot_spacing_px=7,
-            )
 
     def _draw_stable_route_minimap(
         self,
