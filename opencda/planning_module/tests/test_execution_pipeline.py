@@ -275,8 +275,10 @@ def test_resolve_cav_interaction_builds_corridor_rows_on_the_constraint_referenc
     # reference, not the classification one, or Stage D points the
     # longitudinal band the wrong way relative to the path MPC tracks (the
     # reference-divergence bug fixed by restoring this parameter).
+    # Classification begins 10 m behind ego while execution begins at ego.
+    # Station bounds must be rebased, not copied between these polylines.
     classification_reference = [
-        {"x_ref_m": 0.0, "y_ref_m": float(y)} for y in range(0, 61, 2)
+        {"x_ref_m": 0.0, "y_ref_m": float(y)} for y in range(-10, 61, 2)
     ]
     executed_reference = [
         {"x_ref_m": float(k), "y_ref_m": float(k)} for k in range(0, 61, 2)
@@ -308,6 +310,11 @@ def test_resolve_cav_interaction_builds_corridor_rows_on_the_constraint_referenc
         # reference's straight-+y (0, 1).
         assert row.a_x == pytest.approx(half_sqrt2, abs=1.0e-6)
         assert row.a_y == pytest.approx(half_sqrt2, abs=1.0e-6)
+    # v=9 m/s and dt=0.1 gives a first-stage reachability floor near 0.9 m
+    # in the executed frame. The old bug leaked classification station 10.9.
+    assert longitudinal_rows[0].lower < 2.0
+    assert result.constraint_corridor is not None
+    assert result.constraint_corridor.s_lo[1] < 2.0
 
 
 def test_resolve_cav_interaction_defaults_constraint_reference_to_reference_samples():

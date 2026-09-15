@@ -1463,6 +1463,10 @@ class CPXMPCPlannerBridge:
             mpc_object_snapshots=mpc_object_snapshots,
             cav_constraint_rows=cav_constraint_rows,
             cav_diagnostics=cav_diagnostics,
+            cav_corridor=(
+                None if cav_result is None
+                else cav_result.constraint_corridor
+            ),
         )
         execution_result = self.pipeline.execute_mpc(
             MPCExecutionRequest(
@@ -1726,7 +1730,7 @@ class CPXMPCPlannerBridge:
                                          target_speed_mps, stop_goal_active,
                                          behavior_decision, published_reference,
                                          mpc_object_snapshots, cav_constraint_rows,
-                                         cav_diagnostics):
+                                         cav_diagnostics, cav_corridor=None):
         """Serialize one tick for tools/frame_replay. No-op unless the
         ``frame_capture`` config block is present and the sim-time window
         (if any) contains this tick. Debug-only; never raises into the
@@ -1766,6 +1770,7 @@ class CPXMPCPlannerBridge:
                 mpc_object_snapshots=list(mpc_object_snapshots or []),
                 mpc_rows=list(cav_constraint_rows or ()),
                 cav_diagnostics=dict(cav_diagnostics or {}),
+                corridor=cav_corridor,
                 prev_x_solution=getattr(self.mpc, "_last_x_solution", None),
                 prev_u_solution=getattr(self.mpc, "_last_u_solution", None),
                 mpc_runtime_state={

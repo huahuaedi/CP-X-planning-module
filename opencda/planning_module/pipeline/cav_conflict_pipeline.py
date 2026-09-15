@@ -64,6 +64,10 @@ class ConflictResolution:
     tag_state: Dict[str, str] = field(default_factory=dict)
     veto_state: Dict[str, Any] = field(default_factory=dict)
     speed_constraint: Optional[SpeedConstraint] = None
+    # Stage C owns ``corridor`` in its classification-reference station
+    # coordinates. Stage D owns this rebased view in the coordinates of the
+    # reference that the MPC actually executes.
+    constraint_corridor: Optional[Corridor] = None
     mpc_rows: List[Any] = field(default_factory=list)
     diagnostics: Dict[str, Any] = field(default_factory=dict)
 

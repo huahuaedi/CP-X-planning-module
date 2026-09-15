@@ -272,6 +272,7 @@ class PlanningPipeline:
         )
         from .cav_intent_codec import sample_cav_path_at
         from .mpc_corridor_constraints import corridor_rows, homotopy_keepout_rows
+        from .spatiotemporal_corridor import rebase_corridor
 
         steps = max(1, int(horizon_steps))
         step_s = max(1.0e-3, float(dt_s))
@@ -297,8 +298,21 @@ class PlanningPipeline:
             if constraint_reference_samples is None
             else constraint_reference_samples
         )
+        # Stage C stations belong to ``reference_samples`` (possibly a
+        # cooperative maneuver preview). MPC may still execute a different
+        # reference. Tangent alignment is insufficient: the numeric station
+        # origin must also be moved into the executed reference frame.
+        constraint_corridor = rebase_corridor(
+            result.corridor,
+            source_reference=reference_samples,
+            current_reference=corridor_reference,
+            current_ego_xy=origin,
+            age_s=0.0,
+            dt_s=step_s,
+        )
+        result.constraint_corridor = constraint_corridor
         longitudinal_rows = corridor_rows(
-            result.corridor, corridor_reference, ego_origin_xy=origin
+            constraint_corridor, corridor_reference, ego_origin_xy=origin
         )
         lateral_rows = homotopy_keepout_rows(
             result.assignments,
@@ -326,6 +340,9 @@ class PlanningPipeline:
             "longitudinal_qp_row_count": len(longitudinal_rows),
             "homotopy_qp_row_count": len(lateral_rows),
             "total_qp_row_count": len(result.mpc_rows),
+            "constraint_corridor_rebased": bool(
+                constraint_reference_samples is not None
+            ),
             "anticipatory_speed_cap_mps": (
                 ""
                 if result.speed_constraint is None
