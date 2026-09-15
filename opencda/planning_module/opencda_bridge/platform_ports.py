@@ -7,7 +7,73 @@ It is the only owner of waypoint lookup compatibility and actuator conversion.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import Any, Callable
+
+
+@dataclass(frozen=True)
+class VehicleDynamics:
+    """Physical steering geometry exposed by the vehicle platform.
+
+    ``planning_max_steer_rad`` is an MPC feasibility/comfort bound, whereas
+    ``actuator_max_steer_rad`` is the physical wheel angle represented by a
+    normalized platform command of one.  Conflating the two silently changes
+    the plant gain whenever the planning limit is tuned.
+    """
+
+    wheelbase_m: float
+    actuator_max_steer_rad: float
+    source: str = "configured_fallback"
+
+    @classmethod
+    def from_carla_vehicle(
+        cls,
+        vehicle: Any,
+        *,
+        fallback_wheelbase_m: float,
+        fallback_actuator_max_steer_rad: float,
+    ) -> "VehicleDynamics":
+        wheelbase_m = max(0.1, float(fallback_wheelbase_m))
+        actuator_max_steer_rad = max(
+            1.0e-3, float(fallback_actuator_max_steer_rad)
+        )
+        get_physics_control = getattr(vehicle, "get_physics_control", None)
+        if not callable(get_physics_control):
+            return cls(wheelbase_m, actuator_max_steer_rad)
+        try:
+            wheels = list(getattr(get_physics_control(), "wheels", ()) or ())
+        except Exception:
+            return cls(wheelbase_m, actuator_max_steer_rad)
+        steering_wheels = [
+            wheel for wheel in wheels
+            if float(getattr(wheel, "max_steer_angle", 0.0)) > 1.0e-3
+        ]
+        fixed_wheels = [
+            wheel for wheel in wheels
+            if float(getattr(wheel, "max_steer_angle", 0.0)) <= 1.0e-3
+        ]
+        if steering_wheels:
+            actuator_max_steer_rad = math.radians(max(
+                float(getattr(wheel, "max_steer_angle", 0.0))
+                for wheel in steering_wheels
+            ))
+        if steering_wheels and fixed_wheels:
+            front_x = sum(
+                float(getattr(getattr(wheel, "position", None), "x", 0.0))
+                for wheel in steering_wheels
+            ) / float(len(steering_wheels))
+            rear_x = sum(
+                float(getattr(getattr(wheel, "position", None), "x", 0.0))
+                for wheel in fixed_wheels
+            ) / float(len(fixed_wheels))
+            axle_span = abs(float(front_x) - float(rear_x))
+            # CARLA 0.9.12 reports wheel positions in centimetres.
+            wheelbase_m = axle_span / 100.0 if axle_span > 20.0 else axle_span
+        return cls(
+            wheelbase_m=max(0.1, float(wheelbase_m)),
+            actuator_max_steer_rad=max(1.0e-3, float(actuator_max_steer_rad)),
+            source="carla_physics_control",
+        )
 
 
 class MapLookupPort:
@@ -96,12 +162,15 @@ class ActuatorPort:
 
     def __init__(
         self, *, actuator_mapper: Any, constraints: Any, carla_module: Any,
-        clock: Callable[[], float],
+        clock: Callable[[], float], actuator_max_steer_rad: float,
     ) -> None:
         self._mapper = actuator_mapper
         self._constraints = constraints
         self._carla = carla_module
         self._clock = clock
+        self._actuator_max_steer_rad = max(
+            1.0e-6, abs(float(actuator_max_steer_rad))
+        )
         self._ego_speed_mps = 0.0
         self._target_speed_mps = 0.0
         self._stop_goal_active = False
@@ -117,7 +186,6 @@ class ActuatorPort:
     def control(self, acceleration_mps2: float, steering_angle_rad: float):
         max_accel = max(1e-6, float(self._constraints.max_acceleration_mps2))
         max_brake = max(1e-6, abs(float(self._constraints.min_acceleration_mps2)))
-        max_steer = max(1e-6, float(self._constraints.max_steer_rad))
         pedals = self._mapper.map_acceleration(
             acceleration_mps2=float(acceleration_mps2),
             max_acceleration_mps2=max_accel,
@@ -130,7 +198,13 @@ class ActuatorPort:
         return self._carla.VehicleControl(
             throttle=float(pedals.throttle),
             brake=float(pedals.brake),
-            steer=min(1.0, max(-1.0, float(steering_angle_rad) / max_steer)),
+            steer=min(
+                1.0,
+                max(
+                    -1.0,
+                    float(steering_angle_rad) / self._actuator_max_steer_rad,
+                ),
+            ),
         )
 
     def acceleration(self, control: Any) -> float:
@@ -147,8 +221,9 @@ class ActuatorPort:
         ))
 
     def steering(self, control: Any) -> float:
-        return float(getattr(control, "steer", 0.0)) * max(
-            1e-6, float(self._constraints.max_steer_rad)
+        return (
+            float(getattr(control, "steer", 0.0))
+            * self._actuator_max_steer_rad
         )
 
 

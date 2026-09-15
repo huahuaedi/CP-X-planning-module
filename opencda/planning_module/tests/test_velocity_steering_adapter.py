@@ -1,5 +1,7 @@
 import unittest
+from types import SimpleNamespace
 
+from opencda.planning_module.opencda_bridge.platform_ports import VehicleDynamics
 from opencda.planning_module.pipeline.velocity_steering_adapter import (
     OpenCDAVelocitySteeringAdapter,
     VelocitySteeringCommand,
@@ -44,14 +46,15 @@ class _ControlManager:
 class VelocitySteeringAdapterTest(unittest.TestCase):
     def setUp(self):
         self.manager = _ControlManager()
-        self.adapter = OpenCDAVelocitySteeringAdapter(self.manager)
+        self.adapter = OpenCDAVelocitySteeringAdapter(
+            self.manager, actuator_max_steer_rad=1.2
+        )
 
     def _run(self, command, actual_speed_mps=1.0):
         return self.adapter.run_step(
             command=command,
             actual_speed_mps=actual_speed_mps,
             sim_time_s=1.0,
-            max_steering_rad=0.6,
             carla_module=_Carla,
         )
 
@@ -64,14 +67,45 @@ class VelocitySteeringAdapterTest(unittest.TestCase):
 
     def test_mpc_steering_bypasses_opencda_lateral_pid(self):
         control, _ = self._run(VelocitySteeringCommand(3.0, 0.12))
-        self.assertAlmostEqual(control.steer, 0.2)
+        self.assertAlmostEqual(control.steer, 0.1)
         self.assertEqual(self.manager.controller.lateral_call_count, 0)
+
+    def test_carla_physics_separates_actuator_scale_from_planning_limit(self):
+        def wheel(x_cm, maximum_degrees):
+            return SimpleNamespace(
+                position=SimpleNamespace(x=float(x_cm)),
+                max_steer_angle=float(maximum_degrees),
+            )
+
+        physics = SimpleNamespace(wheels=(
+            wheel(223.62, 70.0), wheel(223.62, 70.0),
+            wheel(-63.38, 0.0), wheel(-63.38, 0.0),
+        ))
+        vehicle = SimpleNamespace(get_physics_control=lambda: physics)
+        dynamics = VehicleDynamics.from_carla_vehicle(
+            vehicle,
+            fallback_wheelbase_m=2.7,
+            fallback_actuator_max_steer_rad=0.6,
+        )
+
+        self.assertAlmostEqual(dynamics.wheelbase_m, 2.87)
+        self.assertAlmostEqual(dynamics.actuator_max_steer_rad, 1.2217304764)
+        self.assertEqual(dynamics.source, "carla_physics_control")
+
+    def test_physical_steering_round_trip_uses_actuator_full_scale(self):
+        requested_rad = 0.25
+        normalized = self.adapter._normalized_mpc_steering(
+            steering_rad=requested_rad,
+            actuator_max_steering_rad=self.adapter.actuator_max_steer_rad,
+        )
+        reconstructed_rad = normalized * self.adapter.actuator_max_steer_rad
+        self.assertAlmostEqual(reconstructed_rad, requested_rad)
 
     def test_opencda_lateral_max_does_not_clip_mpc_physical_steering(self):
         self.manager.controller.max_steering = 0.3
         control, _ = self._run(VelocitySteeringCommand(3.0, 0.32))
-        self.assertAlmostEqual(control.steer, 0.32 / 0.6)
-        self.assertGreater(control.steer, self.manager.controller.max_steering)
+        self.assertAlmostEqual(control.steer, 0.32 / 1.2)
+        self.assertLess(control.steer, self.manager.controller.max_steering)
 
     def test_tracking_overspeed_uses_opencda_pid_brake(self):
         control, reason = self._run(
@@ -90,7 +124,6 @@ class VelocitySteeringAdapterTest(unittest.TestCase):
             ),
             actual_speed_mps=6.46,
             sim_time_s=1.0,
-            max_steering_rad=0.6,
             carla_module=_Carla,
         )
 
@@ -107,7 +140,6 @@ class VelocitySteeringAdapterTest(unittest.TestCase):
             ),
             actual_speed_mps=6.57,
             sim_time_s=1.0,
-            max_steering_rad=0.6,
             carla_module=_Carla,
         )
 
@@ -117,7 +149,8 @@ class VelocitySteeringAdapterTest(unittest.TestCase):
 
     def test_small_overspeed_inside_deadband_cannot_trigger_pid_brake(self):
         adapter = OpenCDAVelocitySteeringAdapter(
-            self.manager, speed_deadband_mps=0.15
+            self.manager, actuator_max_steer_rad=1.2,
+            speed_deadband_mps=0.15
         )
         self.manager.controller.lon_run_step = lambda _target_speed_kmh: -1.0
 
@@ -125,7 +158,6 @@ class VelocitySteeringAdapterTest(unittest.TestCase):
             command=VelocitySteeringCommand(2.2, 0.0),
             actual_speed_mps=2.31,
             sim_time_s=1.0,
-            max_steering_rad=0.6,
             carla_module=_Carla,
         )
 

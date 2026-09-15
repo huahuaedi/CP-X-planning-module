@@ -25,7 +25,13 @@ class OpenCDAVelocitySteeringAdapter:
     MPC steering command.
     """
 
-    def __init__(self, control_manager: Any, *, speed_deadband_mps: float = 0.0):
+    def __init__(
+        self,
+        control_manager: Any,
+        *,
+        actuator_max_steer_rad: float,
+        speed_deadband_mps: float = 0.0,
+    ):
         if control_manager is None:
             raise ValueError("OpenCDA ControlManager is required")
         controller = getattr(control_manager, "controller", control_manager)
@@ -33,6 +39,9 @@ class OpenCDAVelocitySteeringAdapter:
             raise TypeError("OpenCDA controller must provide lon_run_step()")
         self.control_manager = control_manager
         self.controller = controller
+        self.actuator_max_steer_rad = max(
+            1.0e-6, abs(float(actuator_max_steer_rad))
+        )
         self.speed_deadband_mps = max(0.0, float(speed_deadband_mps))
 
     def run_step(
@@ -41,7 +50,6 @@ class OpenCDAVelocitySteeringAdapter:
         command: VelocitySteeringCommand,
         actual_speed_mps: float,
         sim_time_s: float,
-        max_steering_rad: float,
         carla_module: Any,
     ):
         del sim_time_s  # OpenCDA PID owns its configured control timestep.
@@ -133,7 +141,7 @@ class OpenCDAVelocitySteeringAdapter:
                 )
             desired_steer = self._normalized_mpc_steering(
                 steering_rad=float(command.target_steering_rad),
-                max_steering_rad=float(max_steering_rad),
+                actuator_max_steering_rad=float(self.actuator_max_steer_rad),
             )
 
         # MPC is the sole lateral controller and already enforces physical
@@ -156,9 +164,9 @@ class OpenCDAVelocitySteeringAdapter:
 
     @staticmethod
     def _normalized_mpc_steering(
-        *, steering_rad: float, max_steering_rad: float
+        *, steering_rad: float, actuator_max_steering_rad: float
     ) -> float:
-        steering_scale = max(1.0e-6, abs(float(max_steering_rad)))
+        steering_scale = max(1.0e-6, abs(float(actuator_max_steering_rad)))
         return max(-1.0, min(1.0, float(steering_rad) / steering_scale))
 
 

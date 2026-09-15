@@ -478,13 +478,32 @@ class CPXMPCPlannerBridge:
         from opencda.planning_module.opencda_bridge.platform_ports import (
             ActuatorPort,
             MapLookupPort,
+            VehicleDynamics,
         )
+        fallback_actuator_steer_rad = float(self.config.get(
+            "platform_actuator_max_steer_rad",
+            math.radians(70.0),
+        ))
+        self.vehicle_dynamics = VehicleDynamics.from_carla_vehicle(
+            self.vehicle_manager.vehicle,
+            fallback_wheelbase_m=float(self.config.get(
+                "platform_wheelbase_m", self.mpc.wheelbase_m
+            )),
+            fallback_actuator_max_steer_rad=fallback_actuator_steer_rad,
+        )
+        # MPC states use the physical axle geometry. Planning steering bounds
+        # remain independent from the actuator's normalized full scale.
+        self.mpc.wheelbase_m = float(self.vehicle_dynamics.wheelbase_m)
+        self.mpc.l_r_m = 0.5 * float(self.vehicle_dynamics.wheelbase_m)
         self.actuator_mapper = CarlaActuatorMapper(self.config)
         self.actuator_port = ActuatorPort(
             actuator_mapper=self.actuator_mapper,
             constraints=self.mpc.constraints,
             carla_module=carla,
             clock=self._sim_time_s,
+            actuator_max_steer_rad=(
+                self.vehicle_dynamics.actuator_max_steer_rad
+            ),
         )
         runtime_input_stage = RuntimeInputStage(self.actuator_mapper)
         vehicle_curvature_margin = min(
@@ -647,6 +666,9 @@ class CPXMPCPlannerBridge:
         )
         self.velocity_steering_adapter = OpenCDAVelocitySteeringAdapter(
             self.vehicle_manager.controller,
+            actuator_max_steer_rad=(
+                self.vehicle_dynamics.actuator_max_steer_rad
+            ),
             speed_deadband_mps=float(self.actuator_mapper.speed_deadband_mps),
         )
         self.mpc_command_extractor = MPCCommandExtractor(
@@ -1102,18 +1124,24 @@ class CPXMPCPlannerBridge:
             ),
             actual_speed_mps=float(actual_speed_mps),
             sim_time_s=float(sim_time_s),
-            max_steering_rad=float(self.mpc.constraints.max_steer_rad),
             carla_module=carla,
         )
         applied_steer_rad = (
             float(getattr(control, "steer", 0.0))
-            * float(self.mpc.constraints.max_steer_rad)
+            * float(self.vehicle_dynamics.actuator_max_steer_rad)
         )
         debug = {
             "control_interface": "planner_velocity_steering",
             "platform_target_speed_mps": float(target_speed_mps),
             "platform_target_steer_rad": float(target_steering_rad),
             "platform_adapter_steer_rad": float(applied_steer_rad),
+            "platform_actuator_max_steer_rad": float(
+                self.vehicle_dynamics.actuator_max_steer_rad
+            ),
+            "platform_wheelbase_m": float(self.vehicle_dynamics.wheelbase_m),
+            "platform_vehicle_dynamics_source": str(
+                self.vehicle_dynamics.source
+            ),
             "platform_actual_speed_mps": float(actual_speed_mps),
             "platform_adapter_reason": str(adapter_reason),
             "platform_adapter_throttle": float(
