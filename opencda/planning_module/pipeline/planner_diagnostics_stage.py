@@ -964,7 +964,11 @@ class PlannerDiagnosticsStage:
             "applied_steer": float(getattr(control, "steer", 0.0)),
             "platform_applied_steer_rad": float(
                 getattr(control, "steer", 0.0)
-            ) * float(self.mpc.constraints.max_steer_rad),
+            ) * float(getattr(
+                getattr(self, "vehicle_dynamics", None),
+                "actuator_max_steer_rad",
+                self.mpc.constraints.max_steer_rad,
+            )),
             "planner_requested": True,
             "planner_executed": True,
             "fallback_active": bool(fallback_reason),

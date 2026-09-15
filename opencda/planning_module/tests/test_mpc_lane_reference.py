@@ -282,6 +282,58 @@ class MPCLaneReferenceTests(unittest.TestCase):
         self.assertEqual(len(observed_progress), 1)
         self.assertAlmostEqual(observed_progress[0], 0.2)
 
+    def test_rollout_uses_curvature_feedforward_before_heading_error(self):
+        """An aligned vehicle must steer into a curved reference proactively."""
+
+        mpc = object.__new__(MPC)
+        mpc.horizon_steps = 1
+        mpc.nx = 4
+        mpc.nu = 2
+        mpc.dt_s = 0.1
+        mpc.wheelbase_m = 2.8
+        mpc.l_r_m = 1.4
+        mpc.reference_prefer_lane_center_path = True
+        mpc.lane_center_follow_use_progress_lookup = True
+        mpc.reference_path_los_heading_blend = 0.0
+        mpc.reference_heading_gain = 0.0
+        mpc.reference_speed_gain = 0.0
+        mpc.speed_soft_constraint_enabled = False
+        mpc.constraints = type("Constraints", (), {
+            "min_velocity_mps": 0.0,
+            "max_velocity_mps": 10.0,
+            "min_acceleration_mps2": -3.0,
+            "max_acceleration_mps2": 3.0,
+            "min_steer_rad": -0.6,
+            "max_steer_rad": 0.6,
+        })()
+        mpc._compute_reference_rollout_speed_limit = (
+            lambda **kwargs: float(kwargs["base_speed_mps"])
+        )
+        mpc._future_speed_upper_bound_mps = (
+            lambda **kwargs: float(kwargs["active_speed_upper_bound_mps"])
+        )
+        reference = [
+            {
+                "x_ref_m": 0.0, "y_ref_m": 0.0, "heading_rad": 0.0,
+                "curvature_1pm": 0.1, "progress_m": 0.0,
+            },
+            {
+                "x_ref_m": 1.0, "y_ref_m": 0.0, "heading_rad": 0.0,
+                "curvature_1pm": 0.1, "progress_m": 1.0,
+            },
+        ]
+
+        _, controls = mpc._reference_rollout(
+            x0=np.array([0.0, 0.0, 2.0, 0.0]),
+            x_ref_target=np.array([1.0, 0.0, 2.0, 0.0]),
+            lane_center_reference=reference,
+            object_snapshots=[],
+        )
+
+        self.assertGreater(float(controls[0, 1]), 0.0)
+        expected = mpc._steering_for_path_curvature(0.1)
+        self.assertAlmostEqual(float(controls[0, 1]), expected)
+
 
 class SignedLongitudinalProgressAffineFormTests(unittest.TestCase):
     def test_zero_at_the_reference_point_itself(self):

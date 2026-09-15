@@ -1104,10 +1104,19 @@ class MPC:
         except (TypeError, ValueError):
             progress_m = float("nan")
 
+        curvature_1pm = sample.get("curvature_1pm", 0.0)
+        try:
+            curvature_1pm = float(curvature_1pm)
+        except (TypeError, ValueError):
+            curvature_1pm = 0.0
+        if not math.isfinite(curvature_1pm):
+            curvature_1pm = 0.0
+
         return {
             "x_ref_m": float(sample.get("x_ref_m", 0.0)),
             "y_ref_m": float(sample.get("y_ref_m", 0.0)),
             "heading_rad": float(sample.get("heading_rad", 0.0)),
+            "curvature_1pm": float(curvature_1pm),
             "lane_id": int(sample.get("lane_id", 0)),
             "lane_width_m": float(lane_width_m),
             "road_center_offset_m": float(road_center_offset_m),
@@ -1272,6 +1281,14 @@ class MPC:
                 "x_ref_m": float(lower["x_ref_m"]) + fraction * (float(upper["x_ref_m"]) - float(lower["x_ref_m"])),
                 "y_ref_m": float(lower["y_ref_m"]) + fraction * (float(upper["y_ref_m"]) - float(lower["y_ref_m"])),
                 "heading_rad": float(heading_rad),
+                "curvature_1pm": (
+                    float(lower["curvature_1pm"])
+                    + fraction
+                    * (
+                        float(upper["curvature_1pm"])
+                        - float(lower["curvature_1pm"])
+                    )
+                ),
                 "lane_id": int(nearer["lane_id"]),
                 "lane_width_m": float(nearer["lane_width_m"]),
                 "road_center_offset_m": float(nearer["road_center_offset_m"]),
@@ -1325,6 +1342,28 @@ class MPC:
             float(sample.get("y_ref_m", 0.0)),
             float(sample.get("heading_rad", 0.0)),
         )
+
+    def _lane_center_curvature_by_progress(
+        self,
+        lane_center_reference: Sequence[Mapping[str, object]] | None,
+        query_progress_m: float,
+    ) -> float:
+        sample = self._get_lane_center_stage_sample_by_progress(
+            lane_center_reference=lane_center_reference,
+            query_progress_m=float(query_progress_m),
+        )
+        return 0.0 if sample is None else float(sample.get("curvature_1pm", 0.0))
+
+    def _lane_center_curvature_by_index(
+        self,
+        lane_center_reference: Sequence[Mapping[str, object]] | None,
+        stage_index: int,
+    ) -> float:
+        sample = self._get_lane_center_stage_sample(
+            lane_center_reference=lane_center_reference,
+            stage_index=int(stage_index),
+        )
+        return 0.0 if sample is None else float(sample.get("curvature_1pm", 0.0))
     @staticmethod
     def _lane_center_waypoint_position(waypoint: Mapping[str, object]) -> Tuple[float, float] | None:
         position_raw = waypoint.get("position")
@@ -2604,6 +2643,20 @@ class MPC:
         tan_delta = math.tan(delta_rad)
         return float((k_ratio * sec_delta_sq) / (1.0 + (k_ratio * tan_delta) ** 2))
 
+    def _steering_for_path_curvature(self, curvature_1pm: float) -> float:
+        """Invert this MPC's CG bicycle model for steady path curvature."""
+
+        curvature = float(curvature_1pm)
+        if abs(curvature) <= 1.0e-9:
+            return 0.0
+        lateral_ratio = max(
+            -1.0 + 1.0e-6,
+            min(1.0 - 1.0e-6, curvature * float(self.l_r_m)),
+        )
+        beta_rad = math.asin(lateral_ratio)
+        axle_ratio = float(self.wheelbase_m) / max(1.0e-9, float(self.l_r_m))
+        return float(math.atan(axle_ratio * math.tan(beta_rad)))
+
     def _reference_rollout(
         self,
         x0: np.ndarray,
@@ -2697,6 +2750,7 @@ class MPC:
             target_x_m = float(x_goal)
             target_y_m = float(y_goal)
             path_heading_rad = float(psi_goal)
+            path_curvature_1pm = 0.0
 
             if progress_lookup_active:
                 # Query the position this stage's own traveled arc length so
@@ -2718,13 +2772,25 @@ class MPC:
                     lane_center_reference=lane_center_reference,
                     query_progress_m=next_progress_estimate_m,
                 )
+                path_curvature_1pm = self._lane_center_curvature_by_progress(
+                    lane_center_reference=lane_center_reference,
+                    query_progress_m=next_progress_estimate_m,
+                )
                 if stage_ref is None:
                     stage_ref = self._get_lane_center_stage_ref(
                         lane_center_reference=lane_center_reference,
                         stage_index=int(k + 1),
                     )
+                    path_curvature_1pm = self._lane_center_curvature_by_index(
+                        lane_center_reference=lane_center_reference,
+                        stage_index=int(k + 1),
+                    )
             elif bool(self.reference_prefer_lane_center_path):
                 stage_ref = self._get_lane_center_stage_ref(
+                    lane_center_reference=lane_center_reference,
+                    stage_index=int(k + 1),
+                )
+                path_curvature_1pm = self._lane_center_curvature_by_index(
                     lane_center_reference=lane_center_reference,
                     stage_index=int(k + 1),
                 )
@@ -2757,8 +2823,17 @@ class MPC:
                 1.0,
                 max(0.0, (v_mps - _low_spd_lo) / max(1e-9, _low_spd_hi - _low_spd_lo)),
             )
+            # Path curvature is the steady-state feed-forward term.  The old
+            # heading-error-only seed commanded zero steering while exactly
+            # aligned at turn entry, then reacted only after yaw had fallen
+            # behind the connector.  That made the rate-limited optimizer
+            # spend the entire first part of every turn catching up.
+            curvature_feedforward_rad = self._steering_for_path_curvature(
+                path_curvature_1pm
+            )
             delta_des = self._clamp(
-                self.reference_heading_gain * heading_error * _spd_scale,
+                curvature_feedforward_rad
+                + self.reference_heading_gain * heading_error * _spd_scale,
                 self.constraints.min_steer_rad,
                 self.constraints.max_steer_rad,
             )
