@@ -4732,6 +4732,7 @@ class CPXMPCPlannerBridge:
         nearest_obstacle_distance_m: Optional[float] = None,
         ego_speed_mps: float = 0.0,
     ) -> None:
+        previous_active_profile = str(self.active_mpc_cost_profile)
         requested = mpc_cost_profile_for_behavior(
             behavior=behavior,
             planner_lc_state=planner_lc_state,
@@ -4755,6 +4756,18 @@ class CPXMPCPlannerBridge:
             self.active_mpc_cost_profile = str(
                 self.mpc.apply_mode_cost_profile(str(self.active_mpc_cost_profile))
             )
+        if (
+            str(self.active_mpc_cost_profile) != previous_active_profile
+            and hasattr(self.mpc, "clear_previous_solution_seed")
+        ):
+            # A shifted solution is a useful linearization seed only while it
+            # describes the same reference mode.  In particular, carrying a
+            # straight, zero-steer rollout into the first TURN solve bypasses
+            # the new connector curvature entirely and forces feedback to
+            # wait for a heading error.  Clear only the optimizer seed; the
+            # persistent reference master and executable control buffer keep
+            # their own independent lifecycles.
+            self.mpc.clear_previous_solution_seed()
         if bool(
             getattr(self.mpc, "adaptive_horizon_enabled", False)
         ) and hasattr(self.mpc, "blend_toward_horizon_s"):
