@@ -23,6 +23,7 @@ SpeedPlan = speed_planner.SpeedPlan
 conflict_corridor_speed_constraint = (
     speed_planner.conflict_corridor_speed_constraint
 )
+cooperative_gap_speed_constraint = speed_planner.cooperative_gap_speed_constraint
 
 
 class SpeedPlannerTest(unittest.TestCase):
@@ -83,6 +84,57 @@ class SpeedPlannerTest(unittest.TestCase):
         self.assertEqual(constraint.owner, "cav_conflict")
         self.assertAlmostEqual(constraint.maximum_mps, math.sqrt(60.0))
         self.assertIn("binding=peer-7", constraint.reason)
+
+    def test_moving_peer_bound_is_not_a_stationary_stop_line(self):
+        constraint = conflict_corridor_speed_constraint(
+            corridor=SimpleNamespace(
+                s_hi=[5.0, 5.8, 6.6, 7.4],
+                binding=["peer"] * 4,
+            ),
+            reference_samples=[
+                {"x_ref_m": 0.0, "y_ref_m": 0.0},
+                {"x_ref_m": 30.0, "y_ref_m": 0.0},
+            ],
+            ego_x_m=5.0,
+            ego_y_m=0.0,
+            comfortable_deceleration_mps2=2.0,
+            corridor_dt_s=0.1,
+        )
+        self.assertIsNotNone(constraint)
+        self.assertAlmostEqual(constraint.maximum_mps, 8.0)
+        self.assertIn("bound_velocity_mps=8.000", constraint.reason)
+
+    def test_proposed_make_gap_prepares_room_without_zero_speed_step(self):
+        constraint = cooperative_gap_speed_constraint(
+            reference_samples=[
+                {"x_ref_m": 0.0, "y_ref_m": 0.0},
+                {"x_ref_m": 30.0, "y_ref_m": 0.0},
+            ],
+            ego_x_m=5.0, ego_y_m=0.0, ego_speed_mps=8.0,
+            peer_x_m=11.0, peer_y_m=3.6, peer_speed_mps=8.0,
+            peer_id="peer", peer_length_m=4.8,
+            ego_half_length_m=2.45, desired_bumper_gap_m=15.0,
+            preparation_time_s=4.0,
+            comfortable_deceleration_mps2=1.5, planning_dt_s=0.1,
+        )
+        self.assertIsNotNone(constraint)
+        self.assertEqual(constraint.owner, "cooperative_gap")
+        self.assertAlmostEqual(constraint.maximum_mps, 7.85)
+
+    def test_cooperative_gap_releases_once_required_gap_is_open(self):
+        constraint = cooperative_gap_speed_constraint(
+            reference_samples=[
+                {"x_ref_m": 0.0, "y_ref_m": 0.0},
+                {"x_ref_m": 60.0, "y_ref_m": 0.0},
+            ],
+            ego_x_m=5.0, ego_y_m=0.0, ego_speed_mps=8.0,
+            peer_x_m=40.0, peer_y_m=3.6, peer_speed_mps=8.0,
+            peer_id="peer", peer_length_m=4.8,
+            ego_half_length_m=2.45, desired_bumper_gap_m=15.0,
+            preparation_time_s=4.0,
+            comfortable_deceleration_mps2=1.5, planning_dt_s=0.1,
+        )
+        self.assertIsNone(constraint)
 
     def test_late_conflict_constraint_flows_through_single_speed_owner(self):
         planner = SpeedTargetPlanner()

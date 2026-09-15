@@ -3181,6 +3181,9 @@ class CPXMPCPlannerBridge:
                 comfortable_deceleration_mps2=float(self.config.get(
                     "cav_conflict_comfort_deceleration_mps2", 1.5
                 )),
+                cooperative_preparation_time_s=float(self.config.get(
+                    "candidate_lane_change_normal_duration_s", 4.0
+                )),
             )
             self._cav_schedule.observe(
                 sim_time_s=float(sim_time_s), result=cav_result,

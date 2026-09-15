@@ -68,6 +68,7 @@ class CorridorParams:
     # corridor overrides a stale ``proceed`` role.
     proceed_safety_override_ttc_s: float = 1.0
     ego_half_length_m: float = 2.45
+    ego_half_width_m: float = 0.95
     # Magnitude of the MPC's own hard deceleration limit (mpc.yaml
     # constraints.min_acceleration_mps2). A cap tighter than what this lets
     # the ego reach by braking alone is not a geometry problem Stage D can
@@ -445,13 +446,30 @@ def build_longitudinal_corridor(
             station and float(station[0]) < float(ego_s0) - 1.0e-6
         )
 
-        # A negotiated make-gap role is not ordinary following: it is the
-        # cooperative longitudinal contract and therefore owns a corridor
-        # cap regardless of whether Stage A labelled the peer FOLLOW or
-        # MERGE.  Apply it before the generic FOLLOW/IDM hand-off.
+        # A claim decides priority, not physical occupancy.  An adjacent
+        # peer whose broadcast path stays in its own lane must not be treated
+        # as an already-merged lead (and must not demand an impossible RSS
+        # gap at k=0).  The role remains latched; the longitudinal half-space
+        # begins only when its predicted footprint enters ego's corridor.
         if role == "make_gap":
+            if tag.reason == "conflicting_resource_claim":
+                continue
+            overlap_m = (
+                0.5 * max(0.0, _f(
+                    agent, "width_m", "width",
+                    default=2.0 * float(p.ego_half_width_m),
+                ))
+                + max(0.0, float(p.ego_half_width_m))
+                + max(0.0, float(rss.lateral_mu_m))
+            )
+            track = list(_obstacle_track_xy(agent))
             for k in range(n + 1):
-                if k < len(station):
+                if k < len(station) and k < len(track) and (
+                    tag.tag in (FOLLOW, LEAD_BRAKE)
+                    or project_to_extended_polyline(
+                        float(track[k][0]), float(track[k][1]), poly
+                    )[0] <= overlap_m
+                ):
                     _cap(k, station[k] - gap, tag.agent_id)
             continue
 
@@ -469,6 +487,33 @@ def build_longitudinal_corridor(
             continue
 
         if tag.tag in (CUT_IN, MERGE):
+            if tag.tag == MERGE:
+                # Stage A may classify on a proposed lane-change curve. A
+                # stationary peer then appears to "converge" merely because
+                # ego's preview reference is moving underneath it. Stage C
+                # owns physical occupancy on the executed reference: require
+                # the *peer's* broadcast path to converge there before
+                # creating a merge half-space. An already same-lane lead is
+                # delegated to SpeedPlanner/IDM; a faster rear peer overtaking
+                # ego's nominal progress still gets a bound.
+                lateral = [
+                    project_to_extended_polyline(float(x), float(y), poly)[0]
+                    for x, y in _obstacle_track_xy(agent)
+                ]
+                if (
+                    len(lateral) < 2
+                    or (
+                        lateral[-1] >= lateral[0] - 0.5
+                        and not (
+                            agent_starts_behind
+                            and any(
+                                station[k] > ego_nominal_station[k]
+                                for k in range(min(len(station), n + 1))
+                            )
+                        )
+                    )
+                ):
+                    continue
             # A cooperative cav that lost the arbitration (role proceed) is
             # expected to yield to ego, so ego takes no bound from it.
             if proceed and not imminent:

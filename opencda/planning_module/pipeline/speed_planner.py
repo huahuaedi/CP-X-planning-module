@@ -111,6 +111,7 @@ def conflict_corridor_speed_constraint(
     ego_x_m: float,
     ego_y_m: float,
     comfortable_deceleration_mps2: float,
+    corridor_dt_s: float = 0.1,
 ) -> Optional[SpeedConstraint]:
     """Convert an active Stage-C progress bound into a nominal speed limit.
 
@@ -133,7 +134,7 @@ def conflict_corridor_speed_constraint(
     upper_bounds = list(getattr(corridor, "s_hi", ()) or ())
     bindings = list(getattr(corridor, "binding", ()) or ())
     active = [
-        (float(upper), str(bindings[index]))
+        (index, float(upper), str(bindings[index]))
         for index, upper in enumerate(upper_bounds)
         if index < len(bindings)
         and str(bindings[index])
@@ -145,16 +146,126 @@ def conflict_corridor_speed_constraint(
     ego_station_m = project_to_extended_polyline(
         float(ego_x_m), float(ego_y_m), polyline
     )[1]
-    stop_station_m, binding = min(active, key=lambda item: item[0])
-    remaining_m = max(0.0, float(stop_station_m) - float(ego_station_m))
     deceleration_mps2 = max(0.1, float(comfortable_deceleration_mps2))
-    maximum_mps = math.sqrt(2.0 * deceleration_mps2 * remaining_m)
+    dt_s = max(1.0e-3, float(corridor_dt_s))
+    by_stage = {index: (upper, binding) for index, upper, binding in active}
+    candidates = []
+    for index, upper, binding in active:
+        remaining_m = max(0.0, upper - float(ego_station_m))
+        # A moving peer's station bound advances with it. Treating the
+        # smallest row as a stationary stop line turns a perfectly parallel
+        # make-gap proposal into a zero-speed command. The row's local slope
+        # is the speed of that moving limit; static crossing rows have zero
+        # slope and retain the original braking-distance approach.
+        neighbor = by_stage.get(index + 1)
+        neighbor_index = index + 1
+        if neighbor is not None and neighbor[1] != binding:
+            neighbor = None
+        if neighbor is None:
+            neighbor = by_stage.get(index - 1)
+            neighbor_index = index - 1
+            if neighbor is not None and neighbor[1] != binding:
+                neighbor = None
+        bound_velocity_mps = 0.0
+        if neighbor is not None:
+            neighbor_upper = neighbor[0]
+            bound_velocity_mps = max(
+                0.0,
+                (neighbor_upper - upper)
+                / ((neighbor_index - index) * dt_s),
+            )
+        candidates.append((
+            bound_velocity_mps
+            + math.sqrt(2.0 * deceleration_mps2 * remaining_m),
+            binding, remaining_m, bound_velocity_mps,
+        ))
+    maximum_mps, binding, remaining_m, bound_velocity_mps = min(
+        candidates, key=lambda item: item[0]
+    )
     return SpeedConstraint(
         owner="cav_conflict",
         maximum_mps=float(maximum_mps),
         reason=(
             "cooperative_corridor_approach:"
-            f"binding={binding},remaining_m={remaining_m:.3f}"
+            f"binding={binding},remaining_m={remaining_m:.3f},"
+            f"bound_velocity_mps={bound_velocity_mps:.3f}"
+        ),
+    )
+
+
+def cooperative_gap_speed_constraint(
+    *,
+    reference_samples: Sequence[Mapping[str, object]],
+    ego_x_m: float,
+    ego_y_m: float,
+    ego_speed_mps: float,
+    peer_x_m: float,
+    peer_y_m: float,
+    peer_speed_mps: float,
+    peer_id: str,
+    peer_length_m: float,
+    ego_half_length_m: float,
+    desired_bumper_gap_m: float,
+    preparation_time_s: float,
+    comfortable_deceleration_mps2: float,
+    planning_dt_s: float,
+) -> Optional[SpeedConstraint]:
+    """Open a negotiated gap before an adjacent peer physically merges.
+
+    A proposed resource claim has no MPC occupancy row. Its losing vehicle
+    may nevertheless need to create longitudinal room before the winner can
+    pass the ordinary lane-change safety gate. The target is the relative
+    speed needed to reach the bumper gap over the maneuver preparation time;
+    each tick may lower the current speed target only by a comfortable
+    deceleration step. Physical collision limits remain Stage C/D's owner.
+    """
+
+    from opencda.planning_module.pipeline.mpc_obstacle_relevance import (
+        _polyline_xy,
+        project_to_extended_polyline,
+    )
+
+    polyline = _polyline_xy(reference_samples)
+    if len(polyline) < 2:
+        return None
+    ego_station = project_to_extended_polyline(
+        float(ego_x_m), float(ego_y_m), polyline
+    )[1]
+    peer_station = project_to_extended_polyline(
+        float(peer_x_m), float(peer_y_m), polyline
+    )[1]
+    if peer_station <= ego_station:
+        return None
+    half_peer = (
+        0.5 * float(peer_length_m)
+        if float(peer_length_m) > 0.0
+        else max(0.0, float(ego_half_length_m))
+    )
+    centre_gap_m = float(peer_station - ego_station)
+    required_centre_gap_m = (
+        max(0.0, float(desired_bumper_gap_m))
+        + max(0.0, float(ego_half_length_m)) + half_peer
+    )
+    deficit_m = max(0.0, required_centre_gap_m - centre_gap_m)
+    if deficit_m <= 0.0:
+        return None
+    desired_mps = max(
+        0.0,
+        float(peer_speed_mps)
+        - deficit_m / max(0.1, float(preparation_time_s)),
+    )
+    reachable_mps = max(
+        0.0,
+        float(ego_speed_mps)
+        - max(0.1, float(comfortable_deceleration_mps2))
+        * max(0.01, float(planning_dt_s)),
+    )
+    return SpeedConstraint(
+        owner="cooperative_gap",
+        maximum_mps=max(desired_mps, reachable_mps),
+        reason=(
+            f"make_gap:peer={peer_id},centre_gap_m={centre_gap_m:.3f},"
+            f"required_m={required_centre_gap_m:.3f}"
         ),
     )
 

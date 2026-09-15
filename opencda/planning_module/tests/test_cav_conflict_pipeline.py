@@ -198,7 +198,9 @@ def test_conflicting_claims_arbitrate_before_geometric_merge_begins():
 
     assert result.diagnostics["tags"]["2"] == IGNORE
     assert result.diagnostics["roles"]["2"] == "make_gap"
-    assert any(value < _BIG for value in result.corridor.s_hi)
+    # The claim reserves priority, but the peer's broadcast path still stays
+    # in its own lane. No physical occupancy -> no MPC half-space or stop.
+    assert all(value >= _BIG for value in result.corridor.s_hi)
 
 
 def test_non_connected_crosser_defaults_to_yield_without_assignment():

@@ -191,12 +191,36 @@ def test_merge_make_gap_puts_ego_behind_cav():
     assert cor.binding[5] == "cav"
 
 
+def test_make_gap_begins_when_peer_predicted_footprint_enters_corridor():
+    path = [
+        (12.0 + 0.8 * k, 3.6 if k < 8 else 3.6 - 0.4 * (k - 7))
+        for k in range(21)
+    ]
+    peer = {"x": 12.0, "y": 3.6, "v": 8.0, "width_m": 1.9,
+            **_track(path)}
+    cor = build_longitudinal_corridor(
+        REF, EGO, [(peer, _tag("peer", MERGE), _assign("make_gap"))], P
+    )
+    assert all(cor.s_hi[k] >= _BIG for k in range(8))
+    assert any(cor.s_hi[k] < _BIG for k in range(10, 21))
+
+
 def test_merge_proceed_adds_no_bound():
     cav = {"x": 25.0, "v": 9.0, **_track([(25.0, 0.2)] * 21)}
     cor = build_longitudinal_corridor(
         REF, EGO, [(cav, _tag("cav", MERGE), _assign("proceed"))], P
     )
     assert all(h >= _BIG for h in cor.s_hi)
+
+
+def test_stationary_peer_is_not_a_merge_on_egos_moving_preview():
+    peer = {"x": 25.0, "y": 0.1, "v": 8.0,
+            **_track([(25.0 + 0.8 * k, 0.1) for k in range(21)])}
+    cor = build_longitudinal_corridor(
+        REF, EGO, [(peer, _tag("peer", MERGE), None)], P
+    )
+    assert all(h >= _BIG for h in cor.s_hi)
+    assert not any(cor.binding)
 
 
 def test_rear_merge_cannot_reverse_lead_vehicle_longitudinal_order():

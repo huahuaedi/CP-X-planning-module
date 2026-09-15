@@ -10,11 +10,13 @@ from .perception_stage import PerceptionStage, PerceptionStageResult
 from .runtime_input_stage import RuntimeInputStage, RuntimeTickSnapshot
 from .speed_planner import (
     conflict_corridor_speed_constraint,
+    cooperative_gap_speed_constraint,
     effective_emergency_gap_m,
 )
 from .cav_conflict_pipeline import resolve_conflicts as resolve_cav_conflicts
 from .conflict_classifier import ClassifierParams
 from .spatiotemporal_corridor import CorridorParams
+from .rss import RSSParams, longitudinal_safe_distance
 
 
 @dataclass(frozen=True)
@@ -227,6 +229,7 @@ class PlanningPipeline:
         max_braking_mps2=3.0,
         current_acceleration_mps2=0.0, max_jerk_mps3=10.0,
         comfortable_deceleration_mps2=1.5,
+        cooperative_preparation_time_s=4.0,
     ):
         """Classify on proposal geometry and constrain the executable geometry.
 
@@ -247,6 +250,12 @@ class PlanningPipeline:
             if constraint_reference_samples is None
             else constraint_reference_samples
         )
+        corridor_params = CorridorParams(
+            horizon_steps=max(1, int(horizon_steps)), dt_s=float(dt_s),
+            max_braking_mps2=max(1.0e-3, abs(float(max_braking_mps2))),
+            max_jerk_mps3=max(0.0, abs(float(max_jerk_mps3))),
+        )
+        rss_params = RSSParams()
         result = resolve_cav_conflicts(
             reference_samples=reference_samples,
             corridor_reference_samples=corridor_reference,
@@ -261,11 +270,7 @@ class PlanningPipeline:
             classifier_params=ClassifierParams(
                 horizon_steps=max(1, int(horizon_steps)), dt_s=float(dt_s)
             ),
-            corridor_params=CorridorParams(
-                horizon_steps=max(1, int(horizon_steps)), dt_s=float(dt_s),
-                max_braking_mps2=max(1.0e-3, abs(float(max_braking_mps2))),
-                max_jerk_mps3=max(0.0, abs(float(max_jerk_mps3))),
-            ),
+            corridor_params=corridor_params, rss_params=rss_params,
             mode_probability_floor=float(mode_probability_floor),
             credible_mode_probability_min=float(credible_mode_probability_min),
             credible_mode_ttc_s=float(credible_mode_ttc_s),
@@ -327,7 +332,46 @@ class PlanningPipeline:
             comfortable_deceleration_mps2=float(
                 comfortable_deceleration_mps2
             ),
+            corridor_dt_s=step_s,
         )
+        peers_by_id = {
+            int(intent.actor_id): intent for intent in list(cav_intents or [])
+        }
+        for assignment in result.assignments:
+            if str(assignment.role) != "make_gap":
+                continue
+            peer = peers_by_id.get(int(assignment.cav_actor_id))
+            if peer is None:
+                continue
+            gap_constraint = cooperative_gap_speed_constraint(
+                reference_samples=corridor_reference,
+                ego_x_m=float(ego_location.x),
+                ego_y_m=float(ego_location.y),
+                ego_speed_mps=float(ego_speed_mps),
+                peer_x_m=float(peer.position_xy[0]),
+                peer_y_m=float(peer.position_xy[1]),
+                peer_speed_mps=float(peer.speed_mps),
+                peer_id=str(peer.actor_id),
+                peer_length_m=float(peer.length_m),
+                ego_half_length_m=float(corridor_params.ego_half_length_m),
+                desired_bumper_gap_m=(
+                    longitudinal_safe_distance(
+                        float(ego_speed_mps), float(peer.speed_mps),
+                        rss_params,
+                    ) + float(corridor_params.follow_extra_buffer_m)
+                ),
+                preparation_time_s=float(cooperative_preparation_time_s),
+                comfortable_deceleration_mps2=float(
+                    comfortable_deceleration_mps2
+                ),
+                planning_dt_s=step_s,
+            )
+            if gap_constraint is not None and (
+                result.speed_constraint is None
+                or gap_constraint.maximum_mps
+                < result.speed_constraint.maximum_mps
+            ):
+                result.speed_constraint = gap_constraint
         result.diagnostics.update({
             "longitudinal_qp_row_count": len(longitudinal_rows),
             "homotopy_qp_row_count": len(lateral_rows),
