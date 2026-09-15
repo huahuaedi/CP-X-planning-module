@@ -3165,28 +3165,57 @@ class MPC:
         qa_eff = comfort_scale * float(self.comfort_cost.qa) / max(1e-9, self.dt_s * self.dt_s)
         qd_eff = comfort_scale * float(self.comfort_cost.qdelta) / max(1e-9, self.dt_s * self.dt_s)
 
-        def add_rate_penalty(var_idx: int, prev_idx: int | None, prev_value: float, weight: float) -> None:
+        def add_rate_penalty(
+            var_idx: int,
+            prev_idx: int | None,
+            prev_value: float,
+            weight: float,
+            reference_delta: float = 0.0,
+        ) -> None:
             if weight <= 0.0:
                 return
             if prev_idx is None:
-                # (u - u_prev_const)^2
+                # (u - u_prev_const - reference_delta)^2
                 add_quadratic(var_idx, weight)
-                q[var_idx] += -2.0 * float(weight) * float(prev_value)
+                q[var_idx] += -2.0 * float(weight) * (
+                    float(prev_value) + float(reference_delta)
+                )
                 return
-            # (u_k - u_{k-1})^2 = u_k^2 + u_{k-1}^2 - 2 u_k u_{k-1}
+            # (u_k - u_{k-1} - reference_delta)^2.  A zero reference
+            # recovers the ordinary actuator-rate comfort term exactly.
             add_quadratic(var_idx, weight)
             add_quadratic(prev_idx, weight)
             add_p_entry(var_idx, prev_idx, -2.0 * float(weight))
+            q[var_idx] += -2.0 * float(weight) * float(reference_delta)
+            q[prev_idx] += 2.0 * float(weight) * float(reference_delta)
 
         for k in range(self.horizon_steps):
             a_idx = index.control_index(k, 0)
             d_idx = index.control_index(k, 1)
             if k == 0:
                 add_rate_penalty(a_idx, None, float(current_acceleration_mps2), qa_eff)
-                add_rate_penalty(d_idx, None, float(current_steering_rad), qd_eff)
+                add_rate_penalty(
+                    d_idx,
+                    None,
+                    float(current_steering_rad),
+                    qd_eff,
+                    reference_delta=(
+                        float(u_ref_rollout[k, 1])
+                        - float(current_steering_rad)
+                    ),
+                )
             else:
                 add_rate_penalty(a_idx, index.control_index(k - 1, 0), 0.0, qa_eff)
-                add_rate_penalty(d_idx, index.control_index(k - 1, 1), 0.0, qd_eff)
+                add_rate_penalty(
+                    d_idx,
+                    index.control_index(k - 1, 1),
+                    0.0,
+                    qd_eff,
+                    reference_delta=(
+                        float(u_ref_rollout[k, 1])
+                        - float(u_ref_rollout[k - 1, 1])
+                    ),
+                )
 
         # --- Objective: temporal-consistency term ---
         # w_tc * sum_k || u_k - u_k^{prev,shift} ||^2 . Not rate-scaled: it is a
