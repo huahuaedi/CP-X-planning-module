@@ -54,6 +54,7 @@ class CandidateSelectionResult:
     reference: tuple
     destination_state: tuple
     diagnostics: Mapping
+    turn_master_curvature_1pm: Optional[float] = None
 
     def mutable_reference(self):
         return [dict(sample) for sample in self.reference]
@@ -979,6 +980,12 @@ class CandidateTrajectoryEvaluator:
             ),
             destination_state=tuple(selected_destination or ()),
             diagnostics=MappingProxyType(diagnostics),
+            turn_master_curvature_1pm=(
+                float(selected.reference_debug["turn_master_curvature_1pm"])
+                if selected.reference_debug.get("turn_master_curvature_1pm")
+                is not None
+                else None
+            ),
         )
 
 

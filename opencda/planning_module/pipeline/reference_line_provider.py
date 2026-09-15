@@ -1049,6 +1049,13 @@ class ReferenceLineProvider(StableReferenceLineProvider):
 
         reference, destination, reason = self.turn_reference(request)
         diagnostics = {"route_turn_reference_reason": str(reason)}
+        turn_snapshot = self.snapshot(TURN)
+        if bool(turn_snapshot.active) and turn_snapshot.samples:
+            diagnostics["turn_master_curvature_1pm"] = float(
+                self.builder.discrete_curvature_1pm(
+                    turn_snapshot.mutable_samples()
+                )
+            )
         if reference:
             first = reference[0]
             dx_m = float(first.get("x_ref_m", first.get("x", 0.0))) - float(
@@ -1143,6 +1150,13 @@ class ReferenceLineProvider(StableReferenceLineProvider):
                     turn_direction=direction,
                 ))
             )
+            turn_snapshot = self.snapshot(TURN)
+            if bool(turn_snapshot.active) and turn_snapshot.samples:
+                diagnostics["turn_master_curvature_1pm"] = float(
+                    self.builder.discrete_curvature_1pm(
+                        turn_snapshot.mutable_samples()
+                    )
+                )
             # PREPARE_TURN remains longitudinally owned by SpeedPlanner.
             for sample in transition_reference:
                 sample["v_ref_mps"] = float(request.target_speed_mps)

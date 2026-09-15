@@ -7,7 +7,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from .candidate_evaluation import CandidateSelectionResult
 from .candidate_pipeline import build_candidate_intents, summarize_candidate_results
-from .reference_line_provider import LANE_CHANGE, TURN
+from .reference_line_provider import LANE_CHANGE
 from .speed_planner import SpeedConstraint
 from opencda.planning_module.utility.speed_profile import curvature_speed_cap_mps
 
@@ -365,17 +365,6 @@ class CandidateSelectionStage:
             and str(authorization.direction).strip().lower() == "right"
             else ""
         )
-        # Candidate construction is allowed to create temporary geometry, but
-        # must not change the speed contract for the already installed turn.
-        # Capture the persistent master before evaluating any alternatives.
-        turn_snapshot = self._provider.snapshot(TURN)
-        turn_master_curvature_1pm = (
-            float(self._provider.builder.discrete_curvature_1pm(
-                turn_snapshot.mutable_samples()
-            ))
-            if bool(turn_snapshot.active) and turn_snapshot.samples
-            else None
-        )
         selected = self.run(
             CandidateSelectionRequest(
                 intents=intents,
@@ -421,7 +410,7 @@ class CandidateSelectionStage:
             turn_prepare_speed_suppressed=bool(
                 request.turn_prepare_speed_suppressed
             ),
-            turn_master_curvature_1pm=turn_master_curvature_1pm,
+            turn_master_curvature_1pm=selected.turn_master_curvature_1pm,
         )
         return CandidateArbitrationResult(
             decision=str(selected.decision),
