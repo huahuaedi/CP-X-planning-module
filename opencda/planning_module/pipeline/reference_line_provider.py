@@ -1038,6 +1038,16 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             reason = ";".join(
                 item for item in (str(reason), str(curvature_reason)) if item
             )
+        # Publish signed curvature measured from the final, conditioned XY
+        # geometry.  AD-map source fields can be absent or stale after
+        # reference conditioning; MPC feed-forward must describe the exact
+        # polyline it will track.
+        from opencda.planning_module.pipeline.reference_geometry import (
+            signed_curvature_at_samples_1pm,
+        )
+        signed_curvatures = signed_curvature_at_samples_1pm(reference)
+        for sample, curvature_1pm in zip(reference, signed_curvatures):
+            sample["curvature_1pm"] = float(curvature_1pm)
         from opencda.planning_module.behavior_planner.reference_pipeline import (
             lane_center_destination_from_reference_arc_length,
         )

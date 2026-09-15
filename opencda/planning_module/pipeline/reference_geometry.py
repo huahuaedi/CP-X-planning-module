@@ -495,6 +495,47 @@ def curvature_profile_1pm(
     return profile
 
 
+def signed_curvature_at_samples_1pm(
+    polyline: Sequence[object],
+    *,
+    eval_arc_m: float = CURVATURE_EVAL_ARC_M,
+) -> List[float]:
+    """Signed, spacing-invariant curvature aligned with input samples.
+
+    The safety contract uses curvature magnitude, but bicycle-model steering
+    feed-forward also needs turn direction.  Each value uses a centred
+    heading window measured in physical arc length and therefore does not
+    change merely because the same AD-map geometry is sampled more densely.
+    """
+
+    points = to_points(polyline)
+    seg_headings, seg_lengths = _segment_headings(points)
+    if len(points) < 2 or not seg_headings:
+        return [0.0 for _ in points]
+    seg_cum = [0.0]
+    for distance_m in seg_lengths:
+        seg_cum.append(seg_cum[-1] + float(distance_m))
+    total_m = float(seg_cum[-1])
+    half_window_m = 0.5 * max(1.0e-3, float(eval_arc_m))
+    values: List[float] = []
+    for station_m in seg_cum:
+        before_m = max(0.0, float(station_m) - half_window_m)
+        after_m = min(total_m, float(station_m) + half_window_m)
+        span_m = float(after_m) - float(before_m)
+        if span_m <= 1.0e-6:
+            values.append(0.0)
+            continue
+        before_heading = _heading_at_arc(seg_headings, seg_cum, before_m)
+        after_heading = _heading_at_arc(seg_headings, seg_cum, after_m)
+        values.append(_wrap(after_heading - before_heading) / span_m)
+    # Duplicate/zero-length input points are removed by _segment_headings.
+    # Reference providers already de-duplicate moving geometry; keep a safe
+    # length contract for partial external inputs.
+    if len(values) < len(points):
+        values.extend([values[-1] if values else 0.0] * (len(points) - len(values)))
+    return values[:len(points)]
+
+
 def max_curvature_1pm(
     polyline: Sequence[object],
     *,

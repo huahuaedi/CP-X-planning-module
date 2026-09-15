@@ -1,3 +1,5 @@
+import math
+
 import pytest
 from types import SimpleNamespace
 
@@ -17,6 +19,7 @@ from pipeline.reference_line_provider import (
     TurnReferenceRequest,
 )
 from pipeline.stable_reference_line_provider import StableReferenceLineProvider
+from pipeline.reference_geometry import signed_curvature_at_samples_1pm
 
 
 def _line(y_m=0.0):
@@ -56,6 +59,19 @@ def test_turn_master_curvature_reads_immutable_provider_geometry():
 
     assert installed
     assert provider.turn_master_curvature_1pm() == pytest.approx(0.125)
+
+
+def test_signed_curvature_uses_physical_arc_and_preserves_turn_direction():
+    quarter_circle_left = [
+        {"x_ref_m": 10.0 * math.cos(angle),
+         "y_ref_m": 10.0 * math.sin(angle)}
+        for angle in [0.025 * index for index in range(17)]
+    ]
+    left = signed_curvature_at_samples_1pm(quarter_circle_left)
+    right = signed_curvature_at_samples_1pm(list(reversed(quarter_circle_left)))
+
+    assert max(left) == pytest.approx(0.1, rel=0.25)
+    assert min(right) == pytest.approx(-0.1, rel=0.25)
 
 
 def test_local_route_reference_prefixes_matched_lane_before_connector():
