@@ -438,7 +438,7 @@ class SpeedPlannerTest(unittest.TestCase):
         self.assertEqual(plan.limiting_owner, "scenario_cap")
         self.assertEqual(plan.as_debug_fields()["speed_owner_scenario_cap_mps"], 1.5)
 
-    def test_turn_cap_records_longitudinal_authority(self):
+    def test_turn_does_not_use_a_fixed_speed_without_reference_geometry(self):
         plan = build_speed_plan(
             scenario_decision=SimpleNamespace(
                 speed_cap_mps=None,
@@ -451,9 +451,9 @@ class SpeedPlannerTest(unittest.TestCase):
             config={"full_intersection_turn_speed_cap_mps": 2.2},
             front_gap_m=None,
         )
-        self.assertEqual(plan.target_speed_mps, 2.2)
-        self.assertEqual(plan.limiting_owner, "turn_cap")
-        self.assertIn("turn_cap", plan.active_constraints)
+        self.assertEqual(plan.target_speed_mps, 4.0)
+        self.assertNotEqual(plan.limiting_owner, "turn_cap")
+        self.assertNotIn("turn_cap", plan.active_constraints)
 
     def test_distant_upcoming_turn_preserves_cruise_speed(self):
         plan = build_speed_plan(
@@ -476,7 +476,7 @@ class SpeedPlannerTest(unittest.TestCase):
         self.assertAlmostEqual(plan.target_speed_mps, 15.6464)
         self.assertNotEqual(plan.limiting_owner, "turn_approach_cap")
 
-    def test_upcoming_turn_uses_distance_based_deceleration_cap(self):
+    def test_upcoming_turn_waits_for_persistent_reference_curvature(self):
         plan = build_speed_plan(
             scenario_decision=SimpleNamespace(
                 speed_cap_mps=None,
@@ -494,10 +494,8 @@ class SpeedPlannerTest(unittest.TestCase):
             upcoming_turn_direction="right",
             upcoming_turn_distance_m=35.0,
         )
-        expected = math.sqrt(5.0 ** 2 + 2.0 * 2.5 * 30.0)
-        self.assertAlmostEqual(plan.target_speed_mps, expected)
-        self.assertEqual(plan.limiting_owner, "turn_approach_cap")
-        self.assertIn("speed_plan_turn_approach_cap", plan.reason)
+        self.assertAlmostEqual(plan.target_speed_mps, 15.6464)
+        self.assertNotEqual(plan.limiting_owner, "turn_approach_cap")
         self.assertEqual(plan.upcoming_turn_distance_m, 35.0)
 
     def test_stop_overrides_turn_approach_cap(self):
@@ -581,13 +579,7 @@ class SpeedPlannerTest(unittest.TestCase):
         self.assertNotEqual(plan.limiting_owner, "lane_change_cap")
 
     def test_instrumentation_is_behaviorally_equivalent_to_legacy_speed_logic(self):
-        decisions = [
-            "lane_follow",
-            "intersection_turn_left",
-            "intersection_turn_right",
-            "stop_at_intersection",
-            "emergency_brake",
-        ]
+        decisions = ["lane_follow", "stop_at_intersection", "emergency_brake"]
         for decision in decisions:
             for scenario_cap in (None, 1.5, 4.0):
                 for scenario_stop in (False, True):

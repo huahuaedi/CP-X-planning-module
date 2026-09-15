@@ -185,14 +185,9 @@ vehicle_base:
     full_intersection_turn_prepare_enabled: true
     full_intersection_turn_prepare_lookahead_m: 22.0
     full_intersection_turn_prepare_min_m: 3.0
-    # One longitudinal contract for the complete turn pipeline.  The AD-map
-    # connector is sampled for 2.2 m/s below, so entering/tracking it at the
-    # old 5.0 m/s ceiling made the vehicle demand excessive lateral
-    # acceleration on Town06's tight connector.  PREPARE_TURN uses the
-    # ScenarioManager key explicitly and sheds speed before geometry ownership
-    # transfers to the connector.
-    full_intersection_turn_speed_cap_mps: 2.2
-    scenario_turn_prepare_speed_cap_mps: 2.8
+    # SpeedPlanner derives turn speed from the immutable AD-map turn master:
+    # v_max=sqrt(a_lateral_max/abs(curvature)).
+    full_intersection_turn_lateral_accel_comfort_mps2: 2.5
     turn_approach_comfort_decel_mps2: 2.5
     turn_approach_entry_buffer_m: 5.0
     turn_approach_preview_margin_m: 10.0
@@ -205,17 +200,7 @@ vehicle_base:
     # raised toward a value that still completes reliably while cutting the
     # drop -- re-validate after any further change.
     full_lane_change_speed_cap_mps: 6.0
-    # This governs the turn connector's own waypoint spacing (step_distance_m
-    # = max(waypoint_turn_min_step_m, dt_s * this)), not a comfort
-    # speed -- raising it alongside cruise speed widened the connector's
-    # sampled path to ~0.5m/step, which cuts the inside of a tight turn
-    # enough to push the swept vehicle envelope outside the drivable
-    # corridor (confirmed: reverting this alone, independent of the
-    # per-turn curvature cap below, fixed a right-turn scenario that got
-    # permanently stuck mid-turn at 5.0). Keep this low so the connector
-    # stays finely sampled regardless of how fast a turn is actually taken;
-    # full_intersection_turn_speed_cap_mps governs the real comfort speed.
-    waypoint_turn_speed_cap_mps: 2.2
+    # Geometry sampling remains independent from the resolved turn speed.
     waypoint_turn_min_step_m: 0.35
     waypoint_turn_destination_arc_m: 4.5
     route_turn_connector_smoothing_passes: 16
@@ -417,13 +402,11 @@ scenario:
         full_intersection_turn_prepare_enabled: true
         full_intersection_turn_prepare_lookahead_m: 22.0
         full_intersection_turn_prepare_min_m: 3.0
-        full_intersection_turn_speed_cap_mps: 2.2
-        scenario_turn_prepare_speed_cap_mps: 2.8
+        full_intersection_turn_lateral_accel_comfort_mps2: 2.5
         turn_approach_comfort_decel_mps2: 2.5
         turn_approach_entry_buffer_m: 5.0
         turn_approach_preview_margin_m: 10.0
         full_lane_change_speed_cap_mps: 6.0
-        waypoint_turn_speed_cap_mps: 2.2
         waypoint_turn_min_step_m: 0.35
         waypoint_turn_destination_arc_m: 4.5
         route_turn_connector_smoothing_passes: 16

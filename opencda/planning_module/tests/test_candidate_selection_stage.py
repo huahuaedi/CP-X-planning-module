@@ -12,7 +12,8 @@ from pipeline.speed_planner import SpeedPlan
 
 def _post_selection_stage(config=None):
     provider = SimpleNamespace(
-        builder=SimpleNamespace(discrete_curvature_1pm=lambda _rows: 0.1)
+        builder=SimpleNamespace(discrete_curvature_1pm=lambda _rows: 0.1),
+        snapshot=lambda _mode: SimpleNamespace(active=False, samples=()),
     )
     return CandidateSelectionStage(
         evaluator=object(), provider=provider,
@@ -44,8 +45,19 @@ def test_post_selection_normalizes_lane_change_without_speed_override():
     assert result.diagnostics["lane_change_longitudinal_authority"] == "SpeedPlanner"
 
 
-def test_post_selection_turn_submits_named_speed_constraint():
-    stage = _post_selection_stage({"full_intersection_turn_speed_cap_mps": 2.2})
+def test_post_selection_turn_uses_persistent_master_curvature():
+    stage = _post_selection_stage({
+        "full_intersection_turn_lateral_accel_comfort_mps2": 2.5,
+        "full_intersection_turn_curvature_min_curvature_1pm": 0.01,
+    })
+    stage._provider.snapshot = lambda _mode: SimpleNamespace(
+        active=True,
+        samples=({"x_ref_m": 0.0, "y_ref_m": 0.0},),
+        mutable_samples=lambda: [
+            {"x_ref_m": 0.0, "y_ref_m": 0.0},
+            {"x_ref_m": 1.0, "y_ref_m": 0.0},
+        ],
+    )
     speed = SpeedPlan(target_speed_mps=6.0, speed_cap_mps=6.0,
                       stop_goal_active=False)
     result = stage.finalize_selected_frame(
@@ -54,9 +66,12 @@ def test_post_selection_turn_submits_named_speed_constraint():
         ego_speed_mps=5.0, scenario_stop_required=False, speed_plan=speed,
         turn_prepare_speed_suppressed=False,
     )
-    assert result.speed_plan.target_speed_mps == 2.2
-    assert result.speed_plan.limiting_owner == "selected_turn_cap"
-    assert result.speed_constraints[0].owner == "selected_turn_cap"
+    assert result.speed_plan is speed
+    assert result.speed_constraints[0].owner == "turn_master_curvature"
+    assert result.speed_constraints[0].maximum_mps == 5.0
+    assert result.diagnostics["turn_curvature_speed_source"] == (
+        "persistent_turn_master"
+    )
 
 
 def test_arbitrate_owns_intent_selection_and_finalization():

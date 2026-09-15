@@ -50,7 +50,7 @@ class CPXScenarioManagerTests(unittest.TestCase):
             "traffic_memory_hold_red",
         )
 
-    def test_town06_turn_speed_contract_uses_consumed_prepare_key(self):
+    def test_town06_turn_speed_is_owned_by_reference_curvature(self):
         config_path = (
             Path(__file__).resolve().parents[2]
             / "scenario_testing"
@@ -59,12 +59,12 @@ class CPXScenarioManagerTests(unittest.TestCase):
         )
         payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
 
-        turn_configs = []
+        planner_configs = []
 
         def collect(node):
             if isinstance(node, dict):
-                if "waypoint_turn_speed_cap_mps" in node:
-                    turn_configs.append(node)
+                if "full_intersection_turn_lateral_accel_comfort_mps2" in node:
+                    planner_configs.append(node)
                 for value in node.values():
                     collect(value)
             elif isinstance(node, list):
@@ -72,18 +72,12 @@ class CPXScenarioManagerTests(unittest.TestCase):
                     collect(value)
 
         collect(payload)
-        self.assertGreaterEqual(len(turn_configs), 1)
-        for config in turn_configs:
-            self.assertNotIn(
-                "full_intersection_turn_prepare_speed_cap_mps", config
-            )
-            self.assertEqual(
-                float(config["full_intersection_turn_speed_cap_mps"]),
-                float(config["waypoint_turn_speed_cap_mps"]),
-            )
+        self.assertGreaterEqual(len(planner_configs), 1)
+        for config in planner_configs:
+            self.assertNotIn("full_intersection_turn_speed_cap_mps", config)
+            self.assertNotIn("waypoint_turn_speed_cap_mps", config)
             manager = CPXScenarioManager(config)
-            self.assertAlmostEqual(manager.turn_speed_cap_mps, 2.2)
-            self.assertAlmostEqual(manager.turn_prepare_speed_cap_mps, 2.8)
+            self.assertFalse(hasattr(manager, "turn_speed_cap_mps"))
 
     def test_default_pipeline_keeps_boundary_recovery_diagnostic_only(self):
         manager = CPXScenarioManager()

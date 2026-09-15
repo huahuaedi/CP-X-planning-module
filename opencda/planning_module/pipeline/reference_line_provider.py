@@ -901,10 +901,9 @@ class ReferenceLineProvider(StableReferenceLineProvider):
         turn_direction = str(request.turn_direction)
         route_revision = str(request.route_revision)
         map_epoch = str(request.map_epoch)
-        turn_speed_mps = min(
-            max(0.4, float(target_speed_mps)),
-            float(config.get("waypoint_turn_speed_cap_mps", 2.2)),
-        )
+        # ReferenceLineProvider owns geometry only. SpeedPlanner later applies
+        # the lateral-acceleration limit derived from this installed master.
+        turn_speed_mps = max(0.4, float(target_speed_mps))
         step_distance_m = max(
             float(config.get("waypoint_turn_min_step_m", 0.35)),
             float(dt_s) * max(0.8, float(turn_speed_mps)),

@@ -438,18 +438,13 @@ def turn_approach_lookahead_m(
     """Return enough route preview to decelerate to the turn-entry speed."""
 
     cruise_speed = max(0.0, float(cruise_speed_mps))
-    turn_speed = max(
-        0.1,
-        float(config.get("full_intersection_turn_speed_cap_mps", 2.2)),
-    )
     comfortable_decel = max(
         0.1,
         float(config.get("turn_approach_comfort_decel_mps2", 2.5)),
     )
     braking_distance = max(
         0.0,
-        (cruise_speed * cruise_speed - turn_speed * turn_speed)
-        / (2.0 * comfortable_decel),
+        cruise_speed * cruise_speed / (2.0 * comfortable_decel),
     )
     entry_buffer = max(
         0.0,
@@ -605,46 +600,9 @@ def build_speed_plan(
         and math.isfinite(float(upcoming_turn_distance_m))
     ):
         finite_turn_distance_m = max(0.0, float(upcoming_turn_distance_m))
-    if (
-        finite_turn_distance_m is not None
-        and decision not in {"intersection_turn_left", "intersection_turn_right"}
-        and not stop_goal
-        and not lane_change_commitment_active
-    ):
-        turn_entry_speed_mps = max(
-            0.1,
-            float(config.get("full_intersection_turn_speed_cap_mps", 2.2)),
-        )
-        comfortable_decel_mps2 = max(
-            0.1,
-            float(config.get("turn_approach_comfort_decel_mps2", 2.5)),
-        )
-        entry_buffer_m = max(
-            0.0,
-            float(config.get("turn_approach_entry_buffer_m", 5.0)),
-        )
-        braking_distance_m = max(0.0, finite_turn_distance_m - entry_buffer_m)
-        turn_approach_cap_mps = math.sqrt(
-            turn_entry_speed_mps * turn_entry_speed_mps
-            + 2.0 * comfortable_decel_mps2 * braking_distance_m
-        )
-        active_constraints.append("turn_approach_cap")
-        previous_cap = float(cap)
-        cap = min(float(cap), float(turn_approach_cap_mps))
-        if float(cap) < previous_cap:
-            limiting_owner = "turn_approach_cap"
-    if decision in {"intersection_turn_left", "intersection_turn_right"}:
-        turn_cap_mps = max(
-            0.1, float(config.get("full_intersection_turn_speed_cap_mps", 2.2))
-        )
-        active_constraints.append("turn_cap")
-        previous_cap = float(cap)
-        cap = min(
-            float(cap),
-            float(turn_cap_mps),
-        )
-        if float(cap) < previous_cap:
-            limiting_owner = "turn_cap"
+    # This stage deliberately does not guess turn curvature with a fixed
+    # speed. CandidateSelectionStage submits ``turn_master_curvature`` once
+    # ReferenceLineProvider has installed the immutable turn master.
     lane_change_cap_mps = None
     if decision in {"lane_change_left", "lane_change_right"}:
         # A route-required lane change can start immediately after ego is

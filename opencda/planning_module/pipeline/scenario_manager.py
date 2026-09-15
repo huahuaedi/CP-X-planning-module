@@ -142,13 +142,6 @@ class CPXScenarioManager:
         self.approach_near_speed_cap_mps = max(
             0.1, float(cfg.get("traffic_stop_approach_near_speed_cap_mps", 2.5))
         )
-        self.turn_speed_cap_mps = max(
-            0.1, float(cfg.get("full_intersection_turn_speed_cap_mps", 2.2))
-        )
-        self.turn_prepare_speed_cap_mps = max(
-            self.turn_speed_cap_mps,
-            float(cfg.get("scenario_turn_prepare_speed_cap_mps", 2.8)),
-        )
         # Route may advertise the next macro maneuver for the whole remaining
         # route.  PREPARE_TURN is a local scenario state, so it must use the
         # same dynamic preview contract as SpeedPlanner/RouteManager.
@@ -693,7 +686,7 @@ class CPXScenarioManager:
                     behavior_override_lc_state=(
                         f"INTERSECTION_TURN_{direction.upper()}"
                     ),
-                    speed_cap_mps=float(self.turn_speed_cap_mps),
+                    speed_cap_mps=float(self.target_speed_mps),
                     reason=(
                         "turn_exit_stabilization:"
                         f"stable_frames={int(self._turn_exit_stable_frames)}/"
@@ -820,7 +813,7 @@ class CPXScenarioManager:
             behavior_stop_target=None,
             behavior_override_decision=f"intersection_turn_{direction}",
             behavior_override_lc_state=f"INTERSECTION_TURN_{direction.upper()}",
-            speed_cap_mps=float(self.turn_speed_cap_mps),
+            speed_cap_mps=float(self.target_speed_mps),
             reason=(
                 (
                     "intersection_turn_exit_alignment_hold:"

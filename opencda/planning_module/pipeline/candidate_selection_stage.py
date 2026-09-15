@@ -7,7 +7,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from .candidate_evaluation import CandidateSelectionResult
 from .candidate_pipeline import build_candidate_intents, summarize_candidate_results
-from .reference_line_provider import LANE_CHANGE
+from .reference_line_provider import LANE_CHANGE, TURN
 from .speed_planner import SpeedConstraint
 from opencda.planning_module.utility.speed_profile import curvature_speed_cap_mps
 
@@ -457,8 +457,14 @@ class CandidateSelectionStage:
                 ),
                 "lane_change_longitudinal_authority": "SpeedPlanner",
             })
-        elif str(decision) in {"intersection_turn_left", "intersection_turn_right"}:
-            curvature = float(self._provider.builder.discrete_curvature_1pm(reference))
+        turn_master = self._provider.snapshot(TURN)
+        if bool(turn_master.active) and turn_master.samples:
+            # Speed comes from the immutable maneuver master, not a rolling
+            # MPC window. One route revision therefore has one curvature
+            # contract throughout prepare, execution and exit stabilization.
+            curvature = float(self._provider.builder.discrete_curvature_1pm(
+                turn_master.mutable_samples()
+            ))
             advisory = curvature_speed_cap_mps(
                 curve_curvature_abs=curvature,
                 curve_min_curvature=max(0.0, float(cfg.get(
@@ -470,31 +476,23 @@ class CandidateSelectionStage:
                 ))),
                 speed_enable_threshold_mps=0.0,
             )
-            turn_cap_mps = max(0.1, float(cfg.get(
-                "full_intersection_turn_speed_cap_mps", 2.2
-            )))
             debug.update({
-                "turn_reference_curvature_1pm": curvature,
+                "turn_master_curvature_1pm": curvature,
                 "turn_curvature_speed_advisory_mps": (
                     "" if advisory is None else float(advisory)
                 ),
+                "turn_curvature_speed_source": "persistent_turn_master",
                 "turn_longitudinal_authority": "SpeedPlanner",
             })
-            constraint = SpeedConstraint(
-                owner="selected_turn_cap", maximum_mps=turn_cap_mps,
-                reason="selected_candidate_turn_speed_cap",
-            )
-            constraints.append(constraint)
-            if turn_cap_mps < float(speed_plan.target_speed_mps):
-                speed_plan = replace(
-                    speed_plan, target_speed_mps=turn_cap_mps,
-                    speed_cap_mps=turn_cap_mps, turn_cap_mps=turn_cap_mps,
-                    limiting_owner="selected_turn_cap",
-                    active_constraints=tuple(speed_plan.active_constraints)
-                    + ("selected_turn_cap",),
-                    external_constraints=tuple(speed_plan.external_constraints)
-                    + (constraint,),
-                )
+            if advisory is not None:
+                constraints.append(SpeedConstraint(
+                    owner="turn_master_curvature",
+                    maximum_mps=max(0.1, float(advisory)),
+                    reason=(
+                        "persistent_turn_master_lateral_acceleration_limit:"
+                        "curvature_1pm=%.6f" % float(curvature)
+                    ),
+                ))
 
         stop_goal = bool(
             scenario_stop_required
