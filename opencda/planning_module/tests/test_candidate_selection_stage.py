@@ -54,12 +54,10 @@ def test_post_selection_turn_uses_persistent_master_curvature():
                       stop_goal_active=False)
     result = stage.finalize_selected_frame(
         decision="intersection_turn_right", lane_change_state="LANE_KEEP",
-        reference=(
-            {"turn_master_curvature_1pm": 0.1},
-            {"turn_master_curvature_1pm": 0.1},
-        ), selected_diagnostics={}, reference_diagnostics={},
+        reference=({}, {}), selected_diagnostics={}, reference_diagnostics={},
         ego_speed_mps=5.0, scenario_stop_required=False, speed_plan=speed,
         turn_prepare_speed_suppressed=False,
+        turn_master_curvature_1pm=0.1,
     )
     assert result.speed_plan is speed
     assert result.speed_constraints[0].owner == "turn_master_curvature"

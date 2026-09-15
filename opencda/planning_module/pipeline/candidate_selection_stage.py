@@ -7,7 +7,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from .candidate_evaluation import CandidateSelectionResult
 from .candidate_pipeline import build_candidate_intents, summarize_candidate_results
-from .reference_line_provider import LANE_CHANGE
+from .reference_line_provider import LANE_CHANGE, TURN
 from .speed_planner import SpeedConstraint
 from opencda.planning_module.utility.speed_profile import curvature_speed_cap_mps
 
@@ -365,6 +365,17 @@ class CandidateSelectionStage:
             and str(authorization.direction).strip().lower() == "right"
             else ""
         )
+        # Candidate construction is allowed to create temporary geometry, but
+        # must not change the speed contract for the already installed turn.
+        # Capture the persistent master before evaluating any alternatives.
+        turn_snapshot = self._provider.snapshot(TURN)
+        turn_master_curvature_1pm = (
+            float(self._provider.builder.discrete_curvature_1pm(
+                turn_snapshot.mutable_samples()
+            ))
+            if bool(turn_snapshot.active) and turn_snapshot.samples
+            else None
+        )
         selected = self.run(
             CandidateSelectionRequest(
                 intents=intents,
@@ -410,6 +421,7 @@ class CandidateSelectionStage:
             turn_prepare_speed_suppressed=bool(
                 request.turn_prepare_speed_suppressed
             ),
+            turn_master_curvature_1pm=turn_master_curvature_1pm,
         )
         return CandidateArbitrationResult(
             decision=str(selected.decision),
@@ -430,6 +442,7 @@ class CandidateSelectionStage:
         reference_diagnostics: Mapping[str, Any], ego_speed_mps: float,
         scenario_stop_required: bool, speed_plan: Any,
         turn_prepare_speed_suppressed: bool,
+        turn_master_curvature_1pm: Any = None,
     ) -> CandidatePostSelectionResult:
         """Interpret the winning candidate exactly once for downstream stages."""
 
@@ -457,16 +470,11 @@ class CandidateSelectionStage:
                 ),
                 "lane_change_longitudinal_authority": "SpeedPlanner",
             })
-        master_curvatures = [
-            float(sample["turn_master_curvature_1pm"])
-            for sample in list(reference or ())
-            if sample.get("turn_master_curvature_1pm") is not None
-        ]
-        if master_curvatures:
+        if turn_master_curvature_1pm is not None:
             # Speed comes from the immutable maneuver master, not a rolling
             # MPC window. One route revision therefore has one curvature
             # contract throughout prepare, execution and exit stabilization.
-            curvature = max(abs(value) for value in master_curvatures)
+            curvature = abs(float(turn_master_curvature_1pm))
             advisory = curvature_speed_cap_mps(
                 curve_curvature_abs=curvature,
                 curve_min_curvature=max(0.0, float(cfg.get(

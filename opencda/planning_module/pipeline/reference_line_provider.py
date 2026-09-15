@@ -985,13 +985,6 @@ class ReferenceLineProvider(StableReferenceLineProvider):
                 master = [dict(sample) for sample in candidate_master]
         if not master:
             return [], list(destination_state or []), str(reason)
-        # Freeze the master-level curvature into the published reference.
-        # Downstream stages consume this immutable contract instead of
-        # reaching back into provider lifecycle state after candidate
-        # construction has completed.
-        turn_master_curvature_1pm = float(
-            self.builder.discrete_curvature_1pm(master)
-        )
         if self.snapshot(TURN).active:
             window = self.window(
                 TURN,
@@ -1017,9 +1010,6 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             sample["v_ref_mps"] = float(turn_speed_mps)
             sample["speed_ref_mps"] = float(turn_speed_mps)
             sample["speed_mps"] = float(turn_speed_mps)
-            sample["turn_master_curvature_1pm"] = float(
-                turn_master_curvature_1pm
-            )
         reference, curvature_reason = self.builder.curvature_feasible_turn_samples(
             reference_samples=reference,
             ego_location=ego_location,
