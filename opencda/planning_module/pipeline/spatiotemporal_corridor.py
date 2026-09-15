@@ -205,10 +205,10 @@ def aggregate_mode_corridors(
         return out
 
     # A per-mode corridor's own caps are already intersected with the ego's
-    # physical progress interval (build_longitudinal_corridor). Carry both
-    # sides of that interval into the reduced corridor; retaining only s_hi
-    # would again let Stage D satisfy a longitudinal stop by steering across
-    # the reference and reducing projected station below the braking floor.
+    # physical upper reachability interval (build_longitudinal_corridor).
+    # ``s_lo`` is intentionally not populated with the braking profile: that
+    # profile describes feasibility of an upper safety cap, not a required
+    # minimum advance by the ego vehicle.
     for corridor, _probability, _dangerous, _label in retained:
         if not corridor.feasible:
             out.feasible = False
@@ -235,13 +235,6 @@ def aggregate_mode_corridors(
         # row.  This preserves the exact clear-scene MPC behavior.
         if veto_cap < _BIG or cap < neutral - 1.0e-6:
             out.s_hi[k] = cap
-            finite_floors = [
-                float(corridor.s_lo[k])
-                for corridor, _probability, _dangerous, _label in retained
-                if k < len(corridor.s_lo) and float(corridor.s_lo[k]) > -_BIG
-            ]
-            if finite_floors:
-                out.s_lo[k] = max(finite_floors)
             out.binding[k] = veto_label or "multimodal_expected"
     out.clamp_and_check()
     return out
@@ -404,11 +397,11 @@ def build_longitudinal_corridor(
     def _cap(k: int, value: float, agent_id: str) -> None:
         floor = braking_floor[k]
         effective = max(float(value), floor)
-        # A progress upper bound is only a physically meaningful corridor
-        # together with the least progress the vehicle can make while staying
-        # aligned to this reference. Without this lower side, steering away
-        # from the path is an artificial alternative to braking.
-        cor.s_lo[k] = max(float(cor.s_lo[k]), floor)
+        # ``floor`` is a reachability test for this safety *upper* bound. It
+        # is not a lower control command: publishing it as s_lo forces the ego
+        # to make at least the maximum-braking progress even when another
+        # constraint or the plant response calls for more braking. Heading
+        # and road-boundary ownership in Stage D prevent lateral escape.
         if effective < cor.s_hi[k]:
             cor.s_hi[k] = effective
             cor.binding[k] = agent_id

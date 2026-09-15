@@ -310,11 +310,12 @@ def test_resolve_cav_interaction_builds_corridor_rows_on_the_constraint_referenc
         # reference's straight-+y (0, 1).
         assert row.a_x == pytest.approx(half_sqrt2, abs=1.0e-6)
         assert row.a_y == pytest.approx(half_sqrt2, abs=1.0e-6)
-    # v=9 m/s and dt=0.1 gives a first-stage reachability floor near 0.9 m
-    # in the executed frame. The old bug leaked classification station 10.9.
-    assert longitudinal_rows[0].lower < 2.0
     assert result.constraint_corridor is not None
-    assert result.constraint_corridor.s_lo[1] < 2.0
+    # The same physical cap is 10 m smaller in the executed reference whose
+    # origin is 10 m farther along. The old bug emitted source value 21.55.
+    assert result.corridor.s_hi[1] == pytest.approx(21.55)
+    assert result.constraint_corridor.s_hi[1] == pytest.approx(11.55)
+    assert longitudinal_rows[0].upper == pytest.approx(11.55)
 
 
 def test_resolve_cav_interaction_defaults_constraint_reference_to_reference_samples():

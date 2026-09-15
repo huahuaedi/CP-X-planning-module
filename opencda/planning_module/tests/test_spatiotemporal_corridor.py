@@ -326,18 +326,18 @@ def test_corridor_floor_accounts_for_positive_acceleration_jerk_seed():
         dt_s=0.1,
     )
     assert cor.s_hi == pytest.approx(expected_floor)
-    assert cor.s_lo == pytest.approx(expected_floor)
+    assert all(value <= -_BIG for value in cor.s_lo)
     assert not cor.feasible
 
 
-def test_corridor_station_floor_uses_the_reference_station_of_the_ego():
+def test_corridor_reachable_cap_uses_the_reference_station_of_the_ego():
     # A rolling reference commonly begins ahead of ego. The physical
     # reachable profile is a delta from the ego station, not from s=0.
     ego = {"x": -2.0, "y": 0.0, "v": 4.0, "a": 0.0, "psi": 0.0}
     params = CorridorParams(horizon_steps=2, dt_s=0.1)
     cor = build_longitudinal_corridor(
         REF, ego,
-        [({"x": 8.0, "v": 0.0}, _tag("x", CROSSING, s=8.0, t=0.0), _assign("yield"))],
+        [({"x": 0.0, "v": 0.0}, _tag("x", CROSSING, s=0.0, t=0.0), _assign("yield"))],
         params,
     )
     relative_floor = _minimum_reachable_station_profile_m(
@@ -348,7 +348,8 @@ def test_corridor_station_floor_uses_the_reference_station_of_the_ego():
         horizon_steps=params.horizon_steps,
         dt_s=params.dt_s,
     )
-    assert cor.s_lo == pytest.approx([-2.0 + value for value in relative_floor])
+    assert cor.s_hi == pytest.approx([-2.0 + value for value in relative_floor])
+    assert all(value <= -_BIG for value in cor.s_lo)
 
 
 def test_crossing_cap_within_braking_limits_is_left_untouched():
