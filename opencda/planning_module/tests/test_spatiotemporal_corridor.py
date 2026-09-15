@@ -71,6 +71,31 @@ def test_cached_corridor_advances_time_and_rebases_station_to_current_reference(
     assert rebased.binding[0] == "peer"
 
 
+def test_rebased_corridor_does_not_repeat_its_terminal_forecast_stage():
+    cached = Corridor(
+        s_lo=[-_BIG] * 4, s_hi=[10.0, 11.0, 12.0, 13.0],
+        binding=["peer"] * 4,
+    )
+    rebased = rebase_corridor(
+        cached, source_reference=REF, current_reference=REF,
+        current_ego_xy=(0.0, 0.0), age_s=0.2, dt_s=0.1,
+    )
+    assert rebased.s_hi == [12.0, 13.0, _BIG, _BIG]
+    assert rebased.binding == ["peer", "peer", "", ""]
+
+
+def test_missing_rebase_geometry_still_advances_the_forecast_clock():
+    cached = Corridor(
+        s_lo=[-_BIG] * 3, s_hi=[10.0, 11.0, 12.0],
+        binding=["peer"] * 3,
+    )
+    rebased = rebase_corridor(
+        cached, source_reference=(), current_reference=(),
+        current_ego_xy=(0.0, 0.0), age_s=0.1, dt_s=0.1,
+    )
+    assert rebased.s_hi == [11.0, 12.0, _BIG]
+
+
 def test_pending_corridor_can_tighten_but_not_revoke_future_rows():
     previous = Corridor(
         s_lo=[-_BIG] * 4,
@@ -85,6 +110,7 @@ def test_pending_corridor_can_tighten_but_not_revoke_future_rows():
     retained = retain_pending_corridor(refreshed, previous)
     assert retained.s_hi == [_BIG, 12.0, 15.0, _BIG]
     assert retained.binding == ["", "old", "new", ""]
+    assert refreshed.s_hi == [_BIG, _BIG, 15.0, _BIG]
 
 
 def test_follow_leaves_corridor_open_for_speed_planner():

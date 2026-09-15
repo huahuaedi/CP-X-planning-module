@@ -69,6 +69,9 @@ class ConflictResolution:
     # coordinates. Stage D owns this rebased view in the coordinates of the
     # reference that the MPC actually executes.
     constraint_corridor: Optional[Corridor] = None
+    # Only a freshly computed Stage-C corridor may reset the cache's forecast
+    # origin. ``corridor`` can also contain older, still-pending bounds.
+    fresh_corridor: Optional[Corridor] = None
     mpc_rows: List[Any] = field(default_factory=list)
     diagnostics: Dict[str, Any] = field(default_factory=dict)
 
@@ -486,11 +489,13 @@ def resolve_conflicts(
             veto_release_ticks=int(credible_mode_veto_release_ticks),
             veto_release_margin_s=float(credible_mode_veto_release_margin_s),
         )
+        fresh_corridor = corridor
         if cached_corridor is not None and not tag_changed:
             corridor = retain_pending_corridor(corridor, cached_corridor)
         corridor_rebuilt = True
     else:
         corridor = cached_corridor
+        fresh_corridor = None
         credible_veto_count = 0
         # Carry the veto latch unchanged while the cache is reused so a
         # later rebuild resumes from the last real state.
@@ -569,6 +574,7 @@ def resolve_conflicts(
     }
     return ConflictResolution(
         tags=tags, assignments=assignments, corridor=corridor,
+        fresh_corridor=fresh_corridor,
         latch_state=new_latch,
         tag_state=current_tag_state,
         veto_state=dict(new_veto_state or {}),

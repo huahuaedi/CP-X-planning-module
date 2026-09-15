@@ -107,23 +107,28 @@ def rebase_corridor(
 
     source_poly = _polyline_xy(source_reference)
     current_poly = _polyline_xy(current_reference)
-    if len(source_poly) < 2 or len(current_poly) < 2:
-        return Corridor(
-            s_lo=list(corridor.s_lo), s_hi=list(corridor.s_hi),
-            binding=list(corridor.binding), feasible=bool(corridor.feasible),
-            first_infeasible_stage=corridor.first_infeasible_stage,
-        )
-    ego_x, ego_y = float(current_ego_xy[0]), float(current_ego_xy[1])
-    source_ego_s = project_to_extended_polyline(ego_x, ego_y, source_poly)[1]
-    current_ego_s = project_to_extended_polyline(ego_x, ego_y, current_poly)[1]
-    station_shift = float(current_ego_s - source_ego_s)
-    stage_shift = max(0, int(float(age_s) / max(1.0e-3, float(dt_s))))
+    station_shift = 0.0
+    if len(source_poly) >= 2 and len(current_poly) >= 2:
+        ego_x, ego_y = float(current_ego_xy[0]), float(current_ego_xy[1])
+        source_ego_s = project_to_extended_polyline(ego_x, ego_y, source_poly)[1]
+        current_ego_s = project_to_extended_polyline(ego_x, ego_y, current_poly)[1]
+        station_shift = float(current_ego_s - source_ego_s)
+    # Missing geometry prevents station rebasing, not passage of time. The
+    # original forecast must still age out rather than freezing indefinitely.
+    stage_shift = max(0, int(
+        float(age_s) / max(1.0e-3, float(dt_s)) + 1.0e-9
+    ))
     n = len(corridor.s_hi)
 
     def shifted(values: Sequence[float], *, infinite_sign: int) -> List[float]:
         out = []
         for stage in range(n):
-            source_stage = min(n - 1, stage + stage_shift)
+            source_stage = stage + stage_shift
+            if source_stage >= n:
+                # A bound published at the end of the old horizon has no
+                # authority over stages that did not exist in that forecast.
+                out.append(float(infinite_sign) * _BIG)
+                continue
             value = float(values[source_stage])
             if abs(value) >= _BIG:
                 out.append(float(infinite_sign) * _BIG)
@@ -132,7 +137,10 @@ def rebase_corridor(
         return out
 
     binding = [
-        str(corridor.binding[min(n - 1, stage + stage_shift)])
+        (
+            str(corridor.binding[stage + stage_shift])
+            if stage + stage_shift < len(corridor.binding) else ""
+        )
         for stage in range(n)
     ]
     rebased = Corridor(
@@ -158,27 +166,36 @@ def retain_pending_corridor(
 
     if previous is None:
         return current
-    n = min(len(current.s_hi), len(previous.s_hi))
+    # The caller caches ``current`` as the fresh prediction, whereas this
+    # effective view also contains still-pending bounds from an older one.
+    # Never mutate the fresh value: caching the merged view would republish
+    # old bounds with a new origin time and prevent them from ever aging out.
+    effective = Corridor(
+        s_lo=list(current.s_lo), s_hi=list(current.s_hi),
+        binding=list(current.binding), feasible=bool(current.feasible),
+        first_infeasible_stage=current.first_infeasible_stage,
+    )
+    n = min(len(effective.s_hi), len(previous.s_hi))
     if n <= 0:
-        return current
+        return effective
     for k in range(n):
         previous_hi = float(previous.s_hi[k])
-        if previous_hi < float(current.s_hi[k]):
-            current.s_hi[k] = previous_hi
-            current.binding[k] = str(previous.binding[k])
+        if previous_hi < float(effective.s_hi[k]):
+            effective.s_hi[k] = previous_hi
+            effective.binding[k] = str(previous.binding[k])
         previous_lo = float(previous.s_lo[k])
-        if previous_lo > float(current.s_lo[k]):
-            current.s_lo[k] = previous_lo
+        if previous_lo > float(effective.s_lo[k]):
+            effective.s_lo[k] = previous_lo
     if not bool(previous.feasible):
-        current.feasible = False
+        effective.feasible = False
         previous_stage = previous.first_infeasible_stage
         if previous_stage is not None and (
-            current.first_infeasible_stage is None
-            or int(previous_stage) < int(current.first_infeasible_stage)
+            effective.first_infeasible_stage is None
+            or int(previous_stage) < int(effective.first_infeasible_stage)
         ):
-            current.first_infeasible_stage = int(previous_stage)
-    current.clamp_and_check()
-    return current
+            effective.first_infeasible_stage = int(previous_stage)
+    effective.clamp_and_check()
+    return effective
 
 
 def aggregate_mode_corridors(

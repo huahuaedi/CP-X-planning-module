@@ -114,13 +114,21 @@ class CAVConflictSchedule:
     ) -> Any:
         if self.corridor is None:
             return None
+        age_s = max(0.0, float(sim_time_s) - float(self.corridor_time_s))
+        horizon_s = max(0.0, (len(self.corridor.s_hi) - 1) * float(dt_s))
+        if age_s >= horizon_s:
+            # The original forecast is exhausted. A merged effective corridor
+            # must never be recycled as if it were a new peer prediction.
+            self.corridor = None
+            self.corridor_reference = ()
+            return None
         from .spatiotemporal_corridor import rebase_corridor
         return rebase_corridor(
             self.corridor,
             source_reference=self.corridor_reference,
             current_reference=reference_samples,
             current_ego_xy=(float(ego_x_m), float(ego_y_m)),
-            age_s=max(0.0, float(sim_time_s) - float(self.corridor_time_s)),
+            age_s=age_s,
             dt_s=float(dt_s),
         )
 
@@ -136,11 +144,15 @@ class CAVConflictSchedule:
         if bool(getattr(result, "diagnostics", {}).get(
             "corridor_rebuilt", False
         )):
-            self.corridor = getattr(result, "corridor", None)
-            self.corridor_reference = tuple(
-                dict(sample) for sample in reference_samples or ()
-            )
-            self.corridor_time_s = float(sim_time_s)
+            fresh = getattr(result, "fresh_corridor", None)
+            if fresh is not None and any(
+                float(cap) < 1.0e9 for cap in fresh.s_hi
+            ):
+                self.corridor = fresh
+                self.corridor_reference = tuple(
+                    dict(sample) for sample in reference_samples or ()
+                )
+                self.corridor_time_s = float(sim_time_s)
         if bool(getattr(result, "diagnostics", {}).get(
             "coordination_roles_refreshed", False
         )):

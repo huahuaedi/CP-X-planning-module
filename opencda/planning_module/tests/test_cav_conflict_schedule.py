@@ -1,6 +1,58 @@
 from types import SimpleNamespace
 
 from pipeline.cav_conflict_schedule import CAVConflictSchedule
+from pipeline.spatiotemporal_corridor import Corridor
+
+_BIG = 1.0e9
+
+
+def test_pending_corridor_keeps_original_time_and_expires_after_forecast():
+    schedule = CAVConflictSchedule()
+    reference = [
+        {"x_ref_m": float(x), "y_ref_m": 0.0} for x in range(20)
+    ]
+    fresh = Corridor(
+        s_lo=[-_BIG] * 4, s_hi=[10.0] * 4,
+        binding=["peer"] * 4,
+    )
+    effective = Corridor(
+        s_lo=[-_BIG] * 4, s_hi=[10.0] * 4,
+        binding=["peer"] * 4,
+    )
+    schedule.observe(
+        sim_time_s=1.0, reference_samples=reference,
+        result=SimpleNamespace(
+            fresh_corridor=fresh, corridor=effective,
+            diagnostics={"corridor_rebuilt": True},
+        ),
+    )
+    assert schedule.corridor is fresh
+    # A clear refresh can retain the previous forecast for its unexpired
+    # stages, but may not stamp those old rows with a new publication time.
+    schedule.observe(
+        sim_time_s=1.1, reference_samples=reference,
+        result=SimpleNamespace(
+            fresh_corridor=Corridor(
+                s_lo=[-_BIG] * 4, s_hi=[_BIG] * 4,
+                binding=[""] * 4,
+            ),
+            corridor=effective,
+            diagnostics={"corridor_rebuilt": True},
+        ),
+    )
+    assert schedule.corridor is fresh
+    assert schedule.corridor_time_s == 1.0
+    pending = schedule.cached_corridor_for_tick(
+        sim_time_s=1.2, reference_samples=reference,
+        ego_x_m=0.0, ego_y_m=0.0, dt_s=0.1,
+    )
+    assert pending.s_hi[:2] == [10.0, 10.0]
+    assert pending.s_hi[2:] == [_BIG, _BIG]
+    assert schedule.cached_corridor_for_tick(
+        sim_time_s=1.3, reference_samples=reference,
+        ego_x_m=0.0, ego_y_m=0.0, dt_s=0.1,
+    ) is None
+    assert schedule.corridor is None
 
 
 def test_constraint_revision_ignores_scheduler_refresh_revision():
