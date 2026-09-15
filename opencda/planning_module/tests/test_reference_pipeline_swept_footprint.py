@@ -99,6 +99,24 @@ class ReferencePipelineSweptFootprintTests(unittest.TestCase):
 
         self.assertTrue(result.accepted)
 
+    def test_turn_master_curvature_survives_reference_conditioning(self):
+        request = self._request()
+        request = ReferencePipelineRequest(**{
+            **request.__dict__,
+            "reference_samples": [
+                dict(sample, turn_master_curvature_1pm=0.125)
+                for sample in request.reference_samples
+            ],
+        })
+
+        result = self._pipeline(lane_width_m=3.5).condition(request)
+
+        self.assertTrue(result.reference_samples)
+        self.assertTrue(all(
+            sample["turn_master_curvature_1pm"] == 0.125
+            for sample in result.reference_samples
+        ))
+
     def test_pipeline_rejects_turn_when_vehicle_cannot_fit_corridor(self):
         result = self._pipeline(lane_width_m=2.0).finalize(self._request())
 

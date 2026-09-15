@@ -101,6 +101,11 @@ class ReferencePipeline:
         reference = [
             dict(sample) for sample in list(request.reference_samples or [])
         ]
+        turn_master_curvature = next((
+            float(sample["turn_master_curvature_1pm"])
+            for sample in reference
+            if sample.get("turn_master_curvature_1pm") is not None
+        ), None)
         reasons: list[str] = []
 
         if mode == "emergency_stop":
@@ -371,6 +376,15 @@ class ReferencePipeline:
                 sample["v_ref_mps"] = 0.0
                 sample["speed_ref_mps"] = 0.0
                 sample["speed_mps"] = 0.0
+
+        # Geometry conditioners may resample a turn and intentionally replace
+        # per-point metadata. This master-level invariant is not per-point
+        # geometry and must survive that internal representation change.
+        if mode == "intersection_turn" and turn_master_curvature is not None:
+            for sample in reference:
+                sample["turn_master_curvature_1pm"] = float(
+                    turn_master_curvature
+                )
 
         return ConditionedReference(
             destination_state=list(destination),
