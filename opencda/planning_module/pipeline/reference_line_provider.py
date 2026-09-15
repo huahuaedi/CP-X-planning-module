@@ -960,6 +960,9 @@ class ReferenceLineProvider(StableReferenceLineProvider):
                     maximum_join_distance_m=float(
                         config.get("local_map_maximum_join_distance_m", 5.0)
                     ),
+                    maximum_join_curvature_1pm=float(
+                        config.get("reference_vehicle_max_curvature_1pm", 0.20)
+                    ),
                 )
             else:
                 candidate_master = []

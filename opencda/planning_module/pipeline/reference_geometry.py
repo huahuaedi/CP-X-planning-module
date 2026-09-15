@@ -22,6 +22,134 @@ CURVATURE_EVAL_ARC_M = 1.5
 Point = Tuple[float, float]
 
 
+def stitch_reference_joins_c1(
+    samples: Sequence[Mapping[str, object]],
+    join_indices: Sequence[int],
+    *,
+    maximum_curvature_1pm: float = 0.20,
+    minimum_transition_arc_m: float = 3.0,
+) -> List[dict]:
+    """Remove AD-map lane-boundary tangent kinks in one master reference.
+
+    ``join_indices`` contains the first sample of each longitudinal successor.
+    Topology and sample metadata remain unchanged.  Around each join, the XY
+    centreline is replaced by one cubic Hermite span whose endpoint tangents
+    come from the untouched incoming and outgoing lane geometry.  Therefore
+    the route stays topology-owned by AD-map while its planning geometry is
+    position- and tangent-continuous.
+
+    The transition length is metric, not index based.  It grows with the
+    measured heading mismatch and the vehicle curvature limit, so the same
+    map join behaves consistently at different source sampling densities.
+    """
+    result = [dict(sample) for sample in list(samples or [])]
+    if len(result) < 5:
+        return result
+    curvature_limit = max(1.0e-3, float(maximum_curvature_1pm))
+    minimum_arc_m = max(0.5, float(minimum_transition_arc_m))
+
+    for raw_join_index in sorted(set(int(value) for value in join_indices)):
+        join_index = int(raw_join_index)
+        if join_index < 2 or join_index > len(result) - 3:
+            continue
+        points = to_points(result)
+        arc = cumulative_arc_m(points)
+        incoming_heading = math.atan2(
+            points[join_index - 1][1] - points[join_index - 2][1],
+            points[join_index - 1][0] - points[join_index - 2][0],
+        )
+        outgoing_heading = math.atan2(
+            points[join_index + 1][1] - points[join_index][1],
+            points[join_index + 1][0] - points[join_index][0],
+        )
+        heading_change = abs(_wrap(outgoing_heading - incoming_heading))
+        if heading_change <= math.radians(1.0):
+            continue
+
+        # Integral curvature equals heading change.  A 25% margin keeps the
+        # Hermite transition away from the geometric feasibility boundary.
+        transition_arc_m = max(
+            minimum_arc_m,
+            1.25 * heading_change / curvature_limit,
+        )
+        half_arc_m = 0.5 * transition_arc_m
+        start_index = join_index - 1
+        while start_index > 0 and (
+            arc[join_index - 1] - arc[start_index] < half_arc_m
+        ):
+            start_index -= 1
+        end_index = join_index
+        while end_index < len(result) - 1 and (
+            arc[end_index] - arc[join_index] < half_arc_m
+        ):
+            end_index += 1
+        if start_index >= join_index - 1 or end_index <= join_index:
+            continue
+
+        start = points[start_index]
+        end = points[end_index]
+        start_heading = math.atan2(
+            points[start_index + 1][1] - start[1],
+            points[start_index + 1][0] - start[0],
+        )
+        end_heading = math.atan2(
+            end[1] - points[end_index - 1][1],
+            end[0] - points[end_index - 1][0],
+        )
+        source_span_m = max(1.0e-3, arc[end_index] - arc[start_index])
+        chord_m = math.hypot(end[0] - start[0], end[1] - start[1])
+        tangent_m = max(chord_m, 0.75 * source_span_m)
+        start_tangent = (
+            tangent_m * math.cos(start_heading),
+            tangent_m * math.sin(start_heading),
+        )
+        end_tangent = (
+            tangent_m * math.cos(end_heading),
+            tangent_m * math.sin(end_heading),
+        )
+        for index in range(start_index + 1, end_index):
+            u = (arc[index] - arc[start_index]) / source_span_m
+            u2, u3 = u * u, u * u * u
+            h00 = 2.0 * u3 - 3.0 * u2 + 1.0
+            h10 = u3 - 2.0 * u2 + u
+            h01 = -2.0 * u3 + 3.0 * u2
+            h11 = u3 - u2
+            x_m = (
+                h00 * start[0] + h10 * start_tangent[0]
+                + h01 * end[0] + h11 * end_tangent[0]
+            )
+            y_m = (
+                h00 * start[1] + h10 * start_tangent[1]
+                + h01 * end[1] + h11 * end_tangent[1]
+            )
+            result[index]["x_ref_m"] = result[index]["x"] = float(x_m)
+            result[index]["y_ref_m"] = result[index]["y"] = float(y_m)
+            result[index]["reference_join_conditioning"] = "c1_hermite"
+
+    points = to_points(result)
+    if len(points) < 2:
+        return result
+    headings = []
+    for index in range(len(points)):
+        first = points[max(0, index - 1)]
+        second = points[min(len(points) - 1, index + 1)]
+        headings.append(math.atan2(second[1] - first[1], second[0] - first[0]))
+    curvatures = signed_curvature_at_samples_1pm(result)
+    for sample, heading, curvature in zip(result, headings, curvatures):
+        sample["heading_rad"] = float(heading)
+        sample["curvature_1pm"] = float(curvature)
+        x_m, y_m = _xy(sample) or (0.0, 0.0)
+        for side in ("left", "right"):
+            boundary_x = sample.get(side + "_boundary_x_m")
+            boundary_y = sample.get(side + "_boundary_y_m")
+            if boundary_x is None or boundary_y is None:
+                continue
+            sample["road_" + side + "_width_m"] = math.hypot(
+                float(boundary_x) - x_m, float(boundary_y) - y_m
+            )
+    return result
+
+
 def align_parallel_reference(
     source_reference: Sequence[Mapping[str, object]],
     target_reference: Sequence[Mapping[str, object]],

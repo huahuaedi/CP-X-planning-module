@@ -5,6 +5,10 @@ from dataclasses import dataclass
 import math
 from typing import Mapping, Sequence
 
+from opencda.planning_module.pipeline.reference_geometry import (
+    stitch_reference_joins_c1,
+)
+
 
 @dataclass(frozen=True)
 class StableReferenceWindow:
@@ -204,7 +208,9 @@ class StableReferenceLineProvider:
 
     def reference_from_local_map(
             self, snapshot, *, start_lane_id, target_speed_mps=0.0,
-            maximum_join_distance_m=5.0):
+            maximum_join_distance_m=5.0,
+            maximum_join_curvature_1pm=0.20,
+            minimum_join_transition_arc_m=3.0):
         """Build a topology-ordered master solely from LocalMapSnapshot."""
         if snapshot is None or not bool(getattr(snapshot, "valid", False)):
             return [], "local_map_snapshot_invalid"
@@ -223,6 +229,7 @@ class StableReferenceLineProvider:
             route_sequence = [start_lane_id] + route_sequence
         samples = []
         accepted_lanes = []
+        join_indices = []
         for lane_id in route_sequence:
             geometry = snapshot.geometry_for_lane(int(lane_id))
             if geometry is None or not geometry.centerline:
@@ -276,10 +283,18 @@ class StableReferenceLineProvider:
                     break
                 if join_distance_m <= 1.0e-4:
                     lane_samples = lane_samples[1:]
+                if lane_samples:
+                    join_indices.append(len(samples))
             samples.extend(lane_samples)
             accepted_lanes.append(int(lane_id))
         if len(samples) < 2:
             return [], "local_map_reference_too_short"
+        samples = stitch_reference_joins_c1(
+            samples,
+            join_indices,
+            maximum_curvature_1pm=float(maximum_join_curvature_1pm),
+            minimum_transition_arc_m=float(minimum_join_transition_arc_m),
+        )
         return samples, "local_map_snapshot_route:" + ">".join(
             str(lane_id) for lane_id in accepted_lanes
         )

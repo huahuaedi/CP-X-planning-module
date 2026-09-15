@@ -129,6 +129,53 @@ def test_reference_master_does_not_bridge_disconnected_successor():
     assert reason == "local_map_snapshot_route:10"
 
 
+def test_reference_master_conditions_lane_join_to_continuous_tangent():
+    snapshot = build_local_map_snapshot(
+        frame_id=1,
+        timestamp_s=1.0,
+        match={"valid": True, "ad_lane_id": 10},
+        local_graph={
+            "corridors": {0: [10, 11]},
+            "lane_to_offset": {10: 0, 11: 0},
+            "route_lane_sequence": [10, 11],
+            "lane_centerlines": {
+                10: [
+                    {"x_m": float(x), "y_m": 0.0}
+                    for x in range(0, 7)
+                ],
+                11: [
+                    {"x_m": 6.0 + float(i), "y_m": 0.45 * float(i)}
+                    for i in range(0, 9)
+                ],
+            },
+        },
+    )
+
+    reference, _ = StableReferenceLineProvider().reference_from_local_map(
+        snapshot,
+        start_lane_id=10,
+        maximum_join_curvature_1pm=0.20,
+    )
+    headings = [
+        math.atan2(
+            float(second["y_ref_m"]) - float(first["y_ref_m"]),
+            float(second["x_ref_m"]) - float(first["x_ref_m"]),
+        )
+        for first, second in zip(reference, reference[1:])
+    ]
+    jumps = [
+        abs(math.atan2(math.sin(b - a), math.cos(b - a)))
+        for a, b in zip(headings, headings[1:])
+    ]
+
+    assert max(jumps) < math.radians(12.0)
+    assert any(
+        sample.get("reference_join_conditioning") == "c1_hermite"
+        for sample in reference
+    )
+    assert list(dict.fromkeys(int(sample["lane_id"]) for sample in reference)) == [10, 11]
+
+
 def test_single_lane_window_preserves_offset_to_snapshot_centerline():
     provider = StableReferenceLineProvider()
     reference, reason = provider.reference_for_lane(
