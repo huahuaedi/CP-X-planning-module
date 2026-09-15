@@ -26,6 +26,27 @@ conflict_corridor_speed_constraint = (
 
 
 class SpeedPlannerTest(unittest.TestCase):
+    def test_turn_curvature_constraint_uses_lateral_acceleration_relation(self):
+        constraint = SpeedTargetPlanner.turn_curvature_constraint(
+            0.1,
+            {
+                "full_intersection_turn_lateral_accel_comfort_mps2": 2.5,
+                "full_intersection_turn_curvature_min_curvature_1pm": 0.01,
+            },
+        )
+
+        self.assertIsNotNone(constraint)
+        self.assertEqual(constraint.owner, "turn_master_curvature")
+        self.assertEqual(constraint.maximum_mps, 5.0)
+
+    def test_turn_curvature_constraint_ignores_straight_master(self):
+        constraint = SpeedTargetPlanner.turn_curvature_constraint(
+            0.005,
+            {"full_intersection_turn_curvature_min_curvature_1pm": 0.01},
+        )
+
+        self.assertIsNone(constraint)
+
     def test_open_conflict_corridor_does_not_change_speed_path(self):
         constraint = conflict_corridor_speed_constraint(
             corridor=SimpleNamespace(

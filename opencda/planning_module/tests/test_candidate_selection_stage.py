@@ -41,30 +41,7 @@ def test_post_selection_normalizes_lane_change_without_speed_override():
     )
     assert result.lane_change_state == "EXECUTE_LANE_CHANGE_LEFT"
     assert result.speed_plan is speed
-    assert result.speed_constraints == ()
     assert result.diagnostics["lane_change_longitudinal_authority"] == "SpeedPlanner"
-
-
-def test_post_selection_turn_uses_persistent_master_curvature():
-    stage = _post_selection_stage({
-        "full_intersection_turn_lateral_accel_comfort_mps2": 2.5,
-        "full_intersection_turn_curvature_min_curvature_1pm": 0.01,
-    })
-    speed = SpeedPlan(target_speed_mps=6.0, speed_cap_mps=6.0,
-                      stop_goal_active=False)
-    result = stage.finalize_selected_frame(
-        decision="intersection_turn_right", lane_change_state="LANE_KEEP",
-        reference=({}, {}), selected_diagnostics={}, reference_diagnostics={},
-        ego_speed_mps=5.0, scenario_stop_required=False, speed_plan=speed,
-        turn_prepare_speed_suppressed=False,
-        turn_master_curvature_1pm=0.1,
-    )
-    assert result.speed_plan is speed
-    assert result.speed_constraints[0].owner == "turn_master_curvature"
-    assert result.speed_constraints[0].maximum_mps == 5.0
-    assert result.diagnostics["turn_curvature_speed_source"] == (
-        "persistent_turn_master"
-    )
 
 
 def test_arbitrate_owns_intent_selection_and_finalization():

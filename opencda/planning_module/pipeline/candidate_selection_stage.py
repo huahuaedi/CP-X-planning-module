@@ -8,7 +8,6 @@ from typing import Any, Callable, Mapping, Sequence
 from .candidate_evaluation import CandidateSelectionResult
 from .candidate_pipeline import build_candidate_intents, summarize_candidate_results
 from .reference_line_provider import LANE_CHANGE
-from .speed_planner import SpeedConstraint
 from opencda.planning_module.utility.speed_profile import curvature_speed_cap_mps
 
 
@@ -41,7 +40,6 @@ class CandidatePostSelectionResult:
     lane_change_state: str
     stop_goal_active: bool
     speed_plan: Any
-    speed_constraints: tuple
     diagnostics: Mapping[str, Any]
 
 
@@ -90,7 +88,6 @@ class CandidateArbitrationResult:
     lane_change_state: str
     stop_goal_active: bool
     speed_plan: Any
-    speed_constraints: tuple
     diagnostics: Mapping[str, Any]
 
     def mutable_reference(self):
@@ -410,7 +407,6 @@ class CandidateSelectionStage:
             turn_prepare_speed_suppressed=bool(
                 request.turn_prepare_speed_suppressed
             ),
-            turn_master_curvature_1pm=selected.turn_master_curvature_1pm,
         )
         return CandidateArbitrationResult(
             decision=str(selected.decision),
@@ -421,7 +417,6 @@ class CandidateSelectionStage:
             lane_change_state=str(final.lane_change_state),
             stop_goal_active=bool(final.stop_goal_active),
             speed_plan=final.speed_plan,
-            speed_constraints=tuple(final.speed_constraints),
             diagnostics=dict(final.diagnostics),
         )
 
@@ -431,14 +426,12 @@ class CandidateSelectionStage:
         reference_diagnostics: Mapping[str, Any], ego_speed_mps: float,
         scenario_stop_required: bool, speed_plan: Any,
         turn_prepare_speed_suppressed: bool,
-        turn_master_curvature_1pm: Any = None,
     ) -> CandidatePostSelectionResult:
         """Interpret the winning candidate exactly once for downstream stages."""
 
         cfg = self._config
         debug = dict(reference_diagnostics or {})
         selected_debug = dict(selected_diagnostics or {})
-        constraints = []
         if str(decision) in {"lane_change_left", "lane_change_right"}:
             curvature = float(self._provider.builder.discrete_curvature_1pm(reference))
             advisory = curvature_speed_cap_mps(
@@ -459,40 +452,6 @@ class CandidateSelectionStage:
                 ),
                 "lane_change_longitudinal_authority": "SpeedPlanner",
             })
-        if turn_master_curvature_1pm is not None:
-            # Speed comes from the immutable maneuver master, not a rolling
-            # MPC window. One route revision therefore has one curvature
-            # contract throughout prepare, execution and exit stabilization.
-            curvature = abs(float(turn_master_curvature_1pm))
-            advisory = curvature_speed_cap_mps(
-                curve_curvature_abs=curvature,
-                curve_min_curvature=max(0.0, float(cfg.get(
-                    "full_intersection_turn_curvature_min_curvature_1pm", 0.01
-                ))),
-                current_speed_mps=float(ego_speed_mps),
-                curve_lateral_accel_limit_mps2=max(0.1, float(cfg.get(
-                    "full_intersection_turn_lateral_accel_comfort_mps2", 2.5
-                ))),
-                speed_enable_threshold_mps=0.0,
-            )
-            debug.update({
-                "turn_master_curvature_1pm": curvature,
-                "turn_curvature_speed_advisory_mps": (
-                    "" if advisory is None else float(advisory)
-                ),
-                "turn_curvature_speed_source": "persistent_turn_master",
-                "turn_longitudinal_authority": "SpeedPlanner",
-            })
-            if advisory is not None:
-                constraints.append(SpeedConstraint(
-                    owner="turn_master_curvature",
-                    maximum_mps=max(0.1, float(advisory)),
-                    reason=(
-                        "persistent_turn_master_lateral_acceleration_limit:"
-                        "curvature_1pm=%.6f" % float(curvature)
-                    ),
-                ))
-
         stop_goal = bool(
             scenario_stop_required
             or selected_debug.get("candidate_selected_stop_goal_active", False)
@@ -515,7 +474,7 @@ class CandidateSelectionStage:
         return CandidatePostSelectionResult(
             decision=str(decision), lane_change_state=phase,
             stop_goal_active=stop_goal, speed_plan=speed_plan,
-            speed_constraints=tuple(constraints), diagnostics=debug,
+            diagnostics=debug,
         )
 
     @staticmethod

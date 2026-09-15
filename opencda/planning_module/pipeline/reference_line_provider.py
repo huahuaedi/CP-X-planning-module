@@ -267,6 +267,22 @@ class ReferenceLineProvider(StableReferenceLineProvider):
     def snapshot(self, mode: str) -> ReferenceLineSnapshot:
         return self._snapshots[self._normalize_mode(mode)]
 
+    def turn_master_curvature_1pm(self) -> Optional[float]:
+        """Return curvature of the immutable turn master, when installed.
+
+        The persistent reference provider is the geometry owner.  Consumers
+        must not estimate turn curvature from a rolling MPC window because
+        the estimate would then change as the window advances through the
+        same maneuver.
+        """
+
+        snapshot = self.snapshot(TURN)
+        if not snapshot.active or not snapshot.samples:
+            return None
+        return abs(float(
+            self.builder.discrete_curvature_1pm(snapshot.mutable_samples())
+        ))
+
     def lane_change_completion_alignment(
         self, *, reference_samples, ego_x_m, ego_y_m, ego_heading_rad
     ) -> LaneChangeAlignment:
@@ -1049,13 +1065,6 @@ class ReferenceLineProvider(StableReferenceLineProvider):
 
         reference, destination, reason = self.turn_reference(request)
         diagnostics = {"route_turn_reference_reason": str(reason)}
-        turn_snapshot = self.snapshot(TURN)
-        if bool(turn_snapshot.active) and turn_snapshot.samples:
-            diagnostics["turn_master_curvature_1pm"] = float(
-                self.builder.discrete_curvature_1pm(
-                    turn_snapshot.mutable_samples()
-                )
-            )
         if reference:
             first = reference[0]
             dx_m = float(first.get("x_ref_m", first.get("x", 0.0))) - float(
@@ -1150,13 +1159,6 @@ class ReferenceLineProvider(StableReferenceLineProvider):
                     turn_direction=direction,
                 ))
             )
-            turn_snapshot = self.snapshot(TURN)
-            if bool(turn_snapshot.active) and turn_snapshot.samples:
-                diagnostics["turn_master_curvature_1pm"] = float(
-                    self.builder.discrete_curvature_1pm(
-                        turn_snapshot.mutable_samples()
-                    )
-                )
             # PREPARE_TURN remains longitudinally owned by SpeedPlanner.
             for sample in transition_reference:
                 sample["v_ref_mps"] = float(request.target_speed_mps)

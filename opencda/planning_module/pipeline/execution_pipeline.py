@@ -438,6 +438,16 @@ class PlanningPipeline:
     def constrain_speed_plan(self, speed_plan, constraint, **kwargs):
         return self.speed.constrain_plan(speed_plan, constraint, **kwargs)
 
+    def constrain_turn_speed_from_reference(
+        self, speed_plan, *, reference_provider, config
+    ):
+        """Apply the provider-owned persistent turn geometry to speed once."""
+
+        constraint = self.speed.turn_curvature_constraint(
+            reference_provider.turn_master_curvature_1pm(), config
+        )
+        return self.speed.constrain_plan(speed_plan, constraint), constraint
+
     def propose_speed(self, **kwargs):
         return self.speed.propose(**kwargs)
 

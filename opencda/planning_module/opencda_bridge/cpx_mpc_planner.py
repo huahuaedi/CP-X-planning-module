@@ -2553,7 +2553,6 @@ class CPXMPCPlannerBridge:
         route_replan_attempted = False
         route_replan_succeeded = False
         route_replan_reason = "route_replan_not_requested"
-        additional_speed_constraints = []
         adapter_output = self.input_adapter.build(
             ego_location=ego_location,
             ego_yaw_rad=float(ego_yaw_rad),
@@ -2953,7 +2952,7 @@ class CPXMPCPlannerBridge:
             previous_idm_acceleration_mps2=getattr(
                 self, "_previous_following_idm_acceleration_mps2", None
             ),
-            additional_constraints=tuple(additional_speed_constraints),
+            additional_constraints=(),
         )
         self._previous_following_idm_acceleration_mps2 = (
             None
@@ -3315,10 +3314,38 @@ class CPXMPCPlannerBridge:
             lc_state = str(candidate_result.lane_change_state)
             stop_goal_active = bool(candidate_result.stop_goal_active)
             speed_plan = candidate_result.speed_plan
-            additional_speed_constraints.extend(candidate_result.speed_constraints)
             reference_debug = dict(candidate_result.diagnostics)
         else:
             reference_debug["candidate_pipeline_enabled"] = False
+
+        # Geometry and longitudinal policy meet at one typed boundary.  The
+        # provider measures the persistent (route-revision-stable) TURN
+        # master, and SpeedTargetPlanner is the sole owner that turns it into
+        # an executable ceiling.  Candidate selection does not carry or edit
+        # speed constraints.
+        speed_plan, turn_curvature_constraint = (
+            self.pipeline.constrain_turn_speed_from_reference(
+                speed_plan,
+                reference_provider=self._stable_reference_line_provider,
+                config=self.config,
+            )
+        )
+        if turn_curvature_constraint is not None:
+            turn_master_curvature_1pm = (
+                self._stable_reference_line_provider
+                .turn_master_curvature_1pm()
+            )
+            planned_speed_mps = float(speed_plan.target_speed_mps)
+            reference_debug.update({
+                "turn_master_curvature_1pm": float(
+                    turn_master_curvature_1pm
+                ),
+                "turn_curvature_speed_advisory_mps": float(
+                    turn_curvature_constraint.maximum_mps
+                ),
+                "turn_curvature_speed_source": "persistent_turn_master",
+                "turn_longitudinal_authority": "SpeedPlanner",
+            })
 
         # Stage C owns the time-indexed safety corridor; SpeedTargetPlanner
         # owns nominal longitudinal intent.  Feed the corridor's approach

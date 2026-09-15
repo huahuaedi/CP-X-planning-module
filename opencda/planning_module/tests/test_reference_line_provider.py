@@ -40,6 +40,24 @@ def _local_geometry(lane_id, points):
     return SimpleNamespace(lane_id=int(lane_id), centerline=centerline)
 
 
+def test_turn_master_curvature_reads_immutable_provider_geometry():
+    provider = ReferenceLineProvider()
+    provider.attach_builder(SimpleNamespace(
+        discrete_curvature_1pm=lambda rows: 0.125 if len(rows) == 30 else 0.0
+    ))
+    assert provider.turn_master_curvature_1pm() is None
+    installed, _ = provider.install(
+        TURN,
+        _line(),
+        route_revision="route-1",
+        map_epoch="town05",
+        event="maneuver_started",
+    )
+
+    assert installed
+    assert provider.turn_master_curvature_1pm() == pytest.approx(0.125)
+
+
 def test_local_route_reference_prefixes_matched_lane_before_connector():
     geometries = {
         10: _local_geometry(10, [(0.0, 0.0), (1.0, 0.0)]),

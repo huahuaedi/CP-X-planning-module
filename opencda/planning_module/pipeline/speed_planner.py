@@ -224,6 +224,39 @@ class SpeedTargetPlanner:
         self._destination_approach_cap_mps = float("inf")
 
     @staticmethod
+    def turn_curvature_constraint(
+        curvature_1pm: Optional[float], config: Mapping[str, object]
+    ) -> Optional[SpeedConstraint]:
+        """Translate the persistent turn geometry into one speed ceiling.
+
+        This is the only turn-speed policy.  ReferenceLineProvider measures
+        the immutable master; SpeedTargetPlanner applies the lateral-accel
+        relation ``v = sqrt(a_lat_max / abs(curvature))``.  No candidate or
+        bridge branch owns a separate fixed turn speed.
+        """
+
+        if curvature_1pm is None:
+            return None
+        curvature = abs(float(curvature_1pm))
+        minimum_curvature = max(0.0, float(config.get(
+            "full_intersection_turn_curvature_min_curvature_1pm", 0.01
+        )))
+        if curvature <= minimum_curvature:
+            return None
+        lateral_accel_mps2 = max(0.1, float(config.get(
+            "full_intersection_turn_lateral_accel_comfort_mps2", 2.5
+        )))
+        maximum_mps = math.sqrt(lateral_accel_mps2 / max(1.0e-6, curvature))
+        return SpeedConstraint(
+            owner="turn_master_curvature",
+            maximum_mps=float(maximum_mps),
+            reason=(
+                "persistent_turn_master_lateral_acceleration_limit:"
+                "curvature_1pm=%.6f" % float(curvature)
+            ),
+        )
+
+    @staticmethod
     def constrain_plan(
         speed_plan: SpeedPlan,
         constraint: Optional[SpeedConstraint],
@@ -601,8 +634,8 @@ def build_speed_plan(
     ):
         finite_turn_distance_m = max(0.0, float(upcoming_turn_distance_m))
     # This stage deliberately does not guess turn curvature with a fixed
-    # speed. CandidateSelectionStage submits ``turn_master_curvature`` once
-    # ReferenceLineProvider has installed the immutable turn master.
+    # speed. Once ReferenceLineProvider installs the immutable turn master,
+    # SpeedTargetPlanner.turn_curvature_constraint owns that ceiling.
     lane_change_cap_mps = None
     if decision in {"lane_change_left", "lane_change_right"}:
         # A route-required lane change can start immediately after ego is
