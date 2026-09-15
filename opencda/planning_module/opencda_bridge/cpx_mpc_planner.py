@@ -3465,12 +3465,19 @@ class CPXMPCPlannerBridge:
         from opencda.planning_module.pipeline.cav_intent_codec import (
             build_ego_cav_intent,
             cav_intent_to_payload,
+            rebase_mpc_state_plan,
         )
 
         states = getattr(self.mpc, "_last_x_solution", None)
-        planned = (
-            [] if states is None
-            else [[float(s[0]), float(s[1]), float(s[2]), float(s[3])] for s in states]
+        planned = rebase_mpc_state_plan(
+            [] if states is None else states,
+            plan_time_s=self.control_buffer.plan_time_s,
+            now_s=float(sim_time_s),
+            dt_s=float(self.mpc.dt_s),
+            current_state=(
+                float(ego_location.x), float(ego_location.y),
+                float(ego_speed_mps), float(ego_yaw_rad),
+            ),
         )
         self._cav_intent_sequence += 1
         extent = getattr(

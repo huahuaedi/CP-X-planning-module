@@ -19,6 +19,7 @@ this module.
 
 from __future__ import annotations
 
+import math
 from typing import Any, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from opencda.planning_module.pipeline.cooperative_arbitration import (
@@ -28,6 +29,82 @@ from opencda.planning_module.pipeline.cooperative_arbitration import (
 
 SCHEMA_VERSION = 1
 _PATH_SAMPLE_LEN = 4  # (t_rel_s, x, y, v)
+
+
+def rebase_mpc_state_plan(
+    planned_states: Sequence[Sequence[float]],
+    *,
+    plan_time_s: Optional[float],
+    now_s: float,
+    dt_s: float,
+    current_state: Sequence[float],
+) -> List[List[float]]:
+    """Return the unexecuted MPC plan in the current vehicle frame.
+
+    A buffered MPC solution belongs to its solve timestamp.  Broadcasting it
+    again with a newer pose/timestamp without advancing the state sequence
+    makes the peer prediction start behind the physical vehicle.  This
+    function samples the old solution at its current age, discards executed
+    states, and rigidly aligns the remainder to the measured current pose and
+    heading.  Relative shape and velocity remain those chosen by MPC.
+    """
+
+    try:
+        raw_states = list(planned_states)
+    except (TypeError, ValueError):
+        raw_states = []
+    states = []
+    for state in raw_states:
+        try:
+            if len(state) >= 4:
+                states.append(list(state))
+        except TypeError:
+            continue
+    if not states or len(current_state) < 4 or plan_time_s is None:
+        return []
+    step_s = max(1.0e-3, float(dt_s))
+    source_position = max(0.0, float(now_s) - float(plan_time_s)) / step_s
+    if source_position > float(len(states) - 1):
+        return []
+
+    def interpolate(position: float) -> List[float]:
+        lower = min(len(states) - 1, max(0, int(math.floor(position))))
+        upper = min(len(states) - 1, lower + 1)
+        ratio = min(1.0, max(0.0, float(position) - float(lower)))
+        first, second = states[lower], states[upper]
+        yaw_delta = math.atan2(
+            math.sin(float(second[3]) - float(first[3])),
+            math.cos(float(second[3]) - float(first[3])),
+        )
+        return [
+            float(first[0]) + ratio * (float(second[0]) - float(first[0])),
+            float(first[1]) + ratio * (float(second[1]) - float(first[1])),
+            float(first[2]) + ratio * (float(second[2]) - float(first[2])),
+            float(first[3]) + ratio * yaw_delta,
+        ]
+
+    predicted_now = interpolate(source_position)
+    heading_delta = math.atan2(
+        math.sin(float(current_state[3]) - float(predicted_now[3])),
+        math.cos(float(current_state[3]) - float(predicted_now[3])),
+    )
+    cosine, sine = math.cos(heading_delta), math.sin(heading_delta)
+    result: List[List[float]] = []
+    output_count = int(math.floor(float(len(states) - 1) - source_position)) + 1
+    for output_index in range(max(1, output_count)):
+        state = interpolate(source_position + float(output_index))
+        dx = float(state[0]) - float(predicted_now[0])
+        dy = float(state[1]) - float(predicted_now[1])
+        result.append([
+            float(current_state[0]) + cosine * dx - sine * dy,
+            float(current_state[1]) + sine * dx + cosine * dy,
+            float(current_state[2]) if output_index == 0 else float(state[2]),
+            float(current_state[3]) if output_index == 0 else math.atan2(
+                math.sin(float(state[3]) + heading_delta),
+                math.cos(float(state[3]) + heading_delta),
+            ),
+        ])
+    return result
 
 
 def _f(m: Mapping[str, Any], *keys: str, default: float = 0.0) -> float:

@@ -49,6 +49,12 @@ class MPCControlBuffer:
         self._last_reason = "control_buffer_empty"
         self._previous_speed_error_mps: Optional[float] = None
 
+    @property
+    def plan_time_s(self) -> Optional[float]:
+        """Simulation timestamp owning the currently buffered MPC solution."""
+
+        return self._plan_time_s
+
     def should_replan(
         self,
         *,

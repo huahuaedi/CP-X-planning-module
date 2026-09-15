@@ -5,6 +5,7 @@ from pipeline.cav_intent_codec import (
     collect_cav_intents,
     cav_intent_from_payload,
     cav_intent_to_payload,
+    rebase_mpc_state_plan,
     sample_cav_path_at,
 )
 
@@ -26,6 +27,41 @@ def test_build_ego_intent_converts_state_sequence_to_timed_path():
     assert len(intent.planned_path) == 3
     assert intent.planned_path[0] == (0.0, 0.0, 0.0, 5.0)
     assert intent.planned_path[2] == (0.2, 1.0, 0.3, 5.4)
+
+
+def test_rebase_mpc_plan_discards_executed_prefix_and_anchors_current_pose():
+    states = [
+        [0.0, 0.0, 5.0, 0.0],
+        [1.0, 0.0, 5.0, 0.0],
+        [2.0, 0.0, 5.0, 0.0],
+        [3.0, 0.2, 5.0, 0.1],
+        [4.0, 0.6, 5.0, 0.2],
+    ]
+
+    rebased = rebase_mpc_state_plan(
+        states,
+        plan_time_s=10.0,
+        now_s=10.2,
+        dt_s=0.1,
+        current_state=[20.0, 4.0, 4.8, 0.0],
+    )
+
+    assert rebased[0] == [20.0, 4.0, 4.8, 0.0]
+    assert [round(value, 6) for value in rebased[1][:3]] == [21.0, 4.2, 5.0]
+    assert [round(value, 6) for value in rebased[2][:3]] == [22.0, 4.6, 5.0]
+
+
+def test_rebase_mpc_plan_rotates_future_shape_with_current_heading():
+    rebased = rebase_mpc_state_plan(
+        [[0.0, 0.0, 2.0, 0.0], [1.0, 0.0, 2.0, 0.0]],
+        plan_time_s=3.0,
+        now_s=3.0,
+        dt_s=0.1,
+        current_state=[5.0, 7.0, 2.0, 0.5 * 3.141592653589793],
+    )
+
+    assert round(rebased[1][0], 6) == 5.0
+    assert round(rebased[1][1], 6) == 8.0
 
 
 def test_codec_roundtrip():
