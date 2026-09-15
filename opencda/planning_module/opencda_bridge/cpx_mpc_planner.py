@@ -5224,7 +5224,11 @@ _DEFAULT_ADAPTIVE_HORIZON_PROFILE_S: dict[str, float] = {
     "lane_follow": 3.0,
     "prepare_lane_change": 4.5,
     "execute_lane_change": 4.5,
-    "intersection_turn": 2.2,
+    # The horizon must expose the curved connector early enough to build the
+    # nominal steering under the physical steering-rate bound.  At the
+    # Town06 turn speed, 2.2 s placed the curvature change at the final MPC
+    # stages and produced a feedback-only correction after the tangent jump.
+    "intersection_turn": 3.0,
     "stop": 2.0,
     "recovery": 1.5,
 }
