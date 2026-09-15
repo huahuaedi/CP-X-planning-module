@@ -7,7 +7,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from .candidate_evaluation import CandidateSelectionResult
 from .candidate_pipeline import build_candidate_intents, summarize_candidate_results
-from .reference_line_provider import LANE_CHANGE, TURN
+from .reference_line_provider import LANE_CHANGE
 from .speed_planner import SpeedConstraint
 from opencda.planning_module.utility.speed_profile import curvature_speed_cap_mps
 
@@ -457,14 +457,16 @@ class CandidateSelectionStage:
                 ),
                 "lane_change_longitudinal_authority": "SpeedPlanner",
             })
-        turn_master = self._provider.snapshot(TURN)
-        if bool(turn_master.active) and turn_master.samples:
+        master_curvatures = [
+            float(sample["turn_master_curvature_1pm"])
+            for sample in list(reference or ())
+            if sample.get("turn_master_curvature_1pm") is not None
+        ]
+        if master_curvatures:
             # Speed comes from the immutable maneuver master, not a rolling
             # MPC window. One route revision therefore has one curvature
             # contract throughout prepare, execution and exit stabilization.
-            curvature = float(self._provider.builder.discrete_curvature_1pm(
-                turn_master.mutable_samples()
-            ))
+            curvature = max(abs(value) for value in master_curvatures)
             advisory = curvature_speed_cap_mps(
                 curve_curvature_abs=curvature,
                 curve_min_curvature=max(0.0, float(cfg.get(

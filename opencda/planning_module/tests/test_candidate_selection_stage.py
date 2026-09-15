@@ -50,19 +50,14 @@ def test_post_selection_turn_uses_persistent_master_curvature():
         "full_intersection_turn_lateral_accel_comfort_mps2": 2.5,
         "full_intersection_turn_curvature_min_curvature_1pm": 0.01,
     })
-    stage._provider.snapshot = lambda _mode: SimpleNamespace(
-        active=True,
-        samples=({"x_ref_m": 0.0, "y_ref_m": 0.0},),
-        mutable_samples=lambda: [
-            {"x_ref_m": 0.0, "y_ref_m": 0.0},
-            {"x_ref_m": 1.0, "y_ref_m": 0.0},
-        ],
-    )
     speed = SpeedPlan(target_speed_mps=6.0, speed_cap_mps=6.0,
                       stop_goal_active=False)
     result = stage.finalize_selected_frame(
         decision="intersection_turn_right", lane_change_state="LANE_KEEP",
-        reference=({}, {}), selected_diagnostics={}, reference_diagnostics={},
+        reference=(
+            {"turn_master_curvature_1pm": 0.1},
+            {"turn_master_curvature_1pm": 0.1},
+        ), selected_diagnostics={}, reference_diagnostics={},
         ego_speed_mps=5.0, scenario_stop_required=False, speed_plan=speed,
         turn_prepare_speed_suppressed=False,
     )

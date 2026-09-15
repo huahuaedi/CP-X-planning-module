@@ -103,6 +103,7 @@ def test_junction_lane_follow_uses_topology_order_not_waypoint_successor():
 def test_turn_reference_keeps_valid_master_until_local_map_revision_catches_up():
     provider = ReferenceLineProvider()
     provider.attach_builder(SimpleNamespace(
+        discrete_curvature_1pm=lambda _reference: 0.125,
         curvature_feasible_turn_samples=lambda reference_samples, **_kwargs: (
             list(reference_samples), ""
         )
@@ -150,6 +151,10 @@ def test_turn_reference_keeps_valid_master_until_local_map_revision_catches_up()
     )
 
     assert samples
+    assert all(
+        sample["turn_master_curvature_1pm"] == pytest.approx(0.125)
+        for sample in samples
+    )
     assert provider.snapshot(TURN).route_revision == "route-1"
     assert "turn_local_map_route_revision_mismatch:route-1!=route-2" in reason
     assert "turn_master_window" in reason
