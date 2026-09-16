@@ -1161,17 +1161,52 @@ class ReferenceLineProvider(StableReferenceLineProvider):
         transition_reference = []
         transition_destination = []
         transition_reason = ""
-        if float(upcoming_turn_distance_m) <= float(transition_arc_m):
+        # Geometry preview and control-reference handoff are separate events.
+        # Install the immutable TURN master as soon as the physical braking
+        # preview opens, so SpeedPlanner can derive a continuous curvature
+        # envelope while MPC still follows the incoming lane.  Only the fixed
+        # transition arc below is allowed to publish connector geometry.
+        from .speed_planner import turn_approach_lookahead_m
+        preview_lookahead_m = turn_approach_lookahead_m(
+            cruise_speed_mps=float(request.target_speed_mps),
+            config=request.config,
+        )
+        preview_reference = []
+        preview_destination = []
+        preview_reason = ""
+        if (
+            direction in {"left", "right"}
+            and float(upcoming_turn_distance_m) <= float(preview_lookahead_m)
+        ):
             snapshot = self.snapshot(TURN)
             if snapshot.active and str(snapshot.maneuver_direction) != direction:
                 self.release(TURN, event="reset")
-            transition_reference, transition_destination, transition_reason = (
+            preview_reference, preview_destination, preview_reason = (
                 self.turn_reference(replace(
                     request,
                     lock_master=True,
                     turn_direction=direction,
                 ))
             )
+            diagnostics.update({
+                "turn_master_preview_reason": str(preview_reason),
+                "turn_master_preview_distance_m": float(
+                    upcoming_turn_distance_m
+                ),
+                "turn_master_preview_lookahead_m": float(preview_lookahead_m),
+            })
+        if float(upcoming_turn_distance_m) <= float(transition_arc_m):
+            transition_reference = list(preview_reference)
+            transition_destination = list(preview_destination)
+            transition_reason = str(preview_reason)
+            if not transition_reference:
+                transition_reference, transition_destination, transition_reason = (
+                    self.turn_reference(replace(
+                        request,
+                        lock_master=True,
+                        turn_direction=direction,
+                    ))
+                )
             # PREPARE_TURN remains longitudinally owned by SpeedPlanner.
             for sample in transition_reference:
                 sample["v_ref_mps"] = float(request.target_speed_mps)

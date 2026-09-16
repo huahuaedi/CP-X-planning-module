@@ -327,6 +327,20 @@ class MPC:
         self.wheelbase_m = float(mpc_cfg.get("wheelbase_m", 2.7))
         if self.wheelbase_m <= 0.0:
             raise ValueError("mpc.wheelbase_m must be > 0.")
+        # Platform-calibrated road-wheel effectiveness.  A value below one
+        # models steering-compliance/tire effects that make the measured yaw
+        # response smaller than the ideal kinematic bicycle prediction for
+        # the same commanded wheel angle.  Keep the physical wheelbase and
+        # actuator limits truthful; this gain is the explicit model-calibration
+        # boundary and must be applied consistently in propagation,
+        # linearization, and curvature feed-forward inversion.
+        self.kinematic_steering_effectiveness = max(
+            0.1,
+            min(
+                2.0,
+                float(mpc_cfg.get("kinematic_steering_effectiveness", 1.0)),
+            ),
+        )
         # CG-reference model parameters. In this project we assume the CG is
         # centered between axles unless a scenario-specific axle split is added.
         self.l_r_m = max(1e-9, 0.5 * float(self.wheelbase_m))
@@ -2632,8 +2646,12 @@ class MPC:
             beta = atan((l_r / L) * tan(delta))
         """
 
+        effectiveness = float(getattr(
+            self, "kinematic_steering_effectiveness", 1.0
+        ))
+        effective_delta_rad = effectiveness * float(delta_rad)
         k_ratio = float(self.l_r_m / max(1e-9, self.wheelbase_m))
-        return float(math.atan(k_ratio * math.tan(float(delta_rad))))
+        return float(math.atan(k_ratio * math.tan(effective_delta_rad)))
 
     def _cg_slip_angle_beta_derivative(self, delta_rad: float) -> float:
         """
@@ -2642,11 +2660,19 @@ class MPC:
         """
 
         delta_rad = float(delta_rad)
+        effectiveness = float(getattr(
+            self, "kinematic_steering_effectiveness", 1.0
+        ))
+        effective_delta_rad = effectiveness * delta_rad
         k_ratio = float(self.l_r_m / max(1e-9, self.wheelbase_m))
-        cos_delta = math.cos(delta_rad)
+        cos_delta = math.cos(effective_delta_rad)
         sec_delta_sq = 1.0 / max(1e-9, cos_delta * cos_delta)
-        tan_delta = math.tan(delta_rad)
-        return float((k_ratio * sec_delta_sq) / (1.0 + (k_ratio * tan_delta) ** 2))
+        tan_delta = math.tan(effective_delta_rad)
+        return float(
+            effectiveness
+            * (k_ratio * sec_delta_sq)
+            / (1.0 + (k_ratio * tan_delta) ** 2)
+        )
 
     def _steering_for_path_curvature(self, curvature_1pm: float) -> float:
         """Invert this MPC's CG bicycle model for steady path curvature."""
@@ -2660,7 +2686,72 @@ class MPC:
         )
         beta_rad = math.asin(lateral_ratio)
         axle_ratio = float(self.wheelbase_m) / max(1.0e-9, float(self.l_r_m))
-        return float(math.atan(axle_ratio * math.tan(beta_rad)))
+        effective_delta_rad = math.atan(axle_ratio * math.tan(beta_rad))
+        effectiveness = max(1.0e-6, float(getattr(
+            self, "kinematic_steering_effectiveness", 1.0
+        )))
+        return float(effective_delta_rad / effectiveness)
+
+    def maximum_path_curvature_1pm(self) -> float:
+        """Return the curvature reachable at the configured steering bound.
+
+        This is intentionally derived from the same calibrated CG bicycle
+        model used by propagation and feed-forward steering.  Reference
+        validation must not advertise a wider feasible set than the MPC.
+        """
+
+        max_steer_rad = abs(float(self.constraints.max_steer_rad))
+        beta_rad = self._cg_slip_angle_beta(max_steer_rad)
+        return float(abs(math.sin(beta_rad)) / max(1.0e-9, self.l_r_m))
+
+    def _nominal_path_steering_profile(
+        self,
+        *,
+        x_ref_rollout: np.ndarray,
+        lane_center_reference: Sequence[Mapping[str, object]] | None,
+    ) -> np.ndarray:
+        """Build road-wheel feed-forward at every rollout state.
+
+        The profile is derived only from persistent reference curvature.  It
+        is deliberately independent of the previous MPC solution: the latter
+        is a useful linearisation seed, but it must not become the geometric
+        steering target or preserve an old straight-road command into a turn.
+        """
+
+        state_count = int(len(x_ref_rollout))
+        profile = np.zeros(state_count, dtype=float)
+        if state_count <= 0 or not lane_center_reference:
+            return profile
+        route_points = [
+            (float(sample.get("x_ref_m", 0.0)), float(sample.get("y_ref_m", 0.0)))
+            for sample in lane_center_reference
+            if isinstance(sample, Mapping)
+        ]
+        if len(route_points) < 2:
+            return profile
+        progress_origin_m = self._reference_progress_origin_m(
+            lane_center_reference
+        )
+        for state_index in range(state_count):
+            local_progress_m, _ = self._nearest_progress_along_route(
+                route_points=route_points,
+                xy=[
+                    float(x_ref_rollout[state_index, 0]),
+                    float(x_ref_rollout[state_index, 1]),
+                ],
+            )
+            curvature_1pm = self._lane_center_curvature_by_progress(
+                lane_center_reference=lane_center_reference,
+                query_progress_m=(
+                    float(progress_origin_m) + float(local_progress_m)
+                ),
+            )
+            profile[state_index] = self._clamp(
+                self._steering_for_path_curvature(curvature_1pm),
+                self.constraints.min_steer_rad,
+                self.constraints.max_steer_rad,
+            )
+        return profile
 
     def _reference_rollout(
         self,
@@ -3166,32 +3257,69 @@ class MPC:
         # Penalizes rapid changes in acceleration and steering across horizon.
         comfort_scale = float(self.comfort_cost.w_comf)
 
-        # J_ctrl rate terms: ((a_k-a_{k-1})/dt)^2 + ((delta_k-delta_{k-1})/dt)^2
+        # J_ctrl rate terms.  Acceleration uses absolute rate.  Steering uses
+        # rate *error* relative to the persistent path's curvature
+        # feed-forward.  Otherwise a valid turn is penalized merely because
+        # its nominal road-wheel angle changes, which makes the optimizer lag
+        # the connector even when the model and reference are correct.
         qa_eff = comfort_scale * float(self.comfort_cost.qa) / max(1e-9, self.dt_s * self.dt_s)
         qd_eff = comfort_scale * float(self.comfort_cost.qdelta) / max(1e-9, self.dt_s * self.dt_s)
 
-        def add_rate_penalty(var_idx: int, prev_idx: int | None, prev_value: float, weight: float) -> None:
+        def add_rate_penalty(
+            var_idx: int,
+            prev_idx: int | None,
+            prev_value: float,
+            weight: float,
+            reference_difference: float = 0.0,
+        ) -> None:
             if weight <= 0.0:
                 return
             if prev_idx is None:
-                # (u - u_prev_const)^2
+                # (u - u_prev_const - reference_difference)^2
                 add_quadratic(var_idx, weight)
-                q[var_idx] += -2.0 * float(weight) * float(prev_value)
+                q[var_idx] += -2.0 * float(weight) * (
+                    float(prev_value) + float(reference_difference)
+                )
                 return
-            # (u_k - u_{k-1})^2 = u_k^2 + u_{k-1}^2 - 2 u_k u_{k-1}
+            # (u_k - u_{k-1} - reference_difference)^2
             add_quadratic(var_idx, weight)
             add_quadratic(prev_idx, weight)
             add_p_entry(var_idx, prev_idx, -2.0 * float(weight))
+            q[var_idx] += -2.0 * float(weight) * float(reference_difference)
+            q[prev_idx] += 2.0 * float(weight) * float(reference_difference)
+
+        nominal_steering_profile = self._nominal_path_steering_profile(
+            x_ref_rollout=x_ref_rollout,
+            lane_center_reference=lane_center_reference,
+        )
 
         for k in range(self.horizon_steps):
             a_idx = index.control_index(k, 0)
             d_idx = index.control_index(k, 1)
             if k == 0:
                 add_rate_penalty(a_idx, None, float(current_acceleration_mps2), qa_eff)
-                add_rate_penalty(d_idx, None, float(current_steering_rad), qd_eff)
+                add_rate_penalty(
+                    d_idx,
+                    None,
+                    float(current_steering_rad),
+                    qd_eff,
+                    reference_difference=float(
+                        nominal_steering_profile[1]
+                        - nominal_steering_profile[0]
+                    ),
+                )
             else:
                 add_rate_penalty(a_idx, index.control_index(k - 1, 0), 0.0, qa_eff)
-                add_rate_penalty(d_idx, index.control_index(k - 1, 1), 0.0, qd_eff)
+                add_rate_penalty(
+                    d_idx,
+                    index.control_index(k - 1, 1),
+                    0.0,
+                    qd_eff,
+                    reference_difference=float(
+                        nominal_steering_profile[k + 1]
+                        - nominal_steering_profile[k]
+                    ),
+                )
 
         # --- Objective: temporal-consistency term ---
         # w_tc * sum_k || u_k - u_k^{prev,shift} ||^2 . Not rate-scaled: it is a

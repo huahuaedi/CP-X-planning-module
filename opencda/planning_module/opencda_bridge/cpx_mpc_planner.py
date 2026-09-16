@@ -14,6 +14,7 @@ import math
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping, Optional, Sequence
@@ -154,6 +155,16 @@ class CPXMPCPlannerBridge:
         map_planner: Any = None,
     ):
         self._ensure_planning_module_import_path()
+        self._init_core_config_and_behavior_stages(
+            vehicle_manager, config, map_planner,
+        )
+        self._init_mpc_and_reference_generation()
+        self._init_pipeline_route_and_finalization()
+
+    def _init_core_config_and_behavior_stages(
+        self, vehicle_manager: Any,
+        config: Optional[Mapping[str, Any]], map_planner: Any,
+    ) -> None:
         self.vehicle_manager = vehicle_manager
         from opencda.planning_module.pipeline.architecture_profile import (
             normalize_architecture_config,
@@ -424,6 +435,14 @@ class CPXMPCPlannerBridge:
         # CSV columns are derived from the typed diagnostics payload on the
         # first recorded frame; the bridge does not own a duplicate schema.
 
+        self._init_speed_target_planner = speed_target_planner
+        self._init_behavior_stage = behavior_stage
+        self._init_scenario_manager = scenario_manager
+        self._init_fallback_manager = fallback_manager
+        self._init_destination_speed_stage = destination_speed_stage
+        self._init_behavior_reference_execution_stage = behavior_reference_execution_stage
+
+    def _init_mpc_and_reference_generation(self) -> None:
         self._ensure_planning_module_import_path()
         from opencda.planning_module.MPC.mpc import MPC
         from opencda.planning_module.behavior_planner import LaneSafetyScorer, RuleBasedBehaviorPlanner
@@ -616,6 +635,31 @@ class CPXMPCPlannerBridge:
             reference_provider=self._stable_reference_line_provider,
             config=self.config,
         )
+
+        self._init_runtime_input_stage = runtime_input_stage
+        self._init_perception_stage = perception_stage
+        self._init_reference_publication_stage = reference_publication_stage
+
+    def _init_pipeline_route_and_finalization(self) -> None:
+        from opencda.planning_module.behavior_planner import RuleBasedBehaviorPlanner
+        from opencda.planning_module.opencda_bridge.cp_provider import OpenCDACPProvider
+        from opencda.planning_module.opencda_bridge.platform_ports import MapLookupPort
+        from opencda.planning_module.pipeline.control_buffer import MPCControlBuffer
+        from opencda.planning_module.pipeline.mpc_feedback import BehaviorMPCFeedback
+        from opencda.planning_module.pipeline.mpc_command_extractor import (
+            MPCCommandExtractor,
+        )
+        from opencda.planning_module.pipeline.route_manager import CPXRouteManager
+        from opencda.planning_module.pipeline.safety_supervisor import SafetySupervisor
+        from opencda.planning_module.pipeline.velocity_steering_adapter import (
+            OpenCDAVelocitySteeringAdapter,
+        )
+        from opencda.planning_module.utility.evaluation_metrics import (
+            EvaluationMetricsRecorder,
+            write_planning_metrics_artifacts,
+        )
+        from opencda.planning_module.utility.global_planner import CustomGlobalPlannerAdapter
+
         mpc_entry_stage = MPCEntryStage(self.config)
         static_obstacle_stage = StaticObstacleStage({
             **self.behavior_runtime_cfg,
@@ -638,7 +682,7 @@ class CPXMPCPlannerBridge:
             provider=self._stable_reference_line_provider,
             maneuver_manager=self.maneuver_manager,
             reference_pipeline=self.reference_pipeline,
-            fallback_manager=fallback_manager,
+            fallback_manager=self._init_fallback_manager,
             static_obstacle_stage=static_obstacle_stage,
             mpc=self.mpc,
             config=self.config,
@@ -650,20 +694,32 @@ class CPXMPCPlannerBridge:
             target_speed_mps=self.target_speed_mps,
         )
         self.pipeline = PlanningPipeline(
-            runtime_input=runtime_input_stage,
-            perception=perception_stage,
-            behavior=behavior_stage,
-            scenario=scenario_manager,
+            runtime_input=self._init_runtime_input_stage,
+            perception=self._init_perception_stage,
+            behavior=self._init_behavior_stage,
+            scenario=self._init_scenario_manager,
             static_obstacle=static_obstacle_stage,
             control_safety=control_safety_stage,
-            speed=speed_target_planner,
-            destination_speed=destination_speed_stage,
-            reference_publication=reference_publication_stage,
+            speed=self._init_speed_target_planner,
+            destination_speed=self._init_destination_speed_stage,
+            reference_publication=self._init_reference_publication_stage,
             mpc_entry=mpc_entry_stage,
-            fallback=fallback_manager,
-            behavior_reference_execution=behavior_reference_execution_stage,
+            fallback=self._init_fallback_manager,
+            behavior_reference_execution=self._init_behavior_reference_execution_stage,
             candidate_selection=candidate_selection_stage,
         )
+        # Construction-only scratch state threaded from the earlier
+        # _init_* phases; nothing outside __init__ may depend on it.
+        del self._init_speed_target_planner
+        del self._init_behavior_stage
+        del self._init_scenario_manager
+        del self._init_fallback_manager
+        del self._init_destination_speed_stage
+        del self._init_behavior_reference_execution_stage
+        del self._init_runtime_input_stage
+        del self._init_perception_stage
+        del self._init_reference_publication_stage
+
         self.velocity_steering_adapter = OpenCDAVelocitySteeringAdapter(
             self.vehicle_manager.controller,
             actuator_max_steer_rad=(
@@ -1081,6 +1137,26 @@ class CPXMPCPlannerBridge:
             "sim_time_s": float(self._sim_time_s()),
         }
 
+    # Ad-hoc stage-level timing: run_step's own wall time was found to be the
+    # dominant cost in MDrive's per-tick loop (~150ms/call vs. mpc_solve_time_ms's
+    # 3ms), so this locates which of the pipeline's stages inside that call
+    # actually spends it.
+    def _accum_stage_ms(self, name: str, seconds: float) -> None:
+        stats = self.__dict__.setdefault("_stage_ms_stats", {})
+        total, count = stats.get(name, (0.0, 0))
+        stats[name] = (total + seconds * 1000.0, count + 1)
+
+    def _print_and_reset_stage_ms(self) -> None:
+        stats = self.__dict__.get("_stage_ms_stats", {})
+        if not stats:
+            return
+        parts = [
+            f"{name}: total={total:.0f}ms avg={total / max(1, count):.1f}ms"
+            for name, (total, count) in stats.items()
+        ]
+        print("[cpx_stage_timing] last 50 calls -- " + " | ".join(parts), flush=True)
+        self._stage_ms_stats = {}
+
     def run_step(self) -> carla.VehicleControl:
         """Plan and return a low-level CARLA control command."""
 
@@ -1110,6 +1186,9 @@ class CPXMPCPlannerBridge:
         self.last_output = planner_output
         self.last_debug = planner_output.diagnostics_dict()
         self._record_debug(self.last_debug)
+        self._stage_timing_call_count = getattr(self, "_stage_timing_call_count", 0) + 1
+        if self._stage_timing_call_count % 50 == 0:
+            self._print_and_reset_stage_ms()
         return planner_output.control
 
     def _apply_velocity_steering_interface(
@@ -1196,6 +1275,7 @@ class CPXMPCPlannerBridge:
             except Exception as exc:
                 if self.debug:
                     print(f"[CP-X OpenCDA Bridge] native CP publish failed: {exc}")
+        _ts_stage = time.monotonic()
         cycle = self.pipeline.begin_cycle(
             timestamp_s=float(self._sim_time_s()),
             ego_transform=(
@@ -1227,6 +1307,7 @@ class CPXMPCPlannerBridge:
                 self.config.get("following_time_headway_s", 1.5)
             ),
         )
+        self._accum_stage_ms("begin_cycle", time.monotonic() - _ts_stage)
         tick = cycle.tick
         perception = cycle.perception
         sim_time_s = float(tick.timestamp_s)
@@ -1248,6 +1329,7 @@ class CPXMPCPlannerBridge:
         from opencda.planning_module.pipeline.behavior_reference_execution_stage import (
             BehaviorReferenceRequest,
         )
+        _ts_stage = time.monotonic()
         behavior_reference = self.pipeline.execute_behavior_reference(
             BehaviorReferenceRequest(
                 ego_location=ego_location,
@@ -1263,6 +1345,7 @@ class CPXMPCPlannerBridge:
             ),
             planner=self._plan_behavior_and_reference,
         )
+        self._accum_stage_ms("execute_behavior_reference", time.monotonic() - _ts_stage)
         destination_state = list(behavior_reference.destination_state)
         lane_center_reference = [
             dict(item) for item in behavior_reference.reference_samples
@@ -1279,6 +1362,7 @@ class CPXMPCPlannerBridge:
                 + str(behavior_reference.failure_reason)
             )
 
+        _ts_stage = time.monotonic()
         destination_application = self.pipeline.apply_destination(
             route_status=getattr(self.route_manager, "last_status", None),
             route_revision=str(self.route_manager.route_revision),
@@ -1290,6 +1374,7 @@ class CPXMPCPlannerBridge:
             reference_debug=reference_debug,
             fallback_lane_id=int(getattr(self._local_map_snapshot, "ego_lane_id", 0)),
         )
+        self._accum_stage_ms("apply_destination", time.monotonic() - _ts_stage)
         destination_stage = destination_application.stage
         destination_state = destination_application.mutable_destination_state()
         lane_center_reference = destination_application.mutable_reference()

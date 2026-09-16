@@ -336,14 +336,19 @@ class SpeedTargetPlanner:
 
     @staticmethod
     def turn_curvature_constraint(
-        curvature_1pm: Optional[float], config: Mapping[str, object]
+        curvature_1pm: Optional[float], config: Mapping[str, object],
+        distance_to_turn_m: Optional[float] = None,
     ) -> Optional[SpeedConstraint]:
         """Translate the persistent turn geometry into one speed ceiling.
 
         This is the only turn-speed policy.  ReferenceLineProvider measures
         the immutable master; SpeedTargetPlanner applies the lateral-accel
-        relation ``v = sqrt(a_lat_max / abs(curvature))``.  No candidate or
-        bridge branch owns a separate fixed turn speed.
+        relation ``v_curve = sqrt(a_lat_max / abs(curvature))``.  Before the
+        curve begins, the same owner publishes the kinematically reachable
+        approach envelope ``sqrt(v_curve**2 + 2*a_long*d)``.  This prevents
+        installation of the turn master from changing the target directly
+        from cruise speed to the final in-curve speed.  No candidate or bridge
+        branch owns a separate fixed turn speed.
         """
 
         if curvature_1pm is None:
@@ -357,13 +362,35 @@ class SpeedTargetPlanner:
         lateral_accel_mps2 = max(0.1, float(config.get(
             "full_intersection_turn_lateral_accel_comfort_mps2", 2.5
         )))
-        maximum_mps = math.sqrt(lateral_accel_mps2 / max(1.0e-6, curvature))
+        curve_speed_mps = math.sqrt(
+            lateral_accel_mps2 / max(1.0e-6, curvature)
+        )
+        distance_m = None
+        if (
+            distance_to_turn_m is not None
+            and math.isfinite(float(distance_to_turn_m))
+        ):
+            distance_m = max(0.0, float(distance_to_turn_m))
+        maximum_mps = float(curve_speed_mps)
+        if distance_m is not None and distance_m > 0.0:
+            approach_deceleration_mps2 = max(0.1, float(config.get(
+                "turn_approach_comfort_decel_mps2", 2.5
+            )))
+            maximum_mps = math.sqrt(
+                float(curve_speed_mps) ** 2
+                + 2.0 * float(approach_deceleration_mps2) * float(distance_m)
+            )
         return SpeedConstraint(
             owner="turn_master_curvature",
             maximum_mps=float(maximum_mps),
             reason=(
                 "persistent_turn_master_lateral_acceleration_limit:"
-                "curvature_1pm=%.6f" % float(curvature)
+                "curvature_1pm=%.6f:curve_speed_mps=%.3f:distance_m=%s"
+                % (
+                    float(curvature),
+                    float(curve_speed_mps),
+                    "none" if distance_m is None else "%.3f" % distance_m,
+                )
             ),
         )
 

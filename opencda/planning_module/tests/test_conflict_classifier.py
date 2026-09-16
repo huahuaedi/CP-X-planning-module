@@ -112,6 +112,41 @@ def test_crossing_heading_uses_schmitt_hysteresis():
     assert exited.tag == FOLLOW
 
 
+def test_confirmed_crossing_uses_wider_spatial_release_boundary():
+    # A new transverse track 4.5 m from the path is correctly irrelevant.
+    # Once that physical conflict has been confirmed, the same projection is
+    # inside the wider release boundary and must not make Stage C drop all
+    # constraints for one prediction refresh.
+    pts = [(20.0, 4.5 + 0.02 * k) for k in range(20)]
+    agent = {
+        "id": "x", "x": 20.0, "y": 4.5, "v": 8.0,
+        "psi": math.pi / 2.0, **_track(pts),
+    }
+
+    fresh = classify_conflicts(REF, EGO, [agent], P)[0]
+    held = classify_conflicts(
+        REF, EGO, [agent], P, previous_tags={"x": CROSSING},
+    )[0]
+
+    assert fresh.tag == IGNORE
+    assert held.tag == CROSSING
+
+
+def test_confirmed_crossing_releases_outside_spatial_schmitt_boundary():
+    pts = [(20.0, 6.2 + 0.02 * k) for k in range(20)]
+    agent = {
+        "id": "x", "x": 20.0, "y": 6.2, "v": 8.0,
+        "psi": math.pi / 2.0, **_track(pts),
+    }
+
+    released = classify_conflicts(
+        REF, EGO, [agent], P, previous_tags={"x": CROSSING},
+    )[0]
+
+    assert released.tag == IGNORE
+    assert released.reason == "min_lat=6.2>=gate:6.0"
+
+
 def test_oncoming_vehicle_is_oncoming():
     pts = [(40.0 - 1.2 * k, 0.2) for k in range(20)]
     t = _one({"id": "onc", "x": 40.0, "y": 0.2, "v": 12.0, "psi": math.pi,

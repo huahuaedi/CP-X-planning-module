@@ -522,7 +522,9 @@ class PlanningPipeline:
         """Apply the provider-owned persistent turn geometry to speed once."""
 
         constraint = self.speed.turn_curvature_constraint(
-            reference_provider.turn_master_curvature_1pm(), config
+            reference_provider.turn_master_curvature_1pm(),
+            config,
+            distance_to_turn_m=speed_plan.upcoming_turn_distance_m,
         )
         return self.speed.constrain_plan(speed_plan, constraint), constraint
 

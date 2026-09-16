@@ -1,5 +1,6 @@
 import math
 import unittest
+from types import SimpleNamespace
 import numpy as np
 
 from MPC.lane_keep import LaneKeepingStageReference, signed_longitudinal_progress_affine_form
@@ -333,6 +334,102 @@ class MPCLaneReferenceTests(unittest.TestCase):
         self.assertGreater(float(controls[0, 1]), 0.0)
         expected = mpc._steering_for_path_curvature(0.1)
         self.assertAlmostEqual(float(controls[0, 1]), expected)
+
+    def test_steering_effectiveness_is_used_by_model_and_curvature_inverse(self):
+        mpc = object.__new__(MPC)
+        mpc.wheelbase_m = 2.8
+        mpc.l_r_m = 1.4
+        mpc.kinematic_steering_effectiveness = 0.85
+
+        nominal_delta = mpc._steering_for_path_curvature(0.1)
+        mpc.kinematic_steering_effectiveness = 1.0
+        ideal_delta = mpc._steering_for_path_curvature(0.1)
+
+        self.assertGreater(nominal_delta, ideal_delta)
+        mpc.kinematic_steering_effectiveness = 0.85
+        beta = mpc._cg_slip_angle_beta(nominal_delta)
+        realized_curvature = math.sin(beta) / mpc.l_r_m
+        self.assertAlmostEqual(realized_curvature, 0.1)
+
+    def test_steering_effectiveness_scales_beta_derivative_consistently(self):
+        mpc = object.__new__(MPC)
+        mpc.wheelbase_m = 2.8
+        mpc.l_r_m = 1.4
+        mpc.kinematic_steering_effectiveness = 0.85
+        delta = 0.3
+        epsilon = 1.0e-6
+        numeric = (
+            mpc._cg_slip_angle_beta(delta + epsilon)
+            - mpc._cg_slip_angle_beta(delta - epsilon)
+        ) / (2.0 * epsilon)
+
+        self.assertAlmostEqual(
+            mpc._cg_slip_angle_beta_derivative(delta), numeric, places=6
+        )
+
+    def test_maximum_curvature_uses_the_calibrated_cg_model(self):
+        mpc = object.__new__(MPC)
+        mpc.wheelbase_m = 2.8
+        mpc.l_r_m = 1.4
+        mpc.kinematic_steering_effectiveness = 0.85
+        mpc.constraints = SimpleNamespace(max_steer_rad=0.6)
+
+        beta = mpc._cg_slip_angle_beta(0.6)
+        expected = abs(math.sin(beta)) / mpc.l_r_m
+        self.assertAlmostEqual(mpc.maximum_path_curvature_1pm(), expected)
+
+        mpc.kinematic_steering_effectiveness = 1.0
+        self.assertGreater(mpc.maximum_path_curvature_1pm(), expected)
+
+    def test_nominal_steering_profile_comes_from_path_not_old_solution(self):
+        mpc = object.__new__(MPC)
+        mpc.wheelbase_m = 2.8
+        mpc.l_r_m = 1.4
+        mpc.kinematic_steering_effectiveness = 0.85
+        mpc.constraints = SimpleNamespace(
+            min_steer_rad=-0.6,
+            max_steer_rad=0.6,
+        )
+        reference = [
+            {
+                "x_ref_m": 0.0,
+                "y_ref_m": 0.0,
+                "heading_rad": 0.0,
+                "progress_m": 0.0,
+                "curvature_1pm": 0.0,
+            },
+            {
+                "x_ref_m": 1.0,
+                "y_ref_m": 0.0,
+                "heading_rad": 0.05,
+                "progress_m": 1.0,
+                "curvature_1pm": 0.08,
+            },
+            {
+                "x_ref_m": 2.0,
+                "y_ref_m": 0.1,
+                "heading_rad": 0.10,
+                "progress_m": 2.0,
+                "curvature_1pm": 0.10,
+            },
+        ]
+        rollout = np.array(
+            [
+                [0.0, 0.0, 3.0, 0.0],
+                [1.0, 0.0, 3.0, 0.0],
+                [2.0, 0.1, 3.0, 0.0],
+            ],
+            dtype=float,
+        )
+
+        profile = mpc._nominal_path_steering_profile(
+            x_ref_rollout=rollout,
+            lane_center_reference=reference,
+        )
+
+        self.assertAlmostEqual(float(profile[0]), 0.0)
+        self.assertGreater(float(profile[1]), 0.0)
+        self.assertGreater(float(profile[2]), float(profile[1]))
 
 
 class SignedLongitudinalProgressAffineFormTests(unittest.TestCase):

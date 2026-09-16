@@ -32,6 +32,12 @@ mpc:
   # With horizon_s=3.0: dt=0.05 -> 60 steps, dt=0.1 -> 30 steps, dt=0.2 -> 15 steps.
   plan_dt_s: 0.1
 
+  # Calibrated from closed-loop CARLA yaw response: the measured yaw-rate is
+  # approximately 85% of the ideal kinematic bicycle prediction at the same
+  # commanded road-wheel angle.  Real-vehicle deployments should replace
+  # this platform calibration from their own steering/yaw identification.
+  kinematic_steering_effectiveness: 0.85
+
   # Replan frequency [Hz].
   # Increase -> fresher plans and better reaction to moving objects, but more
   # compute cost. Decrease -> cheaper runtime, but plans can go stale.

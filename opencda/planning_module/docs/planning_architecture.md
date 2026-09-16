@@ -129,11 +129,17 @@ trajectory is invalid, the candidate boundary must explicitly continue or
 abort the maneuver. The bridge no longer owns active reference stabilization
 or final-gate orchestration.
 
-The reference contract derives its curvature ceiling from
-`tan(max_steer_rad) / wheelbase` with a safety factor. A wider
-mode-specific limit cannot override this vehicle limit. Candidate turn
-geometry is conditioned before evaluation and checked again at the final
-gate.
+The reference contract derives its curvature ceiling from the same calibrated
+CG bicycle model used by MPC propagation and curvature feed-forward, then
+applies a safety factor. A wider mode-specific limit cannot override this
+vehicle limit. Candidate turn geometry is conditioned before evaluation and
+checked again at the final gate.
+
+MPC steering smoothness is evaluated relative to the reference-curvature
+feed-forward profile. The hard steering-rate bound still limits physical
+motion, while the objective no longer treats the steering change required by
+a valid curve as unwanted control chatter. Previous solutions remain
+linearisation seeds only; they do not own nominal path steering.
 
 Road-boundary warning, minor breach recovery, and critical breach are separate
 SafetySupervisor outcomes. A warning uses a closed-loop speed envelope. A

@@ -55,6 +55,14 @@ class ClassifierParams:
     lane_half_width_m: float = 1.9        # "on the ego path" band
     adjacent_lane_m: float = 3.5          # centre-to-centre to the next lane
     ignore_lateral_m: float = 3.0
+    # Spatial Schmitt release boundary for an already-confirmed transverse
+    # conflict.  Prediction refreshes can move the projected closest point by
+    # several metres even though the physical actor and conflict have not
+    # cleared.  Entry remains governed by ``ignore_lateral_m``; CROSSING and
+    # ONCOMING release only after the complete predicted track moves outside
+    # this wider boundary.  This is classification lifecycle, not an MPC or
+    # scenario-specific hold.
+    transverse_release_lateral_m: float = 6.0
     ignore_longitudinal_ahead_m: float = 45.0
     ignore_longitudinal_behind_m: float = 6.0
     crossing_heading_rad: float = math.radians(50.0)
@@ -233,7 +241,13 @@ def classify_conflicts(
                 min_gap = gap
                 conflict_s, conflict_t = along, dt * k
 
-        near_path = any(perp < p.ignore_lateral_m for perp in lat_series)
+        lateral_gate_m = float(p.ignore_lateral_m)
+        if previous_tag in {CROSSING, ONCOMING}:
+            lateral_gate_m = max(
+                lateral_gate_m,
+                float(p.transverse_release_lateral_m),
+            )
+        near_path = any(perp < lateral_gate_m for perp in lat_series)
         within_longitudinal_window = (
             conflict_s is None
             or -p.ignore_longitudinal_behind_m
@@ -245,7 +259,7 @@ def classify_conflicts(
         # ----- classification -----
         if not ever_in_ignore_box:
             reason = (
-                f"min_lat={min_lat:.1f}>=gate"
+                f"min_lat={min_lat:.1f}>=gate:{lateral_gate_m:.1f}"
                 if not near_path
                 else "outside_longitudinal_window"
             )

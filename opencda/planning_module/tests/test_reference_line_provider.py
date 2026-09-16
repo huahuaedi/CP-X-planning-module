@@ -412,6 +412,12 @@ def test_preturn_candidate_keeps_current_lane_outside_transition_arc():
     provider.preturn_lane_reference = lambda *_args, **_kwargs: (
         _line(1.0)[:8], "current_lane"
     )
+    preview_requests = []
+    provider.turn_reference = lambda request: (
+        preview_requests.append(request) or _line(-1.0)[:8],
+        [8.0, -1.0, 5.0, 0.0, 20],
+        "turn_master_previewed",
+    )
     request = TurnReferenceRequest(
         local_map=SimpleNamespace(valid=True),
         config={"lane_follow_to_turn_reference_transition_arc_m": 12.0},
@@ -436,6 +442,11 @@ def test_preturn_candidate_keeps_current_lane_outside_transition_arc():
         "admap_current_lane_center_preturn"
     )
     assert "lane_follow_turn_geometry_hold_reason" not in result.diagnostics
+    assert len(preview_requests) == 1
+    assert preview_requests[0].lock_master is True
+    assert result.diagnostics["turn_master_preview_reason"] == (
+        "turn_master_previewed"
+    )
 
 
 def test_preturn_candidate_locks_connector_and_preserves_speed_owner():

@@ -48,6 +48,31 @@ class SpeedPlannerTest(unittest.TestCase):
 
         self.assertIsNone(constraint)
 
+    def test_turn_curvature_constraint_uses_approach_distance_envelope(self):
+        constraint = SpeedTargetPlanner.turn_curvature_constraint(
+            0.1,
+            {
+                "full_intersection_turn_lateral_accel_comfort_mps2": 2.5,
+                "turn_approach_comfort_decel_mps2": 1.5,
+            },
+            distance_to_turn_m=12.0,
+        )
+
+        self.assertIsNotNone(constraint)
+        self.assertAlmostEqual(constraint.maximum_mps, math.sqrt(61.0))
+        self.assertIn("curve_speed_mps=5.000", constraint.reason)
+        self.assertIn("distance_m=12.000", constraint.reason)
+
+    def test_turn_curvature_constraint_reaches_curve_speed_at_turn_entry(self):
+        constraint = SpeedTargetPlanner.turn_curvature_constraint(
+            0.1,
+            {"full_intersection_turn_lateral_accel_comfort_mps2": 2.5},
+            distance_to_turn_m=0.0,
+        )
+
+        self.assertIsNotNone(constraint)
+        self.assertEqual(constraint.maximum_mps, 5.0)
+
     def test_open_conflict_corridor_does_not_change_speed_path(self):
         constraint = conflict_corridor_speed_constraint(
             corridor=SimpleNamespace(
