@@ -372,52 +372,10 @@ class ReferenceLineProvider(StableReferenceLineProvider):
                 geometry_revision=int(current.geometry_revision),
             )
 
-        route_changed = bool(
-            current.active
-            and str(current.route_revision) != str(request.route_revision)
+        event = self._publish_lifecycle_event(
+            current=current, mode=mode, request=request,
         )
-        map_changed = bool(
-            current.active and str(current.map_epoch) != str(request.map_epoch)
-        )
-        authoritative_lane_id = int(
-            getattr(request.local_map, "ego_lane_id", 0) or 0
-        )
-        owned_lane_ids = {
-            int(value)
-            for value in (current.source_lane_id, current.target_lane_id)
-            if int(value or 0) != 0
-        }
-        for sample in current.samples:
-            try:
-                lane_id = int(sample.get("lane_id", 0) or 0)
-            except (TypeError, ValueError):
-                lane_id = 0
-            if lane_id:
-                owned_lane_ids.add(lane_id)
-        lane_follow_owner_changed = bool(
-            current.active
-            and mode == LANE_FOLLOW
-            and authoritative_lane_id != 0
-            and authoritative_lane_id not in owned_lane_ids
-        )
-        if not current.active:
-            event = (
-                "maneuver_started"
-                if mode in {LANE_CHANGE, CONNECTOR, TURN, POST_TURN}
-                else "initial_route"
-            )
-        elif route_changed:
-            event = "route_changed"
-        elif map_changed:
-            event = "map_epoch_changed"
-        elif lane_follow_owner_changed:
-            # A completed lateral maneuver can keep the same route revision.
-            # In that case the old lane-follow master belongs to the previous
-            # corridor and must not override the freshly built current-lane
-            # reference.  Longitudinal AD-lane transitions remain stable
-            # because successor lane ids are already present in the master.
-            event = "phase_transition"
-        else:
+        if event is None:
             # A planning tick is not a lifecycle event.  The submitted rows
             # have already served as a validity probe; they must not become a
             # second geometry owner.  Advance and window the installed master
@@ -463,6 +421,63 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             submitted_rows=rows,
             reason=str(reason),
         )
+
+    @staticmethod
+    def _publish_lifecycle_event(
+        *, current: ReferenceLineSnapshot, mode: str, request: ReferenceLineRequest,
+    ) -> Optional[str]:
+        """Classify which lifecycle event, if any, this publish represents.
+
+        ``None`` means "not a lifecycle event": the caller must not install
+        anything and should instead just window the existing master.
+        """
+
+        route_changed = bool(
+            current.active
+            and str(current.route_revision) != str(request.route_revision)
+        )
+        map_changed = bool(
+            current.active and str(current.map_epoch) != str(request.map_epoch)
+        )
+        authoritative_lane_id = int(
+            getattr(request.local_map, "ego_lane_id", 0) or 0
+        )
+        owned_lane_ids = {
+            int(value)
+            for value in (current.source_lane_id, current.target_lane_id)
+            if int(value or 0) != 0
+        }
+        for sample in current.samples:
+            try:
+                lane_id = int(sample.get("lane_id", 0) or 0)
+            except (TypeError, ValueError):
+                lane_id = 0
+            if lane_id:
+                owned_lane_ids.add(lane_id)
+        lane_follow_owner_changed = bool(
+            current.active
+            and mode == LANE_FOLLOW
+            and authoritative_lane_id != 0
+            and authoritative_lane_id not in owned_lane_ids
+        )
+        if not current.active:
+            return (
+                "maneuver_started"
+                if mode in {LANE_CHANGE, CONNECTOR, TURN, POST_TURN}
+                else "initial_route"
+            )
+        if route_changed:
+            return "route_changed"
+        if map_changed:
+            return "map_epoch_changed"
+        if lane_follow_owner_changed:
+            # A completed lateral maneuver can keep the same route revision.
+            # In that case the old lane-follow master belongs to the previous
+            # corridor and must not override the freshly built current-lane
+            # reference.  Longitudinal AD-lane transitions remain stable
+            # because successor lane ids are already present in the master.
+            return "phase_transition"
+        return None
 
     def _installation_master(
         self, *, mode: str, request: ReferenceLineRequest,
