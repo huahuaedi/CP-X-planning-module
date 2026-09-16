@@ -12,6 +12,7 @@ from .cooperative_maneuver_proposal import CooperativeManeuverProposal
 from .reference_line_provider import LANE_CHANGE
 from .candidate_evaluation import evaluate_behavior_candidates
 from .behavior_risk import SemanticBehaviorResponse, assess_front_observation
+from .vru_yield_latch import VRUYieldLatch
 from .route_authorization import (
     RouteLaneChangeAuthorizationLatch,
     authorize_opportunistic_lane_change,
@@ -270,6 +271,7 @@ class BehaviorStage:
 
     def __init__(self) -> None:
         self._route_lane_change_latch = RouteLaneChangeAuthorizationLatch()
+        self._vru_yield_latch = VRUYieldLatch()
 
     def reset_route_lane_change_authorization(self) -> None:
         self._route_lane_change_latch.reset()
@@ -277,7 +279,8 @@ class BehaviorStage:
     @staticmethod
     def assess_front_observation(
         *, front_obstacle: Optional[Mapping[str, object]],
-        ego_speed_mps: float, max_deceleration_mps2: float,
+        ego_speed_mps: float, planning_speed_mps: float,
+        max_deceleration_mps2: float,
         route_lane_safety_score: float,
         config: Mapping[str, object], runtime_config: Mapping[str, object],
         object_track_id: Any,
@@ -285,6 +288,7 @@ class BehaviorStage:
         return assess_front_observation(
             front_obstacle=front_obstacle,
             ego_speed_mps=ego_speed_mps,
+            planning_speed_mps=planning_speed_mps,
             max_deceleration_mps2=max_deceleration_mps2,
             route_lane_safety_score=route_lane_safety_score,
             config=config,
@@ -508,9 +512,8 @@ class BehaviorStage:
             ),
         )
 
-    @staticmethod
     def produce_command(
-        *, behavior_planner: Any, static_obstacle_stage: Any,
+        self, *, behavior_planner: Any, static_obstacle_stage: Any,
         reference_map: Any, ego_pose: Any, ego_x_m: float, ego_y_m: float,
         map_lane_context: Any = None,
         ego_yaw_rad: float, ego_speed_mps: float, max_deceleration_mps2: float,
@@ -552,6 +555,7 @@ class BehaviorStage:
         semantic_response = BehaviorStage.assess_front_observation(
             front_obstacle=front_obstacle,
             ego_speed_mps=float(ego_speed_mps),
+            planning_speed_mps=float(target_speed_mps),
             max_deceleration_mps2=float(max_deceleration_mps2),
             route_lane_safety_score=float(
                 lane_safety_scores.get(int(current_lane_id), 1.0)
@@ -560,6 +564,11 @@ class BehaviorStage:
             runtime_config=runtime_config,
             object_track_id=object_track_id,
         )
+        # Recomputing purely from the current ego speed lets the dynamic
+        # stopping envelope shrink as the ego brakes, which can flip
+        # YIELD_STOP back to NONE before the pedestrian has actually
+        # cleared -- see VRUYieldLatch.
+        semantic_response = self._vru_yield_latch.update(semantic_response)
         traffic_stop = bool(
             scenario_stop_required
             or str(behavior_traffic_state).strip().lower() in {"red", "yellow", "stop"}

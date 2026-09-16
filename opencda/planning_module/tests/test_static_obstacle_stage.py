@@ -25,6 +25,52 @@ def test_stage_confirms_then_owns_local_lane_borrow():
     assert not ready.stop_active
 
 
+def test_committed_lane_borrow_is_not_reselected_during_execution():
+    stage = StaticObstacleStage({"static_obstacle_blocked_confirm_s": 0.0})
+    ready = _evaluate(stage, sim_time_s=1.0)
+    executing = _evaluate(
+        stage,
+        sim_time_s=1.1,
+        lane_change_reference_active=True,
+        lane_safety_scores={10: 1.0, 11: 0.0},
+        lane_prediction_risks={11: {"risk": True}},
+    )
+
+    assert ready.target_lane_id == 11
+    assert executing.target_lane_id == 11
+    assert executing.status == "local_avoidance_executing"
+    assert executing.local_avoidance_active
+    assert not executing.stop_active
+
+
+def test_lane_borrow_releases_after_stable_target_lane_match():
+    stage = StaticObstacleStage({
+        "static_obstacle_blocked_confirm_s": 0.0,
+        "static_obstacle_target_lane_release_frames": 3,
+    })
+    ready = _evaluate(stage, sim_time_s=1.0)
+    assert ready.target_lane_id == 11
+
+    first = _evaluate(
+        stage, requested=False, current_lane_id=11,
+        lane_change_reference_active=True, sim_time_s=1.1,
+    )
+    second = _evaluate(
+        stage, requested=False, current_lane_id=11,
+        lane_change_reference_active=True, sim_time_s=1.2,
+    )
+    released = _evaluate(
+        stage, requested=False, current_lane_id=11,
+        lane_change_reference_active=True, sim_time_s=1.3,
+    )
+
+    assert first.local_avoidance_active
+    assert second.local_avoidance_active
+    assert not released.local_avoidance_active
+    assert released.target_lane_id is None
+    assert released.status == "idle"
+
+
 def test_stage_stops_when_no_safe_avoidance_exists():
     stage = StaticObstacleStage({"static_obstacle_blocked_confirm_s": 0.0})
     result = _evaluate(stage, lane_prediction_risks={11: {"risk": True}})

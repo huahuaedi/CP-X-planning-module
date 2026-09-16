@@ -43,7 +43,8 @@ def _observation_source(observation: Mapping[str, object]) -> str:
 
 def assess_front_observation(
     *, front_obstacle: Optional[Mapping[str, object]],
-    ego_speed_mps: float, max_deceleration_mps2: float,
+    ego_speed_mps: float, planning_speed_mps: float,
+    max_deceleration_mps2: float,
     route_lane_safety_score: float,
     config: Mapping[str, object], runtime_config: Mapping[str, object],
     object_track_id: Any,
@@ -71,9 +72,16 @@ def assess_front_observation(
             "vru_yield_reaction_time_s", 1.0
         )))
         buffer_m = max(0.0, float(config.get("vru_yield_buffer_m", 4.0)))
+        # Use the intended approach speed as the conservative baseline.  A
+        # downstream corridor may already be slowing ego; using only current
+        # speed would then shrink this reach and suppress the behavior action
+        # precisely because the trajectory layer had begun responding.
+        approach_speed_mps = max(
+            0.0, float(ego_speed_mps), float(planning_speed_mps)
+        )
         braking_reach_m = (
-            float(ego_speed_mps) * reaction_s
-            + float(ego_speed_mps) ** 2 / (2.0 * deceleration)
+            approach_speed_mps * reaction_s
+            + approach_speed_mps ** 2 / (2.0 * deceleration)
             + buffer_m
         )
         lookahead_m = max(

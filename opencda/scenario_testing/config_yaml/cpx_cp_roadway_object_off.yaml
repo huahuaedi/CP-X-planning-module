@@ -29,7 +29,7 @@ scenario:
         enabled: true
         communication_range: 60
       behavior:
-        max_speed: 15
+        max_speed: 50
         overtake_allowed: false
         local_planner:
           debug_trajectory: false

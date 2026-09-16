@@ -465,6 +465,7 @@ def run_mature_scenario(opt, scenario_params, *, script_name):
             scenario_params.get("world", {}).get("fixed_delta_seconds", 0.05)
         )
         spectator = scenario_manager.world.get_spectator()
+        completed_auxiliary_indices = set()
         for tick_index in range(max(1, max_ticks)):
             scenario_manager.tick()
             ego_vehicle = single_cav_list[0].vehicle
@@ -495,13 +496,28 @@ def run_mature_scenario(opt, scenario_params, *, script_name):
                 print("CP-X mature scenario reached the configured destination.")
                 break
             for cav_index, single_cav in enumerate(single_cav_list):
+                if cav_index in completed_auxiliary_indices:
+                    single_cav.vehicle.apply_control(carla.VehicleControl(
+                        throttle=0.0, brake=1.0, steer=0.0
+                    ))
+                    continue
                 single_cav.update_info()
                 try:
                     control = single_cav.run_step()
                 except SystemExit as exc:
                     if int(getattr(exc, "code", 0) or 0) == 0:
-                        print("CP-X mature scenario stopped by OpenCDA destination condition.")
-                        return
+                        if cav_index == 0:
+                            print("CP-X mature scenario stopped by ego destination condition.")
+                            return
+                        completed_auxiliary_indices.add(cav_index)
+                        single_cav.vehicle.apply_control(carla.VehicleControl(
+                            throttle=0.0, brake=1.0, steer=0.0
+                        ))
+                        print(
+                            "CP-X auxiliary CAV %d reached destination; "
+                            "ego evaluation continues." % cav_index
+                        )
+                        continue
                     raise
                 control = target_brake_stimulus.apply(
                     control,

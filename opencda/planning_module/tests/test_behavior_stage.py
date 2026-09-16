@@ -678,6 +678,7 @@ def test_cp_vru_inside_dynamic_stopping_reach_requests_yield_stop():
             "cooperatively_observed": True,
         },
         ego_speed_mps=8.0,
+        planning_speed_mps=8.0,
         max_deceleration_mps2=-4.0,
         route_lane_safety_score=0.0,
         config={},
@@ -691,6 +692,27 @@ def test_cp_vru_inside_dynamic_stopping_reach_requests_yield_stop():
     assert response.reason == "vru_within_dynamic_stopping_reach"
 
 
+def test_vru_reach_uses_planning_speed_after_corridor_has_slowed_ego():
+    response = BehaviorStage.assess_front_observation(
+        front_obstacle={
+            "vehicle_id": "walker-8",
+            "object_type": "pedestrian",
+            "front_distance_m": 19.5,
+            "v": 1.2,
+            "cooperatively_observed": True,
+        },
+        ego_speed_mps=2.0,
+        planning_speed_mps=8.0,
+        max_deceleration_mps2=-4.0,
+        route_lane_safety_score=0.0,
+        config={},
+        runtime_config={},
+        object_track_id=lambda obstacle: obstacle["vehicle_id"],
+    )
+
+    assert response.action == "YIELD_STOP"
+
+
 def test_typed_static_object_requests_lane_blockage_handling():
     response = BehaviorStage.assess_front_observation(
         front_obstacle={
@@ -702,6 +724,7 @@ def test_typed_static_object_requests_lane_blockage_handling():
             "cooperatively_observed": True,
         },
         ego_speed_mps=7.0,
+        planning_speed_mps=7.0,
         max_deceleration_mps2=-4.0,
         route_lane_safety_score=0.2,
         config={},
@@ -725,6 +748,7 @@ def test_explicit_static_object_does_not_depend_on_lane_score_threshold():
             "cooperatively_observed": True,
         },
         ego_speed_mps=8.0,
+        planning_speed_mps=8.0,
         max_deceleration_mps2=-4.0,
         route_lane_safety_score=0.66,
         config={},
@@ -746,6 +770,7 @@ def test_moving_vehicle_does_not_enter_static_obstacle_lifecycle():
             "locally_observed": True,
         },
         ego_speed_mps=8.0,
+        planning_speed_mps=8.0,
         max_deceleration_mps2=-4.0,
         route_lane_safety_score=0.1,
         config={},

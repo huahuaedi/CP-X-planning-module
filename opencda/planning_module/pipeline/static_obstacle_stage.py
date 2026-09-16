@@ -62,6 +62,7 @@ class StaticObstacleStage:
         self.status = "idle"
         self.reason = "not_requested"
         self.target_lane_id: Optional[int] = None
+        self.target_lane_match_frames = 0
         self.route_transition_pending = False
         self.last_replan_attempt_s = -float("inf")
         self.stop_active = False
@@ -73,10 +74,22 @@ class StaticObstacleStage:
                  lane_safety_scores: Mapping[int, float],
                  lane_prediction_risks: Mapping[int, Mapping[str, object]],
                  attempt_replan: Callable[[], tuple[bool, bool, str]]) -> StaticObstacleResult:
-        if (self.target_lane_id is not None
-                and int(current_lane_id) == int(self.target_lane_id)
-                and not lane_change_reference_active):
+        if (
+            self.target_lane_id is not None
+            and int(current_lane_id) == int(self.target_lane_id)
+        ):
+            self.target_lane_match_frames += 1
+        else:
+            self.target_lane_match_frames = 0
+        release_frames = max(1, int(self.config.get(
+            "static_obstacle_target_lane_release_frames", 3
+        )))
+        if (
+            self.target_lane_id is not None
+            and self.target_lane_match_frames >= release_frames
+        ):
             self.target_lane_id = None
+            self.target_lane_match_frames = 0
         active = self.target_lane_id is not None
         transition_hold = cooldown_hold = False
         if not requested:
@@ -88,6 +101,18 @@ class StaticObstacleStage:
                 "local_avoidance_executing" if active
                 else "traffic_control_excluded" if traffic_control_stop_active
                 else "idle"
+            )
+        elif active:
+            # Target selection is a commitment, not a per-tick preference.
+            # Re-running lane selection while the maneuver owns its reference
+            # can momentarily reject the already selected lane and inject a
+            # false stop into an otherwise valid lane change.
+            self.failed_latched = False
+            self.route_transition_pending = False
+            self.status = (
+                "local_avoidance_executing"
+                if lane_change_reference_active
+                else "local_avoidance_ready"
             )
         else:
             if str(obstacle_id) != self.candidate_id:
@@ -109,6 +134,7 @@ class StaticObstacleStage:
                     "static_obstacle_local_avoidance_enabled", True)) else None
                 if target is not None:
                     self.target_lane_id = int(target)
+                    self.target_lane_match_frames = 0
                     active = True
                     self.failed_latched = False
                     self.route_transition_pending = False

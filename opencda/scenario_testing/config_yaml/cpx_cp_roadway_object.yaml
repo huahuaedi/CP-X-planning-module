@@ -9,7 +9,7 @@ description: |-
 
 cpx_mature:
   map_mode: 2lane_freeway_simplified
-  max_ticks: 650
+  max_ticks: 900
   destination_tolerance_m: 3.0
   completion_mode: first_cav
   run_opencda_evaluation: false
@@ -56,7 +56,10 @@ scenario:
         enabled: true
         communication_range: 60
       behavior:
-        max_speed: 15
+        # The observer supplies an early viewpoint but must clear the bypass
+        # lane; a slow observer would itself make the requested lane change
+        # correctly infeasible and confound the CP-road-object experiment.
+        max_speed: 50
         overtake_allowed: false
         local_planner:
           debug_trajectory: false

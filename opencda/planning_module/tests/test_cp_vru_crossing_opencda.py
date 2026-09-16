@@ -57,7 +57,7 @@ def test_vru_crossing_is_event_aligned_and_crosses_ego_path():
     walker = cfg["scenario"]["scripted_actors"][0]
     assert walker["blueprint"].startswith("walker.")
     assert walker["trigger"] == {
-        "axis": "x", "cross": -236.0, "from": "below"
+        "axis": "x", "cross": -244.0, "from": "below"
     }
     ego_y = float(ego["spawn_position"][1])
     assert float(walker["path"][0][1]) > ego_y > float(walker["path"][-1][1])

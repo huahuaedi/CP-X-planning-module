@@ -84,5 +84,5 @@ scenario:
       z: 0.5
       trigger:
         axis: x
-        cross: -236.0
+        cross: -244.0
         from: below
