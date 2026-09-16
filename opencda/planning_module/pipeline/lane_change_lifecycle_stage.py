@@ -56,17 +56,41 @@ class LaneChangeLifecycleStage:
         lateral_error = float(alignment.lateral_error_m)
         heading_error = float(alignment.heading_error_rad)
         lane_width_m = max(0.1, float(getattr(self._mpc, "lane_width_m", 3.5)))
+        extent = self._vehicle_extent()
+        occupancy = self._generator.lane_corridor_occupancy(
+            x_m=float(ego_location.x),
+            y_m=float(ego_location.y),
+            heading_rad=float(ego_yaw_rad),
+            ego_half_width_m=float(getattr(
+                extent, "y", self._config.get("reference_vehicle_half_width_m", 1.0)
+            )),
+            ego_half_length_m=float(getattr(
+                extent, "x", self._config.get("reference_vehicle_half_length_m", 2.4)
+            )),
+            safety_margin_m=float(self._config.get(
+                "lane_change_completion_footprint_margin_m", 0.05
+            )),
+            corridor_sample=target_sample,
+            prefer_tracking_point=True,
+        )
+        footprint_clearance_m = (
+            float(occupancy.footprint_clearance_m)
+            if bool(occupancy.valid) else float("-inf")
+        )
+        target_lane_matches = int(current_lane_id) == target_lane_id
         geometry_ready = contract.stabilization_handoff_ready(
             progress=float(lifecycle.progress),
             lateral_error_m=lateral_error,
             heading_error_rad=heading_error,
             lane_width_m=lane_width_m,
+            target_lane_matches=bool(target_lane_matches),
+            footprint_clearance_m=float(footprint_clearance_m),
         )
         handoff = self._maneuver.lane_change_handoff_transition(
-            geometry_ready=bool(
-                float(lifecycle.progress) >= float(contract.min_progress)
-                and geometry_ready
-            )
+            # LaneChangeContract is the sole owner of handoff acceptance.
+            # Repeating its former progress-only gate here would discard the
+            # target-corridor evidence it deliberately accepts.
+            geometry_ready=bool(geometry_ready)
         )
         if handoff.action == "start_stabilization":
             reason = self._start_stabilization(
@@ -85,31 +109,11 @@ class LaneChangeLifecycleStage:
         progress = float(lifecycle.progress)
         if phase == "target_lane_stabilization" and math.isfinite(lateral_error):
             progress = min(1.0, max(0.0, 1.0 - abs(lateral_error) / lane_width_m))
-        extent = self._vehicle_extent()
-        occupancy = self._generator.lane_corridor_occupancy(
-            x_m=float(ego_location.x),
-            y_m=float(ego_location.y),
-            heading_rad=float(ego_yaw_rad),
-            ego_half_width_m=float(getattr(
-                extent, "y", self._config.get("reference_vehicle_half_width_m", 1.0)
-            )),
-            ego_half_length_m=float(getattr(
-                extent, "x", self._config.get("reference_vehicle_half_length_m", 2.4)
-            )),
-            safety_margin_m=float(self._config.get(
-                "lane_change_completion_footprint_margin_m", 0.05
-            )),
-            corridor_sample=target_sample,
-            prefer_tracking_point=True,
-        )
         completion = self._maneuver.evaluate_lane_change_completion(
             alignment=alignment,
             progress=progress,
-            target_lane_matches=int(current_lane_id) == target_lane_id,
-            footprint_clearance_m=(
-                float(occupancy.footprint_clearance_m)
-                if bool(occupancy.valid) else float("-inf")
-            ),
+            target_lane_matches=bool(target_lane_matches),
+            footprint_clearance_m=float(footprint_clearance_m),
             contract=contract,
         )
         transition = self._maneuver.accept_evaluated_lane_change_completion(

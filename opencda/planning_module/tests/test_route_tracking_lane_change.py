@@ -558,9 +558,13 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
         )
         self.assertTrue(self._lane_change_reference(bridge))
 
-    def test_heading_alignment_within_threshold_allows_stabilization_handoff(self):
+    def test_target_lane_alignment_allows_handoff_when_progress_is_stale(self):
         bridge = self._bridge()
-        bridge.maneuver_manager.lane_change.progress = 0.95
+        # A finite lane-change master can project to less than the nominal
+        # progress threshold even after the vehicle is physically contained
+        # by and aligned with the target lane.  Target-corridor evidence owns
+        # this handoff instead of leaving the commitment permanently active.
+        bridge.maneuver_manager.lane_change.progress = 0.875
         self._install_lane_change_reference(bridge, [
             {
                 "x_ref_m": float(index + 1),

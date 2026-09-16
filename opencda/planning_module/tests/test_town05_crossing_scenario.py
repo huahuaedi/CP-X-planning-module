@@ -131,12 +131,19 @@ def test_scripted_actor_reports_zero_speed_until_position_trigger():
 
     actor.step(0.05, ego_xy=(-6.0, 0.0))
     assert actor.prediction_active is False
-    assert abs(float(vehicle.velocities[-1].x)) < 1.0e-9
-    assert abs(float(vehicle.velocities[-1].y)) < 1.0e-9
+    held = vehicle.transforms[-1].location
+    assert abs(float(held.x)) < 1.0e-9
+    assert abs(float(held.y) - 10.0) < 1.0e-9
 
     actor.step(0.05, ego_xy=(-4.9, 0.0))
     assert actor.prediction_active is True
-    assert abs(float(vehicle.velocities[-1].y) + 6.0) < 1.0e-6
+    moved = vehicle.transforms[-1].location
+    assert abs(float(moved.x)) < 1.0e-9
+    assert abs(float(moved.y) - 9.7) < 1.0e-6
+    # Physics-disabled scripted vehicles have exactly one motion owner.  The
+    # tracker derives velocity from pose history; no CARLA velocity command
+    # is issued in parallel with set_transform().
+    assert vehicle.velocities == []
 
 
 def test_scripted_actor_optional_acceleration_limit_avoids_velocity_step():
@@ -149,9 +156,12 @@ def test_scripted_actor_optional_acceleration_limit_avoids_velocity_step():
     )
 
     actor.step(0.05)
-    assert abs(_speed(vehicle.velocities[-1]) - 0.2) < 1.0e-6
+    first = vehicle.transforms[-1].location
+    assert abs(float(first.x) - 0.01) < 1.0e-6
     actor.step(0.05)
-    assert abs(_speed(vehicle.velocities[-1]) - 0.4) < 1.0e-6
+    second = vehicle.transforms[-1].location
+    assert abs(float(second.x) - 0.03) < 1.0e-6
+    assert vehicle.velocities == []
 
 
 def test_runner_binds_scripted_actor_id_to_ego_predictor():

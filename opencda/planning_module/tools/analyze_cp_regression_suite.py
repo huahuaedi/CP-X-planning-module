@@ -62,6 +62,105 @@ CASES = {
             "opencda/scenario_testing/cpx_mature_runner.py",
         ),
     },
+    # A/B/E route through cav_conflict_enabled's classify -> assign -> corridor
+    # chain instead of behavior_risk.py's front-obstacle path.  A/B's hazard
+    # is a non-cooperative actor (red-light violator / oncoming car around a
+    # bend) that never broadcasts a claim, so cooperative_arbitration.py never
+    # assigns it a proceed/yield/make_gap role (cav_arbitration stays
+    # "ego_claim_inactive") -- confirmed against a real run where
+    # cav_conflict_tags correctly showed CROSSING/ONCOMING but
+    # cav_conflict_roles was empty every frame.  The corridor still binds and
+    # caps speed (cav_total_qp_row_count > 0), so that -- not "role" -- is
+    # what these two check.  E's two CAVs are both cooperative, so its roles
+    # are checked once a real run confirms which actor gets which role.
+    "red_light_on": {
+        "directory": "debug_cp_red_light_on",
+        "configs": ("cpx_cp_red_light_violator.yaml",),
+        "cp_expected": True,
+        "route_completion_expected": True,
+        "requires_corridor_binding": True,
+        "dependencies": (
+            "opencda/planning_module/pipeline/conflict_classifier.py",
+            "opencda/planning_module/pipeline/cav_conflict_pipeline.py",
+            "opencda/planning_module/pipeline/cooperative_arbitration.py",
+            "opencda/planning_module/opencda_bridge/cp_provider.py",
+        ),
+    },
+    "red_light_off": {
+        "directory": "debug_cp_red_light_off",
+        "configs": (
+            "cpx_cp_red_light_violator.yaml", "cpx_cp_red_light_violator_off.yaml"
+        ),
+        "cp_expected": False,
+        "route_completion_expected": True,
+        "dependencies": (),
+    },
+    "bend_oncoming_on": {
+        "directory": "debug_cp_bend_oncoming_on",
+        "configs": ("cpx_cp_bend_oncoming.yaml",),
+        "cp_expected": True,
+        "route_completion_expected": True,
+        "requires_corridor_binding": True,
+        "dependencies": (
+            "opencda/planning_module/pipeline/conflict_classifier.py",
+            "opencda/planning_module/pipeline/cav_conflict_pipeline.py",
+            "opencda/planning_module/pipeline/cooperative_arbitration.py",
+            "opencda/planning_module/pipeline/spatiotemporal_corridor.py",
+            "opencda/planning_module/opencda_bridge/cp_provider.py",
+        ),
+    },
+    "bend_oncoming_off": {
+        "directory": "debug_cp_bend_oncoming_off",
+        "configs": (
+            "cpx_cp_bend_oncoming.yaml", "cpx_cp_bend_oncoming_off.yaml"
+        ),
+        "cp_expected": False,
+        "route_completion_expected": True,
+        "dependencies": (),
+    },
+    # Two actors, so one directory each.  ON vs. OFF here is
+    # cav_conflict_enabled, not CP obstacle sharing (confirmed: the two
+    # configs differ only in that flag and their debug dirs), so no
+    # cp_expected -- that check is opt-in and skipped when the key is
+    # absent.  Which specific role (yield/make_gap) lands on which actor id
+    # is deliberately left unpinned: confirm against the first real run
+    # before tightening this to a specific vehicle.
+    "two_cav_merge_on_cav1": {
+        "directory": "debug_two_cav_merge_cav1",
+        "configs": ("cpx_two_cav_merge_conflict.yaml",),
+        "route_completion_expected": True,
+        "dependencies": (
+            "opencda/planning_module/pipeline/cav_conflict_pipeline.py",
+            "opencda/planning_module/pipeline/cooperative_arbitration.py",
+            "opencda/planning_module/pipeline/spatiotemporal_corridor.py",
+        ),
+    },
+    "two_cav_merge_on_cav2": {
+        "directory": "debug_two_cav_merge_cav2",
+        "configs": ("cpx_two_cav_merge_conflict.yaml",),
+        "route_completion_expected": True,
+        "dependencies": (
+            "opencda/planning_module/pipeline/cav_conflict_pipeline.py",
+            "opencda/planning_module/pipeline/cooperative_arbitration.py",
+            "opencda/planning_module/pipeline/spatiotemporal_corridor.py",
+        ),
+    },
+    "two_cav_merge_off_cav1": {
+        "directory": "debug_two_cav_merge_off_cav1",
+        "configs": ("cpx_two_cav_merge_conflict_baseline.yaml",),
+        # Confirmed against a real run: without cav_conflict_enabled neither
+        # CAV yields, so both stall a few meters short of the merge with no
+        # collision rather than resolving -- this is the control arm's whole
+        # point, same shape as roadway_object_off.
+        "route_completion_expected": False,
+        "dependencies": (),
+    },
+    "two_cav_merge_off_cav2": {
+        "directory": "debug_two_cav_merge_off_cav2",
+        "configs": ("cpx_two_cav_merge_conflict_baseline.yaml",),
+        "route_completion_expected": False,
+        "dependencies": (),
+    },
 }
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -79,6 +178,25 @@ def _rows(path):
 
 def _count(rows, key, value):
     return sum(row.get(key) == value for row in rows)
+
+
+def _role_frames(rows, role):
+    if not role:
+        return 0
+    return sum(
+        str(role) in dict(row.get("cav_conflict_roles", {}) or {}).values()
+        for row in rows
+    )
+
+
+def _corridor_binding_frames(rows):
+    # cav_conflict_roles (proceed/yield/make_gap) is peer-negotiation only --
+    # it stays empty against a non-cooperative hazard (a red-light violator
+    # or an oncoming car around a bend never broadcasts a claim/intent, so
+    # cav_arbitration reads "ego_claim_inactive").  For those cases the only
+    # observable evidence that classify->corridor actually engaged is the
+    # corridor's own QP row count.
+    return sum(int(row.get("cav_total_qp_row_count", 0) or 0) > 0 for row in rows)
 
 
 def analyze_case(root, name, contract):
@@ -102,6 +220,8 @@ def analyze_case(root, name, contract):
         rows, "semantic_behavior_action", contract.get("action")
     )
     decision_frames = _count(rows, "behavior_decision", contract.get("decision"))
+    role_frames = _role_frames(rows, contract.get("role"))
+    corridor_binding_frames = _corridor_binding_frames(rows)
 
     failures = []
     config_paths = tuple(
@@ -128,16 +248,24 @@ def analyze_case(root, name, contract):
         failures.append("route_not_completed")
     if infeasible_frames:
         failures.append("mpc_infeasible_or_safe_stop")
-    if bool(contract.get("cp_expected")) and cp_frames == 0:
-        failures.append("cp_not_received")
-    if not bool(contract.get("cp_expected")) and cp_frames != 0:
-        failures.append("cp_leaked_into_off_arm")
+    # cp_expected is opt-in: absent means "not applicable to this case"
+    # (e.g. the two-CAV scenarios gate on cav_conflict_enabled, not CP
+    # obstacle sharing), not "OFF arm, must see zero CP frames".
+    if "cp_expected" in contract:
+        if bool(contract["cp_expected"]) and cp_frames == 0:
+            failures.append("cp_not_received")
+        if not bool(contract["cp_expected"]) and cp_frames != 0:
+            failures.append("cp_leaked_into_off_arm")
     if contract.get("risk") and risk_frames == 0:
         failures.append("expected_semantic_risk_missing")
     if contract.get("action") and action_frames == 0:
         failures.append("expected_behavior_action_missing")
     if contract.get("decision") and decision_frames == 0:
         failures.append("expected_maneuver_missing")
+    if contract.get("role") and role_frames == 0:
+        failures.append("expected_cav_role_missing")
+    if bool(contract.get("requires_corridor_binding")) and corridor_binding_frames == 0:
+        failures.append("expected_corridor_binding_missing")
 
     return {
         "case": name,
@@ -154,6 +282,8 @@ def analyze_case(root, name, contract):
         "semantic_risk_frames": risk_frames,
         "semantic_action_frames": action_frames,
         "expected_decision_frames": decision_frames,
+        "expected_role_frames": role_frames,
+        "corridor_binding_frames": corridor_binding_frames,
         "mpc_failure_frames": infeasible_frames,
         "log": str(path),
     }

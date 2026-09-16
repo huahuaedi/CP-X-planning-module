@@ -63,6 +63,38 @@ class LaneChangeCompletionTests(unittest.TestCase):
             lane_width_m=3.5,
         ))
 
+    def test_target_corridor_evidence_can_replace_stale_progress(self):
+        contract = LaneChangeContract()
+
+        self.assertTrue(contract.stabilization_handoff_ready(
+            progress=0.875,
+            lateral_error_m=0.07,
+            heading_error_rad=math.radians(3.8),
+            lane_width_m=3.5,
+            target_lane_matches=True,
+            footprint_clearance_m=0.1,
+        ))
+
+    def test_target_corridor_evidence_requires_lane_and_footprint(self):
+        contract = LaneChangeContract()
+        common = dict(
+            progress=0.875,
+            lateral_error_m=0.07,
+            heading_error_rad=math.radians(3.8),
+            lane_width_m=3.5,
+        )
+
+        self.assertFalse(contract.stabilization_handoff_ready(
+            target_lane_matches=False,
+            footprint_clearance_m=0.1,
+            **common
+        ))
+        self.assertFalse(contract.stabilization_handoff_ready(
+            target_lane_matches=True,
+            footprint_clearance_m=-0.01,
+            **common
+        ))
+
     def test_completion_accepts_central_contract(self):
         contract = LaneChangeContract(
             min_progress=0.95,

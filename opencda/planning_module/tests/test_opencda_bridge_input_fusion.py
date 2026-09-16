@@ -206,6 +206,51 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
             reason="static_obstacle_route_replanned"
         )
 
+    def test_static_obstacle_route_replan_reports_unmapped_lane_without_touching_route(self):
+        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
+        bridge.global_planner = Mock()
+        bridge.global_planner.block_lane_at_position.return_value = None
+        bridge.route_manager = Mock()
+        bridge._static_obstacle_blocked_lane_id = ""
+
+        attempted, succeeded, reason = bridge._attempt_static_obstacle_route_replan(
+            ego_location=SimpleNamespace(x=3.0, y=4.0, z=0.0),
+            obstacle={"x": 8.0, "y": 4.0, "z": 0.0},
+        )
+
+        self.assertTrue(attempted)
+        self.assertFalse(succeeded)
+        self.assertEqual(reason, "static_obstacle_lane_mapping_failed")
+        bridge.route_manager.replan_from.assert_not_called()
+        self.assertEqual(bridge._static_obstacle_blocked_lane_id, "")
+
+    def test_static_obstacle_route_replan_reports_no_route_found_around_closure(self):
+        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
+        bridge.global_planner = Mock()
+        bridge.global_planner.block_lane_at_position.return_value = 17
+        bridge.route_manager = Mock()
+        bridge.route_manager.replan_from.return_value = RouteReplanResult(
+            False, "route_replan_no_route_around_blocked_lane"
+        )
+        bridge._static_obstacle_blocked_lane_id = ""
+        bridge._active_route_summary = "unchanged"
+        bridge.maneuver_manager = Mock()
+        bridge.control_buffer = Mock()
+
+        attempted, succeeded, reason = bridge._attempt_static_obstacle_route_replan(
+            ego_location=SimpleNamespace(x=3.0, y=4.0, z=0.0),
+            obstacle={"x": 8.0, "y": 4.0, "z": 0.0},
+        )
+
+        self.assertTrue(attempted)
+        self.assertFalse(succeeded)
+        self.assertEqual(reason, "route_replan_no_route_around_blocked_lane")
+        # A fully blocked road with no detour must leave routing/control
+        # state untouched -- a failed replan should never half-apply.
+        self.assertEqual(bridge._active_route_summary, "unchanged")
+        bridge.maneuver_manager.reset.assert_not_called()
+        bridge.control_buffer.reset.assert_not_called()
+
     def test_turn_route_replan_refreshes_route_owned_state(self):
         bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
         bridge.config = {"turn_route_replan_cooldown_s": 2.0}

@@ -91,3 +91,44 @@ def test_stage_owns_replan_cooldown_and_transition_hold():
     assert first.stop_active
     assert second.status == "cooldown_route_transition"
     assert not second.stop_active
+
+
+def test_stage_stays_stopped_when_no_lane_and_no_route_around_closure():
+    # A closure spanning every lane with no detour must fail safe: hold the
+    # stop rather than release control with nowhere for the ego to go.
+    stage = StaticObstacleStage({
+        "static_obstacle_blocked_confirm_s": 0.0,
+        "static_obstacle_local_avoidance_enabled": False,
+        "static_obstacle_global_replan_enabled": True,
+        "static_obstacle_replan_cooldown_s": 2.0,
+    })
+    result = _evaluate(
+        stage, sim_time_s=3.0,
+        attempt_replan=lambda: (True, False, "route_replan_no_route_around_blocked_lane"),
+    )
+    assert result.status == "failed_stop"
+    assert result.stop_active
+
+
+def test_stage_retries_replan_after_cooldown_following_a_failed_attempt():
+    attempts = []
+
+    def _attempt_replan():
+        attempts.append(True)
+        return True, False, "route_replan_no_route_around_blocked_lane"
+
+    stage = StaticObstacleStage({
+        "static_obstacle_blocked_confirm_s": 0.0,
+        "static_obstacle_local_avoidance_enabled": False,
+        "static_obstacle_global_replan_enabled": True,
+        "static_obstacle_replan_cooldown_s": 2.0,
+    })
+    _evaluate(stage, sim_time_s=3.0, attempt_replan=_attempt_replan)
+    during_cooldown = _evaluate(stage, sim_time_s=3.5, attempt_replan=_attempt_replan)
+    after_cooldown = _evaluate(stage, sim_time_s=5.5, attempt_replan=_attempt_replan)
+
+    assert len(attempts) == 2
+    assert during_cooldown.status == "cooldown_stop"
+    assert during_cooldown.stop_active
+    assert after_cooldown.status == "failed_stop"
+    assert after_cooldown.stop_active

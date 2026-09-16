@@ -130,6 +130,8 @@ class LaneChangeContract:
         lateral_error_m: float,
         heading_error_rad: float,
         lane_width_m: float,
+        target_lane_matches: bool = False,
+        footprint_clearance_m: float = float("-inf"),
     ) -> bool:
         """Whether crossing may hand off to target-corridor stabilization."""
 
@@ -144,10 +146,26 @@ class LaneChangeContract:
         handoff_heading_rad = max(
             float(self.max_heading_error_rad), math.radians(12.0)
         )
-        return bool(
-            float(progress) >= float(self.min_progress)
-            and abs(float(lateral_error_m)) <= float(handoff_lateral_m)
+        loose_alignment = bool(
+            abs(float(lateral_error_m)) <= float(handoff_lateral_m)
             and abs(float(heading_error_rad)) <= float(handoff_heading_rad)
+        )
+        progress_evidence = float(progress) >= float(self.min_progress)
+        # Projection progress can stop short when the finite lane-change
+        # master has moved behind the ego.  In that case the continuous map
+        # match plus tight target-reference alignment and positive footprint
+        # clearance are stronger physical evidence that crossing is over.
+        target_corridor_evidence = bool(
+            target_lane_matches
+            and abs(float(lateral_error_m)) <= float(self.max_lateral_error_m)
+            and abs(float(heading_error_rad)) <= float(
+                self.max_heading_error_rad
+            )
+            and float(footprint_clearance_m) >= 0.0
+        )
+        return bool(
+            loose_alignment
+            and (progress_evidence or target_corridor_evidence)
         )
 
     def as_debug_fields(self) -> dict[str, object]:
