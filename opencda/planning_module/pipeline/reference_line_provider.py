@@ -741,8 +741,68 @@ class ReferenceLineProvider(StableReferenceLineProvider):
         if local_route_reference is not None:
             return local_route_reference
 
+        destination = self._behavior_reference_destination(
+            compute_temp_destination=compute_temp_destination,
+            map_planner=map_planner, ego_pose=ego_pose,
+            target_lane_id=target_lane_id, decision=decision,
+            lookahead_m=lookahead_m, target_speed_mps=target_speed_mps,
+            route_points=route_points,
+            previous_target_state=previous_target_state,
+            next_macro_maneuver=next_macro_maneuver, planner_mode=planner_mode,
+            route_reference_allowed=route_reference_allowed,
+            in_junction=in_junction,
+        )
+        context = self._behavior_reference_context(
+            select_reference_intent=select_reference_intent,
+            context_cls=MpcReferenceGenerationContext,
+            map_planner=map_planner, ego_pose=ego_pose, ego_state=ego_state,
+            route_points=route_points, previous_reference=previous_reference,
+            behavior_runtime_config=behavior_runtime_config, decision=decision,
+            lane_change_state=lane_change_state, target_lane_id=target_lane_id,
+            current_lane_id=current_lane_id,
+            route_optimal_lane_id=route_optimal_lane_id,
+            route_reference_allowed=route_reference_allowed,
+            route_reference_gate_reason=route_reference_gate_reason,
+            in_junction=in_junction, next_macro_maneuver=next_macro_maneuver,
+            planner_mode=planner_mode, target_speed_mps=target_speed_mps,
+            ego_speed_mps=ego_speed_mps, horizon_steps=horizon_steps,
+            dt_s=dt_s, reference_freeze_count=reference_freeze_count,
+            sim_time_s=sim_time_s,
+            stop_release_smooth_until_s=stop_release_smooth_until_s,
+            authoritative_ego_waypoint=authoritative_ego_waypoint,
+            lane_reference_step_distance_m=lane_reference_step_distance_m,
+            destination=destination,
+        )
+        output = generate_mpc_reference(context)
+        samples = tuple(
+            MappingProxyType(dict(sample))
+            for sample in list(output.local_lane_center_reference or [])
+        )
+        resolved_destination = tuple(
+            output.temporary_destination_state or destination
+        )
+        diagnostics = MappingProxyType(
+            dict(output.mpc_reference_result.trace.as_trace_fields())
+        )
+        return BehaviorReferenceResult(
+            samples=samples,
+            destination_state=resolved_destination,
+            reference_freeze_count=int(output.lane_reference_freeze_count),
+            diagnostics=diagnostics,
+            fallback_reason=str(output.last_reference_fallback_reason),
+        )
+
+    @staticmethod
+    def _behavior_reference_destination(
+        *, compute_temp_destination, map_planner, ego_pose, target_lane_id,
+        decision, lookahead_m, target_speed_mps, route_points,
+        previous_target_state, next_macro_maneuver, planner_mode,
+        route_reference_allowed, in_junction,
+    ):
+        """Seed the temporary destination state from the prior tick's."""
+
         prior = list(previous_target_state or [])
-        destination = compute_temp_destination(
+        return compute_temp_destination(
             map_planner=map_planner,
             ego_pose=ego_pose,
             target_lane_id=int(target_lane_id),
@@ -762,6 +822,21 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             mode_override=str(planner_mode),
             follow_global_route_lane=bool(route_reference_allowed and in_junction),
         )
+
+    @staticmethod
+    def _behavior_reference_context(
+        *, select_reference_intent, context_cls, map_planner, ego_pose,
+        ego_state, route_points, previous_reference, behavior_runtime_config,
+        decision, lane_change_state, target_lane_id, current_lane_id,
+        route_optimal_lane_id, route_reference_allowed,
+        route_reference_gate_reason, in_junction, next_macro_maneuver,
+        planner_mode, target_speed_mps, ego_speed_mps, horizon_steps, dt_s,
+        reference_freeze_count, sim_time_s, stop_release_smooth_until_s,
+        authoritative_ego_waypoint, lane_reference_step_distance_m,
+        destination,
+    ):
+        """Select the reference intent and assemble the MPC generation context."""
+
         intent = select_reference_intent(
             behavior_decision=str(decision),
             planner_fsm_state=str(lane_change_state),
@@ -772,7 +847,7 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             global_route_reference_allowed=bool(route_reference_allowed),
             traffic_control_lane_lock_active=False,
         )
-        context = MpcReferenceGenerationContext(
+        return context_cls(
             map_planner=map_planner,
             ego_pose=ego_pose,
             ego_state=ego_state,
@@ -830,24 +905,6 @@ class ReferenceLineProvider(StableReferenceLineProvider):
                 stop_release_smooth_until_s
             ),
             authoritative_ego_waypoint=authoritative_ego_waypoint,
-        )
-        output = generate_mpc_reference(context)
-        samples = tuple(
-            MappingProxyType(dict(sample))
-            for sample in list(output.local_lane_center_reference or [])
-        )
-        resolved_destination = tuple(
-            output.temporary_destination_state or destination
-        )
-        diagnostics = MappingProxyType(
-            dict(output.mpc_reference_result.trace.as_trace_fields())
-        )
-        return BehaviorReferenceResult(
-            samples=samples,
-            destination_state=resolved_destination,
-            reference_freeze_count=int(output.lane_reference_freeze_count),
-            diagnostics=diagnostics,
-            fallback_reason=str(output.last_reference_fallback_reason),
         )
 
     def _local_route_lane_follow_reference(
