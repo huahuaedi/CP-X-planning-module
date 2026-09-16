@@ -14,8 +14,9 @@ from .speed_planner import (
     effective_emergency_gap_m,
 )
 from .cav_conflict_pipeline import resolve_conflicts as resolve_cav_conflicts
-from .conflict_classifier import ClassifierParams
-from .spatiotemporal_corridor import CorridorParams
+from .conflict_classifier import ClassifierParams, _agent_id
+from .spatiotemporal_corridor import CorridorParams, make_gap_gate_margin_m
+from .mpc_obstacle_relevance import _polyline_xy
 from .rss import RSSParams, longitudinal_safe_distance
 
 
@@ -324,6 +325,32 @@ class PlanningPipeline:
             ),
         )
         result.mpc_rows = list(longitudinal_rows) + list(lateral_rows)
+        # Read-only visibility into a decision build_longitudinal_corridor
+        # already makes for itself: how close (in meters, at closest
+        # approach over the horizon) a make-gap peer's broadcast track came
+        # to opening the corridor cap.  A gentle, well-timed cooperative
+        # merge can legitimately never open it (the speed_constraint below
+        # owns gap-keeping instead) -- this field is what tells a real run
+        # apart from one where the gate is stuck just out of reach.
+        snapshots_by_id = {
+            _agent_id(snapshot): snapshot for snapshot in (obstacle_snapshots or ())
+        }
+        corridor_poly = _polyline_xy(corridor_reference)
+        make_gap_gate_margins_m = {}
+        for assignment in result.assignments:
+            if str(assignment.role) != "make_gap":
+                continue
+            peer_track = tracks.get(int(assignment.cav_actor_id))
+            if not peer_track:
+                continue
+            margin_m = make_gap_gate_margin_m(
+                agent=snapshots_by_id.get(str(assignment.cav_actor_id), {}),
+                track=peer_track, poly=corridor_poly,
+                p=corridor_params, rss=rss_params,
+            )
+            if margin_m is not None:
+                make_gap_gate_margins_m[str(assignment.cav_actor_id)] = margin_m
+        result.diagnostics["make_gap_gate_margin_m"] = make_gap_gate_margins_m
         result.speed_constraint = conflict_corridor_speed_constraint(
             corridor=result.corridor,
             reference_samples=corridor_reference,

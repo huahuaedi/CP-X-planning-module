@@ -189,6 +189,22 @@ def _role_frames(rows, role):
     )
 
 
+def _min_make_gap_gate_margin_m(rows):
+    # Informational only, never a pass/fail signal: how close (meters, at
+    # closest approach) a make-gap peer's track ever came to opening the
+    # corridor cap. A clean cooperative merge can legitimately stay
+    # positive the whole run (see test_spatiotemporal_corridor.py's
+    # test_gradual_real_world_merge_convergence_stays_below_corridor_gate)
+    # -- this exists so that fact is visible in the report instead of
+    # requiring the same log archaeology that first surfaced it.
+    margins = [
+        float(value)
+        for row in rows
+        for value in dict(row.get("cav_make_gap_gate_margin_m", {}) or {}).values()
+    ]
+    return min(margins) if margins else None
+
+
 def _corridor_binding_frames(rows):
     # cav_conflict_roles (proceed/yield/make_gap) is peer-negotiation only --
     # it stays empty against a non-cooperative hazard (a red-light violator
@@ -222,6 +238,7 @@ def analyze_case(root, name, contract):
     decision_frames = _count(rows, "behavior_decision", contract.get("decision"))
     role_frames = _role_frames(rows, contract.get("role"))
     corridor_binding_frames = _corridor_binding_frames(rows)
+    min_make_gap_gate_margin_m = _min_make_gap_gate_margin_m(rows)
 
     failures = []
     config_paths = tuple(
@@ -284,6 +301,7 @@ def analyze_case(root, name, contract):
         "expected_decision_frames": decision_frames,
         "expected_role_frames": role_frames,
         "corridor_binding_frames": corridor_binding_frames,
+        "min_make_gap_gate_margin_m": min_make_gap_gate_margin_m,
         "mpc_failure_frames": infeasible_frames,
         "log": str(path),
     }

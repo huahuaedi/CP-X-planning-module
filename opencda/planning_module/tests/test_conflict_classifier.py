@@ -131,6 +131,17 @@ def test_stopped_lead_does_not_become_oncoming_from_velocity_heading_noise():
     assert t.tag == FOLLOW
 
 
+def test_constant_offset_in_lateral_gray_zone_is_merge_not_ignored():
+    # y=2.4 sits between lane_half_width_m (1.9) and ignore_lateral_m (3.0):
+    # parallel heading, same speed as ego, so it never "enters" (never gets
+    # below lane_half_width_m) and never "converges" (offset doesn't shrink
+    # by >=0.5m over the horizon). Regression for the collision this gray
+    # zone caused when it fell through to IGNORE instead.
+    t = _one({"id": "gray", "x": 6.0, "y": 2.4, "v": 10.0, "psi": 0.0})
+    assert t.tag == MERGE
+    assert t.reason == "in_box_lateral_gray_zone"
+
+
 def test_far_behind_is_ignored():
     t = _one({"id": "b", "x": -40.0, "y": 0.0, "v": 10.0, "psi": 0.0})
     assert t.tag == IGNORE

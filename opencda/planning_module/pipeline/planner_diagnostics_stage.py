@@ -261,6 +261,9 @@ class PlannerDiagnosticsStage:
                 cav_diag.get("agent_states", {}) or {}
             ),
             "cav_conflict_roles": dict(cav_diag.get("roles", {}) or {}),
+            "cav_make_gap_gate_margin_m": dict(
+                cav_diag.get("make_gap_gate_margin_m", {}) or {}
+            ),
             "cav_ego_claim": dict(cav_diag.get("ego_claim", {}) or {}),
             "cav_peer_claims": dict(cav_diag.get("peer_claims", {}) or {}),
             "cav_arbitration": dict(cav_diag.get("arbitration", {}) or {}),

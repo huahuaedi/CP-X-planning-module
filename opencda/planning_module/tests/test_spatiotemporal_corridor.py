@@ -227,6 +227,35 @@ def test_make_gap_begins_when_peer_predicted_footprint_enters_corridor():
     assert any(cor.s_hi[k] < _BIG for k in range(10, 21))
 
 
+def test_gradual_real_world_merge_convergence_stays_below_corridor_gate():
+    # Characterizes the make_gap/proceed handoff boundary against a real
+    # cpx_two_cav_merge_conflict CARLA run: the make-gap peer's broadcast
+    # track closed about 4.2m of lateral offset over the whole ~34s run
+    # (~0.12 m/s average) -- a fully cooperative, well-timed merge, not a
+    # rushed one. Within any single P.horizon_steps*P.dt_s = 2.0s window
+    # that is only ~0.25m of lateral movement, nowhere near overlap_m.
+    # cav_total_qp_row_count was 0 for all 686 frames of that run; this
+    # reproduces why with the real rate rather than an arbitrary fixture,
+    # so a future change to the gate's sensitivity has something concrete
+    # to check itself against.  It is not a failing case: the soft
+    # ResourceClaim + cooperative-speed layer (execution_pipeline.py's
+    # cooperative_gap_speed_constraint) is expected to own gap-keeping for
+    # a clean merge like this one; the corridor is the harder backstop for
+    # when that soft layer runs out of room, and this run never needed it.
+    lateral_rate_mps = 4.2 / 34.25
+    path = [
+        (12.0 + 0.8 * k, 3.6 - lateral_rate_mps * (k * P.dt_s))
+        for k in range(21)
+    ]
+    peer = {"x": 12.0, "y": 3.6, "v": 8.0, "width_m": 1.9,
+            **_track(path)}
+    cor = build_longitudinal_corridor(
+        REF, EGO, [(peer, _tag("peer", MERGE), _assign("make_gap"))], P
+    )
+    assert all(cor.s_hi[k] >= _BIG for k in range(21))
+    assert not any(cor.binding)
+
+
 def test_merge_proceed_adds_no_bound():
     cav = {"x": 25.0, "v": 9.0, **_track([(25.0, 0.2)] * 21)}
     cor = build_longitudinal_corridor(

@@ -284,7 +284,19 @@ def classify_conflicts(
                 tag = LEAD_BRAKE if a_accel <= p.decel_threshold_mps2 else FOLLOW
                 reason = f"same_lane_ahead:a={a_accel:.1f}"
             else:
-                tag, reason = IGNORE, "in_box_but_not_on_path"
+                # Inside the ignore box (min_lat < ignore_lateral_m) but never
+                # closer than lane_half_width_m and not "entered"/"converging"
+                # by the >=0.5m-over-the-horizon tests above: a gray zone
+                # between lane_half_width_m and ignore_lateral_m -- e.g. an
+                # agent holding a near-constant lateral offset in that band,
+                # such as a peer already established in the ego's lane-change
+                # target lane. Falling through to IGNORE here dropped a
+                # genuinely nearby agent from consideration entirely (MDrive
+                # Interactive_Lane_Change: two peer CP-X egos collided when
+                # exactly this case classified the other car as IGNORE mid
+                # lane-change). Tag it MERGE instead -- negotiable via Stage B
+                # arbitration rather than invisible to the planner.
+                tag, reason = MERGE, "in_box_lateral_gray_zone"
 
         out.append(
             ConflictTag(

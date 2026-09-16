@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from pipeline.cooperative_arbitration import CavIntent, ResourceClaim
 from pipeline.execution_pipeline import (
     PlanningPipeline,
     ScenarioPlanningFrameRequest,
@@ -345,3 +346,74 @@ def test_resolve_cav_interaction_defaults_constraint_reference_to_reference_samp
     for row in longitudinal_rows:
         assert row.a_x == pytest.approx(0.0, abs=1.0e-6)
         assert row.a_y == pytest.approx(1.0, abs=1.0e-6)
+
+
+def test_make_gap_gate_margin_is_non_positive_once_peer_converges_into_corridor():
+    reference = [{"x_ref_m": 0.0, "y_ref_m": float(y)} for y in range(0, 61, 2)]
+    ego_location = SimpleNamespace(x=0.0, y=0.0)
+    # Same converging-peer geometry as
+    # test_ego_opens_a_gap_for_a_cooperative_merging_cav in
+    # test_cav_conflict_integration.py: cav one lane over, merging toward
+    # ego's line within the horizon, committed earlier than ego.
+    cav_path = tuple(
+        (0.1 * k, 3.4 - 0.3 * k, 12.0 + 9.0 * 0.1 * k, 9.0)
+        for k in range(21)
+    )
+    cav = CavIntent(
+        actor_id=2, position_xy=(3.4, 12.0),
+        claim=ResourceClaim(kind="lane_change", resource_id="lane_change",
+                             committed_at_s=3.0, active=True),
+        heading_rad=1.5707963267948966, speed_mps=9.0, planned_path=cav_path,
+    )
+    my_claim = ResourceClaim(kind="lane_change", resource_id="lane_change",
+                              committed_at_s=10.0, active=True)
+
+    result = PlanningPipeline.resolve_cav_interaction(
+        reference_samples=reference,
+        ego_location=ego_location, ego_yaw_rad=1.5707963267948966,
+        ego_speed_mps=9.0, actor_id=1, claim=my_claim,
+        obstacle_snapshots=[], cav_intents=[cav], latch_state={},
+        horizon_steps=20, dt_s=0.1,
+    )
+
+    assert result.diagnostics["roles"].get("2") == "make_gap"
+    assert any(h < 1.0e8 for h in result.corridor.s_hi)
+    margins = result.diagnostics["make_gap_gate_margin_m"]
+    assert margins["2"] <= 0.0
+
+
+def test_make_gap_gate_margin_stays_positive_for_a_gentle_real_world_merge():
+    # Same 0.12 m/s lateral rate as
+    # test_gradual_real_world_merge_convergence_stays_below_corridor_gate
+    # in test_spatiotemporal_corridor.py, derived from a real
+    # cpx_two_cav_merge_conflict run where cav_total_qp_row_count was 0 for
+    # all 686 frames.  The margin should read positive (gate not open) so a
+    # future real run can be told apart from one where it is stuck at ~0.
+    reference = [{"x_ref_m": 0.0, "y_ref_m": float(y)} for y in range(0, 61, 2)]
+    ego_location = SimpleNamespace(x=0.0, y=0.0)
+    lateral_rate_mps = 4.2 / 34.25
+    cav_path = tuple(
+        (0.1 * k, 3.4 - lateral_rate_mps * (0.1 * k), 12.0 + 9.0 * 0.1 * k, 9.0)
+        for k in range(21)
+    )
+    cav = CavIntent(
+        actor_id=2, position_xy=(3.4, 12.0),
+        claim=ResourceClaim(kind="lane_change", resource_id="lane_change",
+                             committed_at_s=3.0, active=True),
+        heading_rad=1.5707963267948966, speed_mps=9.0, planned_path=cav_path,
+    )
+    my_claim = ResourceClaim(kind="lane_change", resource_id="lane_change",
+                              committed_at_s=10.0, active=True)
+
+    result = PlanningPipeline.resolve_cav_interaction(
+        reference_samples=reference,
+        ego_location=ego_location, ego_yaw_rad=1.5707963267948966,
+        ego_speed_mps=9.0, actor_id=1, claim=my_claim,
+        obstacle_snapshots=[], cav_intents=[cav], latch_state={},
+        horizon_steps=20, dt_s=0.1,
+    )
+
+    assert result.diagnostics["roles"].get("2") == "make_gap"
+    assert all(h >= 1.0e8 for h in result.corridor.s_hi)
+    margins = result.diagnostics["make_gap_gate_margin_m"]
+    assert margins["2"] > 0.0

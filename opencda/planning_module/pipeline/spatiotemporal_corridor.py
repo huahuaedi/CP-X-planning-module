@@ -384,6 +384,47 @@ def _projected_agent_half_extent_m(
     )
 
 
+def make_gap_overlap_m(agent: Mapping[str, Any], p: "CorridorParams", rss: "RSSParams") -> float:
+    """Lateral distance within which a make-gap peer's track opens the cap.
+
+    Shared by ``build_longitudinal_corridor``'s own gating decision and by
+    diagnostics that report how close a peer came to it, so the two can
+    never drift apart.
+    """
+
+    return (
+        0.5 * max(0.0, _f(
+            agent, "width_m", "width", default=2.0 * float(p.ego_half_width_m),
+        ))
+        + max(0.0, float(p.ego_half_width_m))
+        + max(0.0, float(rss.lateral_mu_m))
+    )
+
+
+def make_gap_gate_margin_m(
+    *, agent: Mapping[str, Any], track: Sequence[XY], poly: Sequence[XY],
+    p: "CorridorParams", rss: "RSSParams",
+) -> Optional[float]:
+    """How many more meters a make-gap peer's track must close to bind.
+
+    Positive: the gate (see ``make_gap_overlap_m``) has not opened anywhere
+    in ``track`` yet, by this many meters at closest approach.  Zero or
+    negative: it has already opened (a corridor cap should be active).
+    ``None`` when there is no track to evaluate.  Read-only: this never
+    feeds back into the corridor itself, it only makes the same decision
+    ``build_longitudinal_corridor`` already makes independently observable.
+    """
+
+    if len(poly) < 2 or not track:
+        return None
+    overlap_m = make_gap_overlap_m(agent, p, rss)
+    closest_m = min(
+        project_to_extended_polyline(float(x), float(y), poly)[0]
+        for x, y in track
+    )
+    return float(closest_m - overlap_m)
+
+
 def build_longitudinal_corridor(
     reference_samples: Sequence[Any],
     ego_snapshot: Mapping[str, Any],
@@ -479,14 +520,7 @@ def build_longitudinal_corridor(
         if role == "make_gap":
             if tag.reason == "conflicting_resource_claim":
                 continue
-            overlap_m = (
-                0.5 * max(0.0, _f(
-                    agent, "width_m", "width",
-                    default=2.0 * float(p.ego_half_width_m),
-                ))
-                + max(0.0, float(p.ego_half_width_m))
-                + max(0.0, float(rss.lateral_mu_m))
-            )
+            overlap_m = make_gap_overlap_m(agent, p, rss)
             track = list(_obstacle_track_xy(agent))
             for k in range(n + 1):
                 if k < len(station) and k < len(track) and (
