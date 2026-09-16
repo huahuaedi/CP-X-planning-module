@@ -85,9 +85,21 @@ def _polyline_xy(reference_samples: Sequence[Any]) -> List[XY]:
     return poly
 
 
-def _point_to_polyline(px: float, py: float, poly: Sequence[XY]) -> Tuple[float, float]:
-    """Return (perpendicular_distance_m, along_arc_length_m_from_poly_start)
-    for the closest point of ``poly`` to ``(px, py)``."""
+def _point_to_polyline_with_arc(
+    px: float, py: float, poly: Sequence[XY],
+) -> Tuple[float, float, float]:
+    """Same projection as ``_point_to_polyline``, plus the polyline's total
+    arc length as a third value.
+
+    ``project_to_extended_polyline`` used to recompute this total with its
+    own separate full O(len(poly)) scan on every call, even though this
+    scan already walks every segment and accumulates the running length as
+    ``arc`` -- the loop just never returned its final value. On a hot path
+    called (nearby agents x prediction horizon steps) times per tick, that
+    second scan was pure duplicated work; returning it here removes it
+    instead of just caching it, so it stays correct even when the caller
+    is given a different polyline on every call.
+    """
 
     best_perp = math.inf
     best_along = 0.0
@@ -99,6 +111,7 @@ def _point_to_polyline(px: float, py: float, poly: Sequence[XY]) -> Tuple[float,
         seg_len2 = seg_dx * seg_dx + seg_dy * seg_dy
         if seg_len2 <= 1e-12:
             continue
+        seg_len = math.sqrt(seg_len2)
         t = ((px - ax) * seg_dx + (py - ay) * seg_dy) / seg_len2
         t_clamped = min(1.0, max(0.0, t))
         cx = ax + t_clamped * seg_dx
@@ -106,9 +119,17 @@ def _point_to_polyline(px: float, py: float, poly: Sequence[XY]) -> Tuple[float,
         perp = math.hypot(px - cx, py - cy)
         if perp < best_perp:
             best_perp = perp
-            best_along = arc + t_clamped * math.sqrt(seg_len2)
-        arc += math.sqrt(seg_len2)
-    return best_perp, best_along
+            best_along = arc + t_clamped * seg_len
+        arc += seg_len
+    return best_perp, best_along, arc
+
+
+def _point_to_polyline(px: float, py: float, poly: Sequence[XY]) -> Tuple[float, float]:
+    """Return (perpendicular_distance_m, along_arc_length_m_from_poly_start)
+    for the closest point of ``poly`` to ``(px, py)``."""
+
+    perp, along, _arc = _point_to_polyline_with_arc(px, py, poly)
+    return perp, along
 
 
 def project_to_extended_polyline(
@@ -124,15 +145,11 @@ def project_to_extended_polyline(
     its first/last tangent.
     """
 
-    lateral_m, station_m = _point_to_polyline(float(px), float(py), poly)
+    lateral_m, station_m, arc_m = _point_to_polyline_with_arc(
+        float(px), float(py), poly
+    )
     if len(poly) < 2:
         return float(lateral_m), float(station_m)
-
-    arc_m = sum(
-        math.hypot(poly[i + 1][0] - poly[i][0],
-                   poly[i + 1][1] - poly[i][1])
-        for i in range(len(poly) - 1)
-    )
 
     first_x, first_y = poly[0]
     next_x, next_y = poly[1]

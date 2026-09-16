@@ -66,6 +66,7 @@ scenario:
 
   scripted_actors:
     - blueprint: vehicle.carlamotors.carlacola
+      object_type: static_object
       path:
         - [-180.0, 8.3]
         - [-179.0, 8.3]

@@ -11,6 +11,7 @@ from .behavior_decision import BehaviorDecision
 from .cooperative_maneuver_proposal import CooperativeManeuverProposal
 from .reference_line_provider import LANE_CHANGE
 from .candidate_evaluation import evaluate_behavior_candidates
+from .behavior_risk import SemanticBehaviorResponse, assess_front_observation
 from .route_authorization import (
     RouteLaneChangeAuthorizationLatch,
     authorize_opportunistic_lane_change,
@@ -221,6 +222,7 @@ class BehaviorCommandResult:
     static_obstacle_result: Any
     opportunistic_lane_change_allowed: bool
     preferred_target_lane_id: int
+    semantic_response: Any
 
 
 @dataclass(frozen=True)
@@ -271,6 +273,24 @@ class BehaviorStage:
 
     def reset_route_lane_change_authorization(self) -> None:
         self._route_lane_change_latch.reset()
+
+    @staticmethod
+    def assess_front_observation(
+        *, front_obstacle: Optional[Mapping[str, object]],
+        ego_speed_mps: float, max_deceleration_mps2: float,
+        route_lane_safety_score: float,
+        config: Mapping[str, object], runtime_config: Mapping[str, object],
+        object_track_id: Any,
+    ) -> SemanticBehaviorResponse:
+        return assess_front_observation(
+            front_obstacle=front_obstacle,
+            ego_speed_mps=ego_speed_mps,
+            max_deceleration_mps2=max_deceleration_mps2,
+            route_lane_safety_score=route_lane_safety_score,
+            config=config,
+            runtime_config=runtime_config,
+            object_track_id=object_track_id,
+        )
 
     @staticmethod
     def _lane_alignment(
@@ -510,10 +530,6 @@ class BehaviorStage:
     ) -> BehaviorCommandResult:
         """Produce one behavior command through the sole obstacle arbitration path."""
 
-        from opencda.planning_module.behavior_planner import (
-            evaluate_intersection_obstacle_response,
-        )
-
         # Lane identity and alignment must come from the same stateful map
         # match.  A second nearest-waypoint query can select a crossing lane
         # at junctions even while LocalMapSnapshot keeps the correct lane id.
@@ -533,29 +549,16 @@ class BehaviorStage:
 
         front_obstacle = nearest_front_obstacles_by_lane.get(int(current_lane_id))
         actual_mode = "INTERSECTION" if in_junction else "NORMAL"
-        evaluation_mode = str(actual_mode)
-        if evaluation_mode == "NORMAL" and bool(config.get(
-            "static_obstacle_replan_normal_mode_enabled",
-            runtime_config.get("static_obstacle_replan_normal_mode_enabled", True),
-        )):
-            evaluation_mode = "INTERSECTION"
-        response = evaluate_intersection_obstacle_response(
-            mode=evaluation_mode,
-            front_obstacle_speed_mps=(
-                None if front_obstacle is None else float(front_obstacle.get("v", 0.0))
+        semantic_response = BehaviorStage.assess_front_observation(
+            front_obstacle=front_obstacle,
+            ego_speed_mps=float(ego_speed_mps),
+            max_deceleration_mps2=float(max_deceleration_mps2),
+            route_lane_safety_score=float(
+                lane_safety_scores.get(int(current_lane_id), 1.0)
             ),
-            original_max_velocity_mps=float(target_speed_mps),
-            moving_obstacle_speed_threshold_mps=float(config.get(
-                "static_obstacle_speed_threshold_mps",
-                runtime_config.get("static_obstacle_speed_threshold_mps",
-                    runtime_config.get("intersection_obstacle_moving_speed_threshold_mps", 0.5)),
-            )),
-            route_lane_safety_score=float(lane_safety_scores.get(int(current_lane_id), 1.0)),
-            static_obstacle_replan_lane_safety_threshold=float(config.get(
-                "static_obstacle_replan_lane_safety_threshold",
-                runtime_config.get("static_obstacle_replan_lane_safety_threshold",
-                    runtime_config.get("intersection_static_obstacle_replan_lane_safety_threshold", 0.5)),
-            )),
+            config=config,
+            runtime_config=runtime_config,
+            object_track_id=object_track_id,
         )
         traffic_stop = bool(
             scenario_stop_required
@@ -564,7 +567,7 @@ class BehaviorStage:
         requested = bool(
             config.get("static_obstacle_replan_enabled",
                 runtime_config.get("static_obstacle_replan_enabled", True))
-            and response.get("request_static_obstacle_replan", False)
+            and semantic_response.action == "LANE_BLOCKAGE"
             and not traffic_stop
         )
         obstacle_result = static_obstacle_stage.evaluate(
@@ -580,10 +583,28 @@ class BehaviorStage:
         )
         local_avoidance = bool(obstacle_result.local_avoidance_active)
         local_target = obstacle_result.target_lane_id
+        if local_avoidance:
+            semantic_response = replace(
+                semantic_response,
+                action="PREPARE_LANE_CHANGE",
+                reason=str(obstacle_result.reason),
+            )
+        elif bool(obstacle_result.stop_active):
+            semantic_response = replace(
+                semantic_response,
+                action="CONTROLLED_STOP",
+                reason=str(obstacle_result.reason),
+            )
         opportunistic_allowed = bool(opportunistic_lane_change_allowed or local_avoidance)
         preferred_lane = int(local_target) if local_avoidance else int(preferred_target_lane_id)
         command = behavior_planner.update(
-            static_obstacle_stop_active=bool(obstacle_result.stop_active),
+            # The established stop primitive is shared by typed semantic
+            # stops; ``semantic_response`` preserves whether the cause was a
+            # VRU yield or an unavailable lane-blockage bypass.
+            static_obstacle_stop_active=bool(
+                obstacle_result.stop_active
+                or semantic_response.action == "YIELD_STOP"
+            ),
             lane_safety_scores=lane_safety_scores, ego_lane_id=int(current_lane_id),
             selected_lane_id=int(current_lane_id), ego_lateral_offset_m=float(lateral_m),
             ego_heading_error_rad=float(heading_rad), mode=actual_mode,
@@ -623,6 +644,7 @@ class BehaviorStage:
             static_obstacle_result=obstacle_result,
             opportunistic_lane_change_allowed=opportunistic_allowed,
             preferred_target_lane_id=int(preferred_lane),
+            semantic_response=semantic_response,
         )
 
     @staticmethod

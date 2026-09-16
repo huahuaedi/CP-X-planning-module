@@ -24,6 +24,7 @@ carla_traffic_manager:
 vehicle_base:
   sensing:
     perception:
+      activate: false
       # Emulate the limited usable sight distance around the bend. This is an
       # input-adapter property; the planner receives no scenario/actor hint.
       deactivated_detection_range_m: 20.0
@@ -41,6 +42,10 @@ vehicle_base:
     prediction_lane_following_enabled: false
     target_speed_mps: 8.0
     communication_range_m: 60.0
+    # This scenario inherits a 1.0 m route threshold from the Town06 turn
+    # baseline, but DestinationSpeedStage latches the terminal stop at 1.5 m.
+    # They must agree or the runner stops while RouteManager still says no.
+    route_reached_distance_m: 1.5
     record_evaluation_metrics: true
     debug_log_formats: [jsonl]
     debug_output_dir: opencda/planning_module/opencda_bridge/debug_cp_bend_oncoming_on
@@ -72,6 +77,7 @@ scenario:
         max_speed: 0
       sensing:
         perception:
+          activate: false
           deactivated_detection_range_m: 60.0
         overtake_allowed: false
         local_planner:

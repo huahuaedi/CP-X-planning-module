@@ -119,7 +119,7 @@ def _is_lane_following_actor(snapshot: Mapping[str, object]) -> bool:
     lane would predict it walking along the road instead of across it."""
 
     actor_type = str(
-        snapshot.get("actor_type", snapshot.get("type", ""))
+        snapshot.get("object_type", snapshot.get("actor_type", snapshot.get("type", "")))
     ).strip().lower()
     return actor_type not in _NON_LANE_FOLLOWING_ACTOR_TYPES
 

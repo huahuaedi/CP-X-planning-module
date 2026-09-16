@@ -72,3 +72,12 @@ scenario:
       planner:
         target_speed_mps: 8.0
         debug_output_dir: opencda/planning_module/opencda_bridge/debug_two_cav_merge_cav2
+        # Temporary: capture raw QP rows around the make_gap heading-wobble
+        # window (role make_gap latches ~t=8.7s, heading starts oscillating
+        # ~t=9.3s) so frame_replay.py can audit lateral coupling. Remove once
+        # the cause is confirmed.
+        frame_capture:
+          out_dir: opencda/planning_module/opencda_bridge/debug_two_cav_merge_cav2/frames
+          sim_time_window_s: [8.5, 13.0]
+          min_row_count: 1
+          max_frames: 60

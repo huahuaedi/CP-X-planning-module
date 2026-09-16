@@ -4,6 +4,7 @@ from pathlib import Path
 from omegaconf import OmegaConf
 
 import opencda.scenario_testing.cpx_mature_runner as mature_runner
+from opencda.planning_module.opencda_bridge.cp_provider import OpenCDACPProvider
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -135,3 +136,25 @@ def test_isolated_runner_reports_foreign_dynamic_actors_without_deleting_them():
         "y": -3.5,
     }]
     assert stale.destroyed is False
+
+
+def test_static_object_semantics_survive_the_carla_actor_boundary():
+    params = {
+        "scenario": {
+            "single_cav_list": [],
+            "scripted_actors": [{"object_type": "static_object"}],
+        }
+    }
+    roles = mature_runner._assign_scenario_actor_roles(params, "road_object")
+    actor = _OwnedActor(
+        30, roles[0], type_id="vehicle.carlamotors.carlacola"
+    )
+
+    assert roles[0].endswith("_type_static_object")
+    assert OpenCDACPProvider._semantic_object_type(actor) == "static_object"
+
+
+def test_untyped_vehicle_keeps_vehicle_semantics():
+    actor = _OwnedActor(31, "ordinary_cav", type_id="vehicle.tesla.model3")
+
+    assert OpenCDACPProvider._semantic_object_type(actor) == "vehicle"

@@ -45,6 +45,7 @@ from opencda.planning_module.pipeline.spatiotemporal_corridor import (
     aggregate_mode_corridors,
     build_longitudinal_corridor,
     retain_pending_corridor,
+    release_cleared_actor_bounds,
 )
 from opencda.planning_module.pipeline.speed_planner import SpeedConstraint
 from opencda.planning_module.pipeline.prediction_modes import as_modes, single_mode
@@ -473,6 +474,29 @@ def resolve_conflicts(
     corridor_rebuilt = bool(
         rebuild_corridor or tag_changed or roles_refreshed
     )
+    clearable_actor_ids = {
+        str(tag.agent_id).split("::mode", 1)[0]
+        for tag in tags
+        if tag.tag == IGNORE and (
+            str(tag.reason).startswith("min_lat=")
+            or str(tag.reason) == "outside_longitudinal_window"
+        )
+    }
+    active_actor_ids = {
+        str(tag.agent_id).split("::mode", 1)[0]
+        for tag in tags if tag.tag != IGNORE
+    }
+    negotiated_gap_actor_ids = {
+        str(assignment.cav_actor_id)
+        for assignment in assignments
+        if str(assignment.role) == "make_gap"
+    }
+    cleared_actor_ids = (
+        clearable_actor_ids - active_actor_ids - negotiated_gap_actor_ids
+    )
+    cached_corridor = release_cleared_actor_bounds(
+        cached_corridor, cleared_actor_ids,
+    )
     incoming_veto_state = dict(veto_state or {})
     held_veto_count = 0
     if corridor_rebuilt or cached_corridor is None:
@@ -547,6 +571,11 @@ def resolve_conflicts(
             1 for t in tags if t.tag in ("FOLLOW", "LEAD_BRAKE")
         ),
         "tags": {t.agent_id: t.tag for t in tags},
+        "semantic_risks": {t.agent_id: t.risk_kind for t in tags},
+        "object_types": {t.agent_id: t.object_type for t in tags},
+        "observation_sources": {
+            t.agent_id: t.observation_source for t in tags
+        },
         "tag_reasons": {t.agent_id: t.reason for t in tags},
         "agent_states": {
             _agent_id(agent): {

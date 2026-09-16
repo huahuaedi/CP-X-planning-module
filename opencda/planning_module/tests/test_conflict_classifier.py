@@ -8,6 +8,8 @@ from pipeline.conflict_classifier import (
     LEAD_BRAKE,
     MERGE,
     ONCOMING,
+    LANE_BLOCKAGE,
+    VRU_CONFLICT,
     ClassifierParams,
     classify_conflicts,
 )
@@ -144,3 +146,29 @@ def test_no_reference_tags_everything_follow():
     tags = classify_conflicts([{"x_ref_m": 0.0, "y_ref_m": 0.0}], EGO,
                               [{"id": "a", "x": 5.0, "y": 5.0}], P)
     assert tags[0].tag == FOLLOW and tags[0].reason == "no_reference"
+
+
+def test_pedestrian_crossing_uses_vru_semantic_risk_and_cp_provenance():
+    pts = [(20.0, -4.0 + 0.8 * k) for k in range(20)]
+    tag = _one({
+        "id": "walker", "x": 20.0, "y": -4.0, "v": 1.5,
+        "psi": math.pi / 2.0, "object_type": "pedestrian",
+        "cooperatively_observed": True, **_track(pts),
+    })
+
+    assert tag.tag == CROSSING
+    assert tag.risk_kind == VRU_CONFLICT
+    assert tag.object_type == "pedestrian"
+    assert tag.observation_source == "cp"
+
+
+def test_stationary_roadway_object_uses_lane_blockage_semantic_risk():
+    tag = _one({
+        "id": "debris", "x": 25.0, "y": 0.1, "v": 0.0,
+        "psi": 0.0, "object_type": "static_object",
+        "locally_observed": True,
+    })
+
+    assert tag.tag == FOLLOW
+    assert tag.risk_kind == LANE_BLOCKAGE
+    assert tag.observation_source == "local"

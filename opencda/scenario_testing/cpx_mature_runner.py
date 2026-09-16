@@ -39,6 +39,14 @@ def _assign_scenario_actor_roles(scenario_params, script_name):
         roles.append(role)
     for index, config in enumerate(scenario.get("scripted_actors", []) or []):
         role = "%s_scripted_%d" % (prefix, index)
+        semantic_type = re.sub(
+            r"[^a-zA-Z0-9_]+", "_", str(config.get("object_type", ""))
+        ).strip("_").lower()
+        if semantic_type:
+            # CARLA actors do not support arbitrary user metadata. Encode the
+            # scenario contract in role_name so perception can recover it at
+            # the simulator boundary instead of guessing from a blueprint.
+            role = "%s_type_%s" % (role, semantic_type)
         config["role_name"] = role
         roles.append(role)
     return tuple(roles)

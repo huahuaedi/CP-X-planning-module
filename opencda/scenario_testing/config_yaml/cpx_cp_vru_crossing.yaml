@@ -4,8 +4,12 @@ description: |-
   Use case C, native OpenCDA entry point. A pedestrian crosses the ego lane
   after an ego-position trigger. An auxiliary CAV is close enough to observe
   and share the VRU before ego enters its own sensing/communication range.
-  The scenario validates pedestrian CP ingestion, prediction, CROSSING
-  classification, space-time corridor construction, and MPC response.
+  Both arms disable OpenCDA local perception, which does not report walkers.
+  This is a CP-awareness versus no-pedestrian-input test, not a comparison
+  against a functioning onboard VRU detector. It exercises CP ingestion,
+  CROSSING classification, corridor construction, and MPC response.
+  The trigger gives the CP-off ego a narrow natural near-miss instead of a
+  scripted collision; CP-on should still yield earlier and more smoothly.
 
 cpx_mature:
   map_mode: 2lane_freeway_simplified
@@ -80,5 +84,5 @@ scenario:
       z: 0.5
       trigger:
         axis: x
-        cross: -230.0
+        cross: -236.0
         from: below

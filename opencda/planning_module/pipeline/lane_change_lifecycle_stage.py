@@ -35,7 +35,7 @@ class LaneChangeLifecycleStage:
 
     def release_completed(
         self, *, current_lane_id: int, ego_location: Any, ego_yaw_rad: float,
-        local_map: Any = None,
+        local_map: Any = None, stall_failure_count: int = 0,
     ) -> str:
         snapshot = self._provider.snapshot(LANE_CHANGE)
         if not snapshot.mutable_samples():
@@ -140,6 +140,42 @@ class LaneChangeLifecycleStage:
                         "lane_change_stabilization_timeout_to_lane_follow_recovery:"
                         f"target_lane={target_lane_id}:"
                         f"map_lane={int(current_lane_id)}"
+                    )
+            else:
+                # geometry-only completion tracking has no notion of MPC
+                # feasibility: a claim committed before target_lane_
+                # stabilization only advances via physical progress, so a
+                # car that cannot move at all (MPC infeasible on every tick,
+                # candidate_hard_gate/bounded_safe_stop) never accumulates
+                # progress and never reaches the phase above -- the existing
+                # stabilization timeout can't see it, and nothing else ever
+                # calls abandon_lane_change() for this phase. Confirmed via
+                # MDrive Interactive_Lane_Change/1: ego committed a lane
+                # change at t=25.5s, target lane 370144, then sat in
+                # emergency_brake with mpc_feedback_failure count climbing
+                # every tick (622 by the time AgentBlockedTest fired) 13.9m
+                # short of the route end -- the claim (and the corridor
+                # bound it holds for cooperative conflict resolution) never
+                # released. Mirrors tick_lane_change_stabilization's
+                # wall-clock bailout, gated on sustained MPC infeasibility
+                # instead of a stabilization-frame count since progress
+                # itself is what's frozen here.
+                stall_timeout_failures = int(self._config.get(
+                    "lane_change_mpc_stall_timeout_failures", 100
+                ))
+                if (
+                    stall_timeout_failures > 0
+                    and int(stall_failure_count) >= stall_timeout_failures
+                ):
+                    self._maneuver.abandon_lane_change(
+                        "mpc_infeasible_stall_timeout", suppress_recommit=True,
+                    )
+                    self.reset_reference()
+                    return (
+                        "lane_change_mpc_stall_timeout_to_lane_follow_recovery:"
+                        f"target_lane={target_lane_id}:"
+                        f"map_lane={int(current_lane_id)}:"
+                        f"consecutive_mpc_failures={int(stall_failure_count)}"
                     )
             return ""
         handoff_reason = self._install_lane_follow_handoff(

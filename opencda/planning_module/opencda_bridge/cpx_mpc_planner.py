@@ -1026,8 +1026,21 @@ class CPXMPCPlannerBridge:
         locations = []
         for entry in list(world_plan or []):
             node = entry[0] if isinstance(entry, (tuple, list)) and entry else entry
-            transform = getattr(node, "transform", node)
-            location = getattr(transform, "location", None)
+            # ``carla.Transform`` (what callers normally pass here) exposes
+            # its own ``.location`` directly, so try that first -- and only
+            # then fall back to ``.transform.location`` for a
+            # ``carla.Waypoint``. The previous order (``.transform`` first)
+            # misidentified a plain ``carla.Transform`` as a ``Waypoint``:
+            # ``Transform`` also happens to define a *method* named
+            # ``transform`` (coordinate transform, unrelated to this route
+            # plumbing), so ``getattr(node, "transform", node)`` silently
+            # picked up that bound method instead of falling back to
+            # ``node``, and the method object has no ``.location`` --
+            # dropping every point and leaving ``locations`` empty.
+            location = getattr(node, "location", None)
+            if location is None:
+                transform = getattr(node, "transform", None)
+                location = getattr(transform, "location", None)
             if location is not None:
                 locations.append(location)
         if len(locations) < 2:
@@ -2821,6 +2834,7 @@ class CPXMPCPlannerBridge:
             static_obstacle_result.target_lane_id
         )
         static_obstacle_stop_active = bool(static_obstacle_result.stop_active)
+        semantic_response = command_result.semantic_response
         opportunistic_lane_change_allowed = bool(
             command_result.opportunistic_lane_change_allowed
         )
@@ -3026,6 +3040,7 @@ class CPXMPCPlannerBridge:
             "static_obstacle_local_avoidance_active": static_obstacle_local_avoidance_active,
             "static_obstacle_local_target_lane_id": static_obstacle_local_target_lane_id,
             "static_obstacle_result": static_obstacle_result,
+            "semantic_response": semantic_response,
             "route_lane_change_required": route_lane_change_required,
             "route_geometry_lane_change_direction": route_geometry_lane_change_direction,
             "route_geometry_lane_change_distance_m": route_geometry_lane_change_distance_m,
@@ -3308,6 +3323,9 @@ class CPXMPCPlannerBridge:
                     ),
                     cooperative_lane_change_deferred=bool(
                         cooperative_lane_change_deferred
+                    ),
+                    lane_change_mpc_stall_failure_count=int(
+                        self._lane_change_mpc_stall_failure_count()
                     ),
                 ),
                 sim_time_s=float(sim_time_s),
@@ -3687,18 +3705,66 @@ class CPXMPCPlannerBridge:
             "rho": float(rho),
             # This is recovery slack, not extra drivable width.  Keeping the
             # 10k envelope penalty means MPC still prefers the body-safe tube,
-            # while the larger ceiling prevents a small tracking error at the
-            # turn apex from making the entire QP mathematically infeasible.
-            "max_slack_m": max(
-                0.10,
-                float(
-                    self.config.get(
-                        "turn_mpc_road_envelope_recovery_slack_m",
-                        1.5,
-                    )
-                ),
+            # while the ceiling prevents a tracking error at the turn apex
+            # from making the entire QP mathematically infeasible. A finite
+            # 1.5m ceiling was observed going infeasible on a real
+            # intersection turn (MDrive Intersection_Deadlock_Resolution/3,
+            # confirmed via MPC._last_infeasibility_diagnostic:
+            # road_envelope_term_active with road_boundary/corridor/terminal
+            # all inactive).
+            #
+            # An unbounded ceiling is NOT the fix, though it was tried first:
+            # this envelope is derived from the reference/lane geometry, not
+            # from live sensing of curbs, poles, medians or other static
+            # scene geometry -- MDrive's ground-truth perception feed here
+            # only ever supplies vehicles + traffic lights (see
+            # _MDriveVehicleManager.perception_manager.objects in
+            # cpx_planner_adapter.py), never static world obstacles. With no
+            # independent check against real geometry, letting MPC accept
+            # an arbitrarily large deviation from the reference tube has no
+            # backstop: re-tested on the same scenario with the ceiling
+            # unbounded, the earlier infeasibility/stall was gone but the
+            # vehicle then drifted far enough off its reference during
+            # recovery to collide with unmodeled static scene geometry
+            # partway through the turn exit (confirmed via a sudden speed
+            # collapse -- 2.34 m/s to under 0.2 m/s in one control tick, at
+            # zero commanded curvature and no MPC-side warning beforehand --
+            # not a planner-commanded stop). 3.0m is a middle ground: about
+            # 2x the original ceiling (enough headroom for the turn geometry
+            # that made 1.5m infeasible) while still bounding how far MPC
+            # can let the solution drift from the reference tube in the
+            # absence of any static-obstacle sensing to catch it.
+            "max_slack_m": (
+                lambda configured: (
+                    float(configured)
+                    if configured is not None and float(configured) > 0.0
+                    else 3.0
+                )
+            )(
+                self.config.get("turn_mpc_road_envelope_recovery_slack_m")
             ),
         }
+
+    def _lane_change_mpc_stall_failure_count(self) -> int:
+        """Consecutive MPC infeasibility count for the active lane-change target.
+
+        Feeds LaneChangeLifecycleStage.release_completed's stall watchdog
+        (see its docstring/comment). Only the committed maneuver's own target
+        lane matters here -- self.mpc_feedback.active_records already keys
+        failures by (decision, target_lane_id), so this just looks up the
+        record for whatever the maneuver FSM currently owns, independent of
+        which decision label produced it.
+        """
+
+        target_lane_id = int(self.maneuver_manager.lane_change.target_lane_id)
+        if target_lane_id == 0:
+            return 0
+        best = 0
+        for record in self.mpc_feedback.active_records:
+            if int(record.get("target_lane_id", 0)) != target_lane_id:
+                continue
+            best = max(best, int(record.get("consecutive_failures", 0)))
+        return best
 
     def _lane_change_lifecycle(self):
         stage = getattr(self, "lane_change_lifecycle_stage", None)
@@ -4823,6 +4889,24 @@ class CPXMPCPlannerBridge:
         road_cfg = dict(payload.get("road", {}))
         road_cfg.setdefault("lane_count", int(self.config.get("lane_count", 3)))
         road_cfg.setdefault("lane_width_m", float(self.config.get("lane_width_m", 3.5)))
+        # "One switch": cav_conflict_enabled is documented (see __init__)
+        # as also needing cost.corridor.enabled in mpc.yaml for the Stage-D
+        # corridor to actually bind in the QP -- but nothing wired that
+        # second half up, so cav_conflict_enabled=true alone still leaves
+        # classify_conflicts/resolve_conflicts running with nowhere to
+        # place their output. Confirmed via MDrive's Intersection_Deadlock_
+        # Resolution/3: with the corridor left at mpc.yaml's off-by-default
+        # and no per-agent yield/crossing mechanism outside it, a left-
+        # turning ego crossed a straight-through ego's path with no
+        # arbitration and collided. Only forces this on when the caller
+        # opted into cav_conflict_enabled -- every existing config that
+        # never sets it keeps mpc.yaml's own corridor setting untouched.
+        if bool(self.config.get("cav_conflict_enabled", False)):
+            cost_cfg = dict(mpc_cfg.get("cost", {}))
+            corridor_cfg = dict(cost_cfg.get("corridor", {}))
+            corridor_cfg["enabled"] = True
+            cost_cfg["corridor"] = corridor_cfg
+            mpc_cfg["cost"] = cost_cfg
         return mpc_cfg, road_cfg
 
 
@@ -5231,6 +5315,24 @@ def _hard_gate_requires_emergency_stop(
         "collision_risk",
         "emergency_brake_direct_control",
         "stop_missing_target_hard_lock",
+        # A geometry/continuity veto with nothing to fall back to is not
+        # automatically harmless just because it isn't an explicit
+        # collision-risk token -- confirmed on a real intersection turn
+        # (MDrive Intersection_Deadlock_Resolution/3): the reference
+        # pipeline hard-gated with "empty_reference;turn_swept_footprint:
+        # no_corridor_geometry" at the turn exit, the bounded-tracking
+        # fallback below applied throttle=0.2-0.23/brake=0.0 the whole
+        # window with the reference still empty, and the ego collided with
+        # unmodeled static scene geometry moments later -- then, still
+        # inside this same hard-gate window, the post-impact speed drop
+        # read as a large speed deficit against normal cruise and the
+        # bounded-tracking path answered with full throttle (brake stayed
+        # 0.0 throughout). "No usable reference at all" is at least as much
+        # a "do not know it's safe to keep moving" case as the
+        # stop-missing-target lock above; treat it the same way.
+        "empty_reference",
+        "no_corridor_geometry",
+        "too_few_forward_samples",
     )
     return any(token in reason for token in hazard_tokens)
 

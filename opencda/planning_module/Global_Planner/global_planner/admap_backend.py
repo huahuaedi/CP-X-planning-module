@@ -9,6 +9,36 @@ from .runtime import import_ad_map_access
 ad = None
 _map_matcher = None
 
+# Diagnostic-only: the most recent lane-geometry query failures, so a
+# consumer (MDrive's planner_diagnostics_stage) can surface *why* a query
+# raised -- lane_id, the offset actually passed, and the exception itself --
+# instead of the caller only ever seeing "returned None". Does not change
+# any query's return value or control flow; purely a side-channel for
+# investigating exactly which queries fail and with what, since the earlier
+# guess (a boundary parametric_offset) was tried and did not change the
+# live failure rate at all.
+_recent_query_failures: list[dict[str, object]] = []
+_MAX_RECENT_QUERY_FAILURES = 20
+
+
+def _record_query_failure(
+    query_name: str, lane_id: int, parametric_offset: float, exc: Exception
+) -> None:
+    _recent_query_failures.append({
+        "query": str(query_name),
+        "lane_id": int(lane_id),
+        "parametric_offset": float(parametric_offset),
+        "exception_type": type(exc).__name__,
+        "exception_message": str(exc),
+    })
+    del _recent_query_failures[:-_MAX_RECENT_QUERY_FAILURES]
+
+
+def get_recent_query_failures() -> list[dict[str, object]]:
+    """Return a copy of the most recent lane-geometry query failures."""
+
+    return list(_recent_query_failures)
+
 
 def _get_compatible_attribute(value, *attribute_names):
     """Read the first available AD-map 2.x/3.x binding attribute."""
@@ -452,7 +482,8 @@ def get_lane_heading(lane_id: int, parametric_offset: float) -> float | None:
     """
     try:
         heading = ad.map.lane.getLaneENUHeading(create_para_point(lane_id, parametric_offset))
-    except Exception:
+    except Exception as exc:
+        _record_query_failure("get_lane_heading", lane_id, parametric_offset, exc)
         return None
     if hasattr(heading, "mENUHeading"):
         return float(heading.mENUHeading)
@@ -467,7 +498,8 @@ def get_lane_width_m(lane_id: int, parametric_offset: float) -> float | None:
     """
     try:
         width = ad.map.lane.getWidth(get_lane(lane_id), ad.physics.ParametricValue(float(parametric_offset)))
-    except Exception:
+    except Exception as exc:
+        _record_query_failure("get_lane_width_m", lane_id, parametric_offset, exc)
         return None
     return distance_to_float(width)
 

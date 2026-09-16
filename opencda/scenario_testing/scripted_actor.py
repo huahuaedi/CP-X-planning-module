@@ -8,10 +8,9 @@ motion must be byte-identical across runs.  A CARLA Traffic-Manager car
 reacts to ego and jitters its own speed; this driver does neither.
 
 Each actor is advanced deterministically along a fixed world-XY polyline at a
-fixed speed with ``set_transform`` (no autopilot). Physics remains enabled so
-CARLA exposes the vehicle velocity or walker control to perception; the next
-scripted pose still owns the trajectory and removes accumulated physical
-drift.
+fixed speed with ``set_transform`` (no autopilot). Scripted vehicles are
+kinematic: CARLA physics must not also integrate a vehicle that is teleported
+every tick. Perception recovers motion from successive observed poses.
 """
 
 from __future__ import annotations
@@ -31,6 +30,7 @@ class ScriptedActor:
         speed_mps: float,
         acceleration_mps2: Any = None,
         z_m: float = 0.3,
+        road_map: Any = None,
         start_tick: int = 0,
         loop: bool = False,
         trigger: Any = None,
@@ -48,6 +48,7 @@ class ScriptedActor:
         )
         self._current_speed = 0.0
         self._z = float(z_m)
+        self._road_map = road_map
         self._start_tick = int(start_tick)
         self._loop = bool(loop)
         self._seg = 0
@@ -81,18 +82,56 @@ class ScriptedActor:
         a, b = self._path[seg], self._path[seg + 1]
         return math.hypot(b[0] - a[0], b[1] - a[1])
 
+    def _point_at_station(self, station_m: float):
+        remaining = max(0.0, float(station_m))
+        for seg in range(len(self._path) - 1):
+            length = self._seg_len(seg)
+            if remaining <= length or seg == len(self._path) - 2:
+                fraction = min(1.0, remaining / max(length, 1.0e-6))
+                a, b = self._path[seg], self._path[seg + 1]
+                return (
+                    a[0] + fraction * (b[0] - a[0]),
+                    a[1] + fraction * (b[1] - a[1]),
+                )
+            remaining -= length
+        return self._path[-1]
+
+    def _heading_at_station(self, station_m: float) -> float:
+        # A vehicle-length-scale chord gives a continuous tangent at polyline
+        # corners without changing the deterministic XY path or arrival time.
+        before = self._point_at_station(station_m - 1.0)
+        after = self._point_at_station(station_m + 1.0)
+        dx, dy = after[0] - before[0], after[1] - before[1]
+        if math.hypot(dx, dy) < 1.0e-6:
+            return self._heading(self._seg)
+        return math.atan2(dy, dx)
+
     def _teleport(self, xy, heading_rad: float, *, speed_mps=None) -> None:
         import carla
 
+        z_m = self._z
+        if not self._is_walker and self._road_map is not None:
+            # Kinematic vehicles do not settle under gravity.  Use the road
+            # elevation at each XY pose instead of preserving spawn clearance
+            # throughout the drive; walkers may be on a sidewalk and retain
+            # their explicitly configured height.
+            try:
+                waypoint = self._road_map.get_waypoint(
+                    carla.Location(x=float(xy[0]), y=float(xy[1]), z=self._z),
+                    project_to_road=True,
+                )
+                if waypoint is not None:
+                    z_m = float(waypoint.transform.location.z) + 0.03
+            except Exception:
+                pass
         self.vehicle.set_transform(
             carla.Transform(
-                carla.Location(x=float(xy[0]), y=float(xy[1]), z=self._z),
+                carla.Location(x=float(xy[0]), y=float(xy[1]), z=z_m),
                 carla.Rotation(yaw=math.degrees(float(heading_rad))),
             )
         )
-        # Keep CARLA's reported velocity consistent with scripted motion so
-        # prediction consumes real kinematics rather than inferring them from
-        # teleports. Walkers and vehicles expose different command APIs.
+        # Walkers need an explicit control command; scripted vehicles are
+        # kinematic, so their observed velocity comes from successive poses.
         reported_speed = (
             self._current_speed if speed_mps is None else float(speed_mps)
         )
@@ -108,13 +147,6 @@ class ScriptedActor:
                     jump=False,
                 ))
                 return
-            self.vehicle.set_target_velocity(
-                carla.Vector3D(
-                    x=float(reported_speed * math.cos(heading_rad)),
-                    y=float(reported_speed * math.sin(heading_rad)),
-                    z=0.0,
-                )
-            )
         except Exception:
             pass
 
@@ -177,7 +209,8 @@ class ScriptedActor:
         seg_len = max(1.0e-6, self._seg_len(self._seg))
         frac = self._s_in_seg / seg_len
         xy = (a[0] + frac * (b[0] - a[0]), a[1] + frac * (b[1] - a[1]))
-        self._teleport(xy, self._heading(self._seg))
+        station_m = sum(self._seg_len(seg) for seg in range(self._seg))
+        self._teleport(xy, self._heading_at_station(station_m + self._s_in_seg))
 
     @property
     def finished(self) -> bool:
@@ -207,13 +240,17 @@ def spawn_scripted_actors(world: Any, actor_cfgs: Sequence[dict]) -> List[Script
     """Spawn one :class:`ScriptedActor` per config entry.
 
     Config entry keys: ``blueprint`` (default ``vehicle.tesla.model3``),
-    ``path`` (list of ``[x, y]``), ``speed_mps``, ``z`` (default 0.3),
+    ``path`` (list of ``[x, y]``), ``speed_mps``, ``z`` (spawn/fallback height),
     ``start_tick`` (default 0), ``loop`` (default False).
     """
 
     import carla
 
     blueprint_library = world.get_blueprint_library()
+    try:
+        road_map = world.get_map()
+    except Exception:
+        road_map = None
     out: List[ScriptedActor] = []
     for i, cfg in enumerate(list(actor_cfgs or [])):
         cfg = dict(cfg or {})
@@ -248,14 +285,15 @@ def spawn_scripted_actors(world: Any, actor_cfgs: Sequence[dict]) -> List[Script
         if vehicle is None:
             print("[scripted_actor] entry %d spawn failed at %s" % (i, path[0]))
             continue
-        # ``set_target_velocity`` is not reflected by CARLA's get_velocity()
-        # for a physics-disabled actor. Keep physics enabled so every planner
-        # layer observes the same scripted kinematics; set_transform() on the
-        # next tick remains the authoritative motion source.
-        try:
-            vehicle.set_simulate_physics(True)
-        except Exception:
-            pass
+        # A vehicle cannot safely have two motion owners: CARLA dynamics and
+        # this script's per-tick set_transform(). Disable physics for scripted
+        # vehicles; the planner's tracker/CP observation boundary estimates
+        # kinematics from pose changes. Walkers retain their own control API.
+        if not bp_name.startswith("walker."):
+            try:
+                vehicle.set_simulate_physics(False)
+            except Exception:
+                pass
         out.append(
             ScriptedActor(
                 vehicle,
@@ -263,6 +301,7 @@ def spawn_scripted_actors(world: Any, actor_cfgs: Sequence[dict]) -> List[Script
                 speed_mps=float(cfg.get("speed_mps", 6.0)),
                 acceleration_mps2=cfg.get("acceleration_mps2"),
                 z_m=z,
+                road_map=road_map,
                 start_tick=int(cfg.get("start_tick", 0)),
                 loop=bool(cfg.get("loop", False)),
                 trigger=dict(cfg.get("trigger", {}) or {}),

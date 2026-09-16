@@ -2547,6 +2547,8 @@ class ReferenceGenerator:
                     0.5,
                     float(self.mpc.dt_s) * max(0.5, min(float(ego_speed_mps), 1.5)),
                 ),
+                ego_speed_mps=float(ego_speed_mps),
+                deceleration_mps2=float(comfortable_decel_mps2),
             )
             return (
                 emergency_reference,
@@ -2710,10 +2712,31 @@ class ReferenceGenerator:
         current_lane_id: int,
         horizon_steps: int,
         step_distance_m: float,
+        ego_speed_mps: float = 0.0,
+        deceleration_mps2: float = 2.0,
     ) -> tuple[list[dict[str, object]], list[float]]:
+        # Ramp the reference speed down from the ego's *actual* current speed
+        # (v^2 = v0^2 - 2*a*s, same profile as fallback_manager._bounded_
+        # safe_stop) instead of pinning every sample -- including the very
+        # first one, a fraction of a second ahead -- to 0. This path is
+        # reached while the ego can still be moving at road speed (e.g. a
+        # stop-at-intersection target that failed to resolve): demanding
+        # zero velocity one step away asks the MPC to kill all speed
+        # instantly, which is kinematically infeasible for any bounded-
+        # acceleration vehicle model and was leaving the QP with no
+        # feasible solution -- the ego would brake to a stop once (from
+        # whatever speed it already had) and then never move again for the
+        # rest of the run, since every subsequent emergency-stop reference
+        # made the same impossible demand.
+        decel_mps2 = max(0.1, float(deceleration_mps2))
+        station_m = 0.0
+        speed_mps = max(0.0, float(ego_speed_mps))
         samples = []
         for index in range(max(1, int(horizon_steps)) + 1):
             distance_m = float(index + 1) * max(0.5, float(step_distance_m))
+            station_m = float(distance_m)
+            speed_sq = max(0.0, float(ego_speed_mps) ** 2 - 2.0 * decel_mps2 * station_m)
+            speed_mps = min(float(speed_mps), math.sqrt(speed_sq))
             x_m = float(ego_location.x) + float(distance_m) * math.cos(float(ego_yaw_rad))
             y_m = float(ego_location.y) + float(distance_m) * math.sin(float(ego_yaw_rad))
             samples.append({
@@ -2727,10 +2750,14 @@ class ReferenceGenerator:
                 "road_center_offset_m": 0.0,
                 "road_left_width_m": 1.75,
                 "road_right_width_m": 1.75,
-                "v_ref_mps": 0.0,
-                "speed_ref_mps": 0.0,
-                "speed_mps": 0.0,
+                "v_ref_mps": float(speed_mps),
+                "speed_ref_mps": float(speed_mps),
+                "speed_mps": float(speed_mps),
             })
+        if samples:
+            samples[-1]["v_ref_mps"] = 0.0
+            samples[-1]["speed_ref_mps"] = 0.0
+            samples[-1]["speed_mps"] = 0.0
         first = samples[0] if samples else {
             "x_ref_m": float(ego_location.x),
             "y_ref_m": float(ego_location.y),

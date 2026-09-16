@@ -110,6 +110,7 @@ class ReferencePipeline:
                 current_lane_id=int(request.current_lane_id),
                 horizon_steps=int(self.horizon_steps),
                 step_distance_m=max(0.5, float(self.dt_s) * 0.8),
+                ego_speed_mps=float(request.ego_speed_mps),
             )
             reference = generated.samples
             destination = generated.destination_state
@@ -638,6 +639,7 @@ class ReferencePipeline:
                 current_lane_id=int(request.current_lane_id),
                 horizon_steps=int(self.horizon_steps),
                 step_distance_m=float(step_distance_m),
+                ego_speed_mps=float(request.ego_speed_mps),
             )
             return (
                 generated.samples,

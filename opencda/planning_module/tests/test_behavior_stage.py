@@ -666,3 +666,92 @@ def test_unauthorized_lane_change_is_normalized_once():
     assert result.phase == "LANE_KEEP"
     assert result.reason == "prediction_conflict"
     assert result.reset_lane_change_reason == "prediction_conflict"
+
+
+def test_cp_vru_inside_dynamic_stopping_reach_requests_yield_stop():
+    response = BehaviorStage.assess_front_observation(
+        front_obstacle={
+            "vehicle_id": "walker-7",
+            "object_type": "pedestrian",
+            "front_distance_m": 12.0,
+            "v": 1.2,
+            "cooperatively_observed": True,
+        },
+        ego_speed_mps=8.0,
+        max_deceleration_mps2=-4.0,
+        route_lane_safety_score=0.0,
+        config={},
+        runtime_config={},
+        object_track_id=lambda obstacle: obstacle["vehicle_id"],
+    )
+
+    assert response.risk_kind == "VRU_CONFLICT"
+    assert response.action == "YIELD_STOP"
+    assert response.observation_source == "cp"
+    assert response.reason == "vru_within_dynamic_stopping_reach"
+
+
+def test_typed_static_object_requests_lane_blockage_handling():
+    response = BehaviorStage.assess_front_observation(
+        front_obstacle={
+            "vehicle_id": "debris-3",
+            "object_type": "roadway_object",
+            "front_distance_m": 24.0,
+            "v": 0.0,
+            "locally_observed": True,
+            "cooperatively_observed": True,
+        },
+        ego_speed_mps=7.0,
+        max_deceleration_mps2=-4.0,
+        route_lane_safety_score=0.2,
+        config={},
+        runtime_config={},
+        object_track_id=lambda obstacle: obstacle["vehicle_id"],
+    )
+
+    assert response.risk_kind == "LANE_BLOCKAGE"
+    assert response.action == "LANE_BLOCKAGE"
+    assert response.object_type == "static_object"
+    assert response.observation_source == "local+cp"
+
+
+def test_explicit_static_object_does_not_depend_on_lane_score_threshold():
+    response = BehaviorStage.assess_front_observation(
+        front_obstacle={
+            "vehicle_id": "road-object-1",
+            "object_type": "static_object",
+            "front_distance_m": 76.0,
+            "v": 0.0,
+            "cooperatively_observed": True,
+        },
+        ego_speed_mps=8.0,
+        max_deceleration_mps2=-4.0,
+        route_lane_safety_score=0.66,
+        config={},
+        runtime_config={},
+        object_track_id=lambda obstacle: obstacle["vehicle_id"],
+    )
+
+    assert response.risk_kind == "LANE_BLOCKAGE"
+    assert response.action == "LANE_BLOCKAGE"
+
+
+def test_moving_vehicle_does_not_enter_static_obstacle_lifecycle():
+    response = BehaviorStage.assess_front_observation(
+        front_obstacle={
+            "vehicle_id": "lead-2",
+            "object_type": "vehicle",
+            "front_distance_m": 18.0,
+            "v": 4.0,
+            "locally_observed": True,
+        },
+        ego_speed_mps=8.0,
+        max_deceleration_mps2=-4.0,
+        route_lane_safety_score=0.1,
+        config={},
+        runtime_config={},
+        object_track_id=lambda obstacle: obstacle["vehicle_id"],
+    )
+
+    assert response.risk_kind == "NONE"
+    assert response.action == "NONE"

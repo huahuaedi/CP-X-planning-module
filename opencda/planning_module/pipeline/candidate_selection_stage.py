@@ -32,6 +32,7 @@ class CandidateSelectionRequest:
     current_steering_rad: float = 0.0
     required_decision: str = ""
     required_target_lane_id: int = 0
+    lane_change_mpc_stall_failure_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,7 @@ class CandidateArbitrationRequest:
     speed_plan: Any
     turn_prepare_speed_suppressed: bool
     cooperative_lane_change_deferred: bool = False
+    lane_change_mpc_stall_failure_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -390,6 +392,9 @@ class CandidateSelectionStage:
                     int(authorization.target_lane_id)
                     if required_decision else 0
                 ),
+                lane_change_mpc_stall_failure_count=int(
+                    request.lane_change_mpc_stall_failure_count
+                ),
             ),
             sim_time_s=float(sim_time_s),
             route_revision=str(route_revision),
@@ -525,6 +530,7 @@ class CandidateSelectionStage:
             ego_location=request.ego_location,
             ego_yaw_rad=float(request.ego_yaw_rad),
             local_map=getattr(request.reference_context, "local_map", None),
+            stall_failure_count=int(request.lane_change_mpc_stall_failure_count),
         ) or "")
         intents = list(request.intents or ())
         if self._maneuver.route_lane_change_edge_completed:

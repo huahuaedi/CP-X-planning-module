@@ -16,6 +16,7 @@ from pipeline.spatiotemporal_corridor import (
     aggregate_mode_corridors,
     build_longitudinal_corridor,
     retain_pending_corridor,
+    release_cleared_actor_bounds,
     rebase_corridor,
     _minimum_reachable_station_profile_m,
 )
@@ -111,6 +112,27 @@ def test_pending_corridor_can_tighten_but_not_revoke_future_rows():
     assert retained.s_hi == [_BIG, 12.0, 15.0, _BIG]
     assert retained.binding == ["", "old", "new", ""]
     assert refreshed.s_hi == [_BIG, _BIG, 15.0, _BIG]
+
+
+def test_fresh_geometric_clearance_releases_only_that_actors_pending_rows():
+    previous = Corridor(
+        s_lo=[-_BIG] * 4,
+        s_hi=[_BIG, 12.0, 18.0, 20.0],
+        binding=["", "walker::mode0", "walker", "unseen_vehicle"],
+    )
+    current = Corridor(
+        s_lo=[-_BIG] * 4,
+        s_hi=[_BIG] * 4,
+        binding=[""] * 4,
+    )
+
+    filtered_cache = release_cleared_actor_bounds(previous, {"walker"})
+    released = retain_pending_corridor(current, filtered_cache)
+
+    assert released.s_hi == [_BIG, _BIG, _BIG, 20.0]
+    assert released.binding == ["", "", "", "unseen_vehicle"]
+    assert previous.s_hi[1] == 12.0
+    assert filtered_cache.s_hi[1] == _BIG
 
 
 def test_follow_leaves_corridor_open_for_speed_planner():

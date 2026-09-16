@@ -5,11 +5,11 @@ from ``vehicle_manager.perception_manager.objects``: for the publishing CAV
 and every nearby CAV in ``v2x_manager.cav_nearby`` (population itself is
 distance-gated by ``v2x.communication_range``, unrelated to whether that CAV
 runs the CP-X planner), this scans every ``*vehicle*``/``*walker*`` CARLA
-actor within ``communication_range_m`` of *that* vantage point and fuses
+actor within that CAV's configured sensor range (also capped by the CP
+provider's exchange radius) and fuses
 (deduplicates) the union into one obstacle list. This sidesteps two
 limitations of OpenCDA's own perception path: its ground-truth "deactivated"
-mode hard-codes a 50 m detection radius (``perception_manager.py::deactivate_mode``'s
-``thresh = 50``), and it never tracks pedestrians at all (only
+mode does not track pedestrians at all (only
 ``{"vehicles", "traffic_lights"}``). Nearby CAVs only need to exist and be
 tracked -- they do not need their own CP-X planner/provider running, so
 plain OpenCDA-default-``BehaviorAgent`` traffic works as an observation
@@ -68,6 +68,7 @@ class OpenCDACPProvider:
         )
         self.last_publish_summary: dict[str, object] = {}
         self._last_observer_cav_ids: list[str] = []
+        self._pose_observations: dict[str, tuple[float, float, float, float, float]] = {}
 
     def publish(
         self,
@@ -154,6 +155,7 @@ class OpenCDACPProvider:
                 {
                     "actor_id": str(message.get("id", "")),
                     "actor_type": str(message.get("type", "unknown")),
+                    "actor_z_m": float(message.get("z", 0.0) or 0.0),
                     "observer_cav_ids": list(
                         message.get("observed_by_cav_ids", []) or []
                     ),
@@ -335,7 +337,10 @@ class OpenCDACPProvider:
         # separate, independent check from `communication_range_m` below).
         # A nearby CAV only needs to be a tracked VehicleManager; it does not
         # need its own CP-X planner running.
-        vantage_points: list[tuple[str, Any]] = [(str(ego_id), ego_location)]
+        vantage_points: list[tuple[str, Any, float]] = [(
+            str(ego_id), ego_location,
+            self._sensor_range_m(vehicle_manager),
+        )]
         v2x_manager = getattr(vehicle_manager, "v2x_manager", None)
         cav_nearby = getattr(v2x_manager, "cav_nearby", {}) or {}
         for nearby_vm in dict(cav_nearby).values():
@@ -347,12 +352,13 @@ class OpenCDACPProvider:
                 vantage_points.append((
                     str(getattr(nearby_vehicle, "id", "")),
                     get_location(),
+                    self._sensor_range_m(nearby_vm),
                 ))
             except RuntimeError:
                 continue
         self._last_observer_cav_ids = sorted(set(
             str(observer_id)
-            for observer_id, _ in vantage_points
+            for observer_id, _, _ in vantage_points
             if str(observer_id)
         ))
 
@@ -378,11 +384,15 @@ class OpenCDACPProvider:
             in_range_observer_ids: list[str] = []
             observed_by_cav_ids: list[str] = []
             visibility_by_cav_id: dict[str, str] = {}
-            for observer_id, vantage in vantage_points:
-                if actor_location.distance(vantage) > self.communication_range_m:
+            for observer_id, vantage, sensor_range_m in vantage_points:
+                distance_m = float(actor_location.distance(vantage))
+                if distance_m > self.communication_range_m:
                     continue
                 observer_id = str(observer_id)
                 in_range_observer_ids.append(observer_id)
+                if distance_m > sensor_range_m:
+                    visibility_by_cav_id[observer_id] = "out_of_sensor_range"
+                    continue
                 visible, reason = self._line_of_sight_visible(
                     world=world,
                     observer_location=vantage,
@@ -399,8 +409,7 @@ class OpenCDACPProvider:
             actor_id = self._object_actor_id(actor, fallback=str(actor_id_int))
             if actor_id in seen_actor_ids:
                 continue
-            type_id = str(getattr(actor, "type_id", ""))
-            object_type = "pedestrian" if type_id.startswith("walker.") else "vehicle"
+            object_type = self._semantic_object_type(actor)
             message = self._object_to_cp_message(
                 obj=actor,
                 map_planner=map_planner,
@@ -432,6 +441,39 @@ class OpenCDACPProvider:
                 messages.append(message)
 
         return messages
+
+    @staticmethod
+    def _semantic_object_type(actor: Any) -> str:
+        """Recover the canonical type carried across the CARLA boundary."""
+
+        type_id = str(getattr(actor, "type_id", "")).strip().lower()
+        role_name = str(
+            getattr(actor, "attributes", {}).get("role_name", "")
+        ).strip().lower()
+        marker = "_type_"
+        if marker in role_name:
+            declared = role_name.rsplit(marker, 1)[-1]
+            if declared in {
+                "vehicle", "pedestrian", "cyclist", "vru", "static_object"
+            }:
+                return declared
+        return "pedestrian" if type_id.startswith("walker.") else "vehicle"
+
+    def _sensor_range_m(self, vehicle_manager: Any) -> float:
+        """Read the ground-truth sensor limit independently of V2X reach.
+
+        Active camera/lidar perception has no common range field in OpenCDA;
+        validation scenes needing exact sight-distance parity use the
+        deactivated ground-truth adapter instead.
+        """
+
+        perception = getattr(vehicle_manager, "perception_manager", None)
+        if bool(getattr(perception, "activate", False)):
+            return float(self.communication_range_m)
+        configured = getattr(perception, "deactivated_detection_range_m", None)
+        if configured is None:
+            return float(self.communication_range_m)
+        return max(0.0, min(float(configured), self.communication_range_m))
 
     def _fallback_carla_actor_messages(
         self,
@@ -505,7 +547,20 @@ class OpenCDACPProvider:
         ):
             return None
 
-        if speed_kmh is None:
+        actor_id = self._object_actor_id(obj, fallback=fallback_id)
+        heading_rad = math.radians(float(rotation.yaw))
+        if str(object_type).lower() in {"pedestrian", "walker"}:
+            # Scripted walkers are moved with set_transform; CARLA's
+            # get_velocity() can describe the teleport rather than walking.
+            # Derive their observed motion from successive CP poses instead.
+            speed_mps, heading_rad = self._observed_motion(
+                actor_id=actor_id,
+                x_m=float(location.x),
+                y_m=float(location.y),
+                timestamp_s=float(sim_time_s),
+                heading_rad=heading_rad,
+            )
+        elif speed_kmh is None:
             if velocity is None:
                 speed_mps = 0.0
             else:
@@ -516,7 +571,17 @@ class OpenCDACPProvider:
                 )
         else:
             speed_mps = max(0.0, float(speed_kmh) / 3.6)
-        heading_rad = math.radians(float(rotation.yaw))
+        if str(object_type).lower() not in {"pedestrian", "walker"} and speed_mps <= 0.05:
+            # Kinematic actors and real adapters may report zero velocity
+            # while their observed pose changes. Recover that motion at the
+            # same observation boundary used for pedestrian trajectories.
+            speed_mps, heading_rad = self._observed_motion(
+                actor_id=actor_id,
+                x_m=float(location.x),
+                y_m=float(location.y),
+                timestamp_s=float(sim_time_s),
+                heading_rad=heading_rad,
+            )
         lane_id = 0
         road_id = -1
         try:
@@ -535,7 +600,6 @@ class OpenCDACPProvider:
             speed_mps=float(speed_mps),
             heading_rad=float(heading_rad),
         )
-        actor_id = self._object_actor_id(obj, fallback=fallback_id)
         return {
             "id": f"{provider_source}:{actor_id}",
             "type": str(object_type),
@@ -570,6 +634,30 @@ class OpenCDACPProvider:
             )),
             "visibility_by_cav_id": dict(visibility_by_cav_id or {}),
         }
+
+    def _observed_motion(
+        self, *, actor_id: str, x_m: float, y_m: float,
+        timestamp_s: float, heading_rad: float,
+    ) -> tuple[float, float]:
+        previous = self._pose_observations.get(str(actor_id))
+        speed_mps = 0.0
+        if previous is not None:
+            prev_t, prev_x, prev_y, prev_speed, prev_heading = previous
+            dt_s = float(timestamp_s) - float(prev_t)
+            if dt_s > 1.0e-4:
+                dx_m = float(x_m) - float(prev_x)
+                dy_m = float(y_m) - float(prev_y)
+                distance_m = math.hypot(dx_m, dy_m)
+                speed_mps = float(distance_m / dt_s)
+                if distance_m > 1.0e-4:
+                    heading_rad = math.atan2(dy_m, dx_m)
+            elif dt_s >= 0.0:
+                speed_mps, heading_rad = float(prev_speed), float(prev_heading)
+        self._pose_observations[str(actor_id)] = (
+            float(timestamp_s), float(x_m), float(y_m),
+            float(speed_mps), float(heading_rad),
+        )
+        return float(speed_mps), float(heading_rad)
 
     def _line_of_sight_visible(
         self,

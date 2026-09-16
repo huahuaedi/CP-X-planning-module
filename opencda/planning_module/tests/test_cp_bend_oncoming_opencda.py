@@ -57,16 +57,19 @@ def test_oncoming_path_reverses_the_ego_bend_and_is_event_aligned():
     assert cfg["vehicle_base"]["planner"]["cav_conflict_enabled"] is True
     assert cfg["vehicle_base"]["planner"]["global_planner_mode"] == "dij"
     assert cfg["vehicle_base"]["planner"]["ignore_traffic_control"] is True
+    assert cfg["vehicle_base"]["planner"]["route_reached_distance_m"] == 1.5
     assert (
         cfg["vehicle_base"]["sensing"]["perception"]
         ["deactivated_detection_range_m"]
         == 20.0
     )
+    assert cfg["vehicle_base"]["sensing"]["perception"]["activate"] is False
     observer = cfg["scenario"]["single_cav_list"][1]
     assert observer["behavior"]["max_speed"] == 0
     assert observer["sensing"]["perception"][
         "deactivated_detection_range_m"
     ] == 60.0
+    assert observer["sensing"]["perception"]["activate"] is False
 
 
 

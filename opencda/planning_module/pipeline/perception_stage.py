@@ -6,6 +6,12 @@ from dataclasses import dataclass
 import math
 from typing import Any, Mapping, Optional, Sequence, Tuple
 
+from .observation_contract import (
+    add_provenance,
+    merge_metadata,
+    normalize_cp,
+    normalize_local,
+)
 from .prediction import obstacle_track_id
 
 
@@ -26,6 +32,10 @@ class PerceptionStage:
     The callable ports isolate currently legacy data implementations without
     giving this stage access to the bridge or its mutable state.
     """
+
+    # Stable facade; decoding itself is owned by observation_contract.
+    normalize_local = staticmethod(normalize_local)
+    normalize_cp = staticmethod(normalize_cp)
 
     def __init__(
         self,
@@ -114,7 +124,7 @@ class PerceptionStage:
         snapshots = []
         for index, detected in enumerate(vehicles):
             if isinstance(detected, Mapping):
-                normalized = cls.normalize_local(detected)
+                normalized = normalize_local(detected)
                 if normalized is not None:
                     snapshots.append(normalized)
                 continue
@@ -255,18 +265,34 @@ class PerceptionStage:
         fused = {}
         priorities = {}
         for raw in list(local_objects or ()):
-            normalized = self.normalize_local(raw)
+            normalized = normalize_local(raw)
             if normalized is not None:
+                normalized = add_provenance(
+                    normalized,
+                    channel="local",
+                    received_timestamp_s=float(timestamp_s),
+                )
                 self._upsert(fused, priorities, normalized)
         for raw in list(cp_obstacles or ()):
             if not isinstance(raw, Mapping) or not self.message_is_fresh(
                 raw, timestamp_s=float(timestamp_s)
             ):
                 continue
-            normalized = self.normalize_cp(raw)
-            if normalized is None or self._duplicates_native_perception(
-                normalized, fused.values()
-            ):
+            normalized = normalize_cp(raw)
+            if normalized is None:
+                continue
+            normalized = add_provenance(
+                normalized,
+                channel="cp",
+                received_timestamp_s=float(timestamp_s),
+            )
+            duplicate_key = self._native_perception_duplicate_key(
+                normalized, fused
+            )
+            if duplicate_key is not None:
+                fused[duplicate_key] = merge_metadata(
+                    fused[duplicate_key], normalized
+                )
                 continue
             self._upsert(fused, priorities, normalized)
         return list(fused.values())
@@ -290,16 +316,26 @@ class PerceptionStage:
 
     @staticmethod
     def _duplicates_native_perception(candidate, existing, max_delta_m=1.0):
+        return PerceptionStage._native_perception_duplicate_key(
+            candidate,
+            {str(index): item for index, item in enumerate(existing)},
+            max_delta_m=max_delta_m,
+        ) is not None
+
+    @staticmethod
+    def _native_perception_duplicate_key(
+        candidate, existing, max_delta_m=1.0
+    ):
         provider = str(candidate.get("provider_source", "")).lower()
         source = str(candidate.get("source", "")).lower()
         if "perception" not in provider and "perception" not in source:
-            return False
+            return None
         try:
             candidate_x = float(candidate.get("x", 0.0))
             candidate_y = float(candidate.get("y", 0.0))
         except Exception:
-            return False
-        for item in existing:
+            return None
+        for key, item in dict(existing or {}).items():
             item_provider = str(item.get("provider_source", "")).lower()
             item_source = str(item.get("source", "")).lower()
             if "perception" not in item_provider and "perception" not in item_source:
@@ -312,8 +348,8 @@ class PerceptionStage:
             except Exception:
                 continue
             if distance_m <= float(max_delta_m):
-                return True
-        return False
+                return key
+        return None
 
     @staticmethod
     def _source_priority(snapshot):
@@ -345,11 +381,14 @@ class PerceptionStage:
             if isinstance(previous, Mapping) else -1.0
         )
         confidence = float(snapshot.get("confidence", 0.0))
-        if priority > previous_priority or (
+        replace = priority > previous_priority or (
             priority == previous_priority and confidence >= previous_confidence
-        ):
-            fused[key] = dict(snapshot)
+        )
+        if replace:
+            fused[key] = merge_metadata(snapshot, previous or {})
             priorities[key] = int(priority)
+        elif previous is not None:
+            fused[key] = merge_metadata(previous, snapshot)
 
     def limit_for_mpc(self, objects, *, ego_location):
         result = [
@@ -364,78 +403,3 @@ class PerceptionStage:
             ) ** 2)
             result = result[:self._max_mpc_obstacles]
         return result
-
-    @staticmethod
-    def normalize_local(snapshot):
-        try:
-            obstacle_id = str(
-                snapshot.get("vehicle_id", snapshot.get("id", ""))
-            ).strip()
-            if not obstacle_id:
-                return None
-            return {
-                "vehicle_id": obstacle_id, "id": obstacle_id,
-                "x": float(snapshot.get("x", 0.0)),
-                "y": float(snapshot.get("y", 0.0)),
-                "v": float(snapshot.get("v", 0.0)),
-                "psi": float(snapshot.get("psi", 0.0)),
-                "length_m": float(snapshot.get("length_m", 4.5)),
-                "width_m": float(snapshot.get("width_m", 2.0)),
-                "source": str(snapshot.get("source", "opencda_perception")),
-                "provider_source": str(snapshot.get(
-                    "provider_source", "native_opencda_perception"
-                )),
-                "confidence": float(snapshot.get("confidence", 1.0)),
-            }
-        except Exception:
-            return None
-
-    @staticmethod
-    def normalize_cp(obstacle):
-        try:
-            raw_id = str(
-                obstacle.get("id", obstacle.get("vehicle_id", ""))
-            ).strip()
-            if not raw_id:
-                return None
-            state = obstacle.get("state", ())
-            state_values = list(state) if (
-                isinstance(state, Sequence)
-                and not isinstance(state, (str, bytes, bytearray))
-            ) else []
-            x_m = obstacle.get(
-                "x", obstacle.get("x_m", state_values[0] if state_values else None)
-            )
-            y_m = obstacle.get(
-                "y", obstacle.get("y_m", state_values[1] if len(state_values) >= 2 else None)
-            )
-            if x_m is None or y_m is None:
-                return None
-            speed_mps = obstacle.get(
-                "v", obstacle.get("speed_mps", state_values[2] if len(state_values) >= 3 else 0.0)
-            )
-            heading_rad = obstacle.get(
-                "psi", obstacle.get("heading_rad", state_values[3] if len(state_values) >= 4 else 0.0)
-            )
-            shape = obstacle.get("shape", {})
-            shape = dict(shape) if isinstance(shape, Mapping) else {}
-            obstacle_id = raw_id.rsplit(":", 1)[-1]
-            return {
-                "vehicle_id": obstacle_id, "id": obstacle_id,
-                "cp_message_id": raw_id,
-                "x": float(x_m), "y": float(y_m),
-                "v": float(speed_mps), "psi": float(heading_rad),
-                "length_m": float(shape.get("length_m", obstacle.get("length_m", 4.5))),
-                "width_m": float(shape.get("width_m", obstacle.get("width_m", 2.0))),
-                "source": str(obstacle.get("source", "opencda_cp")),
-                "provider_source": str(obstacle.get("provider_source", "opencda_cp")),
-                "confidence": float(obstacle.get("confidence", 0.5)),
-                "lane_id": int(float(obstacle.get("lane_id", 0) or 0)),
-                "road_id": int(float(obstacle.get("road_id", 0) or 0)),
-                "object_type": str(obstacle.get("type", "unknown")),
-                "observed_by_cav_ids": list(obstacle.get("observed_by_cav_ids", ()) or ()),
-                "not_observed_by_cav_ids": list(obstacle.get("not_observed_by_cav_ids", ()) or ()),
-                "blind_spot_shared": bool(obstacle.get("blind_spot_shared", False)),
-            }
-        except Exception:
-            return None

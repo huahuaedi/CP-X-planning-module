@@ -10,6 +10,24 @@ from .local_map_snapshot import LocalMapSnapshot
 from .reference_line_provider import LANE_FOLLOW
 
 
+def _recent_admap_query_failures() -> list[dict[str, object]]:
+    """Read admap_backend's recent lane-geometry query failure log.
+
+    Best-effort: only the AD-map global-planner path imports admap_backend
+    at all (it needs the compiled ad-map-access bindings), so this returns
+    an empty list rather than raising on any other configuration.
+    """
+
+    try:
+        from opencda.planning_module.Global_Planner.global_planner import (
+            admap_backend,
+        )
+
+        return admap_backend.get_recent_query_failures()
+    except Exception:
+        return []
+
+
 def _cav_conflict_summary(diag: Mapping[str, Any]) -> str:
     """One-line CSV field: per-agent tag + per-cav role + corridor status."""
 
@@ -73,6 +91,17 @@ class PlannerDiagnosticsStage:
             "static_obstacle_candidate_since_s": float(
                 c["static_obstacle_result"].candidate_since_s
             ),
+            "semantic_risk_kind": str(c["semantic_response"].risk_kind),
+            "semantic_behavior_action": str(c["semantic_response"].action),
+            "semantic_object_type": str(c["semantic_response"].object_type),
+            "semantic_observation_source": str(
+                c["semantic_response"].observation_source
+            ),
+            "semantic_obstacle_id": str(c["semantic_response"].obstacle_id),
+            "semantic_obstacle_distance_m": float(
+                c["semantic_response"].distance_m
+            ),
+            "semantic_behavior_reason": str(c["semantic_response"].reason),
             "static_obstacle_global_replan_enabled": bool(self.config.get(
                 "static_obstacle_global_replan_enabled",
                 self.behavior_runtime_cfg.get("static_obstacle_global_replan_enabled", False),
@@ -771,6 +800,27 @@ class PlannerDiagnosticsStage:
             "front_gap_obstacle_is_source_lane": reference_debug.get(
                 "front_gap_obstacle_is_source_lane", ""
             ),
+            "semantic_risk_kind": reference_debug.get(
+                "semantic_risk_kind", "NONE"
+            ),
+            "semantic_behavior_action": reference_debug.get(
+                "semantic_behavior_action", "NONE"
+            ),
+            "semantic_object_type": reference_debug.get(
+                "semantic_object_type", "unknown"
+            ),
+            "semantic_observation_source": reference_debug.get(
+                "semantic_observation_source", "unknown"
+            ),
+            "semantic_obstacle_id": reference_debug.get(
+                "semantic_obstacle_id", ""
+            ),
+            "semantic_obstacle_distance_m": reference_debug.get(
+                "semantic_obstacle_distance_m", ""
+            ),
+            "semantic_behavior_reason": reference_debug.get(
+                "semantic_behavior_reason", ""
+            ),
             "speed_owner_requested_mps": reference_debug.get(
                 "speed_owner_requested_mps", ""
             ),
@@ -925,6 +975,25 @@ class PlannerDiagnosticsStage:
             "mpc_feasibility_checked": bool(mpc_replan_executed),
             "mpc_feasibility_status": str(mpc_status),
             "mpc_feasibility_reason": str(fallback_reason),
+            # Which AD-map lane-geometry queries actually raised this tick
+            # (lane_id, parametric_offset, exception) -- a prior guess that
+            # validate_turn_swept_footprint's "no_corridor_geometry" came
+            # from a parametric_offset landing right on a lane-boundary
+            # seam was tried (a clamp-and-retry in admap_backend.py) and
+            # made no measurable difference on a live run, so this replaces
+            # that guess with the actual query failures instead of another
+            # guess. See Global_Planner.global_planner.admap_backend
+            # .get_recent_query_failures / _record_query_failure.
+            "admap_query_failures": _recent_admap_query_failures(),
+            # Section-level snapshot of which constraint groups were switched
+            # on for the QP that just failed (road envelope/obstacle count,
+            # corridor rows, terminal-stop constraint, etc.) -- captured by
+            # MPC._build_qp/_solve_qp only when the solve is infeasible, so
+            # this stays empty on every normally-solved tick. See mpc.py's
+            # _last_qp_diagnostic / _last_infeasibility_diagnostic.
+            "mpc_infeasibility_diagnostic": dict(
+                getattr(self.mpc, "_last_infeasibility_diagnostic", {}) or {}
+            ),
             "mpc_solve_time_ms": float(getattr(self.mpc, "_last_solve_time_ms", 0.0)),
             "mpc_cost_profile": str(self.active_mpc_cost_profile),
             "requested_mpc_cost_profile": str(self.requested_mpc_cost_profile),

@@ -112,6 +112,30 @@ def test_stage_c_refresh_retains_pending_rows_for_unchanged_conflict():
     assert result.corridor.binding == cached.binding
 
 
+def test_stage_a_geometric_clearance_filters_cache_without_stage_c_refresh():
+    cached = Corridor(
+        s_lo=[-_BIG] * 21,
+        s_hi=[18.0] * 21,
+        binding=["walker"] * 20 + ["unseen_vehicle"],
+    )
+    walker = {
+        "id": "walker", "x": 30.0, "y": 6.0,
+        "v": 1.2, "psi": -math.pi / 2.0,
+        "predicted_trajectory": [{"x": 30.0, "y": 6.0}] * 21,
+    }
+    result = resolve_conflicts(
+        reference_samples=REF, ego_snapshot=EGO, my_actor_id=1,
+        obstacle_snapshots=[walker], tag_state={"walker": IGNORE},
+        refresh_assignments=False, rebuild_corridor=False,
+        cached_corridor=cached,
+    )
+
+    assert result.diagnostics["tags"]["walker"] == IGNORE
+    assert not result.diagnostics["corridor_rebuilt"]
+    assert result.corridor.s_hi == [_BIG] * 20 + [18.0]
+    assert cached.s_hi == [18.0] * 21
+
+
 def test_cooperative_make_gap_overrides_generic_follow_handoff():
     path = [(20.0 + 0.6 * k, 0.1) for k in range(21)]
     peer = _cav(2, (20.0, 0.1), committed_at_s=1.0, path=path, speed=6.0)
@@ -201,6 +225,19 @@ def test_conflicting_claims_arbitrate_before_geometric_merge_begins():
     # The claim reserves priority, but the peer's broadcast path still stays
     # in its own lane. No physical occupancy -> no MPC half-space or stop.
     assert all(value >= _BIG for value in result.corridor.s_hi)
+
+    pending = Corridor(
+        s_lo=[-_BIG] * 21, s_hi=[18.0] * 21,
+        binding=["2"] * 21,
+    )
+    cached = resolve_conflicts(
+        reference_samples=REF, ego_snapshot=EGO, my_actor_id=1,
+        my_claim=ego_claim, cav_intents=[peer],
+        tag_state={"2": IGNORE}, cached_corridor=pending,
+        rebuild_corridor=False, refresh_assignments=True,
+    )
+    assert cached.diagnostics["roles"]["2"] == "make_gap"
+    assert cached.corridor.s_hi == pending.s_hi
 
 
 def test_non_connected_crosser_defaults_to_yield_without_assignment():

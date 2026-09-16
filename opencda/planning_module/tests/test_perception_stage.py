@@ -98,3 +98,89 @@ def test_perception_stage_tracks_before_front_speed_is_resolved():
 
     assert result.front_actor_speed_mps == pytest.approx(4.0)
     assert result.fused_objects[0]["kinematics_source"] == "position_finite_difference"
+
+
+def test_fusion_preserves_cp_provenance_and_prediction_with_local_kinematics():
+    stage = PerceptionStage(max_mpc_obstacles=4)
+
+    fused = stage.fuse(
+        local_objects=[{
+            "vehicle_id": "42", "x": 10.0, "y": 0.0, "v": 3.0,
+            "psi": 0.0, "timestamp_s": 10.0,
+        }],
+        cp_obstacles=[{
+            "id": "native_opencda_v2x:42",
+            "state": [12.0, 0.0, 7.0, 0.0],
+            "source": "opencda_v2x",
+            "provider_source": "native_opencda_v2x",
+            "timestamp_s": 9.8,
+            "ttl_s": 1.0,
+            "type": "car",
+            "predicted_modes": [{
+                "probability": 1.0,
+                "path": [{"t": 0.0, "x": 12.0, "y": 0.0}],
+            }],
+        }],
+        timestamp_s=10.0,
+    )
+
+    assert len(fused) == 1
+    obstacle = fused[0]
+    assert obstacle["x"] == 10.0
+    assert obstacle["v"] == 3.0
+    assert obstacle["object_type"] == "vehicle"
+    assert obstacle["observation_sources"] == ["local", "cp"]
+    assert obstacle["locally_observed"] is True
+    assert obstacle["cooperatively_observed"] is True
+    assert obstacle["cp_age_s"] == pytest.approx(0.2)
+    assert len(obstacle["predicted_modes"]) == 1
+
+
+def test_position_deduplication_keeps_cp_evidence_on_local_object():
+    stage = PerceptionStage(max_mpc_obstacles=4)
+
+    fused = stage.fuse(
+        local_objects=[{
+            "vehicle_id": "local-actor", "x": 15.0, "y": -2.0,
+            "v": 2.5, "psi": 0.0,
+            "source": "opencda_perception",
+            "provider_source": "native_opencda_perception",
+        }],
+        cp_obstacles=[{
+            "id": "native_opencda_perception:anonymous-0",
+            "state": [15.2, -2.1, 2.5, 0.0],
+            "source": "opencda_perception",
+            "provider_source": "native_opencda_perception",
+            "timestamp_s": 3.0,
+            "ttl_s": 1.0,
+            "observed_by_cav_ids": [7],
+            "blind_spot_shared": True,
+        }],
+        timestamp_s=3.5,
+    )
+
+    assert len(fused) == 1
+    obstacle = fused[0]
+    assert obstacle["vehicle_id"] == "local-actor"
+    assert obstacle["observation_sources"] == ["local", "cp"]
+    assert obstacle["cooperatively_observed"] is True
+    assert obstacle["observed_by_cav_ids"] == [7]
+    assert obstacle["blind_spot_shared"] is True
+
+
+def test_stale_cp_observation_never_enters_common_observation_contract():
+    stage = PerceptionStage(max_mpc_obstacles=4)
+
+    fused = stage.fuse(
+        local_objects=[],
+        cp_obstacles=[{
+            "id": "remote-vru",
+            "state": [5.0, 1.0, 1.0, 0.0],
+            "type": "pedestrian",
+            "timestamp_s": 1.0,
+            "ttl_s": 0.5,
+        }],
+        timestamp_s=2.0,
+    )
+
+    assert fused == []

@@ -39,6 +39,14 @@ MERGE = "MERGE"
 CROSSING = "CROSSING"
 ONCOMING = "ONCOMING"
 
+NO_RISK = "NONE"
+FOLLOWING_CONFLICT = "FOLLOWING_CONFLICT"
+CROSSING_OCCUPANCY = "CROSSING_OCCUPANCY"
+ONCOMING_CONFLICT = "ONCOMING_CONFLICT"
+MERGE_GAP = "MERGE_GAP"
+VRU_CONFLICT = "VRU_CONFLICT"
+LANE_BLOCKAGE = "LANE_BLOCKAGE"
+
 
 @dataclass(frozen=True)
 class ClassifierParams:
@@ -69,6 +77,45 @@ class ConflictTag:
     min_lateral_m: float              # min |lateral offset| over the horizon
     cooperative: bool
     reason: str
+    object_type: str = "unknown"
+    risk_kind: str = NO_RISK
+    observation_source: str = "unknown"
+
+
+def _risk_kind(object_type: str, tag: str) -> str:
+    """Map geometric tags to the one semantic-risk vocabulary."""
+
+    if tag == IGNORE:
+        return NO_RISK
+    if object_type in {"pedestrian", "cyclist", "vru"}:
+        return VRU_CONFLICT
+    if object_type == "static_object":
+        return LANE_BLOCKAGE
+    if tag == CROSSING:
+        return CROSSING_OCCUPANCY
+    if tag == ONCOMING:
+        return ONCOMING_CONFLICT
+    if tag in {CUT_IN, MERGE}:
+        return MERGE_GAP
+    return FOLLOWING_CONFLICT
+
+
+def _observation_source(agent: Mapping[str, Any]) -> str:
+    local = bool(agent.get("locally_observed", False))
+    cooperative = bool(agent.get("cooperatively_observed", False))
+    if local and cooperative:
+        return "local+cp"
+    if cooperative:
+        return "cp"
+    if local:
+        return "local"
+    if bool(agent.get("cooperative", False)):
+        return "peer_intent"
+    legacy = (
+        str(agent.get("provider_source", ""))
+        + " " + str(agent.get("source", ""))
+    ).lower()
+    return "cp" if "v2x" in legacy or "cp" in legacy else "unknown"
 
 
 def _f(m: Mapping[str, Any], *keys: str, default: float = 0.0) -> float:
@@ -134,9 +181,14 @@ def classify_conflicts(
     out: List[ConflictTag] = []
     if len(poly) < 2:
         for a in agent_snapshots or []:
-            out.append(ConflictTag(_agent_id(a), FOLLOW, None, None, 0.0, 0.0,
-                                   bool(a.get("cooperative", False)),
-                                   "no_reference"))
+            object_type = str(a.get("object_type", "unknown") or "unknown")
+            out.append(ConflictTag(
+                _agent_id(a), FOLLOW, None, None, 0.0, 0.0,
+                bool(a.get("cooperative", False)), "no_reference",
+                object_type=object_type,
+                risk_kind=_risk_kind(object_type, FOLLOW),
+                observation_source=_observation_source(a),
+            ))
         return out
 
     n, dt = max(1, int(p.horizon_steps)), max(1e-3, float(p.dt_s))
@@ -147,6 +199,7 @@ def classify_conflicts(
 
     for a in list(agent_snapshots or []):
         aid = _agent_id(a)
+        object_type = str(a.get("object_type", "unknown") or "unknown")
         previous_tag = str((previous_tags or {}).get(aid, ""))
         coop = bool(a.get("cooperative", False))
         track = [
@@ -241,6 +294,9 @@ def classify_conflicts(
                 min_gap_m=(0.0 if min_gap == math.inf else float(min_gap)),
                 min_lateral_m=(0.0 if min_lat == math.inf else float(min_lat)),
                 cooperative=coop, reason=reason,
+                object_type=object_type,
+                risk_kind=_risk_kind(object_type, tag),
+                observation_source=_observation_source(a),
             )
         )
     return out

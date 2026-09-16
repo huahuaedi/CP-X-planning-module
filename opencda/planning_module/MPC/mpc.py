@@ -799,6 +799,8 @@ class MPC:
         self._consecutive_solver_failure_count: int = 0
         self._last_failure_reset_triggered: bool = False
         self._last_warm_start_retry_triggered: bool = False
+        self._last_qp_diagnostic: Dict[str, object] = {}
+        self._last_infeasibility_diagnostic: Dict[str, object] = {}
         # Track whether the previous plan_trajectory call was a stop goal.
         # Used to detect the stop→resume transition and prevent the v=0 stop
         # plan from being reused as a linearisation seed, which would cause a
@@ -2197,6 +2199,9 @@ class MPC:
             "failure_reset_triggered": bool(self._last_failure_reset_triggered),
             "warm_start_retry_triggered": bool(
                 self._last_warm_start_retry_triggered
+            ),
+            "infeasibility_diagnostic": dict(
+                getattr(self, "_last_infeasibility_diagnostic", {}) or {}
             ),
         }
 
@@ -3771,6 +3776,27 @@ class MPC:
         A = sp.csc_matrix((a_data, (a_row, a_col)), shape=(len(lower_bounds), n_var), dtype=float)
         l = np.asarray(lower_bounds, dtype=float)
         u = np.asarray(upper_bounds, dtype=float)
+        # Cheap, read-only snapshot of which constraint groups this specific
+        # solve actually switched on, for _solve_qp to attach to an
+        # infeasible-status debug record. Deliberately not a full row-to-
+        # constraint label map (would need instrumenting every add_constraint
+        # call site across this ~700-line function); this section-level view
+        # is enough to distinguish "avoidance vs. terminal-stop conflict" from
+        # "corridor vs. lane-boundary conflict" without that larger, riskier
+        # change.
+        self._last_qp_diagnostic = {
+            "row_count": int(len(lower_bounds)),
+            "var_count": int(n_var),
+            "road_envelope_term_active": bool(road_envelope_term_active),
+            "road_envelope_block_count": int(len(envelope_blocks_list)),
+            "road_boundary_term_active": bool(road_boundary_term_active),
+            "corridor_term_active": bool(corridor_term_active),
+            "corridor_row_count": int(len(corridor_row_list)),
+            "corridor_heading_term_active": bool(corridor_heading_term_active),
+            "speed_soft_term_active": bool(speed_soft_term_active),
+            "terminal_speed_constraint_active": bool(terminal_speed_constraint_active),
+            "object_count": int(len(object_snapshots or [])),
+        }
         return P, q, A, l, u, index
 
     @staticmethod
@@ -3817,6 +3843,16 @@ class MPC:
         solve_time_ms = (time.perf_counter() - t0) * 1000.0
         status = str(result.info.status).lower()
         if result.x is None or "solved" not in status:
+            # Pair this failure with the constraint-group snapshot _build_qp
+            # just took for this exact QP (set immediately before this call),
+            # so an infeasible tick's debug record says *which* constraint
+            # groups were switched on -- e.g. distinguishing an obstacle-
+            # envelope-vs-terminal-stop conflict from a corridor-vs-lane-
+            # boundary one -- instead of only the generic solver status.
+            self._last_infeasibility_diagnostic = dict(
+                getattr(self, "_last_qp_diagnostic", {}) or {}
+            )
+            self._last_infeasibility_diagnostic["status"] = str(status)
             return None, status, float(solve_time_ms)
         return np.asarray(result.x, dtype=float), status, float(solve_time_ms)
 

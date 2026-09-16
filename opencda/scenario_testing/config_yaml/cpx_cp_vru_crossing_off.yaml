@@ -3,6 +3,8 @@ base_config: cpx_cp_vru_crossing.yaml
 description: |-
   CP-off control arm for use case C. Physical actors, routes, and event
   trigger are inherited unchanged; only ego's CP transport is disabled.
+  Local walker detection is also absent in both arms, so this control arm
+  intentionally receives no pedestrian obstacle input.
 
 vehicle_base:
   planner:

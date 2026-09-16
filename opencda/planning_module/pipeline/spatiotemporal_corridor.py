@@ -160,9 +160,9 @@ def retain_pending_corridor(
 
     ``previous`` must already be time/station rebased to the current tick.
     A fresh prediction may tighten a bound immediately, but an open or looser
-    refresh cannot revoke a constraint that was published for a still-future
-    stage.  The rolling horizon removes those rows naturally.  This is the
-    corridor lifecycle contract; it avoids a second timer/hysteresis owner.
+    refresh cannot revoke a still-future constraint. The caller first removes
+    bounds whose owners have been freshly observed as geometrically clear;
+    missing observations keep the old bound until its forecast ages out.
     """
 
     if previous is None:
@@ -197,6 +197,31 @@ def retain_pending_corridor(
             effective.first_infeasible_stage = int(previous_stage)
     effective.clamp_and_check()
     return effective
+
+
+def release_cleared_actor_bounds(
+    corridor: Optional[Corridor], cleared_actor_ids: Sequence[str],
+) -> Optional[Corridor]:
+    """Remove only bounds whose observed owner is clear over the horizon.
+
+    A cached corridor is still needed for actors that disappeared from
+    perception; this returns a filtered view without mutating that cache.
+    """
+
+    cleared = {str(actor_id) for actor_id in cleared_actor_ids}
+    if corridor is None or not cleared:
+        return corridor
+    filtered = Corridor(
+        s_lo=list(corridor.s_lo), s_hi=list(corridor.s_hi),
+        binding=list(corridor.binding),
+    )
+    for k, owner in enumerate(filtered.binding):
+        if str(owner).split("::mode", 1)[0] in cleared:
+            filtered.s_lo[k] = -_BIG
+            filtered.s_hi[k] = _BIG
+            filtered.binding[k] = ""
+    filtered.clamp_and_check()
+    return filtered
 
 
 def aggregate_mode_corridors(

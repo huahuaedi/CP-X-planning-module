@@ -230,7 +230,7 @@ class LaneFollowingObstaclePredictionTests(unittest.TestCase):
             "v": 1.4,
             "psi": 0.0,
             "a": 0.0,
-            "actor_type": "pedestrian",
+            "object_type": "pedestrian",
         }
         straight = obstacle_future_trajectory(
             pedestrian_snapshot, horizon_s=2.0, dt_s=0.5, model="constant_acceleration"

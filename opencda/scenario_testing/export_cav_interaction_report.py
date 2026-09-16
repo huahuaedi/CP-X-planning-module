@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from bisect import bisect_left, bisect_right
 import json
 import math
 import subprocess
@@ -125,6 +126,29 @@ def _trajectory_delta(first, second):
     return max(deltas, default=0.0)
 
 
+def _smoothed_acceleration(rows, window_s=0.5):
+    """Centered time-window mean for display only; never alters logged commands."""
+
+    times = [_f(row, "sim_time_s") for row in rows]
+    values = [_f(row, "post_supervisor_accel_cmd_mps2") for row in rows]
+    samples = [(t, value) for t, value in zip(times, values)
+               if math.isfinite(t) and math.isfinite(value)]
+    if not samples:
+        return [], []
+    sample_times = [sample[0] for sample in samples]
+    sample_values = [sample[1] for sample in samples]
+    prefix = [0.0]
+    for value in sample_values:
+        prefix.append(prefix[-1] + value)
+    half_window = window_s / 2.0
+    smoothed = []
+    for t in sample_times:
+        lo = bisect_left(sample_times, t - half_window)
+        hi = bisect_right(sample_times, t + half_window)
+        smoothed.append((prefix[hi] - prefix[lo]) / (hi - lo))
+    return sample_times, smoothed
+
+
 def _plot(data, output: Path):
     import matplotlib
     matplotlib.use("Agg")
@@ -163,14 +187,31 @@ def _plot(data, output: Path):
         rows = data[f"on_{cav}"]; t = [_f(r, "sim_time_s") for r in rows]
         axes[0].plot(t, [_f(r, "cav_intent_count", 0.0) for r in rows], label=f"{cav} intents")
         axes[0].plot(t, [_f(r, "cav_shared_plan_count", 0.0) for r in rows], "--", label=f"{cav} shared plans")
-        axes[1].plot(t, [_f(r, "post_supervisor_accel_cmd_mps2", 0.0) for r in rows], label=cav)
+        accel_t, accel = _smoothed_acceleration(rows)
+        axes[1].plot(accel_t, accel, label=cav)
         axes[2].plot(t, [_f(r, "steer_cmd_rad", 0.0) for r in rows], label=cav)
     for axis, ylabel in zip(axes, ("received count", "accel (m/s²)", "steer (rad)")):
         axis.set_ylabel(ylabel); axis.grid(True, alpha=0.25); axis.legend()
     axes[2].set_xlabel("simulation time (s)")
+    axes[1].set_title("Acceleration command")
     fig.suptitle("Prediction transport and MPC control response (ON)")
     fig.tight_layout()
     fig.savefig(output / "cav_prediction_and_control.png", dpi=170)
+    plt.close(fig)
+
+    fig, axis = plt.subplots(figsize=(12, 5))
+    for arm, style in (("off", "--"), ("on", "-")):
+        for cav in ("cav1", "cav2"):
+            accel_t, accel = _smoothed_acceleration(data[f"{arm}_{cav}"])
+            axis.plot(accel_t, accel, style, color=colors[cav],
+                      label=f"{arm.upper()} {cav}")
+    axis.set_title("Acceleration command")
+    axis.set_xlabel("simulation time (s)")
+    axis.set_ylabel("acceleration (m/s²)")
+    axis.grid(True, alpha=0.25)
+    axis.legend()
+    fig.tight_layout()
+    fig.savefig(output / "cav_acceleration_smoothed.png", dpi=170)
     plt.close(fig)
 
     fig, axis = plt.subplots(figsize=(12, 4.8))
@@ -320,7 +361,8 @@ def main():
             f"{item['max_on_off_position_delta_m']} m"
         )
     report += ["", "## Artifacts", "", "- `cav_interaction_overview.png`",
-               "- `cav_prediction_and_control.png`", "- `cav_prediction_accuracy.png`",
+               "- `cav_prediction_and_control.png`", "- `cav_acceleration_smoothed.png`",
+               "- `cav_prediction_accuracy.png`",
                "- `metrics.json`"]
     report += [f"- `{name}`" for name in videos]
     (args.output / "report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
