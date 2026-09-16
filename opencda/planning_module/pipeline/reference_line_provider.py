@@ -924,6 +924,42 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             float(config.get("waypoint_turn_min_step_m", 0.35)),
             float(dt_s) * max(0.8, float(turn_speed_mps)),
         )
+        master, reason = self._turn_master_geometry(
+            local_map=local_map, config=config, ego_location=ego_location,
+            current_lane_id=current_lane_id, target_lane_id=target_lane_id,
+            turn_speed_mps=turn_speed_mps, lock_master=lock_master,
+            turn_direction=turn_direction, route_revision=route_revision,
+            map_epoch=map_epoch,
+        )
+        if not master:
+            return [], list(destination_state or []), str(reason)
+        reference, reason = self._turn_master_window(
+            master=master, ego_location=ego_location, config=config,
+            step_distance_m=step_distance_m, horizon_steps=horizon_steps,
+            reason=reason,
+        )
+        reference, destination, reason = self._turn_reference_finish(
+            reference=reference, ego_location=ego_location,
+            ego_yaw_rad=ego_yaw_rad, config=config,
+            current_state=current_state, current_lane_id=current_lane_id,
+            target_lane_id=target_lane_id, turn_speed_mps=turn_speed_mps,
+            destination_state=destination_state, reason=reason,
+        )
+        return [dict(sample) for sample in reference], list(destination), str(reason)
+
+    def _turn_master_geometry(
+        self, *, local_map: Any, config: Mapping[str, Any], ego_location: Any,
+        current_lane_id: int, target_lane_id: int, turn_speed_mps: float,
+        lock_master: bool, turn_direction: str, route_revision: str,
+        map_epoch: str,
+    ) -> tuple[list, str]:
+        """Resolve (and, if the lifecycle requires it, install) the TURN master.
+
+        Split out of ``turn_reference``: this is the AD-map lookup +
+        installation half; windowing and curvature/destination shaping stay
+        separate steps.
+        """
+
         reason = ""
         turn_snapshot = self.snapshot(TURN)
         master = turn_snapshot.mutable_samples()
@@ -1002,8 +1038,14 @@ class ReferenceLineProvider(StableReferenceLineProvider):
                 master = self.snapshot(TURN).mutable_samples()
             elif not turn_snapshot.active:
                 master = [dict(sample) for sample in candidate_master]
-        if not master:
-            return [], list(destination_state or []), str(reason)
+        return master, str(reason)
+
+    def _turn_master_window(
+        self, *, master: list, ego_location: Any, config: Mapping[str, Any],
+        step_distance_m: float, horizon_steps: int, reason: str,
+    ) -> tuple[list, str]:
+        """Window the installed TURN master, or fall back to it unwindowed."""
+
         if self.snapshot(TURN).active:
             window = self.window(
                 TURN,
@@ -1025,6 +1067,17 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             )
         else:
             reference = [dict(sample) for sample in master]
+        return reference, str(reason)
+
+    def _turn_reference_finish(
+        self, *, reference: list, ego_location: Any, ego_yaw_rad: float,
+        config: Mapping[str, Any], current_state: Any, current_lane_id: int,
+        target_lane_id: int, turn_speed_mps: float, destination_state: Any,
+        reason: str,
+    ) -> tuple[list, list, str]:
+        """Stamp speed/curvature onto the windowed reference and seed
+        the destination state from it."""
+
         for sample in reference:
             sample["v_ref_mps"] = float(turn_speed_mps)
             sample["speed_ref_mps"] = float(turn_speed_mps)
@@ -1069,7 +1122,7 @@ class ReferenceLineProvider(StableReferenceLineProvider):
                 config.get("waypoint_turn_destination_arc_m", 4.5)
             ),
         ) or seed
-        return [dict(sample) for sample in reference], list(destination), str(reason)
+        return reference, destination, str(reason)
 
     def intersection_turn_candidate(
         self, request: TurnReferenceRequest, *, decision: str
