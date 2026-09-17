@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from typing import Any, Dict, List, Mapping, Sequence
 
 
@@ -99,8 +100,26 @@ def write_cp_message_payload(
 ) -> None:
     ensure_cp_message_file_exists(message_path=message_path)
     normalized_payload = normalize_cp_payload(payload, schema_version=schema_version)
-    with open(message_path, "w", encoding="utf-8") as message_file:
-        json.dump(normalized_payload, message_file, indent=2)
+    normalized_path = os.path.abspath(str(message_path).strip() or CP_MESSAGE_PATH)
+    directory = os.path.dirname(normalized_path)
+    descriptor, temporary_path = tempfile.mkstemp(
+        prefix=".%s." % os.path.basename(normalized_path),
+        suffix=".tmp",
+        dir=directory,
+        text=True,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as message_file:
+            json.dump(normalized_payload, message_file, indent=2)
+            message_file.flush()
+            os.fsync(message_file.fileno())
+        # Readers observe either the complete previous generation or the
+        # complete new generation. A killed scenario can no longer expose a
+        # half-written CP obstacle/lane-event payload to the planner.
+        os.replace(temporary_path, normalized_path)
+    finally:
+        if os.path.exists(temporary_path):
+            os.unlink(temporary_path)
 
 
 def reset_cp_message_payload(
