@@ -7,6 +7,7 @@ import math
 from typing import Any, Mapping
 
 from .local_map_snapshot import LocalMapSnapshot
+from .reference_geometry import pose_at_arc, project_to_polyline
 from .reference_line_provider import LANE_FOLLOW
 
 
@@ -42,6 +43,49 @@ def _cav_conflict_summary(diag: Mapping[str, Any]) -> str:
     if feasible is not None:
         parts.append("corridor_feasible" if feasible else "corridor_infeasible")
     return ";".join(parts) if parts else "no_conflict"
+
+
+def _wrap_angle_rad(angle_rad: float) -> float:
+    return (float(angle_rad) + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def _executed_reference_tracking(
+    *,
+    reference: object,
+    ego_x_m: float,
+    ego_y_m: float,
+    ego_yaw_rad: float,
+) -> dict[str, object]:
+    """Measure ego pose against the reference actually submitted to MPC.
+
+    Map-matcher alignment and executed-reference tracking are deliberately
+    separate diagnostics.  Near a connector they may use different local
+    tangents; treating the former as MPC tracking error led control tuning to
+    chase a map-association signal rather than the trajectory being executed.
+    """
+
+    samples = list(reference or []) if isinstance(reference, (list, tuple)) else []
+    if len(samples) < 2:
+        return {
+            "executed_reference_tracking_valid": False,
+            "executed_reference_progress_s_m": "",
+            "executed_reference_lateral_error_m": "",
+            "executed_reference_heading_error_deg": "",
+        }
+    progress_s_m, lateral_error_m = project_to_polyline(
+        samples,
+        float(ego_x_m),
+        float(ego_y_m),
+    )
+    _, _, reference_heading_rad = pose_at_arc(samples, progress_s_m)
+    return {
+        "executed_reference_tracking_valid": True,
+        "executed_reference_progress_s_m": float(progress_s_m),
+        "executed_reference_lateral_error_m": float(lateral_error_m),
+        "executed_reference_heading_error_deg": math.degrees(
+            _wrap_angle_rad(float(ego_yaw_rad) - float(reference_heading_rad))
+        ),
+    }
 
 
 class PlannerDiagnosticsStage:
@@ -235,12 +279,19 @@ class PlannerDiagnosticsStage:
         cp_summary = dict(getattr(self.cp_provider, "last_publish_summary", {}) or {})
         cav_resolution = context.get("cav_resolution")
         cav_diag = dict(getattr(cav_resolution, "diagnostics", {}) or {})
+        executed_reference_tracking = _executed_reference_tracking(
+            reference=lane_center_reference,
+            ego_x_m=float(ego_location.x),
+            ego_y_m=float(ego_location.y),
+            ego_yaw_rad=float(ego_yaw_rad),
+        )
         diagnostics = {
             "sim_time_s": float(self._sim_time_s()),
             "vehicle_id": int(getattr(self.vehicle_manager.vehicle, "id", -1)),
             "x_m": float(ego_location.x),
             "y_m": float(ego_location.y),
             "yaw_deg": float(ego_transform.rotation.yaw),
+            **executed_reference_tracking,
             "speed_mps": float(ego_speed_mps),
             "measured_accel_mps2": float(measured_accel_mps2),
             "mpc_jerk_seed_accel_mps2": float(mpc_jerk_seed_accel_mps2),

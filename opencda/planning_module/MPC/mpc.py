@@ -3142,6 +3142,7 @@ class MPC:
         speed_tracking_reference_mps: Sequence[float] | None = None,
         temporal_consistency_reference_u: np.ndarray | None = None,
         corridor_rows: Sequence[Any] | None = None,
+        tracking_ref_rollout: np.ndarray | None = None,
     ) -> Tuple[sp.csc_matrix, np.ndarray, sp.csc_matrix, np.ndarray, np.ndarray, QPIndex]:
         """
         Intent:
@@ -3153,6 +3154,13 @@ class MPC:
         """
 
         object_count = len(object_snapshots)
+        # A previous solution is useful as a dynamics-linearisation seed, but
+        # it is not this tick's tracking target. Sequential QP iterations may
+        # update ``x_ref_rollout``; the reference-derived target stays fixed.
+        tracking_rollout = np.asarray(
+            x_ref_rollout if tracking_ref_rollout is None else tracking_ref_rollout,
+            dtype=float,
+        )
         envelope_blocks_list = (
             list(road_envelope_blocks.get("blocks", []) or [])
             if isinstance(road_envelope_blocks, Mapping)
@@ -3289,7 +3297,7 @@ class MPC:
             q[prev_idx] += 2.0 * float(weight) * float(reference_difference)
 
         nominal_steering_profile = self._nominal_path_steering_profile(
-            x_ref_rollout=x_ref_rollout,
+            x_ref_rollout=tracking_rollout,
             lane_center_reference=lane_center_reference,
         )
 
@@ -3366,14 +3374,14 @@ class MPC:
             qp_stage_progress_m = [float(ego_progress_m)]
             for j in range(self.horizon_steps):
                 cumulative_distance_m += math.hypot(
-                    float(x_ref_rollout[j + 1, 0]) - float(x_ref_rollout[j, 0]),
-                    float(x_ref_rollout[j + 1, 1]) - float(x_ref_rollout[j, 1]),
+                    float(tracking_rollout[j + 1, 0]) - float(tracking_rollout[j, 0]),
+                    float(tracking_rollout[j + 1, 1]) - float(tracking_rollout[j, 1]),
                 )
                 qp_stage_progress_m.append(float(ego_progress_m) + float(cumulative_distance_m))
 
         for k in range(1, self.horizon_steps + 1):
             stage_reference = self._tracking_reference_at_stage(
-                x_ref_rollout=x_ref_rollout,
+                x_ref_rollout=tracking_rollout,
                 stage_index=int(k),
             )
             x_ref_value = float(stage_reference[0])
@@ -3407,8 +3415,8 @@ class MPC:
                 lane_sample = self._get_lane_center_stage_sample(
                     lane_center_reference=lane_center_reference,
                     stage_index=int(k),
-                    query_x_m=float(x_ref_rollout[k, 0]),
-                    query_y_m=float(x_ref_rollout[k, 1]),
+                    query_x_m=float(tracking_rollout[k, 0]),
+                    query_y_m=float(tracking_rollout[k, 1]),
                 )
             lane_reference = normalize_lane_reference_sample(
                 lane_sample,
@@ -3446,7 +3454,7 @@ class MPC:
                 lane_heading_ref = float(lane_reference.heading_rad)
                 lane_heading_ref_aligned = self._align_angle_near(
                     angle_rad=float(lane_heading_ref),
-                    around_rad=float(x_ref_rollout[k, 3]),
+                    around_rad=float(tracking_rollout[k, 3]),
                 )
 
                 if bool(self.lane_center_follow_enabled) and float(self.lane_center_follow_weight) > 0.0:
@@ -4419,20 +4427,37 @@ class MPC:
                     shifted_seed_x,
                     np.asarray(shifted_seed[1], dtype=float),
                 )
-        x_ref_rollout, u_ref_rollout = self._reference_rollout(
+        # Build the immutable tracking target from the current published
+        # reference.  A shifted previous solution may still seed dynamics
+        # linearisation below, but must never replace this target.
+        tracking_x_ref_rollout, tracking_u_ref_rollout = self._reference_rollout(
             x0=x0,
             x_ref_target=destination,
             lane_center_reference=lane_center_reference,
             object_snapshots=object_snapshots,
             speed_upper_bound_mps=float(active_speed_upper_bound_mps),
             reachable_speed_floor_profile_mps=reachable_speed_floor_profile_mps,
-            seed_state_traj=shifted_seed[0] if shifted_seed is not None else None,
-            seed_control_traj=shifted_seed[1] if shifted_seed is not None else None,
+            seed_state_traj=None,
+            seed_control_traj=None,
         )
+        if shifted_seed is None:
+            x_ref_rollout = np.asarray(tracking_x_ref_rollout, dtype=float)
+            u_ref_rollout = np.asarray(tracking_u_ref_rollout, dtype=float)
+        else:
+            x_ref_rollout, u_ref_rollout = self._reference_rollout(
+                x0=x0,
+                x_ref_target=destination,
+                lane_center_reference=lane_center_reference,
+                object_snapshots=object_snapshots,
+                speed_upper_bound_mps=float(active_speed_upper_bound_mps),
+                reachable_speed_floor_profile_mps=reachable_speed_floor_profile_mps,
+                seed_state_traj=shifted_seed[0],
+                seed_control_traj=shifted_seed[1],
+            )
         speed_tracking_reference_mps = self._speed_tracking_reference(
             x0=x0,
             x_ref_target=destination,
-            linearization_rollout=x_ref_rollout,
+            linearization_rollout=tracking_x_ref_rollout,
             object_snapshots=object_snapshots,
             current_acceleration_mps2=float(planning_current_acceleration_mps2),
             speed_upper_bound_mps=float(active_speed_upper_bound_mps),
@@ -4443,6 +4468,7 @@ class MPC:
             initial_x_ref_rollout: np.ndarray,
             initial_u_ref_rollout: np.ndarray,
             fixed_speed_tracking_reference_mps: Sequence[float],
+            fixed_tracking_x_ref_rollout: np.ndarray,
         ) -> tuple[np.ndarray | None, np.ndarray | None, str, float, np.ndarray, np.ndarray]:
             solve_time_total_ms = 0.0
             current_x_rollout = np.asarray(initial_x_ref_rollout, dtype=float)
@@ -4474,6 +4500,7 @@ class MPC:
                         shifted_seed[1] if shifted_seed is not None else None
                     ),
                     corridor_rows=corridor_rows,
+                    tracking_ref_rollout=fixed_tracking_x_ref_rollout,
                 )
                 solution, status, solve_time_ms = self._solve_qp(P=P, q=q, A=A, l=l, u=u)
                 solve_time_total_ms += float(solve_time_ms)
@@ -4498,6 +4525,10 @@ class MPC:
             initial_u_ref_rollout=np.asarray(u_ref_rollout, dtype=float),
             fixed_speed_tracking_reference_mps=np.asarray(
                 speed_tracking_reference_mps,
+                dtype=float,
+            ),
+            fixed_tracking_x_ref_rollout=np.asarray(
+                tracking_x_ref_rollout,
                 dtype=float,
             ),
         )
@@ -4566,6 +4597,10 @@ class MPC:
                 initial_u_ref_rollout=np.asarray(clean_u_ref_rollout, dtype=float),
                 fixed_speed_tracking_reference_mps=np.asarray(
                     clean_speed_tracking_reference_mps,
+                    dtype=float,
+                ),
+                fixed_tracking_x_ref_rollout=np.asarray(
+                    clean_x_ref_rollout,
                     dtype=float,
                 ),
             )

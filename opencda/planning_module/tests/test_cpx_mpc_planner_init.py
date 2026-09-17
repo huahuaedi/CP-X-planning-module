@@ -130,6 +130,13 @@ def test_mpc_is_configured_with_bridge_vehicle_geometry(bridge):
     assert bridge.mpc.ego_length_m == pytest.approx(4.8)
 
 
+def test_reference_contract_reserves_closed_loop_curvature_authority(bridge):
+    expected = 0.90 * bridge.mpc.maximum_path_curvature_1pm()
+    assert bridge.config["reference_vehicle_max_curvature_1pm"] == pytest.approx(
+        expected
+    )
+
+
 def test_pipeline_wires_all_stage_owners(bridge):
     pipeline = bridge.pipeline
     for attr in (

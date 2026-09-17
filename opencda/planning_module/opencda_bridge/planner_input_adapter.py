@@ -9,6 +9,7 @@ the PlannerInputFrame consumed by CP-X behavior, reference generation, and MPC.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
@@ -132,7 +133,9 @@ class OpenCDAPlanningAdapter:
             float(ego_speed_mps),
             float(ego_yaw_rad),
         ]
+        _ts = time.monotonic()
         ego_waypoint = bridge.reference_map.get_waypoint(ego_pose)
+        bridge._accum_stage_ms("adapter_get_waypoint", time.monotonic() - _ts)
         # One lane namespace is used end-to-end: the opaque AD-map lane id.
         # Direction is carried separately by topology offsets; numeric lane-id
         # ordering has no lateral meaning.
@@ -146,12 +149,14 @@ class OpenCDAPlanningAdapter:
         }
 
         route_points = bridge.active_global_route_points()
+        _ts = time.monotonic()
         route_summary = bridge.planning_global_route_summary(
             ego_location=ego_location,
             ego_heading_rad=float(ego_yaw_rad),
             fallback_lane_id=int(current_lane_id),
             ego_waypoint=ego_waypoint,
         )
+        bridge._accum_stage_ms("adapter_route_summary", time.monotonic() - _ts)
         local_map = bridge.local_map_snapshot()
         authoritative_lane_id = int(
             getattr(local_map, "ego_lane_id", 0)
@@ -266,11 +271,14 @@ class OpenCDAPlanningAdapter:
         # tracker output below.  Nothing consumed the first result.  Keep the
         # tracked snapshot as the single per-tick map-query owner so each
         # obstacle is projected onto the CARLA reference map only once.
+        _ts = time.monotonic()
         lane_assignments = bridge.assign_obstacles_to_lanes(
             tracked_obstacles,
             ego_waypoint=ego_waypoint,
             ego_lane_id=int(current_lane_id),
         )
+        bridge._accum_stage_ms("adapter_assign_obstacles_to_lanes", time.monotonic() - _ts)
+        _ts = time.monotonic()
         lane_safety_scores = bridge.lane_safety_scorer.compute_lane_scores(
             ego_snapshot=ego_snapshot,
             obstacle_snapshots=tracked_obstacles,
@@ -280,12 +288,15 @@ class OpenCDAPlanningAdapter:
             timestamp_s=float(sim_time_s),
         )
         bridge.lane_safety_scorer.cleanup_stale_obstacles(set(lane_assignments.keys()))
+        bridge._accum_stage_ms("adapter_lane_safety_scores", time.monotonic() - _ts)
+        _ts = time.monotonic()
         front_dist_by_lane = bridge.nearest_front_distance_by_lane(
             ego_snapshot=ego_snapshot,
             obstacle_snapshots=tracked_obstacles,
             lane_assignments=lane_assignments,
             available_lane_ids=lane_ids,
         )
+        bridge._accum_stage_ms("adapter_nearest_front_distance", time.monotonic() - _ts)
         # A flat min_front_gap_m doesn't scale with cruise speed -- give
         # it the same reaction-time margin regardless of how fast the
         # scenario is configured to cruise, floored at the configured
@@ -302,6 +313,7 @@ class OpenCDAPlanningAdapter:
             float(bridge.min_front_gap_m),
             float(bridge.target_speed_mps) * float(bridge.min_front_gap_time_s),
         )
+        _ts = time.monotonic()
         prediction_frame = bridge.tracker.predict(
             ego_snapshot=ego_snapshot,
             lane_assignments=lane_assignments,
@@ -314,6 +326,7 @@ class OpenCDAPlanningAdapter:
             lane_step_fn=bridge.lane_step_fn(),
             snapshot_transform=bridge.prediction_snapshot_transform(),
         )
+        bridge._accum_stage_ms("adapter_tracker_predict", time.monotonic() - _ts)
         route_context = RouteContext(
             optimal_lane_id=int(route_optimal_lane_id),
             next_macro_maneuver=str(

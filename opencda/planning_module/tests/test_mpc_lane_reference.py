@@ -431,7 +431,6 @@ class MPCLaneReferenceTests(unittest.TestCase):
         self.assertGreater(float(profile[1]), 0.0)
         self.assertGreater(float(profile[2]), float(profile[1]))
 
-
 class SignedLongitudinalProgressAffineFormTests(unittest.TestCase):
     def test_zero_at_the_reference_point_itself(self):
         reference = LaneKeepingStageReference(

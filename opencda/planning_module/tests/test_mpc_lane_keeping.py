@@ -722,6 +722,46 @@ class MPCLaneKeepingIntegrationTests(unittest.TestCase):
             {"lane_width_m": 4.0, "lane_count": 3},
         )
 
+    def test_tracking_target_is_independent_of_linearization_rollout(self):
+        config, map_config = self._minimal_mpc_config(speed_soft_enabled=False)
+        config["cost"]["attractive"] = {
+            "w_attractive": 1.0,
+            "q_x": 1.0,
+            "q_y": 1.0,
+            "q_v": 1.0,
+            "q_psi": 1.0,
+        }
+        mpc = MPC(config, map_config)
+        linearization_a = np.zeros((mpc.horizon_steps + 1, 4), dtype=float)
+        linearization_b = linearization_a.copy()
+        linearization_b[1:, 1] = 9.0
+        tracking = linearization_a.copy()
+        tracking[1:, 1] = 5.0
+        controls = np.zeros((mpc.horizon_steps, 2), dtype=float)
+
+        def build(linearization, tracking_rollout=None):
+            return mpc._build_qp(
+                x0=np.zeros(4, dtype=float),
+                x_ref_target=np.zeros(4, dtype=float),
+                object_snapshots=[],
+                current_acceleration_mps2=0.0,
+                current_steering_rad=0.0,
+                x_ref_rollout=linearization,
+                u_ref_rollout=controls,
+                lane_center_reference=None,
+                speed_upper_bound_mps=None,
+                reachable_speed_floor_profile_mps=None,
+                tracking_ref_rollout=tracking_rollout,
+            )
+
+        _, q_a, _, _, _, index = build(linearization_a, tracking)
+        _, q_b, _, _, _, _ = build(linearization_b, tracking)
+        _, q_legacy, _, _, _, _ = build(linearization_a)
+        y_stage_one = index.state_index(1, 1)
+
+        self.assertAlmostEqual(q_a[y_stage_one], q_b[y_stage_one])
+        self.assertNotAlmostEqual(q_a[y_stage_one], q_legacy[y_stage_one])
+
     def test_speed_slack_variable_count_matches_flag(self):
         mpc_enabled = MPC(*self._minimal_mpc_config(speed_soft_enabled=True))
         mpc_disabled = MPC(*self._minimal_mpc_config(speed_soft_enabled=False))

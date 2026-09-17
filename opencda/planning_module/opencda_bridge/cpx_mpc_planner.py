@@ -537,10 +537,7 @@ class CPXMPCPlannerBridge:
                 ),
             ),
         )
-        vehicle_max_curvature_1pm = (
-            math.tan(float(self.mpc.constraints.max_steer_rad))
-            / max(1.0e-6, float(self.mpc.wheelbase_m))
-        )
+        vehicle_max_curvature_1pm = self.mpc.maximum_path_curvature_1pm()
         self.config["reference_vehicle_max_curvature_1pm"] = (
             float(vehicle_curvature_margin)
             * float(vehicle_max_curvature_1pm)
@@ -1148,14 +1145,27 @@ class CPXMPCPlannerBridge:
 
     def _print_and_reset_stage_ms(self) -> None:
         stats = self.__dict__.get("_stage_ms_stats", {})
-        if not stats:
-            return
-        parts = [
-            f"{name}: total={total:.0f}ms avg={total / max(1, count):.1f}ms"
-            for name, (total, count) in stats.items()
-        ]
-        print("[cpx_stage_timing] last 50 calls -- " + " | ".join(parts), flush=True)
-        self._stage_ms_stats = {}
+        if stats:
+            parts = [
+                f"{name}: total={total:.0f}ms avg={total / max(1, count):.1f}ms"
+                for name, (total, count) in stats.items()
+            ]
+            print("[cpx_stage_timing] last 50 calls -- " + " | ".join(parts), flush=True)
+            self._stage_ms_stats = {}
+        wp_hits = self.__dict__.get("_waypoint_cache_hits", 0)
+        wp_misses = self.__dict__.get("_waypoint_cache_misses", 0)
+        if wp_hits or wp_misses:
+            wp_total = wp_hits + wp_misses
+            print(
+                "[cpx_stage_timing] prediction get_waypoint cache -- "
+                f"last 50 ticks: hits={wp_hits} misses={wp_misses} "
+                f"hit_rate={100.0 * wp_hits / max(1, wp_total):.0f}% "
+                f"(native calls avoided: {wp_hits}/{wp_total})",
+                flush=True,
+            )
+            self._waypoint_cache_hits = 0
+            self._waypoint_cache_misses = 0
+            self._per_tick_waypoint_repeat_pct = []
 
     def run_step(self) -> carla.VehicleControl:
         """Plan and return a low-level CARLA control command."""
@@ -1231,6 +1241,17 @@ class CPXMPCPlannerBridge:
                 self.vehicle_dynamics.actuator_max_steer_rad
             ),
             "platform_wheelbase_m": float(self.vehicle_dynamics.wheelbase_m),
+            "mpc_kinematic_steering_effectiveness": float(
+                self.mpc.kinematic_steering_effectiveness
+            ),
+            "reference_vehicle_curvature_safety_factor": float(
+                self.config.get(
+                    "reference_vehicle_curvature_safety_factor", 0.90
+                )
+            ),
+            "reference_vehicle_max_curvature_1pm": float(
+                self.config["reference_vehicle_max_curvature_1pm"]
+            ),
             "platform_vehicle_dynamics_source": str(
                 self.vehicle_dynamics.source
             ),
@@ -1396,6 +1417,7 @@ class CPXMPCPlannerBridge:
         # front-gap threshold is only an input proposal and must not re-latch
         # stop after candidate evaluation has selected a safe route maneuver.
         selected_stop_goal_active = bool(behavior_decision.stop_required)
+        _ts_stage = time.monotonic()
         speed_frame = self.pipeline.resolve_speed(
             behavior=behavior_decision,
             speed_plan=typed_speed_plan,
@@ -1407,6 +1429,7 @@ class CPXMPCPlannerBridge:
             destination_state=destination_state,
             reference_samples=lane_center_reference,
         )
+        self._accum_stage_ms("resolve_speed", time.monotonic() - _ts_stage)
         speed_target = speed_frame.target
         ceiling_result = speed_frame.ceiling
         speed_ref_mps = float(speed_target.target_mps)
@@ -1454,6 +1477,7 @@ class CPXMPCPlannerBridge:
         candidate_reason = str(reference_debug.get(
             "candidate_pipeline_selected_reason", ""
         ))
+        _ts_stage = time.monotonic()
         admission = self.pipeline.prepare_trajectory_execution(
             publication_kwargs={
                 "destination_state": destination_state,
@@ -1496,6 +1520,8 @@ class CPXMPCPlannerBridge:
             candidate_name=candidate_name,
             candidate_reason=candidate_reason,
         )
+        self._accum_stage_ms("prepare_trajectory_execution", time.monotonic() - _ts_stage)
+        _ts_stage = time.monotonic()
         publication_result = admission.publication
         destination_state = publication_result.mutable_destination()
         lane_center_reference = publication_result.mutable_samples()
@@ -1566,6 +1592,8 @@ class CPXMPCPlannerBridge:
                 else cav_result.constraint_corridor
             ),
         )
+        self._accum_stage_ms("between_admission_and_mpc", time.monotonic() - _ts_stage)
+        _ts_stage = time.monotonic()
         execution_result = self.pipeline.execute_mpc(
             MPCExecutionRequest(
                 sim_time_s=float(sim_time_s),
@@ -1617,12 +1645,14 @@ class CPXMPCPlannerBridge:
             ),
             emergency_stop_control=self._emergency_stop_control,
         )
+        self._accum_stage_ms("execute_mpc", time.monotonic() - _ts_stage)
         mpc_jerk_seed_accel_mps2 = float(
             execution_result.jerk_seed_acceleration_mps2
         )
         from opencda.planning_module.pipeline.control_finalization_stage import (
             ControlFinalizationRequest,
         )
+        _ts_stage = time.monotonic()
         finalized_control = self.pipeline.finalize_control(
             ControlFinalizationRequest(
                 execution=execution_result,
@@ -1655,6 +1685,8 @@ class CPXMPCPlannerBridge:
             update_boundary_recovery=self._update_boundary_recovery_request,
             reset_boundary_recovery=self._reset_boundary_recovery_request,
         )
+        self._accum_stage_ms("finalize_control", time.monotonic() - _ts_stage)
+        _ts_stage = time.monotonic()
         mpc_jerk_seed_accel_mps2 = float(
             execution_result.jerk_seed_acceleration_mps2
         )
@@ -1749,6 +1781,7 @@ class CPXMPCPlannerBridge:
             destination_state=destination_state,
             lane_center_reference=lane_center_reference,
         )
+        self._accum_stage_ms("post_finalize_control", time.monotonic() - _ts_stage)
         return PlannerOutput(
             control=control,
             behavior_command=BehaviorCommand.from_debug(
@@ -2656,6 +2689,7 @@ class CPXMPCPlannerBridge:
         route_replan_attempted = False
         route_replan_succeeded = False
         route_replan_reason = "route_replan_not_requested"
+        _ts_sub = time.monotonic()
         adapter_output = self.input_adapter.build(
             ego_location=ego_location,
             ego_yaw_rad=float(ego_yaw_rad),
@@ -2663,6 +2697,7 @@ class CPXMPCPlannerBridge:
             object_snapshots=object_snapshots,
             cp_payload=cp_payload,
         )
+        self._accum_stage_ms("sub_input_adapter_build", time.monotonic() - _ts_sub)
         planner_input_frame = adapter_output.frame
         # The adapter's tracker is the sole temporal obstacle-state owner.
         # Downstream behavior, speed and interaction stages must consume the
@@ -2691,6 +2726,7 @@ class CPXMPCPlannerBridge:
         route_optimal_lane_id = int(adapter_output.route_optimal_lane_id)
         route_reference_allowed = bool(adapter_output.route_reference_allowed)
         route_reference_gate_reason = str(adapter_output.route_reference_gate_reason)
+        _ts_sub = time.monotonic()
         route_behavior = self.pipeline.resolve_route_context(
             adapter_output=adapter_output,
             local_map_snapshot=local_map_snapshot,
@@ -2705,6 +2741,7 @@ class CPXMPCPlannerBridge:
             ego_speed_mps=float(ego_speed_mps),
             config=self.config,
         )
+        self._accum_stage_ms("sub_resolve_route_context", time.monotonic() - _ts_sub)
         lane_change_context = route_behavior.context
         route_lane_change_allowed = bool(
             route_behavior.route_lane_change_allowed
@@ -2736,6 +2773,7 @@ class CPXMPCPlannerBridge:
             )
         route_lane_change_required = bool(lane_change_authorization.required_by_route)
         source_quality = dict(adapter_output.source_quality)
+        _ts_sub = time.monotonic()
         scenario_observation = self.pipeline.observe_planning_frame(
             ScenarioPlanningFrameRequest(
                 adapter_output=adapter_output,
@@ -2761,6 +2799,7 @@ class CPXMPCPlannerBridge:
                 fallback_destination_state=[],
             ),
         )
+        self._accum_stage_ms("sub_observe_planning_frame", time.monotonic() - _ts_sub)
         turn_context = scenario_observation.turn_context
         scenario_result = scenario_observation.scenario
         resolved_traffic_state = str(scenario_observation.resolved_traffic_state)
@@ -2774,6 +2813,7 @@ class CPXMPCPlannerBridge:
             turn_context.route_advanced_to_lane_change
         )
         scenario_decision = scenario_result.decision
+        _ts_sub = time.monotonic()
         conflict_resolution = self.pipeline.resolve_conflicts(
             ConflictResolutionRequest(
                 route_authorization=lane_change_authorization,
@@ -2808,6 +2848,7 @@ class CPXMPCPlannerBridge:
             ),
             maneuver_manager=self.maneuver_manager,
         )
+        self._accum_stage_ms("sub_resolve_conflicts", time.monotonic() - _ts_sub)
         lane_change_authorization = conflict_resolution.authorization
         lateral_ownership = conflict_resolution.lateral_ownership
         lateral_handoff = lateral_ownership.handoff
@@ -2853,6 +2894,7 @@ class CPXMPCPlannerBridge:
         mpc_feedback = self.mpc_feedback.candidate_feedback(
             current_time_s=float(sim_time_s)
         )
+        _ts_sub = time.monotonic()
         command_frame = self.pipeline.produce_behavior_command(
             BehaviorCommandFrameRequest(
                 adapter_output=adapter_output, ego_pose=ego_pose,
@@ -2900,6 +2942,7 @@ class CPXMPCPlannerBridge:
             ),
             object_track_id=self._object_track_id,
         )
+        self._accum_stage_ms("sub_produce_behavior_command", time.monotonic() - _ts_sub)
         command_result = command_frame.command
         candidate_frame = command_frame.candidate_frame
         cooperative_proposal = command_frame.cooperative_proposal
@@ -3193,6 +3236,7 @@ class CPXMPCPlannerBridge:
                 s_begin_m=claim_interval.s_begin_m,
                 s_end_m=claim_interval.s_end_m,
             )
+            _ts_sub = time.monotonic()
             conflict_reference = self.pipeline.cooperative_conflict_reference(
                 proposal=cooperative_proposal,
                 local_map=local_map_snapshot,
@@ -3202,6 +3246,9 @@ class CPXMPCPlannerBridge:
                 horizon_steps=int(self.mpc.horizon_steps),
                 dt_s=float(self.mpc.dt_s),
                 lane_width_m=float(getattr(self.mpc, "lane_width_m", 3.5)),
+            )
+            self._accum_stage_ms(
+                "sub_cooperative_conflict_reference", time.monotonic() - _ts_sub
             )
             cav_claim = self._cooperative_claim_manager.claim(
                 proposal=cooperative_proposal,
@@ -3222,6 +3269,7 @@ class CPXMPCPlannerBridge:
                 ego_x_m=float(ego_location.x), ego_y_m=float(ego_location.y),
                 dt_s=float(self.mpc.dt_s),
             )
+            _ts_sub = time.monotonic()
             cav_result = self.pipeline.resolve_cav_interaction(
                 reference_samples=conflict_reference.mutable_samples(),
                 # Stage D's QP rows must linearize against the reference the
@@ -3284,6 +3332,9 @@ class CPXMPCPlannerBridge:
                 cooperative_preparation_time_s=float(self.config.get(
                     "candidate_lane_change_normal_duration_s", 4.0
                 )),
+            )
+            self._accum_stage_ms(
+                "sub_resolve_cav_interaction", time.monotonic() - _ts_sub
             )
             self._cav_schedule.observe(
                 sim_time_s=float(sim_time_s), result=cav_result,
@@ -4209,7 +4260,28 @@ class CPXMPCPlannerBridge:
             return None
         from utility.global_planner import lane_step_xy_heading
 
-        get_waypoint_fn = self.reference_map.get_waypoint
+        _raw_get_waypoint_fn = self.reference_map.get_waypoint
+
+        # Same-tick AD-map query cache. lane_step_xy_heading calls
+        # get_waypoint_fn once per (object x horizon step) during prediction
+        # extrapolation; measured ~50% of those queries land on a (x, y)
+        # already queried earlier in the *same* tick (adjacent horizon steps
+        # of a slow-moving object, or two objects predicted through the same
+        # stretch of lane). This closure -- and so the cache -- is rebuilt
+        # fresh every tick (called once per input_adapter.build()), so it can
+        # never return a stale result: within one tick the map query for a
+        # given point is a pure function of (x, y).
+        _waypoint_cache: dict = {}
+
+        def get_waypoint_fn(pose):
+            key = (round(float(pose["x"]), 1), round(float(pose["y"]), 1))
+            if key in _waypoint_cache:
+                self._waypoint_cache_hits = getattr(self, "_waypoint_cache_hits", 0) + 1
+                return _waypoint_cache[key]
+            self._waypoint_cache_misses = getattr(self, "_waypoint_cache_misses", 0) + 1
+            result = _raw_get_waypoint_fn(pose)
+            _waypoint_cache[key] = result
+            return result
 
         def _step(x_m: float, y_m: float, distance_m: float):
             result = lane_step_xy_heading(
