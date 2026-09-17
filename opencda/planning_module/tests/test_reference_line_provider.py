@@ -74,6 +74,44 @@ def test_signed_curvature_uses_physical_arc_and_preserves_turn_direction():
     assert min(right) == pytest.approx(-0.1, rel=0.25)
 
 
+def test_turn_finish_preserves_immutable_master_curvature_when_xy_is_unchanged():
+    provider = ReferenceLineProvider()
+    provider.attach_builder(SimpleNamespace(
+        curvature_feasible_turn_samples=lambda **kwargs: (
+            [dict(row) for row in kwargs["reference_samples"]],
+            "",
+        )
+    ))
+    reference = [
+        {
+            "x_ref_m": float(index + 1),
+            "y_ref_m": 0.1 * float(index * index),
+            "heading_rad": 0.05 * float(index),
+            "curvature_1pm": 0.08 + 0.01 * float(index),
+            "progress_m": float(index + 1),
+            "lane_id": 20,
+        }
+        for index in range(4)
+    ]
+
+    finished, _, _ = provider._turn_reference_finish(
+        reference=reference,
+        ego_location=SimpleNamespace(x=0.0, y=0.0),
+        ego_yaw_rad=0.0,
+        config={"reference_vehicle_max_curvature_1pm": 0.20},
+        current_state=[0.0, 0.0, 2.0, 0.0, 10],
+        current_lane_id=10,
+        target_lane_id=20,
+        turn_speed_mps=2.0,
+        destination_state=[0.0, 0.0, 2.0, 0.0, 20],
+        reason="turn_master_window",
+    )
+
+    assert [row["curvature_1pm"] for row in finished] == pytest.approx(
+        [0.08, 0.09, 0.10, 0.11]
+    )
+
+
 def test_local_route_reference_prefixes_matched_lane_before_connector():
     geometries = {
         10: _local_geometry(10, [(0.0, 0.0), (1.0, 0.0)]),
