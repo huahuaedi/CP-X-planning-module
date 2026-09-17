@@ -132,3 +132,33 @@ def test_committed_claim_does_not_follow_matcher_into_target_lane():
     assert updated.target_corridor_id == 20
     assert updated.s_begin_m == 50.0
     assert updated.s_end_m == 100.0
+
+
+def test_route_reset_does_not_reuse_the_previous_committed_resource():
+    manager = CooperativeClaimManager(enabled=True)
+    manager.claim(
+        proposal=_proposal(source=10, target=20, station=20,
+                           s_begin=40.0, s_end=90.0),
+        sim_time_s=1.0,
+    )
+    manager.claim(
+        proposal=_proposal(source=10, target=20, station=20,
+                           active=True, committed_at_s=1.4,
+                           s_begin=42.0, s_end=92.0),
+        sim_time_s=1.5,
+    )
+
+    manager.reset()
+    rebuilt = manager.claim(
+        proposal=_proposal(source=30, target=40, station=40,
+                           active=True, committed_at_s=2.0,
+                           s_begin=5.0, s_end=55.0),
+        sim_time_s=2.1,
+    )
+
+    assert rebuilt.resource_id == "lane_change:30:40"
+    assert rebuilt.source_corridor_id == 30
+    assert rebuilt.target_corridor_id == 40
+    assert rebuilt.station_corridor_id == 40
+    assert rebuilt.s_begin_m == 5.0
+    assert rebuilt.s_end_m == 55.0

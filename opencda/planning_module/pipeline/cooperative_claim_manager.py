@@ -29,6 +29,13 @@ class CooperativeClaimManager:
     def current_claim(self) -> Optional[ResourceClaim]:
         return self._last_claim
 
+    def reset(self) -> None:
+        """Retire proposal and claim identity at a route-topology boundary."""
+
+        self._proposal_key = None
+        self._proposed_at_s = 0.0
+        self._last_claim = None
+
     def claim(
         self, *, proposal: CooperativeManeuverProposal, sim_time_s: float,
     ) -> Optional[ResourceClaim]:

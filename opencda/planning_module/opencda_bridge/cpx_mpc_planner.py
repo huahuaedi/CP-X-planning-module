@@ -3270,6 +3270,7 @@ class CPXMPCPlannerBridge:
                 self._cav_schedule.reset(
                     reason="route_revision_changed:" + current_route_revision
                 )
+                self._cooperative_claim_manager.reset()
             lane_change = self.maneuver_manager.lane_change
             if bool(lane_change.active):
                 cooperative_proposal = cooperative_proposal.with_commitment(
