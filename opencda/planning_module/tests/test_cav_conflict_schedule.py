@@ -104,6 +104,7 @@ def test_route_reset_clears_every_conflict_lifecycle_state():
         corridor_reference=({"x_ref_m": 0.0, "y_ref_m": 0.0},),
         corridor_time_s=4.0,
         conflict_reference=object(),
+        corridor_infeasible_streak=2,
     )
     old_revision = schedule.revision
 
@@ -116,8 +117,35 @@ def test_route_reset_clears_every_conflict_lifecycle_state():
     assert schedule.corridor is None
     assert schedule.corridor_reference == ()
     assert schedule.conflict_reference is None
+    assert schedule.corridor_infeasible_streak == 0
     assert schedule.revision == old_revision + 1
     assert schedule.last_reset_reason == "route_revision_changed:r2"
+
+
+def test_corridor_infeasibility_debounce_is_owned_by_schedule():
+    schedule = CAVConflictSchedule(infeasible_emergency_streak=2)
+    result = SimpleNamespace(
+        constraint_corridor=SimpleNamespace(feasible=False),
+        latch_state={}, tag_state={}, veto_state={}, assignments=(),
+        diagnostics={},
+    )
+
+    schedule.observe(sim_time_s=1.0, result=result)
+    assert schedule.corridor_infeasible_streak == 1
+    assert schedule.corridor_emergency_stop_required is False
+    schedule.observe(sim_time_s=1.05, result=result)
+    assert schedule.corridor_emergency_stop_required is True
+
+    schedule.observe(
+        sim_time_s=1.10,
+        result=SimpleNamespace(
+            constraint_corridor=SimpleNamespace(feasible=True),
+            latch_state={}, tag_state={}, veto_state={}, assignments=(),
+            diagnostics={},
+        ),
+    )
+    assert schedule.corridor_infeasible_streak == 0
+    assert schedule.corridor_emergency_stop_required is False
 
 
 def test_conflict_reference_rebuilds_only_on_coordination_refresh():

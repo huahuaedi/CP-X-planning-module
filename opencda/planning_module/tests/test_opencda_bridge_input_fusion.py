@@ -37,7 +37,7 @@ from pipeline.traffic_light_memory import TrafficLightMemory
 from pipeline.reference_gate import FinalReferenceGate
 from pipeline.reference_generator import GeneratedReference, ReferenceGenerator
 from pipeline.reference_pipeline import ReferencePipeline, ReferencePipelineRequest
-from pipeline.route_manager import RouteReplanResult
+from pipeline.route_manager import LaneClosureRouteResult, RouteReplanResult
 from pipeline.mpc_entry_stage import MPCEntryStage
 from pipeline.maneuver_manager import ManeuverManager
 from pipeline.fallback_manager import TrajectoryFallbackManager
@@ -46,52 +46,34 @@ from pipeline.reference_line_provider import LANE_FOLLOW, TURN, ReferenceLinePro
 from pipeline.perception_stage import PerceptionStage
 
 
-class CorridorInfeasibleEscalationTests(unittest.TestCase):
-    """CPXMPCPlannerBridge._update_corridor_infeasible_streak -- see
-    control_finalization_stage tests for what the escalation actually does
-    to the control output once this returns True."""
-
-    @staticmethod
-    def _bridge(streak_threshold=2):
-        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
-        bridge._corridor_infeasible_streak = 0
-        bridge.corridor_infeasible_emergency_streak = int(streak_threshold)
-        return bridge
-
-    @staticmethod
-    def _cav_result(feasible):
-        return SimpleNamespace(
-            constraint_corridor=SimpleNamespace(feasible=bool(feasible))
-        )
-
-    def test_no_cav_result_never_escalates(self):
-        bridge = self._bridge()
-        for _ in range(5):
-            self.assertFalse(bridge._update_corridor_infeasible_streak(None))
-
-    def test_single_infeasible_tick_does_not_escalate_below_the_streak(self):
-        bridge = self._bridge(streak_threshold=2)
-        self.assertFalse(
-            bridge._update_corridor_infeasible_streak(self._cav_result(False))
-        )
-
-    def test_escalates_once_the_streak_threshold_is_reached(self):
-        bridge = self._bridge(streak_threshold=2)
-        bridge._update_corridor_infeasible_streak(self._cav_result(False))
-        self.assertTrue(
-            bridge._update_corridor_infeasible_streak(self._cav_result(False))
-        )
-
-    def test_a_feasible_tick_resets_the_streak(self):
-        bridge = self._bridge(streak_threshold=2)
-        bridge._update_corridor_infeasible_streak(self._cav_result(False))
-        bridge._update_corridor_infeasible_streak(self._cav_result(True))
-        self.assertFalse(
-            bridge._update_corridor_infeasible_streak(self._cav_result(False))
-        )
-
-
 class OpenCDABridgeInputFusionTests(unittest.TestCase):
+    def test_cp_lane_closure_route_change_resets_pipeline_once(self):
+        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
+        bridge.config = {"cp_lane_closure_reroute_enabled": True}
+        bridge.route_manager = Mock()
+        bridge.route_manager.apply_lane_closures.return_value = (
+            LaneClosureRouteResult(
+                attempted=True, success=True, route_changed=True,
+                reason="admap_route_replanned:cp_lane_closure:closure-1",
+                handled_message_ids=("closure-1",), blocked_lane_ids=(17,),
+            )
+        )
+        bridge._reset_pipeline_for_route_revision = Mock()
+
+        result = bridge._apply_cp_lane_closures(
+            ego_location=SimpleNamespace(x=3.0, y=4.0, z=0.0),
+            cp_payload={"lane_events": [{
+                "id": "closure-1", "type": "lane_closure",
+                "position": {"x": 8.0, "y": 4.0},
+            }]},
+        )
+
+        self.assertTrue(result.route_changed)
+        bridge.route_manager.apply_lane_closures.assert_called_once()
+        bridge._reset_pipeline_for_route_revision.assert_called_once_with(
+            reason="cp_lane_closure_route_replanned"
+        )
+
     def test_static_obstacle_local_avoidance_selects_safest_adjacent_lane(self):
         selected = _select_static_obstacle_local_avoidance_lane(
             current_lane_id=2,

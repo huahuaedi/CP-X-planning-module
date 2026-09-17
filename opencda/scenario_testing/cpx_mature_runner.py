@@ -15,6 +15,7 @@ from opencda.planning_module.opencda_bridge.debug_viewer import OpenCDADebugView
 from opencda.planning_module.utility.cp_messages import (
     CP_MESSAGE_PATH,
     reset_cp_message_payload,
+    upsert_cp_item,
 )
 from opencda.scenario_testing.evaluations.evaluate_manager import EvaluationManager
 from opencda.scenario_testing.scripted_actor import spawn_scripted_actors
@@ -261,6 +262,71 @@ class _TargetBrakeStimulus(object):
         return control
 
 
+class _LaneClosureStimulus(object):
+    """Publish one durable CP lane-closure event from scenario configuration.
+
+    The fixture owns only when the external CP event becomes available. Route
+    mapping, de-duplication, topology mutation and rollback remain entirely in
+    :class:`CPXRouteManager`, exactly as they will for a real CP transport.
+    """
+
+    def __init__(self, config, *, message_path):
+        self.config = dict(config or {})
+        self.message_path = str(message_path)
+        self.published = False
+
+    def _triggered(self, tick, vehicle_managers):
+        trigger = dict(self.config.get("trigger_position", {}) or {})
+        if not trigger:
+            return int(tick) >= max(0, int(self.config.get("start_tick", 0)))
+        cav_index = int(trigger.get("cav_index", 0))
+        if not 0 <= cav_index < len(vehicle_managers):
+            return False
+        axis = str(trigger.get("axis", "x")).strip().lower()
+        if axis not in ("x", "y"):
+            raise ValueError("cp_lane_closure.trigger_position.axis must be x or y")
+        position = float(getattr(vehicle_managers[cav_index].vehicle.get_location(), axis))
+        threshold = float(trigger["value"])
+        direction = str(trigger.get("direction", "increasing")).strip().lower()
+        if direction == "increasing":
+            return position >= threshold
+        if direction == "decreasing":
+            return position <= threshold
+        raise ValueError(
+            "cp_lane_closure.trigger_position.direction must be increasing or decreasing"
+        )
+
+    def publish_if_due(self, *, tick, sim_time_s, vehicle_managers):
+        if self.published or not bool(self.config.get("enabled", False)):
+            return False
+        if not self._triggered(tick, vehicle_managers):
+            return False
+        message = dict(self.config.get("message", {}) or {})
+        message.setdefault("type", "lane_closure")
+        message.setdefault("source", "scenario_cp_fixture")
+        if not str(message.get("id", "")).strip():
+            raise ValueError("cp_lane_closure.message.id is required")
+        if str(message.get("type", "")).strip().lower() != "lane_closure":
+            raise ValueError("cp_lane_closure.message.type must be lane_closure")
+        self.published = bool(upsert_cp_item(
+            message_path=self.message_path,
+            schema_version=1,
+            list_name="lane_events",
+            item=message,
+            timestamp_s=float(sim_time_s),
+        ))
+        if self.published:
+            print(
+                "[CP-X lane closure] published id=%s position=%s ad_lane_id=%s"
+                % (
+                    str(message.get("id", "")),
+                    message.get("position"),
+                    message.get("ad_lane_id"),
+                )
+            )
+        return bool(self.published)
+
+
 def _scenario_manager_kwargs(scenario_params):
     mature_cfg = scenario_params.get("cpx_mature", {})
     map_mode = str(mature_cfg.get("map_mode", "town")).strip().lower()
@@ -302,6 +368,25 @@ def _reset_cooperative_payloads(scenario_params):
             paths.add(configured_path)
     for message_path in sorted(paths):
         reset_cp_message_payload(message_path=message_path)
+
+
+def _primary_cp_message_path(scenario_params):
+    """Return the transport path consumed by the primary CAV planner."""
+
+    vehicle_base_planner = dict(
+        scenario_params.get("vehicle_base", {}).get("planner", {}) or {}
+    )
+    cavs = list(
+        scenario_params.get("scenario", {}).get("single_cav_list", []) or []
+    )
+    ego_planner = dict(cavs[0].get("planner", {}) or {}) if cavs else {}
+    return str(
+        ego_planner.get(
+            "cp_message_path",
+            vehicle_base_planner.get("cp_message_path", CP_MESSAGE_PATH),
+        )
+        or CP_MESSAGE_PATH
+    )
 
 
 def _configure_synthetic_multimodal_prediction(
@@ -461,6 +546,10 @@ def run_mature_scenario(opt, scenario_params, *, script_name):
             runtime_cfg.get("scripted_target_brake", {}) or {}
         )
         target_brake_stimulus = _TargetBrakeStimulus(scripted_brake_cfg)
+        lane_closure_stimulus = _LaneClosureStimulus(
+            runtime_cfg.get("cp_lane_closure", {}),
+            message_path=_primary_cp_message_path(scenario_params),
+        )
         fixed_dt_s = float(
             scenario_params.get("world", {}).get("fixed_delta_seconds", 0.05)
         )
@@ -473,6 +562,13 @@ def run_mature_scenario(opt, scenario_params, *, script_name):
             _ego_xy = (float(_ego_loc.x), float(_ego_loc.y))
             for scripted_actor in scripted_actor_list:
                 scripted_actor.step(fixed_dt_s, ego_xy=_ego_xy)
+            lane_closure_stimulus.publish_if_due(
+                tick=tick_index,
+                sim_time_s=float(
+                    scenario_manager.world.get_snapshot().timestamp.elapsed_seconds
+                ),
+                vehicle_managers=single_cav_list,
+            )
             if synthetic_prediction_runtime is not None:
                 scripted_target, activation_state, actor_id = (
                     synthetic_prediction_runtime

@@ -236,7 +236,10 @@ class CPXMPCPlannerBridge:
         self._cav_schedule = CAVConflictSchedule(
             coordination_period_s=float(
                 self.config.get("cav_coordination_period_s", 0.2)
-            )
+            ),
+            infeasible_emergency_streak=max(1, int(
+                self.config.get("corridor_infeasible_emergency_streak", 2)
+            )),
         )
         from opencda.planning_module.pipeline.cav_conflict_compute_governor import (
             CAVConflictComputeGovernor,
@@ -259,23 +262,6 @@ class CPXMPCPlannerBridge:
         # that reaches the governor always takes the reset branch below --
         # harmless (it is already fresh) and avoids a separate first-tick case.
         self._cav_conflict_governor_route_revision = "\x00uninitialized"
-        # A CAV corridor is built from true max-braking limits (not an
-        # arbitrarily weak substitute -- see build_longitudinal_corridor's
-        # own clamp), so Corridor.feasible=False means even max braking from
-        # here cannot satisfy every constraint: an unavoidable conflict, not
-        # a normal negotiation state. Before this, that was only ever a
-        # logged diagnostic (corridor_feasible/corridor_first_infeasible_stage
-        # in cav_conflict_pipeline.py) -- nothing downstream read it, so the
-        # planner kept issuing whatever speed/steering the (slack-relaxed) QP
-        # solution happened to produce instead of the full emergency stop the
-        # rest of the codebase already reserves for a confirmed collision
-        # hazard. Escalating only after a short streak (not the first tick)
-        # avoids one noisy/transient infeasible tick during negotiation
-        # forcing a full brake + zero-steer response.
-        self._corridor_infeasible_streak = 0
-        self.corridor_infeasible_emergency_streak = max(1, int(
-            self.config.get("corridor_infeasible_emergency_streak", 2)
-        ))
         self._cav_transport_diagnostics: dict[str, Any] = {}
         # This CAV's own broadcast for nearby CP-X CAVs to read (its planned
         # trajectory + ResourceClaim + pose). Read peer-to-peer through
@@ -1340,28 +1326,6 @@ class CPXMPCPlannerBridge:
             debug,
         )
 
-    def _update_corridor_infeasible_streak(self, cav_result: Any) -> bool:
-        """Escalate to a full emergency stop once a CAV corridor has been
-        infeasible for several consecutive ticks.
-
-        ``Corridor.feasible=False`` means max braking from here cannot
-        satisfy every constraint the corridor encodes -- an unavoidable
-        conflict under the corridor's own (true max-deceleration) bound, not
-        a normal negotiation state. A streak requirement instead of firing
-        on the first infeasible tick keeps one noisy/transient tick during
-        negotiation from forcing a full brake + zero-steer response.
-        """
-
-        corridor = None if cav_result is None else cav_result.constraint_corridor
-        if corridor is not None and not bool(getattr(corridor, "feasible", True)):
-            self._corridor_infeasible_streak += 1
-        else:
-            self._corridor_infeasible_streak = 0
-        return (
-            self._corridor_infeasible_streak
-            >= self.corridor_infeasible_emergency_streak
-        )
-
     def execute_planning_pipeline(self):
         """Public OpenCDA bridge port for one full CP-X planning tick."""
 
@@ -1658,8 +1622,8 @@ class CPXMPCPlannerBridge:
             cav_constraint_revision = self._cav_schedule.constraint_revision(
                 cav_diagnostics
             )
-        corridor_infeasible_escalate = self._update_corridor_infeasible_streak(
-            cav_result
+        corridor_infeasible_escalate = bool(
+            self._cav_schedule.corridor_emergency_stop_required
         )
         self._maybe_capture_execute_mpc_frame(
             sim_time_s=float(sim_time_s),
@@ -2783,9 +2747,33 @@ class CPXMPCPlannerBridge:
         cp_payload: Mapping[str, Any] | None = None,
     ):
         sim_time_s = self._sim_time_s()
-        route_replan_attempted = False
-        route_replan_succeeded = False
-        route_replan_reason = "route_replan_not_requested"
+        lane_closure_update = self._apply_cp_lane_closures(
+            ego_location=ego_location,
+            cp_payload=cp_payload,
+        )
+        route_replan_attempted = bool(
+            getattr(lane_closure_update, "attempted", False)
+        )
+        route_replan_succeeded = bool(
+            getattr(lane_closure_update, "success", False)
+            and getattr(lane_closure_update, "route_changed", False)
+        )
+        route_replan_reason = str(
+            getattr(
+                lane_closure_update,
+                "reason",
+                "route_replan_not_requested",
+            )
+        )
+        # A valid closure for which no alternate topology exists is a typed
+        # route failure, not permission to continue into the closed lane.
+        stop_goal_active = bool(
+            stop_goal_active
+            or (
+                route_replan_attempted
+                and not bool(getattr(lane_closure_update, "success", False))
+            )
+        )
         _ts_sub = time.monotonic()
         adapter_output = self.input_adapter.build(
             ego_location=ego_location,
@@ -2870,6 +2858,21 @@ class CPXMPCPlannerBridge:
             )
         route_lane_change_required = bool(lane_change_authorization.required_by_route)
         source_quality = dict(adapter_output.source_quality)
+        source_quality.update({
+            "cp_lane_closure_attempted": bool(route_replan_attempted),
+            "cp_lane_closure_route_changed": bool(
+                getattr(lane_closure_update, "route_changed", False)
+            ),
+            "cp_lane_closure_reason": str(
+                getattr(lane_closure_update, "reason", "")
+            ),
+            "cp_lane_closure_handled_ids": list(
+                getattr(lane_closure_update, "handled_message_ids", ()) or ()
+            ),
+            "cp_lane_closure_blocked_lane_ids": list(
+                getattr(lane_closure_update, "blocked_lane_ids", ()) or ()
+            ),
+        })
         _ts_sub = time.monotonic()
         scenario_observation = self.pipeline.observe_planning_frame(
             ScenarioPlanningFrameRequest(
@@ -3887,13 +3890,7 @@ class CPXMPCPlannerBridge:
         if not bool(result.success):
             return True, False, str(result.reason)
 
-        self._active_route_summary = self.route_manager.active_route_summary
-        self.nominal_trajectory_generator.reset(source="turn_route_replanned")
-        self._reset_route_tracking_lane_change_reference()
-        maneuver_manager = getattr(self, "maneuver_manager", None)
-        if maneuver_manager is not None:
-            maneuver_manager.reset(reason="turn_route_replanned")
-        self.control_buffer.reset(reason="turn_route_replanned")
+        self._reset_pipeline_for_route_revision(reason="turn_route_replanned")
         return True, True, str(result.reason)
 
     def _rolling_turn_envelope_payload_world(
@@ -4580,19 +4577,52 @@ class CPXMPCPlannerBridge:
         if not bool(result.success):
             return True, False, str(result.reason)
 
-        self._active_route_summary = self.route_manager.active_route_summary
-        self.nominal_trajectory_generator.reset(
-            source="static_obstacle_route_replanned"
+        self._reset_pipeline_for_route_revision(
+            reason="static_obstacle_route_replanned"
         )
+        return True, True, str(result.reason)
+
+    def _apply_cp_lane_closures(
+        self, *, ego_location: Any, cp_payload: Mapping[str, Any] | None,
+    ) -> Any:
+        """Submit CP lane events to RouteManager's atomic route lifecycle."""
+
+        if not bool(self.config.get("cp_lane_closure_reroute_enabled", True)):
+            return None
+        payload = dict(cp_payload or {})
+        messages = list(
+            payload.get("lane_closures", payload.get("lane_events", ())) or ()
+        )
+        apply_closures = getattr(self.route_manager, "apply_lane_closures", None)
+        if not messages or not callable(apply_closures):
+            return None
+        result = apply_closures(
+            messages=messages,
+            start_point={
+                "x": float(ego_location.x),
+                "y": float(ego_location.y),
+                "z": float(getattr(ego_location, "z", 0.0)),
+            },
+        )
+        if bool(getattr(result, "route_changed", False)):
+            self._reset_pipeline_for_route_revision(
+                reason="cp_lane_closure_route_replanned"
+            )
+        return result
+
+    def _reset_pipeline_for_route_revision(self, *, reason: str) -> None:
+        """Retire all trajectory/control state after an accepted route swap."""
+
+        self._active_route_summary = self.route_manager.active_route_summary
+        self.nominal_trajectory_generator.reset(source=str(reason))
         self._reset_route_tracking_lane_change_reference()
-        self.maneuver_manager.clear_required_lane_change()
         maneuver_manager = getattr(self, "maneuver_manager", None)
         if maneuver_manager is not None:
-            maneuver_manager.reset(reason="static_obstacle_route_replanned")
-        self.control_buffer.reset(reason="static_obstacle_route_replanned")
-        if hasattr(self.mpc, "clear_previous_solution_seed"):
-            self.mpc.clear_previous_solution_seed()
-        return True, True, str(result.reason)
+            maneuver_manager.reset(reason=str(reason))
+        self.control_buffer.reset(reason=str(reason))
+        mpc = getattr(self, "mpc", None)
+        if mpc is not None and hasattr(mpc, "clear_previous_solution_seed"):
+            mpc.clear_previous_solution_seed()
 
     def _load_cp_message_payload(self) -> dict[str, Any]:
         try:

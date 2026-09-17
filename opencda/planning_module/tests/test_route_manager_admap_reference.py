@@ -53,6 +53,22 @@ class _ADMapPlanner:
         return list(self.entries)
 
 
+class _ClosurePlanner(_ADMapPlanner):
+    def __init__(self, entries, rerouted_entries):
+        super().__init__(entries)
+        self.rerouted_entries = list(rerouted_entries)
+        self.blocked_lanes = []
+        self.block_calls = []
+
+    def block_lane_at_position(self, position):
+        self.block_calls.append(dict(position))
+        lane_id = 10
+        if lane_id not in self.blocked_lanes:
+            self.blocked_lanes.append(lane_id)
+        self.entries = list(self.rerouted_entries)
+        return lane_id
+
+
 def _planner(points_and_options):
     return _ADMapPlanner([
         {
@@ -64,6 +80,74 @@ def _planner(points_and_options):
 
 
 class RouteManagerADMapReferenceTest(unittest.TestCase):
+    def test_cp_lane_closure_atomically_installs_one_new_route_revision(self):
+        initial = [
+            {"waypoint": _ADMapWaypoint(0.0, 0.0, 10), "road_option": "LANEFOLLOW"},
+            {"waypoint": _ADMapWaypoint(10.0, 0.0, 10), "road_option": "LANEFOLLOW"},
+        ]
+        detour = [
+            {"waypoint": _ADMapWaypoint(1.0, 0.0, 11), "road_option": "CHANGELANELEFT"},
+            {"waypoint": _ADMapWaypoint(6.0, 3.5, 11), "road_option": "LANEFOLLOW"},
+            {"waypoint": _ADMapWaypoint(10.0, 3.5, 11), "road_option": "LANEFOLLOW"},
+        ]
+        planner = _ClosurePlanner(initial, detour)
+        manager = CPXRouteManager(global_planner=planner)
+        manager.set_destination(
+            start_point={"x": 0.0, "y": 0.0},
+            goal_point={"x": 10.0, "y": 0.0},
+        )
+
+        message = {
+            "id": "closure-1", "type": "lane_closure",
+            "position": {"x": 5.0, "y": 0.0, "z": 0.0},
+        }
+        result = manager.apply_lane_closures(
+            messages=[message], start_point={"x": 1.0, "y": 0.0},
+        )
+
+        self.assertTrue(result.success, result.reason)
+        self.assertTrue(result.route_changed)
+        self.assertEqual(result.handled_message_ids, ("closure-1",))
+        self.assertEqual(result.blocked_lane_ids, (10,))
+        self.assertEqual(manager.route_revision, "route-2")
+        self.assertEqual(manager._route_nodes()[0][3].ad_lane_id, 11)
+
+        duplicate = manager.apply_lane_closures(
+            messages=[message], start_point={"x": 2.0, "y": 0.0},
+        )
+        self.assertFalse(duplicate.attempted)
+        self.assertFalse(duplicate.route_changed)
+        self.assertEqual(manager.route_revision, "route-2")
+        self.assertEqual(len(planner.block_calls), 1)
+
+    def test_failed_cp_lane_closure_restores_route_and_blocked_topology(self):
+        initial = [
+            {"waypoint": _ADMapWaypoint(0.0, 0.0, 10), "road_option": "LANEFOLLOW"},
+            {"waypoint": _ADMapWaypoint(10.0, 0.0, 10), "road_option": "LANEFOLLOW"},
+        ]
+        planner = _ClosurePlanner(initial, [])
+        manager = CPXRouteManager(global_planner=planner)
+        manager.set_destination(
+            start_point={"x": 0.0, "y": 0.0},
+            goal_point={"x": 10.0, "y": 0.0},
+        )
+        old_nodes = manager._route_nodes()
+
+        result = manager.apply_lane_closures(
+            messages=[{
+                "id": "closure-no-detour", "type": "lane_closure",
+                "position": [5.0, 0.0, 0.0],
+            }],
+            start_point={"x": 1.0, "y": 0.0},
+        )
+
+        self.assertTrue(result.attempted)
+        self.assertFalse(result.success)
+        self.assertFalse(result.route_changed)
+        self.assertEqual(planner.blocked_lanes, [])
+        self.assertEqual(manager.route_revision, "route-1")
+        self.assertEqual(manager._route_nodes(), old_nodes)
+
     def test_missing_topology_reports_goal_distance_not_zero_remaining(self):
         manager = CPXRouteManager(global_planner=_planner([]))
         manager.set_destination(

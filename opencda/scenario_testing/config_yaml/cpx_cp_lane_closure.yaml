@@ -1,0 +1,57 @@
+base_config: cpx_profile_full_default.yaml
+
+description: |-
+  CP-F high-level planning validation. A remote lane-closure event becomes
+  available while the ego is still upstream. RouteManager maps the event to
+  AD-map lane 630148 and atomically replaces the route with the open adjacent
+  lane 630149. No local obstacle is spawned: success therefore demonstrates
+  CP lane-event transport and topology rerouting, not reactive avoidance.
+
+cpx_mature:
+  map_mode: 2lane_freeway_simplified
+  max_ticks: 700
+  destination_tolerance_m: 3.0
+  completion_mode: first_cav
+  run_opencda_evaluation: false
+  cp_lane_closure:
+    enabled: true
+    trigger_position:
+      cav_index: 0
+      axis: x
+      value: -265.0
+      direction: increasing
+    message:
+      id: cp_f_workzone_lane_630148
+      type: lane_closure
+      position: [-180.0, 8.3, 0.0]
+      confidence: 1.0
+
+carla_traffic_manager:
+  vehicle_list: []
+
+vehicle_base:
+  sensing:
+    perception:
+      activate: false
+    localization:
+      activate: false
+      debug_helper:
+        show_animation: false
+  behavior:
+    ignore_traffic_light: true
+    overtake_allowed: false
+  planner:
+    global_planner_xodr_path: ../assets/2lane_freeway_simplified/2lane_freeway_simplified.xodr
+    target_speed_mps: 8.0
+    full_allow_opportunistic_lane_change: false
+    cp_lane_closure_reroute_enabled: true
+    debug_output_dir: opencda/planning_module/opencda_bridge/debug_cp_lane_closure
+
+scenario:
+  single_cav_list:
+    - name: ego
+      spawn_position: [-290.0, 8.3, 0.3, 0, 0, 0]
+      destination: [-80.0, 8.3, 0.3]
+      v2x:
+        enabled: true
+        communication_range: 80

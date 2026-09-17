@@ -18,6 +18,7 @@ class CAVConflictSchedule:
     """Own role cadence and cached Stage-A/B state across planning ticks."""
 
     coordination_period_s: float = 0.2
+    infeasible_emergency_streak: int = 2
     latch_state: dict = field(default_factory=dict)
     tag_state: dict = field(default_factory=dict)
     veto_state: dict = field(default_factory=dict)
@@ -31,6 +32,7 @@ class CAVConflictSchedule:
     _has_observation: bool = False
     revision: int = 0
     last_reset_reason: str = "initial"
+    corridor_infeasible_streak: int = 0
 
     def reset(self, *, reason: str) -> None:
         """Atomically retire all runtime state at a topology boundary."""
@@ -46,6 +48,7 @@ class CAVConflictSchedule:
         self._last_refresh_s = -float("inf")
         self._last_structure_revision = ""
         self._has_observation = False
+        self.corridor_infeasible_streak = 0
         self.revision += 1
         self.last_reset_reason = str(reason)
 
@@ -174,6 +177,13 @@ class CAVConflictSchedule:
         self.tag_state = dict(getattr(result, "tag_state", {}) or {})
         self.veto_state = dict(getattr(result, "veto_state", {}) or {})
         self.assignments = tuple(getattr(result, "assignments", ()) or ())
+        constraint_corridor = getattr(result, "constraint_corridor", None)
+        if constraint_corridor is not None and not bool(
+            getattr(constraint_corridor, "feasible", True)
+        ):
+            self.corridor_infeasible_streak += 1
+        else:
+            self.corridor_infeasible_streak = 0
         self._has_observation = True
         released_actor_ids = tuple(
             str(actor_id)
@@ -207,3 +217,12 @@ class CAVConflictSchedule:
         )):
             self._last_refresh_s = float(sim_time_s)
             self.revision += 1
+
+    @property
+    def corridor_emergency_stop_required(self) -> bool:
+        """Return the debounced fail-safe state for the owned corridor."""
+
+        return bool(
+            int(self.corridor_infeasible_streak)
+            >= max(1, int(self.infeasible_emergency_streak))
+        )

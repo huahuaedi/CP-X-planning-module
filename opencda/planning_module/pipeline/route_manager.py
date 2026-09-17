@@ -38,6 +38,18 @@ class RouteReplanResult:
 
 
 @dataclass(frozen=True)
+class LaneClosureRouteResult:
+    """Atomic result of applying durable CP lane-closure events."""
+
+    attempted: bool
+    success: bool
+    route_changed: bool
+    reason: str
+    handled_message_ids: Tuple[str, ...] = ()
+    blocked_lane_ids: Tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
 class RouteCursorSnapshot:
     """The single per-tick progress result consumed by downstream stages."""
 
@@ -153,6 +165,7 @@ class CPXRouteManager:
         self._route_current_lane_id: int = 0
         self._last_progress_sync_pose: Optional[Tuple[float, float, float]] = None
         self._route_stalled_motion_m: float = 0.0
+        self._handled_lane_closure_ids = set()
         self._last_status = RouteManagerStatus(debug_reason="route_not_initialized")
 
     def set_destination(
@@ -316,6 +329,116 @@ class CPXRouteManager:
                 False,
                 f"route_replan_failed:{str(trigger_reason)}:{exc}",
             )
+
+    def apply_lane_closures(
+        self,
+        *,
+        messages: Sequence[Mapping[str, object]],
+        start_point: Mapping[str, object],
+    ) -> LaneClosureRouteResult:
+        """Block newly observed AD-map lanes and atomically replace the route.
+
+        Message identity, blocked topology and route revision are one
+        lifecycle owned here. A failed proposal restores both the previous
+        route (inside :meth:`replan_from`) and the planner's blocked-lane set;
+        callers therefore never observe a half-applied closure.
+        """
+
+        pending = []
+        for raw in list(messages or ()):
+            if not isinstance(raw, Mapping):
+                continue
+            message = dict(raw)
+            message_id = str(message.get("id", "") or "").strip()
+            message_type = str(message.get("type", "") or "").strip().lower()
+            if (
+                not message_id
+                or message_type != "lane_closure"
+                or message_id in self._handled_lane_closure_ids
+            ):
+                continue
+            pending.append((message_id, message))
+        if not pending:
+            return LaneClosureRouteResult(
+                attempted=False,
+                success=True,
+                route_changed=False,
+                reason="cp_lane_closure_no_new_messages",
+            )
+
+        blocked_before = self._blocked_lane_snapshot()
+        resolved_ids = []
+        blocked_lane_ids = []
+        for message_id, message in pending:
+            lane_id = self._resolve_and_block_lane_closure(message)
+            if lane_id is None:
+                continue
+            resolved_ids.append(str(message_id))
+            if int(lane_id) not in blocked_lane_ids:
+                blocked_lane_ids.append(int(lane_id))
+        if not blocked_lane_ids:
+            self._restore_blocked_lanes(blocked_before)
+            return LaneClosureRouteResult(
+                attempted=True,
+                success=False,
+                route_changed=False,
+                reason="cp_lane_closure_mapping_failed",
+            )
+
+        result = self.replan_from(
+            start_point=start_point,
+            trigger_reason="cp_lane_closure:" + ",".join(resolved_ids),
+        )
+        if not bool(result.success):
+            self._restore_blocked_lanes(blocked_before)
+            return LaneClosureRouteResult(
+                attempted=True,
+                success=False,
+                route_changed=False,
+                reason=str(result.reason),
+                blocked_lane_ids=tuple(blocked_lane_ids),
+            )
+
+        self._handled_lane_closure_ids.update(resolved_ids)
+        return LaneClosureRouteResult(
+            attempted=True,
+            success=True,
+            route_changed=True,
+            reason=str(result.reason),
+            handled_message_ids=tuple(resolved_ids),
+            blocked_lane_ids=tuple(blocked_lane_ids),
+        )
+
+    def _resolve_and_block_lane_closure(
+        self, message: Mapping[str, object],
+    ) -> Optional[int]:
+        position = _lane_closure_position(message)
+        if position is not None:
+            block_position = getattr(
+                self.global_planner, "block_lane_at_position", None
+            )
+            if callable(block_position):
+                lane_id = block_position(position)
+                return None if lane_id is None else int(lane_id)
+        try:
+            lane_id = int(message.get("ad_lane_id"))
+        except (TypeError, ValueError):
+            return None
+        block_lane = getattr(self.global_planner, "block_ad_lane_id", None)
+        if not callable(block_lane):
+            return None
+        block_lane(int(lane_id))
+        return int(lane_id)
+
+    def _blocked_lane_snapshot(self) -> Tuple[int, ...]:
+        return tuple(int(lane_id) for lane_id in list(
+            getattr(self.global_planner, "blocked_lanes", ()) or ()
+        ))
+
+    def _restore_blocked_lanes(self, snapshot: Sequence[int]) -> None:
+        blocked = getattr(self.global_planner, "blocked_lanes", None)
+        if isinstance(blocked, list):
+            blocked[:] = [int(lane_id) for lane_id in snapshot]
 
     def get_route_info(
         self,
@@ -1535,6 +1658,32 @@ def _canonical_lane_id(waypoint: Any, fallback_lane_id: int) -> int:
     except Exception:
         pass
     return int(fallback_lane_id)
+
+
+def _lane_closure_position(
+    message: Mapping[str, object],
+) -> Optional[Dict[str, float]]:
+    raw = message.get("position")
+    try:
+        if isinstance(raw, Mapping) and "x" in raw and "y" in raw:
+            return {
+                "x": float(raw["x"]),
+                "y": float(raw["y"]),
+                "z": float(raw.get("z", 0.0)),
+            }
+        if (
+            isinstance(raw, Sequence)
+            and not isinstance(raw, (str, bytes))
+            and len(raw) >= 2
+        ):
+            return {
+                "x": float(raw[0]),
+                "y": float(raw[1]),
+                "z": float(raw[2]) if len(raw) >= 3 else 0.0,
+            }
+    except (TypeError, ValueError):
+        return None
+    return None
 
 
 def _project_to_segment(
