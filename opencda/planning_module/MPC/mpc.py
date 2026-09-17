@@ -815,6 +815,8 @@ class MPC:
             "Cost_VelocitySlack": 0.0,
         }
         self._last_lane_keeping_profile = LaneKeepingProfile(stage_metrics=tuple(), total_cost=0.0)
+        self._last_nominal_steering_profile: tuple[float, ...] = tuple()
+        self._last_steering_reference_weight = 0.0
         self._last_x_solution: np.ndarray | None = None
         self._last_u_solution: np.ndarray | None = None
         self._previous_x_solution: np.ndarray | None = None
@@ -3317,6 +3319,9 @@ class MPC:
             x_ref_rollout=tracking_rollout,
             lane_center_reference=lane_center_reference,
         )
+        self._last_nominal_steering_profile = tuple(
+            float(value) for value in nominal_steering_profile
+        )
 
         # Track the persistent reference's curvature feed-forward directly.
         # The rate-error term below cannot observe a constant steering offset:
@@ -3327,6 +3332,7 @@ class MPC:
         qd_reference_eff = (
             comfort_scale * float(self.comfort_cost.qdelta_reference)
         )
+        self._last_steering_reference_weight = float(qd_reference_eff)
 
         for k in range(self.horizon_steps):
             a_idx = index.control_index(k, 0)

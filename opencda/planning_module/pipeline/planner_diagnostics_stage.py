@@ -992,6 +992,16 @@ class PlannerDiagnosticsStage:
             "reference_max_curvature_1pm": reference_debug.get(
                 "reference_max_curvature_1pm", ""
             ),
+            "reference_first_curvature_1pm": (
+                float(lane_center_reference[0].get("curvature_1pm", 0.0))
+                if lane_center_reference
+                else ""
+            ),
+            "reference_second_curvature_1pm": (
+                float(lane_center_reference[1].get("curvature_1pm", 0.0))
+                if lane_center_reference and len(lane_center_reference) > 1
+                else ""
+            ),
             "reference_contract_max_curvature_1pm": reference_debug.get(
                 "reference_contract_max_curvature_1pm", ""
             ),
@@ -1052,6 +1062,19 @@ class PlannerDiagnosticsStage:
                 getattr(self.mpc, "_last_infeasibility_diagnostic", {}) or {}
             ),
             "mpc_solve_time_ms": float(getattr(self.mpc, "_last_solve_time_ms", 0.0)),
+            "mpc_nominal_steering_first_rad": (
+                float(self.mpc._last_nominal_steering_profile[1])
+                if len(getattr(self.mpc, "_last_nominal_steering_profile", ())) > 1
+                else ""
+            ),
+            "mpc_nominal_steering_max_abs_rad": (
+                max(abs(float(value)) for value in self.mpc._last_nominal_steering_profile)
+                if getattr(self.mpc, "_last_nominal_steering_profile", ())
+                else ""
+            ),
+            "mpc_steering_reference_weight": float(
+                getattr(self.mpc, "_last_steering_reference_weight", 0.0)
+            ),
             "mpc_cost_profile": str(self.active_mpc_cost_profile),
             "requested_mpc_cost_profile": str(self.requested_mpc_cost_profile),
             "mpc_cost_profile_switch_reason": str(self.mpc_cost_profile_switch_reason),
