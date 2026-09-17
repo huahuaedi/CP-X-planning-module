@@ -1403,11 +1403,6 @@ class CPXMPCPlannerBridge:
         behavior_decision = behavior_stage_result.decision
         behavior_debug = behavior_stage_result.mutable_diagnostics()
         reference_debug = destination_application.mutable_reference_debug()
-        route_reached_destination = bool(destination_stage.reached_destination)
-        route_remaining_distance_m = float(destination_stage.remaining_distance_m)
-        route_destination_approach = bool(destination_stage.approach_active)
-        destination_stopping_distance_m = float(destination_stage.required_distance_m)
-        destination_stop_buffer_m = float(destination_stage.stop_buffer_m)
         destination_speed_constraint = destination_stage.constraint
         if destination_application.finished:
             setattr(self.vehicle_manager, "_opencda_agent_finished", True)
@@ -5395,53 +5390,6 @@ class CPXMPCPlannerBridge:
     @staticmethod
     def _wrap_angle(angle_rad: float) -> float:
         return (float(angle_rad) + math.pi) % (2.0 * math.pi) - math.pi
-
-def _route_destination_stop_gate(
-    *,
-    route_found: bool,
-    remaining_distance_m: float,
-    ego_speed_mps: float,
-    deceleration_mps2: float,
-    buffer_m: float,
-) -> tuple[bool, float]:
-    """Return a physics-based destination approach stop decision."""
-
-    deceleration = max(0.5, float(deceleration_mps2))
-    required_distance_m = (
-        max(0.0, float(ego_speed_mps)) ** 2 / (2.0 * deceleration)
-        + max(0.0, float(buffer_m))
-    )
-    active = bool(
-        route_found
-        and math.isfinite(float(remaining_distance_m))
-        and float(remaining_distance_m) >= 0.0
-        and float(remaining_distance_m) <= float(required_distance_m)
-    )
-    return active, float(required_distance_m)
-
-
-def _destination_approach_speed_cap(
-    *,
-    remaining_distance_m: float,
-    deceleration_mps2: float,
-    buffer_m: float,
-) -> float:
-    """Return the continuous speed cap that stops at the route buffer.
-
-    This is the inverse of the constant-deceleration stopping-distance
-    equation.  It deliberately owns only longitudinal planning; reference
-    geometry remains owned by the persistent reference-line provider.
-    """
-
-    if not math.isfinite(float(remaining_distance_m)):
-        return float("inf")
-    usable_distance_m = max(
-        0.0,
-        float(remaining_distance_m) - max(0.0, float(buffer_m)),
-    )
-    deceleration = max(0.5, float(deceleration_mps2))
-    return math.sqrt(2.0 * deceleration * usable_distance_m)
-
 
 def _hard_gate_requires_emergency_stop(
     *,

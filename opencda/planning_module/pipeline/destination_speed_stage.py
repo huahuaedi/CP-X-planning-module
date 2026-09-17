@@ -13,6 +13,7 @@ class DestinationSpeedStageResult:
     constraint: Optional[SpeedConstraint]
     route_found: bool
     reached_destination: bool
+    mission_complete: bool
     approach_active: bool
     stop_latched: bool
     remaining_distance_m: float
@@ -22,6 +23,7 @@ class DestinationSpeedStageResult:
 
     def trace_fields(self) -> dict[str, object]:
         return {
+            "destination_mission_complete": bool(self.mission_complete),
             "destination_stop_latched": bool(self.stop_latched),
             "destination_stop_reason": str(self.reason),
             "destination_stop_remaining_distance_m": float(
@@ -68,11 +70,16 @@ class DestinationSpeedStage:
         self._fallback = fallback_manager
         self._behavior = behavior_stage
         self._stop_latched = False
+        self._mission_complete = False
         self._route_revision = ""
 
     @property
     def stop_latched(self) -> bool:
         return bool(self._stop_latched)
+
+    @property
+    def mission_complete(self) -> bool:
+        return bool(self._mission_complete)
 
     def evaluate(
         self,
@@ -85,6 +92,7 @@ class DestinationSpeedStage:
         if revision != self._route_revision:
             self._route_revision = revision
             self._stop_latched = False
+            self._mission_complete = False
         route_found = bool(getattr(route_status, "route_found", False))
         reached = bool(
             route_status and getattr(route_status, "reached_destination", False)
@@ -117,6 +125,23 @@ class DestinationSpeedStage:
             or reached
             or (approach_active and remaining_m <= buffer_m)
         )
+        completion_speed_mps = max(
+            0.0,
+            float(self._config.get("destination_stop_complete_speed_mps", 0.15)),
+        )
+        # Mission completion belongs to this stage, not RouteManager.  The
+        # latter reports geometric progress to the route endpoint, whereas a
+        # vehicle must stop one footprint-safe buffer before that endpoint.
+        # Once the buffered stop is achieved, retain completion until route
+        # identity changes so speed measurement noise cannot reopen a mission.
+        self._mission_complete = bool(
+            self._mission_complete
+            or (
+                route_found
+                and self._stop_latched
+                and float(ego_speed_mps) <= completion_speed_mps
+            )
+        )
         reason = ""
         if self._stop_latched:
             reason = (
@@ -130,6 +155,7 @@ class DestinationSpeedStage:
             constraint=constraint,
             route_found=route_found,
             reached_destination=reached,
+            mission_complete=bool(self._mission_complete),
             approach_active=bool(approach_active),
             stop_latched=bool(self._stop_latched),
             remaining_distance_m=remaining_m,
@@ -197,10 +223,5 @@ class DestinationSpeedStage:
             reference_samples=tuple(dict(sample) for sample in reference),
             behavior_stage_result=behavior,
             reference_debug=debug,
-            finished=bool(
-                stage.stop_latched
-                and float(ego_speed_mps) <= float(
-                    self._config.get("destination_stop_complete_speed_mps", 0.15)
-                )
-            ),
+            finished=bool(stage.mission_complete),
         )

@@ -535,6 +535,10 @@ class PlanningPipeline:
     def destination_stop_latched(self) -> bool:
         return bool(self.destination_speed.stop_latched)
 
+    @property
+    def destination_mission_complete(self) -> bool:
+        return bool(self.destination_speed.mission_complete)
+
     def publish_reference(self, **kwargs):
         return self.reference_publication.run(**kwargs)
 

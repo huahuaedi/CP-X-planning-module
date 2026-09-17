@@ -785,6 +785,9 @@ class PlannerDiagnosticsStage:
                 self.route_manager.last_status.remaining_distance_m
             ),
             "route_reached_destination": bool(self.route_manager.last_status.reached_destination),
+            "mission_complete": bool(
+                self.pipeline.destination_mission_complete
+            ),
             "destination_stop_latched": bool(
                 self.pipeline.destination_stop_latched
             ),

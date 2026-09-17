@@ -27,8 +27,6 @@ if "carla" not in sys.modules:
 
 from opencda_bridge.cpx_mpc_planner import (
     CPXMPCPlannerBridge,
-    _destination_approach_speed_cap,
-    _route_destination_stop_gate,
 )
 from pipeline.static_obstacle_stage import (
     cooldown_policy as _static_obstacle_cooldown_policy,
@@ -49,59 +47,6 @@ from pipeline.perception_stage import PerceptionStage
 
 
 class OpenCDABridgeInputFusionTests(unittest.TestCase):
-    def test_destination_approach_speed_cap_is_continuous_stopping_profile(self):
-        self.assertAlmostEqual(
-            _destination_approach_speed_cap(
-                remaining_distance_m=11.5,
-                deceleration_mps2=2.0,
-                buffer_m=1.5,
-            ),
-            (40.0 ** 0.5),
-        )
-        self.assertEqual(
-            _destination_approach_speed_cap(
-                remaining_distance_m=1.5,
-                deceleration_mps2=2.0,
-                buffer_m=1.5,
-            ),
-            0.0,
-        )
-        self.assertEqual(
-            _destination_approach_speed_cap(
-                remaining_distance_m=0.0,
-                deceleration_mps2=2.0,
-                buffer_m=1.5,
-            ),
-            0.0,
-        )
-
-    def test_destination_stop_gate_uses_physical_stopping_distance(self):
-        active, required_m = _route_destination_stop_gate(
-            route_found=True,
-            remaining_distance_m=7.0,
-            ego_speed_mps=5.0,
-            deceleration_mps2=2.0,
-            buffer_m=1.5,
-        )
-        self.assertTrue(active)
-        self.assertAlmostEqual(required_m, 7.75)
-
-    def test_destination_stop_gate_rejects_missing_route_and_far_goal(self):
-        self.assertFalse(_route_destination_stop_gate(
-            route_found=False,
-            remaining_distance_m=0.0,
-            ego_speed_mps=0.0,
-            deceleration_mps2=2.0,
-            buffer_m=1.5,
-        )[0])
-        self.assertFalse(_route_destination_stop_gate(
-            route_found=True,
-            remaining_distance_m=20.0,
-            ego_speed_mps=5.0,
-            deceleration_mps2=2.0,
-            buffer_m=1.5,
-        )[0])
-
     def test_static_obstacle_local_avoidance_selects_safest_adjacent_lane(self):
         selected = _select_static_obstacle_local_avoidance_lane(
             current_lane_id=2,
