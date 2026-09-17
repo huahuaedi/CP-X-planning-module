@@ -710,6 +710,11 @@ class PlannerDiagnosticsStage:
             "lane_change_completion_heading_error_deg": reference_debug.get(
                 "lane_change_completion_heading_error_deg", ""
             ),
+            "lane_change_completion_predicted_lateral_error_m": (
+                reference_debug.get(
+                    "lane_change_completion_predicted_lateral_error_m", ""
+                )
+            ),
             "lane_change_contract_min_progress": reference_debug.get(
                 "lane_change_contract_min_progress", ""
             ),
@@ -721,6 +726,9 @@ class PlannerDiagnosticsStage:
             ),
             "lane_change_contract_required_stable_frames": reference_debug.get(
                 "lane_change_contract_required_stable_frames", ""
+            ),
+            "lane_change_contract_handoff_preview_time_s": reference_debug.get(
+                "lane_change_contract_handoff_preview_time_s", ""
             ),
             "lane_change_stabilization_entry_lateral_error_m": reference_debug.get(
                 "lane_change_stabilization_entry_lateral_error_m", ""

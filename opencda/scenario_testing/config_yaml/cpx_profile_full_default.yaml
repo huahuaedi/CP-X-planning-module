@@ -71,6 +71,12 @@ vehicle_base:
     route_reference_tracking_reserve_m: 0.20
     control_buffer_max_reference_anchor_jump_m: 0.75
     lane_change_completion_footprint_margin_m: 0.05
+    # One target-corridor contract owns both completion and the lane-follow
+    # ownership transfer.  The preview term scales the admissible heading
+    # residual with speed instead of using a separate high-speed threshold.
+    lane_change_completion_max_lateral_error_m: 0.20
+    lane_change_completion_max_heading_error_deg: 5.0
+    lane_change_completion_handoff_preview_time_s: 0.30
     use_opencda_global_route: true
     opencda_global_route_reference_allowed: true
     global_planner_mode: dij

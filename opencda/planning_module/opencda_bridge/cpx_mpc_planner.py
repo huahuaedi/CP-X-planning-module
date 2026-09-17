@@ -4010,11 +4010,13 @@ class CPXMPCPlannerBridge:
 
     def _release_completed_lane_change_commitment(
         self, *, current_lane_id: int, ego_location: Any, ego_yaw_rad: float,
+        ego_speed_mps: float = 0.0,
     ) -> str:
         return self._lane_change_lifecycle().release_completed(
             current_lane_id=current_lane_id,
             ego_location=ego_location,
             ego_yaw_rad=ego_yaw_rad,
+            ego_speed_mps=float(ego_speed_mps),
             local_map=getattr(self, "_local_map_snapshot", None),
         )
 

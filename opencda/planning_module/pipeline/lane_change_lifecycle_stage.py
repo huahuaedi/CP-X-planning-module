@@ -35,7 +35,8 @@ class LaneChangeLifecycleStage:
 
     def release_completed(
         self, *, current_lane_id: int, ego_location: Any, ego_yaw_rad: float,
-        local_map: Any = None, stall_failure_count: int = 0,
+        ego_speed_mps: float = 0.0, local_map: Any = None,
+        stall_failure_count: int = 0,
     ) -> str:
         snapshot = self._provider.snapshot(LANE_CHANGE)
         if not snapshot.mutable_samples():
@@ -112,6 +113,7 @@ class LaneChangeLifecycleStage:
         completion = self._maneuver.evaluate_lane_change_completion(
             alignment=alignment,
             progress=progress,
+            ego_speed_mps=float(ego_speed_mps),
             target_lane_matches=bool(target_lane_matches),
             footprint_clearance_m=float(footprint_clearance_m),
             contract=contract,
@@ -119,6 +121,7 @@ class LaneChangeLifecycleStage:
         transition = self._maneuver.accept_evaluated_lane_change_completion(
             completion=completion,
             contract=contract,
+            ego_speed_mps=float(ego_speed_mps),
             stabilization_geometry_ready=bool(geometry_ready),
             stabilization_lateral_error_m=lateral_error,
             stabilization_heading_error_rad=heading_error,
@@ -134,8 +137,12 @@ class LaneChangeLifecycleStage:
                     # Dropping its reference on a wall-clock timeout revives
                     # the obsolete source-lane master.
                     timeout_enabled=not bool(
-                        lifecycle.geometry_completion_latched
-                        or completion.complete
+                        completion.complete
+                        or (
+                            lifecycle.geometry_completion_latched
+                            and float(lifecycle.progress_s_m) + 1.0e-3
+                            < float(lifecycle.transition_to_turn_arc_m)
+                        )
                     ),
                 )
                 if timeout.action == "abandon":

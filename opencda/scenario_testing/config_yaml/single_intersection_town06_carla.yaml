@@ -222,17 +222,11 @@ vehicle_base:
     route_reference_tracking_reserve_m: 0.20
     control_buffer_max_reference_anchor_jump_m: 0.75
     lane_change_completion_footprint_margin_m: 0.05
-    # Defaults (0.35m / 8deg) let a lane change hand off to lane_follow with
-    # residual error right at the tolerance edge, leaving lane_follow's own
-    # centering controller to spend several extra seconds (and a visible
-    # steering swing) cleaning it up right when the vehicle should already
-    # look like it's driving a straight line. Tightening these makes the
-    # lane-change reference tracker itself finish the convergence (it's
-    # already actively driving toward the target lane center every tick;
-    # this only delays the "complete" declaration, not how fast ego closes
-    # the gap) before handing off.
+    # Match the shared CP-X completion contract for this standalone Town06
+    # configuration (it does not inherit cpx_profile_full_default.yaml).
     lane_change_completion_max_lateral_error_m: 0.20
     lane_change_completion_max_heading_error_deg: 5.0
+    lane_change_completion_handoff_preview_time_s: 0.30
     # Keep the turn reference through the outgoing-lane connector. Switching
     # to the stricter lane-follow contract after only 1 s exposed a local
     # curvature spike at the right-turn/straight-line join.

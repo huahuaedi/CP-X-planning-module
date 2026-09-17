@@ -30,17 +30,66 @@ class LaneChangeCompletionTests(unittest.TestCase):
             "lane_change_completion_max_lateral_error_m": 0.2,
             "lane_change_completion_max_heading_error_deg": 5.0,
             "lane_change_completion_stable_frames": 0,
+            "lane_change_completion_handoff_preview_time_s": 0.25,
         })
 
         self.assertEqual(contract.min_progress, 1.0)
         self.assertEqual(contract.max_lateral_error_m, 0.2)
         self.assertAlmostEqual(contract.max_heading_error_rad, math.radians(5.0))
         self.assertEqual(contract.required_stable_frames, 1)
+        self.assertEqual(contract.handoff_preview_time_s, 0.25)
         self.assertTrue(contract.convergence_ready(
             progress=1.0,
             lateral_error_m=0.2,
             heading_error_rad=math.radians(5.0),
         ))
+
+    def test_high_speed_heading_error_delays_lane_follow_handoff(self):
+        contract = LaneChangeContract(
+            min_progress=0.92,
+            max_lateral_error_m=0.20,
+            max_heading_error_rad=math.radians(5.0),
+            required_stable_frames=1,
+            handoff_preview_time_s=0.30,
+        )
+
+        # This reproduces the 12 m/s closed-loop handoff: both geometric
+        # errors independently fit the old contract, but the heading would
+        # carry the vehicle about 0.27 m laterally before control can react.
+        self.assertFalse(contract.convergence_ready(
+            progress=0.995,
+            lateral_error_m=0.019,
+            heading_error_rad=math.radians(4.33),
+            speed_mps=12.0,
+        ))
+        self.assertTrue(contract.convergence_ready(
+            progress=0.995,
+            lateral_error_m=0.019,
+            heading_error_rad=math.radians(1.5),
+            speed_mps=12.0,
+        ))
+
+    def test_completion_uses_speed_aware_handoff_projection(self):
+        contract = LaneChangeContract(
+            min_progress=0.92,
+            max_lateral_error_m=0.20,
+            max_heading_error_rad=math.radians(5.0),
+            required_stable_frames=1,
+            handoff_preview_time_s=0.30,
+        )
+        result = evaluate_lane_change_completion(
+            reference_samples=self._terminal_reference(),
+            ego_x_m=9.0,
+            ego_y_m=0.019,
+            ego_heading_rad=math.radians(4.33),
+            ego_speed_mps=12.0,
+            progress=0.995,
+            previous_stable_frames=0,
+            contract=contract,
+        )
+
+        self.assertFalse(result.complete)
+        self.assertEqual(result.stable_frames, 0)
 
     def test_stabilization_handoff_precedes_final_convergence(self):
         contract = LaneChangeContract()

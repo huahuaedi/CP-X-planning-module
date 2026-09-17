@@ -433,6 +433,15 @@ class ManeuverManager:
             < float(transition_arc_m)
         ):
             return LaneChangeTransition("hold", "transition_arc_incomplete")
+        if not bool(geometrically_complete):
+            # The latch proves that the physical lane crossing completed at
+            # least once; it does not prove that the vehicle is still aligned
+            # with the lane-follow geometry at the ownership transfer instant.
+            # Requiring fresh convergence here prevents a fixed transition
+            # arc from releasing into a large high-speed lateral excursion.
+            return LaneChangeTransition(
+                "hold", "lane_follow_handoff_not_converged"
+            )
         return LaneChangeTransition("complete", str(completion_reason))
 
     def evaluate_lane_change_completion(
@@ -440,6 +449,7 @@ class ManeuverManager:
         *,
         alignment,
         progress,
+        ego_speed_mps,
         target_lane_matches,
         footprint_clearance_m,
         contract,
@@ -460,6 +470,7 @@ class ManeuverManager:
             footprint_clearance_m=float(footprint_clearance_m),
             min_footprint_clearance_m=0.0,
             contract=contract,
+            ego_speed_mps=float(ego_speed_mps),
         )
 
     def accept_evaluated_lane_change_completion(
@@ -467,6 +478,7 @@ class ManeuverManager:
         *,
         completion,
         contract,
+        ego_speed_mps,
         stabilization_geometry_ready,
         stabilization_lateral_error_m,
         stabilization_heading_error_rad,
@@ -497,6 +509,13 @@ class ManeuverManager:
             ),
             "lane_change_completion_heading_error_deg": math.degrees(
                 float(completion.target_heading_error_rad)
+            ),
+            "lane_change_completion_predicted_lateral_error_m": (
+                contract.predicted_lateral_error_m(
+                    lateral_error_m=float(completion.target_lateral_error_m),
+                    heading_error_rad=float(completion.target_heading_error_rad),
+                    speed_mps=float(ego_speed_mps),
+                )
             ),
             "lane_change_completion_target_lane_matches": bool(
                 completion.target_lane_matches
@@ -532,10 +551,10 @@ class ManeuverManager:
     def record_lane_change_completion_evidence(self, stable_frames, debug,
                                                geometrically_complete=False):
         self.lane_change.completion_stable_frames = max(0, int(stable_frames))
-        # Geometric completion is a one-way lifecycle event.  The following
-        # fixed-arc handoff may temporarily move outside the tight completion
-        # tolerance; that must not make an already completed crossing become
-        # incomplete again.
+        # Crossing completion is a one-way lifecycle event used to retain the
+        # stabilization reference while its fixed arc is consumed.  Final
+        # ownership release still requires fresh target-lane convergence in
+        # ``accept_lane_change_completion`` above.
         self.lane_change.geometry_completion_latched = bool(
             self.lane_change.geometry_completion_latched
             or geometrically_complete

@@ -189,6 +189,37 @@ class ManeuverManagerTests(unittest.TestCase):
         self.assertEqual(complete.action, "complete")
         self.assertTrue(manager.lane_change.active)
 
+    def test_latched_crossing_requires_fresh_alignment_at_handoff(self):
+        manager = ManeuverManager()
+        manager.begin_lane_change(
+            "lane_change_left", "executing", 1, 2, 12.0, []
+        )
+        manager.begin_lane_change_stabilization()
+        manager.record_lane_change_completion_evidence(
+            5, {"reason": "crossing_complete"}, geometrically_complete=True
+        )
+
+        waiting = manager.accept_lane_change_completion(
+            stable_frames=0,
+            debug={"reason": "handoff_drifted"},
+            geometrically_complete=False,
+            completion_reason="not_converged",
+            transition_progress_m=10.0,
+            transition_arc_m=10.0,
+        )
+        complete = manager.accept_lane_change_completion(
+            stable_frames=5,
+            debug={"reason": "handoff_aligned"},
+            geometrically_complete=True,
+            completion_reason="converged",
+            transition_progress_m=10.5,
+            transition_arc_m=10.0,
+        )
+
+        self.assertEqual(waiting.action, "hold")
+        self.assertEqual(waiting.reason, "lane_follow_handoff_not_converged")
+        self.assertEqual(complete.action, "complete")
+
     def test_post_turn_phase_has_no_geometry_interface(self):
         manager = ManeuverManager()
         manager.turn.decision = "intersection_turn_right"

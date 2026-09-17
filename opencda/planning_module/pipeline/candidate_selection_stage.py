@@ -529,6 +529,7 @@ class CandidateSelectionStage:
             current_lane_id=int(request.current_lane_id),
             ego_location=request.ego_location,
             ego_yaw_rad=float(request.ego_yaw_rad),
+            ego_speed_mps=float(request.ego_speed_mps),
             local_map=getattr(request.reference_context, "local_map", None),
             stall_failure_count=int(request.lane_change_mpc_stall_failure_count),
         ) or "")

@@ -72,9 +72,10 @@ class LaneChangeContract:
     """Single convergence contract for lane-change lifecycle transitions."""
 
     min_progress: float = 0.92
-    max_lateral_error_m: float = 0.35
-    max_heading_error_rad: float = math.radians(8.0)
+    max_lateral_error_m: float = 0.20
+    max_heading_error_rad: float = math.radians(5.0)
     required_stable_frames: int = 5
+    handoff_preview_time_s: float = 0.30
 
     @classmethod
     def from_config(cls, config: Mapping[str, object]) -> "LaneChangeContract":
@@ -90,7 +91,7 @@ class LaneChangeContract:
                 0.05,
                 float(
                     config.get(
-                        "lane_change_completion_max_lateral_error_m", 0.35
+                        "lane_change_completion_max_lateral_error_m", 0.20
                     )
                 ),
             ),
@@ -99,7 +100,7 @@ class LaneChangeContract:
                     0.1,
                     float(
                         config.get(
-                            "lane_change_completion_max_heading_error_deg", 8.0
+                            "lane_change_completion_max_heading_error_deg", 5.0
                         )
                     ),
                 )
@@ -108,7 +109,33 @@ class LaneChangeContract:
                 1,
                 int(config.get("lane_change_completion_stable_frames", 5)),
             ),
+            handoff_preview_time_s=max(
+                0.0,
+                float(config.get(
+                    "lane_change_completion_handoff_preview_time_s", 0.30
+                )),
+            ),
         )
+
+    def predicted_lateral_error_m(
+        self, *, lateral_error_m: float, heading_error_rad: float,
+        speed_mps: float,
+    ) -> float:
+        """Bound the immediate lane-follow handoff error.
+
+        Completion transfers geometry ownership from the maneuver reference
+        to the target-lane centerline.  A heading error that is harmless at
+        parking speed can create a visible lateral excursion at road speed.
+        Project that drift over the short controller response horizon so the
+        same geometric contract remains meaningful across speeds.
+        """
+
+        lateral_drift_m = (
+            max(0.0, float(speed_mps))
+            * float(self.handoff_preview_time_s)
+            * abs(math.sin(float(heading_error_rad)))
+        )
+        return abs(float(lateral_error_m)) + float(lateral_drift_m)
 
     def convergence_ready(
         self,
@@ -116,11 +143,17 @@ class LaneChangeContract:
         progress: float,
         lateral_error_m: float,
         heading_error_rad: float,
+        speed_mps: float = 0.0,
     ) -> bool:
         return bool(
             float(progress) >= float(self.min_progress)
             and abs(float(lateral_error_m)) <= float(self.max_lateral_error_m)
             and abs(float(heading_error_rad)) <= float(self.max_heading_error_rad)
+            and self.predicted_lateral_error_m(
+                lateral_error_m=float(lateral_error_m),
+                heading_error_rad=float(heading_error_rad),
+                speed_mps=float(speed_mps),
+            ) <= float(self.max_lateral_error_m)
         )
 
     def stabilization_handoff_ready(
@@ -157,9 +190,16 @@ class LaneChangeContract:
         # clearance are stronger physical evidence that crossing is over.
         target_corridor_evidence = bool(
             target_lane_matches
-            and abs(float(lateral_error_m)) <= float(self.max_lateral_error_m)
-            and abs(float(heading_error_rad)) <= float(
-                self.max_heading_error_rad
+            # Entry into stabilization is deliberately broader than final
+            # lane-follow release: this phase exists to remove the remaining
+            # target-lane error.  Keep the distinction inside the contract
+            # rather than weakening the final completion budget.
+            and abs(float(lateral_error_m)) <= max(
+                float(self.max_lateral_error_m),
+                0.10 * max(0.1, float(lane_width_m)),
+            )
+            and abs(float(heading_error_rad)) <= max(
+                float(self.max_heading_error_rad), math.radians(8.0)
             )
             and float(footprint_clearance_m) >= 0.0
         )
@@ -180,6 +220,9 @@ class LaneChangeContract:
             "lane_change_contract_required_stable_frames": int(
                 self.required_stable_frames
             ),
+            "lane_change_contract_handoff_preview_time_s": float(
+                self.handoff_preview_time_s
+            ),
         }
 
 
@@ -199,6 +242,7 @@ def evaluate_lane_change_completion(
     max_heading_error_rad: float = math.radians(8.0),
     required_stable_frames: int = 5,
     contract: Optional[LaneChangeContract] = None,
+    ego_speed_mps: float = 0.0,
 ) -> LaneChangeCompletion:
     """Require convergence to the locked target geometry.
 
@@ -267,14 +311,19 @@ def evaluate_lane_change_completion(
             max_lateral_error_m=float(max_lateral_error_m),
             max_heading_error_rad=float(max_heading_error_rad),
             required_stable_frames=int(required_stable_frames),
+            handoff_preview_time_s=(
+                float(contract.handoff_preview_time_s)
+                if contract is not None else 0.30
+            ),
         ),
+        ego_speed_mps=float(ego_speed_mps),
     )
 
 
 def evaluate_lane_change_alignment(
     *, available, lateral_error_m, heading_error_rad, progress,
     previous_stable_frames, target_lane_matches, footprint_clearance_m,
-    min_footprint_clearance_m=0.0, contract
+    min_footprint_clearance_m=0.0, contract, ego_speed_mps=0.0,
 ) -> LaneChangeCompletion:
     """Evaluate one provider-owned alignment with the shared contract."""
 
@@ -284,6 +333,7 @@ def evaluate_lane_change_alignment(
             progress=float(progress),
             lateral_error_m=float(lateral_error_m),
             heading_error_rad=float(heading_error_rad),
+            speed_mps=float(ego_speed_mps),
         )
         and float(footprint_clearance_m) >= float(min_footprint_clearance_m)
     )
