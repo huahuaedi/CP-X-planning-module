@@ -42,34 +42,39 @@ def mpc_stage_trajectory(
     module's prediction at all: it only recognizes a ``predicted_trajectory``
     already shaped as one ``[x, y, v, psi]`` entry per stage, and silently
     falls back to its own constant-velocity extrapolation for anything else
-    (including the ``{x, y, t}`` dict points this module produces). The
-    heading is held constant at ``fallback_heading_rad`` because the
-    constant-acceleration/constant-velocity models this module falls back to
-    do not turn -- a real turning prediction would need to supply its own
-    per-point heading in ``points``.
+    (including the ``{x, y, t}`` dict points this module produces). Each
+    point's own ``psi`` is used when present (a real turning prediction
+    supplies one -- see ``behavior_planner.trajectory_risk._trajectory_points``,
+    which now derives it from the trajectory's local tangent rather than
+    dropping it); ``fallback_heading_rad`` only covers a point missing it
+    and every stage extrapolated past a trajectory shorter than the horizon,
+    where holding the last known heading is the only heading left to hold.
     """
 
     stages: List[List[float]] = []
     last_x: float | None = None
     last_y: float | None = None
     last_v = 0.0
+    last_psi = float(fallback_heading_rad)
     for step in range(max(0, int(horizon_steps))):
         if step < len(points):
             point = points[step]
             x = float(point.get("x", 0.0))
             y = float(point.get("y", 0.0))
             v = float(point.get("v", last_v))
+            psi = float(point.get("psi", fallback_heading_rad))
         elif last_x is not None:
             # The supplied trajectory is shorter than MPC's horizon (e.g. a
             # CP-supplied real prediction that stops early). Hold the last
             # known speed/heading rather than leaving later stages unset.
-            x = float(last_x) + float(last_v) * math.cos(float(fallback_heading_rad)) * float(dt_s)
-            y = float(last_y) + float(last_v) * math.sin(float(fallback_heading_rad)) * float(dt_s)
+            x = float(last_x) + float(last_v) * math.cos(float(last_psi)) * float(dt_s)
+            y = float(last_y) + float(last_v) * math.sin(float(last_psi)) * float(dt_s)
             v = float(last_v)
+            psi = float(last_psi)
         else:
             break
-        last_x, last_y, last_v = x, y, v
-        stages.append([float(x), float(y), float(v), float(fallback_heading_rad)])
+        last_x, last_y, last_v, last_psi = x, y, v, psi
+        stages.append([float(x), float(y), float(v), float(psi)])
     return stages
 
 

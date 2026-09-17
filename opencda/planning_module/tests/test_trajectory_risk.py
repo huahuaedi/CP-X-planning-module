@@ -261,5 +261,56 @@ class LaneFollowingObstaclePredictionTests(unittest.TestCase):
         self.assertEqual(without_param, with_none)
 
 
+class PredictionPointKinematicsTests(unittest.TestCase):
+    """A supplied ``predicted_trajectory`` must keep or derive v/psi/a --
+    see behavior_planner.trajectory_risk._trajectory_points /
+    _fill_missing_kinematics. Without this, a real per-point speed a
+    CP message or tracker attaches gets silently thrown away, and anything
+    reading the normalized points back (pipeline.prediction.mpc_stage_trajectory
+    -> MPC._get_object_state_at_stage) sees no v/psi at all instead of the
+    real ones."""
+
+    def test_supplied_v_and_psi_are_kept_as_is_not_recomputed(self):
+        snapshot = {
+            "x": 0.0, "y": 0.0, "v": 999.0, "psi": 999.0,
+            "predicted_trajectory": [
+                {"x": 10.0, "y": 0.0, "t": 1.0, "v": 3.0, "psi": 0.7, "a": 0.4},
+            ],
+        }
+        points = obstacle_future_trajectory(snapshot, horizon_s=2.0, dt_s=1.0)
+        self.assertEqual(points[0]["v"], 3.0)
+        self.assertEqual(points[0]["psi"], 0.7)
+        self.assertEqual(points[0]["a"], 0.4)
+
+    def test_missing_v_and_psi_are_derived_from_the_trajectory_not_zero(self):
+        # Straight line east at 4 m/s -- x advances by 4 every 1s, y constant.
+        snapshot = {
+            "x": 0.0, "y": 0.0, "v": 999.0, "psi": 999.0,
+            "predicted_trajectory": [
+                {"x": 4.0, "y": 0.0, "t": 1.0},
+                {"x": 8.0, "y": 0.0, "t": 2.0},
+                {"x": 12.0, "y": 0.0, "t": 3.0},
+            ],
+        }
+        points = obstacle_future_trajectory(snapshot, horizon_s=3.0, dt_s=1.0)
+        self.assertEqual(len(points), 3)
+        for point in points:
+            # None of these come from the (deliberately wrong) snapshot
+            # v/psi=999 -- every point is derived from x/y/t, including the
+            # first, which has no predecessor to backward-difference against.
+            self.assertAlmostEqual(point["v"], 4.0)
+            self.assertAlmostEqual(point["psi"], 0.0)
+
+    def test_single_point_trajectory_uses_the_snapshots_current_state(self):
+        snapshot = {
+            "x": 0.0, "y": 0.0, "v": 7.0, "psi": 1.2,
+            "predicted_trajectory": [{"x": 4.0, "y": 0.0, "t": 1.0}],
+        }
+        points = obstacle_future_trajectory(snapshot, horizon_s=2.0, dt_s=1.0)
+        self.assertEqual(len(points), 1)
+        self.assertEqual(points[0]["v"], 7.0)
+        self.assertEqual(points[0]["psi"], 1.2)
+
+
 if __name__ == "__main__":
     unittest.main()

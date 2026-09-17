@@ -135,6 +135,26 @@ class MpcStageTrajectoryTest(unittest.TestCase):
             [],
         )
 
+    def test_uses_each_points_own_psi_instead_of_the_constant_fallback(self):
+        # A real turning prediction supplies its own heading per point --
+        # this must survive into the MPC stage instead of being overwritten
+        # by fallback_heading_rad (see behavior_planner.trajectory_risk,
+        # which now derives a real psi instead of dropping it).
+        points = [
+            {"x": 1.0, "y": 0.0, "t": 0.5, "v": 2.0, "psi": 0.3},
+            {"x": 2.0, "y": 0.5, "t": 1.0, "v": 2.0, "psi": 0.6},
+        ]
+
+        stages = mpc_stage_trajectory(
+            points, fallback_heading_rad=0.0, horizon_steps=3, dt_s=0.5,
+        )
+
+        self.assertEqual(stages[0][3], 0.3)
+        self.assertEqual(stages[1][3], 0.6)
+        # Extrapolated past the supplied trajectory: hold the last real
+        # heading (0.6), not the unrelated initial fallback (0.0).
+        self.assertEqual(stages[2][3], 0.6)
+
 
 if __name__ == "__main__":
     unittest.main()

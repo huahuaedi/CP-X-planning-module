@@ -17,6 +17,17 @@ def _safe_float(value: object, default: float = 0.0) -> float:
 
 
 def _trajectory_points(snapshot: Mapping[str, object]) -> list[dict]:
+    """Normalize ``snapshot["predicted_trajectory"]`` to ``{x, y, t, v, psi, a}``.
+
+    A CP-supplied or tracker-supplied trajectory may already carry v/psi/a
+    per point; those are kept as-is (never silently dropped -- callers such
+    as ``pipeline.prediction.mpc_stage_trajectory`` read ``v`` straight off
+    each point, and a point missing it degrades to a stale/zero speed with
+    no error). Whatever is missing is derived from the trajectory itself
+    (finite difference for v, local tangent for psi) rather than left
+    absent, via ``_fill_missing_kinematics``.
+    """
+
     raw_trajectory = snapshot.get("predicted_trajectory", None)
     if not isinstance(raw_trajectory, Sequence) or isinstance(raw_trajectory, (str, bytes, bytearray)):
         return []
@@ -26,13 +37,90 @@ def _trajectory_points(snapshot: Mapping[str, object]) -> list[dict]:
             x_m = _safe_float(raw_point.get("x", snapshot.get("x", 0.0)))
             y_m = _safe_float(raw_point.get("y", snapshot.get("y", 0.0)))
             t_s = _safe_float(raw_point.get("t", raw_point.get("time_s", index)))
+            v_mps = raw_point.get("v")
+            psi_rad = raw_point.get("psi")
+            a_mps2 = raw_point.get("a")
         elif isinstance(raw_point, Sequence) and not isinstance(raw_point, (str, bytes, bytearray)) and len(raw_point) >= 2:
             x_m = _safe_float(raw_point[0])
             y_m = _safe_float(raw_point[1])
+            v_mps = raw_point[2] if len(raw_point) >= 3 else None
+            psi_rad = raw_point[3] if len(raw_point) >= 4 else None
             t_s = _safe_float(raw_point[4] if len(raw_point) >= 5 else index)
+            a_mps2 = None
         else:
             continue
-        points.append({"x": float(x_m), "y": float(y_m), "t": float(t_s)})
+        points.append({
+            "x": float(x_m),
+            "y": float(y_m),
+            "t": float(t_s),
+            "v": None if v_mps is None else _safe_float(v_mps),
+            "psi": None if psi_rad is None else _safe_float(psi_rad),
+            "a": None if a_mps2 is None else _safe_float(a_mps2),
+        })
+    return _fill_missing_kinematics(points, snapshot)
+
+
+def _fill_missing_kinematics(points: list[dict], snapshot: Mapping[str, object]) -> list[dict]:
+    """Fill ``v``/``psi``/``a`` left ``None`` by ``_trajectory_points`` above.
+
+    v: finite difference against the neighbor point (backward, except at
+    the first point where there is no predecessor -- there it uses the
+    forward difference to the second point, falling back to the
+    snapshot's current speed only if there is no second point either).
+    psi: the local tangent direction implied by the same neighbor pair.
+    A single-point trajectory has no neighbor to difference against, so it
+    takes v/psi straight from the snapshot's current state.
+    """
+
+    if not points:
+        return points
+    snapshot_v = _safe_float(snapshot.get("v", 0.0))
+    snapshot_psi = _safe_float(snapshot.get("psi", 0.0))
+
+    if len(points) == 1:
+        only = points[0]
+        if only["v"] is None:
+            only["v"] = float(snapshot_v)
+        if only["psi"] is None:
+            only["psi"] = float(snapshot_psi)
+        if only["a"] is None:
+            only["a"] = 0.0
+        return points
+
+    for index, point in enumerate(points):
+        if point["v"] is not None and point["psi"] is not None:
+            continue
+        earlier = points[index - 1] if index > 0 else None
+        later = points[index + 1] if index + 1 < len(points) else None
+        if earlier is not None:
+            # Backward difference: the vector from the previous sample to
+            # this one, which is this point's own direction of travel.
+            dt_s = point["t"] - earlier["t"]
+            dx_m = point["x"] - earlier["x"]
+            dy_m = point["y"] - earlier["y"]
+        elif later is not None:
+            # First point has no predecessor -- forward difference to the
+            # next sample instead of defaulting straight to the snapshot.
+            dt_s = later["t"] - point["t"]
+            dx_m = later["x"] - point["x"]
+            dy_m = later["y"] - point["y"]
+        else:
+            dt_s = dx_m = dy_m = 0.0
+
+        if point["v"] is None:
+            point["v"] = (
+                float(math.hypot(dx_m, dy_m) / abs(dt_s))
+                if abs(dt_s) > 1.0e-6
+                else float(snapshot_v)
+            )
+        if point["psi"] is None:
+            point["psi"] = (
+                float(math.atan2(dy_m, dx_m))
+                if abs(dx_m) > 1.0e-9 or abs(dy_m) > 1.0e-9
+                else float(snapshot_psi)
+            )
+        if point["a"] is None:
+            point["a"] = 0.0
     return points
 
 
