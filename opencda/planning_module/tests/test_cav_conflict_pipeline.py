@@ -29,11 +29,12 @@ def _cav(actor_id, xy, committed_at_s, *, path=(), speed=9.0, heading=0.0,
 
 
 def test_relevant_agent_budget_keeps_the_nearest_agents_ahead():
-    # 8 obstacles all inside the default ignore window (ahead, in-lane), at
-    # increasing distance. Two-agent scenarios are not evidence four (let
-    # alone eight) hold real-time: the budget must cap Stage A/B/C's input
-    # regardless of how many objects perception reports, keeping the closest
-    # ones (the route-overlap proxy) rather than an arbitrary subset.
+    # 8 obstacles all classified FOLLOW at increasing distance, so
+    # conflict_t_s (closing time) grows monotonically with distance for this
+    # simple case -- ranking by severity coincides with ranking by distance
+    # here. Two-agent scenarios are not evidence four (let alone eight) hold
+    # real-time: the budget must cap Stage B/C's input regardless of how
+    # many objects perception reports.
     obstacles = [
         {"id": f"obs{i}", "x": 5.0 + 4.0 * i, "y": 0.1, "v": 6.0,
          "predicted_trajectory": [{"x": 5.0 + 4.0 * i, "y": 0.1}] * 21}
@@ -65,13 +66,51 @@ def test_relevant_agent_budget_is_configurable():
     assert r.diagnostics["relevant_agent_dropped_count"] == 5
 
 
-def test_mode_budget_keeps_the_most_probable_modes():
+def test_severity_budget_keeps_a_far_crossing_vehicle_over_near_non_conflicts():
+    # The exact danger a pre-classification position filter gets wrong: a
+    # vehicle 6m off ego's path (outside the default 3m ignore_lateral_m
+    # window) but on a predicted track crossing ego's path shortly, versus
+    # several vehicles that are merely *near* ego's current position with no
+    # real closing risk (moving at ego's own speed, so nothing is actually
+    # converging). A position/distance-based pre-filter would keep the near,
+    # harmless vehicles and could drop the real crossing conflict outright.
+    # Ranking by classify_conflicts' own conflict_t_s (computed from each
+    # agent's full predicted track, after classification has already run on
+    # everyone) must keep the crossing vehicle instead.
+    fillers = [
+        {"id": f"filler{i}", "x": 35.0 + 4.0 * i, "y": 0.1, "v": 10.0,
+         "predicted_trajectory": [
+             {"x": 35.0 + 4.0 * i + 1.0 * k, "y": 0.1} for k in range(21)
+         ]}
+        for i in range(5)
+    ]
+    crossing_track = [{"x": 30.0, "y": -6.0 + 1.0 * k} for k in range(20)]
+    crosser = {"id": "npc", "x": 30.0, "y": -6.0, "v": 8.0, "psi": math.pi / 2.0}
+    r = resolve_conflicts(
+        reference_samples=REF, ego_snapshot=EGO, my_actor_id=1, my_claim=None,
+        obstacle_snapshots=fillers + [crosser],
+        prediction_modes={"npc": [{"path": crossing_track, "probability": 1.0}]},
+        cav_intents=[], max_relevant_agents=3,
+    )
+    assert r.diagnostics["tags"].get("npc") == CROSSING
+    assert r.diagnostics["relevant_agent_dropped_count"] == 3
+
+
+def test_mode_budget_trims_only_the_sub_credible_tail():
+    # credible_mode_probability_min defaults to 0.15, mode_probability_floor
+    # defaults to 0.05 -- all 5 probabilities here clear the floor (so none
+    # are dropped before the cap even runs), but only the first clears the
+    # credible threshold. One mode (0.5) is credible and must survive
+    # regardless of the mode budget; among the remaining sub-credible tail
+    # (0.10/0.09/0.08/0.07), the budget (3) only has room for 2 more once
+    # the credible one is seated, so the two highest-probability tail modes
+    # survive and the rest are trimmed.
     agent = {
         "id": "multi", "x": 20.0, "y": 0.1, "v": 6.0,
         "predicted_modes": [
             {"path": [{"x": 20.0 + k, "y": 0.1} for k in range(21)],
              "probability": p}
-            for p in (0.5, 0.4, 0.3, 0.2, 0.1)
+            for p in (0.5, 0.10, 0.09, 0.08, 0.07)
         ],
     }
     r = resolve_conflicts(
@@ -80,10 +119,30 @@ def test_mode_budget_keeps_the_most_probable_modes():
     )
     assert r.diagnostics["mode_budget_per_agent"] == 3
     assert r.diagnostics["mode_budget_capped_agent_count"] == 1
-    # The 5 modes expand into "multi::mode<index>" entries pre-cap; only the
-    # 3 highest-probability survive (0.5, 0.4, 0.3 -- not 0.2 or 0.1).
     kept_mode_ids = {k for k in r.diagnostics["tags"] if k.startswith("multi::mode")}
     assert kept_mode_ids == {"multi::mode0", "multi::mode1", "multi::mode2"}
+
+
+def test_mode_budget_never_drops_a_credible_mode_even_over_budget():
+    # Two modes (0.5, 0.16) both clear credible_mode_probability_min (0.15).
+    # A mode budget of 1 must not silently blind the credible-danger veto
+    # to either one of them -- both survive, exceeding the nominal budget,
+    # and only the definitely-sub-credible tail (0.05, 0.04) is trimmed.
+    agent = {
+        "id": "multi", "x": 20.0, "y": 0.1, "v": 6.0,
+        "predicted_modes": [
+            {"path": [{"x": 20.0 + k, "y": 0.1} for k in range(21)],
+             "probability": p}
+            for p in (0.5, 0.16, 0.05, 0.04)
+        ],
+    }
+    r = resolve_conflicts(
+        reference_samples=REF, ego_snapshot=EGO, my_actor_id=1,
+        my_claim=None, obstacle_snapshots=[agent], cav_intents=[],
+        max_modes_per_agent=1,
+    )
+    kept_mode_ids = {k for k in r.diagnostics["tags"] if k.startswith("multi::mode")}
+    assert kept_mode_ids == {"multi::mode0", "multi::mode1"}
 
 
 def test_end_to_end_follow_is_delegated_to_speed_planner():

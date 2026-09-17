@@ -815,6 +815,11 @@ class MPC:
             "Cost_VelocitySlack": 0.0,
         }
         self._last_lane_keeping_profile = LaneKeepingProfile(stage_metrics=tuple(), total_cost=0.0)
+        # Compact explanation of the single prediction stage contributing the
+        # largest road-boundary cost.  The aggregate Cost_RoadBoundary alone
+        # cannot distinguish a true predicted excursion from a bad
+        # stage-to-reference association.
+        self._last_road_boundary_peak_diagnostic: Dict[str, object] = {}
         self._last_nominal_steering_profile: tuple[float, ...] = tuple()
         self._last_steering_reference_weight = 0.0
         self._last_x_solution: np.ndarray | None = None
@@ -2243,6 +2248,11 @@ class MPC:
 
         return dict(self._last_cost_terms)
 
+    def get_last_road_boundary_peak_diagnostic(self) -> Dict[str, object]:
+        """Return a copy of the worst-stage road-boundary explanation."""
+
+        return dict(self._last_road_boundary_peak_diagnostic)
+
     def clear_previous_solution_seed(self) -> None:
         """Drop any stored warm-start solution used for rollout seeding."""
 
@@ -3391,31 +3401,10 @@ class MPC:
         w_qv_safe = attractive_scale * float(self.comfort_cost.qv)
         w_qpsi_safe = attractive_scale * float(self.comfort_cost.qpsi)
 
-        qp_progress_lookup_active = bool(
-            getattr(self, "lane_center_follow_use_progress_lookup", False)
-        ) and bool(lane_center_reference)
-        qp_stage_progress_m: List[float] = []
-        if qp_progress_lookup_active:
-            ego_local_progress_m, _ = self._nearest_progress_along_route(
-                route_points=[
-                    (float(s.get("x_ref_m", 0.0)), float(s.get("y_ref_m", 0.0)))
-                    for s in lane_center_reference
-                    if isinstance(s, Mapping)
-                ],
-                xy=[float(x0[0]), float(x0[1])],
-            )
-            ego_progress_m = (
-                self._reference_progress_origin_m(lane_center_reference)
-                + float(ego_local_progress_m)
-            )
-            cumulative_distance_m = 0.0
-            qp_stage_progress_m = [float(ego_progress_m)]
-            for j in range(self.horizon_steps):
-                cumulative_distance_m += math.hypot(
-                    float(tracking_rollout[j + 1, 0]) - float(tracking_rollout[j, 0]),
-                    float(tracking_rollout[j + 1, 1]) - float(tracking_rollout[j, 1]),
-                )
-                qp_stage_progress_m.append(float(ego_progress_m) + float(cumulative_distance_m))
+        qp_lane_stage_samples = self._lane_center_stage_samples_for_rollout(
+            lane_center_reference=lane_center_reference,
+            rollout=tracking_rollout,
+        )
 
         for k in range(1, self.horizon_steps + 1):
             stage_reference = self._tracking_reference_at_stage(
@@ -3443,19 +3432,11 @@ class MPC:
             # where
             #   e_y   = -(x-x_ref)sin(theta_ref) + (y-y_ref)cos(theta_ref)
             #   e_psi = wrap(psi - theta_ref)
-            lane_sample = None
-            if qp_progress_lookup_active:
-                lane_sample = self._get_lane_center_stage_sample_by_progress(
-                    lane_center_reference=lane_center_reference,
-                    query_progress_m=qp_stage_progress_m[k],
-                )
-            if lane_sample is None:
-                lane_sample = self._get_lane_center_stage_sample(
-                    lane_center_reference=lane_center_reference,
-                    stage_index=int(k),
-                    query_x_m=float(tracking_rollout[k, 0]),
-                    query_y_m=float(tracking_rollout[k, 1]),
-                )
+            lane_sample = (
+                qp_lane_stage_samples[k]
+                if k < len(qp_lane_stage_samples)
+                else None
+            )
             lane_reference = normalize_lane_reference_sample(
                 lane_sample,
                 default_lane_width_m=float(getattr(self, "lane_width_m", 4.0)),
@@ -4046,8 +4027,8 @@ class MPC:
         self,
         x_traj: np.ndarray,
         lane_center_reference: Sequence[Mapping[str, object]] | None,
+        lane_stage_samples: Sequence[Mapping[str, object] | None] | None = None,
     ) -> LaneKeepingProfile:
-        lane_stage_samples: List[Dict[str, float] | None] = []
         state_xy: List[Tuple[float, float]] = []
         stage_count = min(int(x_traj.shape[0]), int(self.horizon_steps) + 1)
         for stage_index in range(stage_count):
@@ -4057,13 +4038,11 @@ class MPC:
                     float(x_traj[stage_index, 1]),
                 )
             )
-            lane_stage_samples.append(
-                self._get_lane_center_stage_sample(
-                    lane_center_reference=lane_center_reference,
-                    stage_index=int(stage_index),
-                    query_x_m=float(x_traj[stage_index, 0]),
-                    query_y_m=float(x_traj[stage_index, 1]),
-                )
+
+        if lane_stage_samples is None:
+            lane_stage_samples = self._lane_center_stage_samples_for_rollout(
+                lane_center_reference=lane_center_reference,
+                rollout=x_traj,
             )
 
         lane_center_weight = (
@@ -4086,6 +4065,63 @@ class MPC:
             default_lane_width_m=float(getattr(self, "lane_width_m", 4.0)),
         )
 
+    def _lane_center_stage_samples_for_rollout(
+        self,
+        *,
+        lane_center_reference: Sequence[Mapping[str, object]] | None,
+        rollout: np.ndarray,
+    ) -> List[Dict[str, float] | None]:
+        """Resolve one lane sample per stage using the QP's arc-length rule."""
+
+        stage_count = min(int(rollout.shape[0]), int(self.horizon_steps) + 1)
+        if stage_count <= 0:
+            return []
+        progress_lookup_active = bool(
+            getattr(self, "lane_center_follow_use_progress_lookup", False)
+        ) and bool(lane_center_reference)
+        stage_progress_m: List[float] = []
+        if progress_lookup_active:
+            ego_local_progress_m, _ = self._nearest_progress_along_route(
+                route_points=[
+                    (float(sample.get("x_ref_m", 0.0)), float(sample.get("y_ref_m", 0.0)))
+                    for sample in lane_center_reference or []
+                    if isinstance(sample, Mapping)
+                ],
+                xy=[float(rollout[0, 0]), float(rollout[0, 1])],
+            )
+            ego_progress_m = (
+                self._reference_progress_origin_m(lane_center_reference)
+                + float(ego_local_progress_m)
+            )
+            cumulative_distance_m = 0.0
+            stage_progress_m = [float(ego_progress_m)]
+            for stage_index in range(1, stage_count):
+                cumulative_distance_m += math.hypot(
+                    float(rollout[stage_index, 0]) - float(rollout[stage_index - 1, 0]),
+                    float(rollout[stage_index, 1]) - float(rollout[stage_index - 1, 1]),
+                )
+                stage_progress_m.append(
+                    float(ego_progress_m) + float(cumulative_distance_m)
+                )
+
+        samples: List[Dict[str, float] | None] = []
+        for stage_index in range(stage_count):
+            lane_sample = None
+            if progress_lookup_active:
+                lane_sample = self._get_lane_center_stage_sample_by_progress(
+                    lane_center_reference=lane_center_reference,
+                    query_progress_m=stage_progress_m[stage_index],
+                )
+            if lane_sample is None:
+                lane_sample = self._get_lane_center_stage_sample(
+                    lane_center_reference=lane_center_reference,
+                    stage_index=stage_index,
+                    query_x_m=float(rollout[stage_index, 0]),
+                    query_y_m=float(rollout[stage_index, 1]),
+                )
+            samples.append(lane_sample)
+        return samples
+
     def _evaluate_plan_cost_terms(
         self,
         x_traj: np.ndarray,
@@ -4096,6 +4132,7 @@ class MPC:
         current_steering_rad: float,
         lane_center_reference: Sequence[Mapping[str, object]] | None,
         steering_reference_profile: Sequence[float] | None = None,
+        tracking_reference_rollout: np.ndarray | None = None,
     ) -> Dict[str, float]:
         """
         Evaluate per-term objective values for the most recent planned trajectory.
@@ -4123,22 +4160,37 @@ class MPC:
             dpsi = self._wrap_angle(float(x_traj[k, 3]) - psi_ref)
             cost_attractive_ref += qx * dx * dx + qy * dy * dy + qv * dv * dv + qpsi * dpsi * dpsi
 
+        lane_stage_samples = self._lane_center_stage_samples_for_rollout(
+            lane_center_reference=lane_center_reference,
+            rollout=(
+                x_traj
+                if tracking_reference_rollout is None
+                else tracking_reference_rollout
+            ),
+        )
         lane_keep_profile = self._evaluate_lane_keeping_profile(
             x_traj=x_traj,
             lane_center_reference=lane_center_reference,
+            lane_stage_samples=lane_stage_samples,
         )
         self._last_lane_keeping_profile = lane_keep_profile
+        self._last_road_boundary_peak_diagnostic = (
+            self._road_boundary_peak_diagnostic(
+                x_traj=x_traj,
+                lane_stage_samples=lane_stage_samples,
+                lane_keep_profile=lane_keep_profile,
+            )
+        )
         cost_lane_center = 0.0
         cost_centerline_xy = 0.0
         cost_road_boundary = 0.0
         for metric in lane_keep_profile.stage_metrics:
             if int(metric.stage_index) <= 0:
                 continue
-            lane_sample = self._get_lane_center_stage_sample(
-                lane_center_reference=lane_center_reference,
-                stage_index=int(metric.stage_index),
-                query_x_m=float(x_traj[int(metric.stage_index), 0]),
-                query_y_m=float(x_traj[int(metric.stage_index), 1]),
+            lane_sample = (
+                lane_stage_samples[int(metric.stage_index)]
+                if int(metric.stage_index) < len(lane_stage_samples)
+                else None
             )
             lane_reference = normalize_lane_reference_sample(
                 lane_sample,
@@ -4294,6 +4346,80 @@ class MPC:
             "Cost_Repulsive": float(cost_repulsive),
             "Cost_Control": float(cost_control),
             "Cost_VelocitySlack": float(cost_velocity_slack),
+        }
+
+    def _road_boundary_peak_diagnostic(
+        self,
+        *,
+        x_traj: np.ndarray,
+        lane_stage_samples: Sequence[Mapping[str, object] | None],
+        lane_keep_profile: LaneKeepingProfile,
+    ) -> Dict[str, object]:
+        """Describe the horizon stage with the largest boundary penalty."""
+
+        candidates = [
+            metric
+            for metric in lane_keep_profile.stage_metrics
+            if int(metric.stage_index) > 0
+        ]
+        if not candidates:
+            return {}
+        peak = max(candidates, key=lambda metric: float(metric.boundary_cost))
+        stage_index = int(peak.stage_index)
+        if stage_index < 0 or stage_index >= int(x_traj.shape[0]):
+            return {}
+        predicted_x_m = float(x_traj[stage_index, 0])
+        predicted_y_m = float(x_traj[stage_index, 1])
+        lane_sample = (
+            lane_stage_samples[stage_index]
+            if stage_index < len(lane_stage_samples)
+            else None
+        )
+        lane_reference = normalize_lane_reference_sample(
+            lane_sample,
+            default_lane_width_m=float(getattr(self, "lane_width_m", 4.0)),
+        )
+        if lane_reference is None:
+            return {
+                "stage_index": stage_index,
+                "boundary_cost": float(peak.boundary_cost),
+                "reference_available": False,
+            }
+        raw_sample = lane_sample if isinstance(lane_sample, Mapping) else {}
+        progress_value = raw_sample.get(
+            "progress_m", raw_sample.get("s_m", raw_sample.get("route_s_m"))
+        )
+        reference_progress_m: object = ""
+        if isinstance(progress_value, (int, float)) and math.isfinite(
+            float(progress_value)
+        ):
+            reference_progress_m = float(progress_value)
+        return {
+            "stage_index": stage_index,
+            "stage_time_s": float(stage_index) * float(self.dt_s),
+            "boundary_cost": float(peak.boundary_cost),
+            "boundary_excess_m": float(peak.boundary_excess_m),
+            "left_excess_m": float(peak.road_left_excess_m),
+            "right_excess_m": float(peak.road_right_excess_m),
+            "predicted_x_m": predicted_x_m,
+            "predicted_y_m": predicted_y_m,
+            "predicted_heading_rad": float(x_traj[stage_index, 3]),
+            "reference_available": True,
+            "reference_x_m": float(lane_reference.x_center_m),
+            "reference_y_m": float(lane_reference.y_center_m),
+            "reference_heading_rad": float(lane_reference.heading_rad),
+            "reference_progress_m": reference_progress_m,
+            "reference_distance_m": float(math.hypot(
+                predicted_x_m - float(lane_reference.x_center_m),
+                predicted_y_m - float(lane_reference.y_center_m),
+            )),
+            "lane_id": int(peak.lane_id),
+            "lateral_offset_m": float(peak.d_perp_m),
+            "road_center_offset_m": float(peak.road_center_offset_m),
+            "road_left_width_m": float(peak.road_left_width_m),
+            "road_right_width_m": float(peak.road_right_width_m),
+            "outside_lane": bool(peak.outside_lane),
+            "outside_road": bool(peak.outside_road),
         }
 
     def plan_trajectory(
@@ -4721,6 +4847,9 @@ class MPC:
             current_steering_rad=float(current_steering_rad),
             lane_center_reference=lane_center_reference,
             steering_reference_profile=diagnostic_steering_reference,
+            tracking_reference_rollout=np.asarray(
+                tracking_x_ref_rollout, dtype=float
+            ),
         )
 
         world_x_solution = np.asarray(x_solution, dtype=float).copy()

@@ -26,12 +26,16 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from opencda.planning_module.pipeline.conflict_classifier import (
+    CROSSING,
+    CUT_IN,
+    FOLLOW,
     IGNORE,
+    LEAD_BRAKE,
     MERGE,
+    ONCOMING,
     ClassifierParams,
     ConflictTag,
     classify_conflicts,
-    _f,
 )
 from opencda.planning_module.pipeline.cooperative_arbitration import (
     ArbitrationLatchEntry,
@@ -112,47 +116,98 @@ def _agent_id(agent: Mapping[str, Any]) -> str:
     ))
 
 
-def _relevant_physical_agents(
-    agents: Sequence[Mapping[str, Any]],
-    reference_samples: Sequence[Any],
-    *,
-    max_agents: int,
-    ignore_lateral_m: float,
-    ignore_longitudinal_ahead_m: float,
-    ignore_longitudinal_behind_m: float,
-) -> Tuple[List[Mapping[str, Any]], int]:
-    """Cap how many physical agents reach Stage A/B/C this tick.
+# Lower rank = kept preferentially by _cap_agents_by_severity. CROSSING/
+# ONCOMING and MERGE/CUT_IN are genuine lateral-path conflicts; FOLLOW/
+# LEAD_BRAKE are SpeedPlanner/IDM's nominal concern (build_longitudinal_
+# corridor does not constrain on them by default -- see its own FOLLOW/
+# LEAD_BRAKE branch), so they must never outrank a real crossing conflict
+# merely because their trivial "closest approach" time is small.
+_TAG_SEVERITY_RANK: Dict[str, int] = {
+    CROSSING: 0, ONCOMING: 0,
+    MERGE: 1, CUT_IN: 1,
+    LEAD_BRAKE: 2, FOLLOW: 2,
+    IGNORE: 3,
+}
 
-    A cheap current-position pre-filter, not a replacement for Stage A's own
-    (track-aware) IGNORE gate: it uses the same lateral/longitudinal window
-    so an agent this keeps is never one Stage A would have ignored anyway,
-    then ranks survivors by along-route distance (a route-overlap proxy) and
-    keeps the nearest ``max_agents``. Two CAVs negotiating is not evidence
-    four can hold real-time -- classify/assign/corridor all scale with
-    however many agents reach them, so the bound has to be enforced before
-    that point, not after. Returns (kept_agents, dropped_count).
+
+def _physical_agent_id(agent: Mapping[str, Any]) -> str:
+    return str(agent.get("physical_actor_id", _agent_id(agent)))
+
+
+def _physical_tag_id(tag: ConflictTag) -> str:
+    return str(tag.agent_id).split("::mode", 1)[0]
+
+
+def _cap_agents_by_severity(
+    *,
+    all_agents: Sequence[Mapping[str, Any]],
+    tags: Sequence[ConflictTag],
+    mode_groups: Mapping[str, List[Tuple[Mapping[str, Any], float]]],
+    max_agents: int,
+) -> Tuple[
+    List[Mapping[str, Any]], List[ConflictTag],
+    Dict[str, List[Tuple[Mapping[str, Any], float]]], int,
+]:
+    """Cap how many physical agents reach Stage B/C this tick, by severity.
+
+    Runs *after* classify_conflicts, not before: ranking by Stage A's own
+    tag (computed from each agent's full predicted track) means a
+    currently-far-but-about-to-cross vehicle is never mistaken for
+    irrelevant the way a pre-classification position filter mistook it
+    (a crossing vehicle still on its own street has a large *current*
+    lateral offset from ego's path, even seconds from actually crossing it).
+
+    Ranked primarily by tag class, not conflict_t_s alone: CROSSING/ONCOMING
+    (genuine lateral path conflicts -- Stage C's homotopy keepout exists
+    specifically for these) and MERGE/CUT_IN outrank FOLLOW/LEAD_BRAKE,
+    which corridor construction itself treats as SpeedPlanner/IDM's nominal
+    concern, not a half-space it constrains on by default (see
+    build_longitudinal_corridor's own FOLLOW/LEAD_BRAKE branch). Using raw
+    conflict_t_s alone would rank a same-speed, constant-safe-gap FOLLOW
+    agent (whose closest approach is trivially "now", t=0, precisely because
+    it never gets closer) as more urgent than a real crossing conflict
+    still several seconds out -- exactly backwards. Within a tag class,
+    conflict_t_s (soonest first) breaks ties. IGNORE/untagged agents rank
+    last: Stage A already decided they are not a physical conflict, so the
+    budget only ever trims what Stage A itself found least urgent, never a
+    classified conflict in favor of a merely-nearby one. Returns
+    (kept_agents, kept_tags, kept_mode_groups, dropped_physical_agent_count).
     """
 
-    if max_agents <= 0 or len(agents) <= max_agents:
-        return list(agents), 0
-    poly = _polyline_xy(reference_samples)
-    if len(poly) < 2:
-        return list(agents)[:max_agents], len(agents) - max_agents
-    scored = []
-    for agent in agents:
-        lateral_m, along_m = project_to_extended_polyline(
-            _f(agent, "x", "x_m"), _f(agent, "y", "y_m"), poly,
+    physical_ids: List[str] = []
+    seen = set()
+    for agent in all_agents:
+        pid = _physical_agent_id(agent)
+        if pid not in seen:
+            seen.add(pid)
+            physical_ids.append(pid)
+    if max_agents <= 0 or len(physical_ids) <= max_agents:
+        return list(all_agents), list(tags), dict(mode_groups), 0
+
+    best_severity: Dict[str, Tuple[int, float]] = {
+        pid: (_TAG_SEVERITY_RANK[IGNORE], float("inf")) for pid in physical_ids
+    }
+    for tag in tags:
+        pid = _physical_tag_id(tag)
+        if pid not in best_severity:
+            continue
+        candidate = (
+            _TAG_SEVERITY_RANK.get(tag.tag, _TAG_SEVERITY_RANK[IGNORE]),
+            float("inf") if tag.conflict_t_s is None else float(tag.conflict_t_s),
         )
-        ahead = along_m >= 0.0
-        within_window = abs(lateral_m) <= float(ignore_lateral_m) and (
-            (ahead and along_m <= float(ignore_longitudinal_ahead_m))
-            or (not ahead and abs(along_m) <= float(ignore_longitudinal_behind_m))
-        )
-        relevance_m = abs(along_m) if within_window else float("inf")
-        scored.append((relevance_m, agent))
-    scored.sort(key=lambda item: item[0])
-    kept = [agent for _, agent in scored[:max_agents]]
-    return kept, len(agents) - len(kept)
+        if candidate < best_severity[pid]:
+            best_severity[pid] = candidate
+    # Stable sort: ties (typically every agent Stage A left at "no conflict")
+    # keep perception order rather than an arbitrary reshuffle.
+    ranked = sorted(physical_ids, key=lambda pid: best_severity[pid])
+    kept = set(ranked[:max_agents])
+
+    return (
+        [agent for agent in all_agents if _physical_agent_id(agent) in kept],
+        [tag for tag in tags if _physical_tag_id(tag) in kept],
+        {pid: group for pid, group in mode_groups.items() if pid in kept},
+        len(physical_ids) - len(kept),
+    )
 
 
 def _prediction_evidence(agent: Mapping[str, Any]) -> dict:
@@ -424,17 +479,6 @@ def resolve_conflicts(
             a.setdefault("trajectory_source", "prediction")
         perception_agents.append(a)
     physical_agents: List[Mapping[str, Any]] = perception_agents + cav_agents
-    physical_agents, dropped_agent_count = _relevant_physical_agents(
-        physical_agents, reference_samples,
-        max_agents=int(max_relevant_agents),
-        ignore_lateral_m=float(classifier_params.ignore_lateral_m),
-        ignore_longitudinal_ahead_m=float(
-            classifier_params.ignore_longitudinal_ahead_m
-        ),
-        ignore_longitudinal_behind_m=float(
-            classifier_params.ignore_longitudinal_behind_m
-        ),
-    )
     all_agents: List[Mapping[str, Any]] = []
     mode_groups: Dict[str, List[Tuple[Mapping[str, Any], float]]] = {}
     retained_mode_count = 0
@@ -445,13 +489,30 @@ def resolve_conflicts(
             mode for mode in modes
             if float(mode.probability) >= max(0.0, float(mode_probability_floor))
         ]
-        if int(max_modes_per_agent) > 0 and len(retained) > int(max_modes_per_agent):
-            # Keep the most probable modes; a low-probability tail contributes
-            # the least to the corridor's worst-case envelope anyway.
-            retained = sorted(
-                retained, key=lambda mode: -float(mode.probability)
-            )[: int(max_modes_per_agent)]
-            mode_capped_agent_count += 1
+        pre_cap_count = len(retained)
+        if int(max_modes_per_agent) > 0 and pre_cap_count > int(max_modes_per_agent):
+            # A mode at or above credible_mode_probability_min is exactly what
+            # the credible-danger veto below exists to catch even at low
+            # probability -- dropping it here for budget would silently
+            # blind that check to a hypothesis it was built to see. Only the
+            # sub-credible tail is budget's to trim, ranked by probability
+            # since among modes none of this tick's stages will veto on,
+            # probability is the only signal left to rank by.
+            credible = [
+                mode for mode in retained
+                if float(mode.probability) >= float(credible_mode_probability_min)
+            ]
+            non_credible = sorted(
+                (
+                    mode for mode in retained
+                    if float(mode.probability) < float(credible_mode_probability_min)
+                ),
+                key=lambda mode: -float(mode.probability),
+            )
+            room = max(0, int(max_modes_per_agent) - len(credible))
+            retained = credible + non_credible[:room]
+            if len(retained) < pre_cap_count:
+                mode_capped_agent_count += 1
         if len(retained) == 1:
             # Stage A consumes ``predicted_trajectory``. Do not silently drop
             # the prediction module's only hypothesis merely because no
@@ -481,9 +542,18 @@ def resolve_conflicts(
             retained_mode_count += 1
 
     # Stage A -----------------------------------------------------------------
+    # Every agent is classified before any count budget applies: a crossing
+    # vehicle still on its own street (large *current* lateral offset from
+    # ego's path) is exactly the case a pre-classification position filter
+    # would misjudge as irrelevant, and classify_conflicts already reasons
+    # over the full predicted track, not current position.
     tags = classify_conflicts(
         reference_samples, ego_snapshot, all_agents, classifier_params,
         previous_tags=tag_state,
+    )
+    all_agents, tags, mode_groups, dropped_agent_count = _cap_agents_by_severity(
+        all_agents=all_agents, tags=tags, mode_groups=mode_groups,
+        max_agents=int(max_relevant_agents),
     )
     tag_by_id = {t.agent_id: t for t in tags}
     corridor_reference = (
@@ -605,11 +675,14 @@ def resolve_conflicts(
         source_counts[_source(agent)] = source_counts.get(_source(agent), 0) + 1
 
     diagnostics = {
-        "conflict_agent_count": len(physical_agents),
+        # Post-severity-budget counts: how many physical agents (and their
+        # mode-expanded entries) actually reached Stage B/C this tick.
+        "conflict_agent_count": len({
+            _physical_agent_id(agent) for agent in all_agents
+        }),
         "mode_conflict_count": len(all_agents),
         "deduplicated_agent_count": (
             len(raw_obstacles) + len(cav_agents) - len(physical_agents)
-            - dropped_agent_count
         ),
         "relevant_agent_budget": int(max_relevant_agents),
         "relevant_agent_dropped_count": int(dropped_agent_count),

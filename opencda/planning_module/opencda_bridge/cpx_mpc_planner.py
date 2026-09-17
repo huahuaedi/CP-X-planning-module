@@ -255,6 +255,10 @@ class CPXMPCPlannerBridge:
                 self.config.get("cav_conflict_budget_recover_streak", 5)
             ),
         )
+        # Never a real route_manager.route_revision value, so the first tick
+        # that reaches the governor always takes the reset branch below --
+        # harmless (it is already fresh) and avoids a separate first-tick case.
+        self._cav_conflict_governor_route_revision = "\x00uninitialized"
         self._cav_transport_diagnostics: dict[str, Any] = {}
         # This CAV's own broadcast for nearby CP-X CAVs to read (its planned
         # trajectory + ResourceClaim + pose). Read peer-to-peer through
@@ -2657,6 +2661,9 @@ class CPXMPCPlannerBridge:
                 else ""
             ),
             "Cost_RoadBoundary": cost_terms.get("Cost_RoadBoundary", ""),
+            "mpc_road_boundary_peak": (
+                self.mpc.get_last_road_boundary_peak_diagnostic()
+            ),
             "Cost_Repulsive": cost_terms.get("Cost_Repulsive", ""),
             "Cost_Repulsive_Safe": cost_terms.get("Cost_Repulsive_Safe", ""),
             "Cost_Repulsive_Collision": cost_terms.get(
@@ -3249,6 +3256,14 @@ class CPXMPCPlannerBridge:
         cav_result = None
         cooperative_lane_change_deferred = False
         if self._cav_conflict_enabled:
+            # A compute budget degraded by a complex intersection must not
+            # keep constraining an unrelated later maneuver or route -- the
+            # pressure that earned the degradation is gone once the route
+            # itself has changed, so the ceiling should be too.
+            current_route_revision = str(self.route_manager.route_revision)
+            if current_route_revision != self._cav_conflict_governor_route_revision:
+                self._cav_conflict_governor_route_revision = current_route_revision
+                self._cav_conflict_governor.reset()
             lane_change = self.maneuver_manager.lane_change
             if bool(lane_change.active):
                 cooperative_proposal = cooperative_proposal.with_commitment(

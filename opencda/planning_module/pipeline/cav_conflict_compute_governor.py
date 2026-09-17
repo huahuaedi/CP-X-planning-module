@@ -1,10 +1,12 @@
 """Runtime feedback on top of resolve_conflicts' static agent/mode budget.
 
-cav_conflict_pipeline.resolve_conflicts already bounds Stage A/B/C to a
-fixed max_relevant_agents/max_modes_per_agent per tick (see
-_relevant_physical_agents). That static cap controls the worst case but
-cannot know, ahead of time, how much slower this specific machine or this
-specific tick's classify/assign/corridor work actually is. This module owns
+cav_conflict_pipeline.resolve_conflicts already bounds Stage B/C to a
+fixed max_relevant_agents/max_modes_per_agent per tick, ranked by Stage A's
+own classified severity so a real conflict is never dropped in favor of a
+merely-nearby one (see _cap_agents_by_severity). That static cap controls
+the worst case but cannot know, ahead of time, how much slower this
+specific machine or this specific tick's assign/corridor work actually is.
+This module owns
 the one further decision: given how long the conflict pipeline has actually
 been taking, should the budget step down (or back up) from its static
 ceiling for the *next* tick.

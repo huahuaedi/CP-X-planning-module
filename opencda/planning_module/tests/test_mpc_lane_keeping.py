@@ -187,6 +187,58 @@ class LaneKeepingMathTests(unittest.TestCase):
         )
         self.assertFalse(bool(diagnostics["outside_road"][-1]))
 
+    def test_boundary_peak_diagnostic_identifies_worst_horizon_stage(self):
+        reference_samples = [
+            {
+                "x_ref_m": float(stage),
+                "y_ref_m": 0.0,
+                "heading_rad": 0.0,
+                "progress_m": float(stage),
+                "lane_id": 7,
+                "lane_width_m": 4.0,
+                "road_center_offset_m": 0.0,
+                "road_left_width_m": 2.0,
+                "road_right_width_m": 2.0,
+            }
+            for stage in range(3)
+        ]
+        x_traj = np.asarray(
+            [
+                [0.0, 0.0, 2.0, 0.0],
+                [1.0, 0.2, 2.0, 0.0],
+                [2.0, 1.8, 2.0, 0.1],
+            ],
+            dtype=float,
+        )
+        profile = evaluate_lane_keeping_profile(
+            state_xy=[tuple(row[:2]) for row in x_traj],
+            lane_references=reference_samples,
+            centering_weight=1.0,
+            boundary_weight=10.0,
+            safe_region_alpha=0.75,
+            road_boundary_margin_m=0.5,
+            default_lane_width_m=4.0,
+        )
+        mpc = object.__new__(MPC)
+        mpc.dt_s = 0.1
+        mpc.lane_width_m = 4.0
+        mpc._get_lane_center_stage_sample = lambda **kwargs: reference_samples[
+            int(kwargs["stage_index"])
+        ]
+
+        diagnostic = mpc._road_boundary_peak_diagnostic(
+            x_traj=x_traj,
+            lane_stage_samples=reference_samples,
+            lane_keep_profile=profile,
+        )
+
+        self.assertEqual(diagnostic["stage_index"], 2)
+        self.assertAlmostEqual(diagnostic["stage_time_s"], 0.2)
+        self.assertAlmostEqual(diagnostic["reference_progress_m"], 2.0)
+        self.assertAlmostEqual(diagnostic["reference_distance_m"], 1.8)
+        self.assertGreater(diagnostic["boundary_excess_m"], 0.0)
+        self.assertFalse(diagnostic["outside_road"])
+
 
 class RoadEnvelopeBlockMathTests(unittest.TestCase):
     @staticmethod

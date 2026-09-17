@@ -175,3 +175,35 @@ def test_is_deterministic_for_the_same_frozen_input(bridge):
         first.behavior_stage_result.decision.maneuver
         == second.behavior_stage_result.decision.maneuver
     )
+
+
+def test_cav_conflict_governor_resets_when_the_route_changes():
+    # A compute budget degraded by a complex intersection must not keep
+    # constraining an unrelated later route -- confirmed against the real
+    # bridge tick, not just CAVConflictComputeGovernor in isolation, since
+    # the wiring (route_manager.route_revision -> governor.reset()) lives in
+    # _plan_behavior_and_reference, not the governor itself.
+    if not _TOWN06_XODR.is_file():
+        pytest.skip(f"fixture map not found: {_TOWN06_XODR}")
+    cache_root = tempfile.mkdtemp(prefix="cpx_governor_reset_test_")
+    config = {
+        "enabled": True, "debug": False, "record_evaluation_metrics": False,
+        "publish_cp_message": False,
+        "global_planner_xodr_path": str(_TOWN06_XODR),
+        "global_planner_cache_root": cache_root,
+        "cav_conflict_enabled": True,
+    }
+    bridge = CPXMPCPlannerBridge(_VehicleManager(), config)
+    bridge.route_manager.set_destination(start_point=START_XYZ, goal_point=GOAL_XYZ)
+    _call(bridge)
+    assert bridge._cav_conflict_governor_route_revision == str(
+        bridge.route_manager.route_revision
+    )
+
+    for _ in range(20):
+        bridge._cav_conflict_governor.observe_stage_ms(500.0)
+    assert bridge._cav_conflict_governor.current_max_relevant_agents < 6
+
+    bridge.route_manager.set_destination(start_point=START_XYZ, goal_point=GOAL_XYZ)
+    _call(bridge)
+    assert bridge._cav_conflict_governor.current_max_relevant_agents == 6
