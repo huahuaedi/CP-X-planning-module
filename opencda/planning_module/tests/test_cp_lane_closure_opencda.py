@@ -64,6 +64,30 @@ def test_lane_closure_stimulus_publishes_one_durable_lane_event(tmp_path):
     }]
 
 
+def test_lane_closure_stimulus_publishes_from_the_real_scenario_yaml_config(tmp_path):
+    # _LaneClosureStimulus is constructed from the raw OmegaConf node
+    # straight out of scenario yaml in cpx_mature_runner.py (not a plain
+    # dict, unlike the fixture above) -- dict(config) only converts the top
+    # level, leaving a nested list (message.position) as an OmegaConf
+    # ListConfig, which upsert_cp_item's json.dump cannot serialize. This
+    # reproduces that exact path end to end: real yaml -> real OmegaConf
+    # node -> publish_if_due -> a JSON file actually readable back.
+    config = OmegaConf.load(CONFIG_DIR / "cpx_cp_lane_closure.yaml")
+    message_path = tmp_path / "cp_message.json"
+    stimulus = _LaneClosureStimulus(
+        config.cpx_mature.cp_lane_closure, message_path=str(message_path),
+    )
+    manager = _manager(-264.0, 8.3)
+
+    assert stimulus.publish_if_due(
+        tick=1, sim_time_s=1.0, vehicle_managers=[manager]
+    ) is True
+
+    payload = load_cp_message_payload(str(message_path))
+    assert payload["lane_events"][0]["position"] == [-180.0, 8.3, 0.0]
+    assert isinstance(payload["lane_events"][0]["position"], list)
+
+
 def test_cp_f_config_uses_one_native_entry_and_real_lane_event():
     config = OmegaConf.load(CONFIG_DIR / "cpx_cp_lane_closure.yaml")
     fixture = OmegaConf.to_container(

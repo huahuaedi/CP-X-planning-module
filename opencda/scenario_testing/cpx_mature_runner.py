@@ -7,6 +7,7 @@ import re
 from collections.abc import Mapping
 
 import carla
+from omegaconf import OmegaConf
 
 import opencda.scenario_testing.utils.customized_map_api as map_api
 import opencda.scenario_testing.utils.sim_api as sim_api
@@ -271,7 +272,17 @@ class _LaneClosureStimulus(object):
     """
 
     def __init__(self, config, *, message_path):
-        self.config = dict(config or {})
+        # config is the raw OmegaConf node straight from scenario yaml --
+        # dict(config) only converts the top level; a nested list (e.g.
+        # message.position) stays an OmegaConf ListConfig, which
+        # json.dump (inside write_cp_message_payload, via upsert_cp_item)
+        # cannot serialize. Round-tripping through OmegaConf.create/
+        # to_container recursively resolves the whole structure to plain
+        # dict/list/scalar, and is a no-op for a plain dict (e.g. from a
+        # test constructing this directly).
+        self.config = OmegaConf.to_container(
+            OmegaConf.create(config if config is not None else {}), resolve=True
+        )
         self.message_path = str(message_path)
         self.published = False
 
