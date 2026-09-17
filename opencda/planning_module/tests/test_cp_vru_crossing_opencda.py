@@ -74,16 +74,17 @@ class _Walker:
     type_id = "walker.pedestrian.0001"
 
     def __init__(self):
-        self.controls = []
+        self.transforms = []
+        self.physics_enabled = True
 
     def set_transform(self, transform):
-        self.transform = transform
+        self.transforms.append(transform)
 
-    def apply_control(self, control):
-        self.controls.append(control)
+    def set_simulate_physics(self, enabled):
+        self.physics_enabled = bool(enabled)
 
 
-def test_scripted_walker_reports_motion_through_walker_control():
+def test_scripted_walker_has_one_kinematic_motion_owner():
     walker = _Walker()
     actor = ScriptedActor(
         walker,
@@ -93,9 +94,28 @@ def test_scripted_walker_reports_motion_through_walker_control():
 
     actor.step(0.05)
 
-    assert abs(float(walker.controls[-1].speed) - 1.2) < 1.0e-6
-    assert abs(float(walker.controls[-1].direction.x)) < 1.0e-6
-    assert abs(float(walker.controls[-1].direction.y) + 1.0) < 1.0e-6
+    assert walker.physics_enabled is False
+    assert len(walker.transforms) == 2
+    assert walker.transforms[-1].location.y < walker.transforms[0].location.y
+
+
+def test_scripted_walker_remains_locked_to_endpoint_after_completion():
+    walker = _Walker()
+    actor = ScriptedActor(
+        walker,
+        path_xy=[(0.0, 0.1), (0.0, 0.0)],
+        speed_mps=1.0,
+        z_m=0.5,
+    )
+
+    actor.step(0.2)
+    transforms_at_completion = len(walker.transforms)
+    actor.step(0.05)
+
+    assert actor.finished is True
+    assert len(walker.transforms) == transforms_at_completion + 1
+    assert abs(float(walker.transforms[-1].location.y)) < 1.0e-6
+    assert abs(float(walker.transforms[-1].location.z) - 0.5) < 1.0e-6
 
 
 def test_cp_pedestrian_speed_comes_from_observed_positions_not_teleport_velocity():

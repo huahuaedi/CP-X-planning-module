@@ -8,8 +8,8 @@ motion must be byte-identical across runs.  A CARLA Traffic-Manager car
 reacts to ego and jitters its own speed; this driver does neither.
 
 Each actor is advanced deterministically along a fixed world-XY polyline at a
-fixed speed with ``set_transform`` (no autopilot). Scripted vehicles are
-kinematic: CARLA physics must not also integrate a vehicle that is teleported
+fixed speed with ``set_transform`` (no autopilot). Scripted actors are
+kinematic: CARLA physics must not also integrate an actor that is teleported
 every tick. Perception recovers motion from successive observed poses.
 """
 
@@ -55,6 +55,14 @@ class ScriptedActor:
         self._s_in_seg = 0.0
         self._done = len(self._path) < 2
         self._tick = 0
+        # A scripted actor has exactly one motion owner.  This applies to
+        # walkers as well as vehicles: mixing per-tick set_transform() with
+        # WalkerControl/gravity lets CARLA integrate the walker between script
+        # ticks and, once the path finishes, eventually drop it below ground.
+        try:
+            self.vehicle.set_simulate_physics(False)
+        except Exception:
+            pass
         # Optional ego-position trigger: hold at path[0] until the ego crosses
         # a line, then start the schedule. Removes the ego's variable
         # spawn-settle + acceleration time from arrival-time alignment.
@@ -130,26 +138,6 @@ class ScriptedActor:
                 carla.Rotation(yaw=math.degrees(float(heading_rad))),
             )
         )
-        # Walkers need an explicit control command; scripted vehicles are
-        # kinematic, so their observed velocity comes from successive poses.
-        reported_speed = (
-            self._current_speed if speed_mps is None else float(speed_mps)
-        )
-        try:
-            if self._is_walker:
-                self.vehicle.apply_control(carla.WalkerControl(
-                    direction=carla.Vector3D(
-                        x=float(math.cos(heading_rad)),
-                        y=float(math.sin(heading_rad)),
-                        z=0.0,
-                    ),
-                    speed=float(reported_speed),
-                    jump=False,
-                ))
-                return
-        except Exception:
-            pass
-
     # ------------------------------------------------------------------ #
     def _check_trigger(self, ego_xy) -> None:
         if self._armed or ego_xy is None:
@@ -168,8 +156,14 @@ class ScriptedActor:
         self._check_trigger(ego_xy)
         if self._done or not self._armed:
             self._current_speed = 0.0
-            if self._path and not self._done:
-                self._teleport(self._path[0], self._heading(0), speed_mps=0.0)
+            if self._path:
+                if self._done:
+                    xy = self._path[-1]
+                    heading = self._heading(len(self._path) - 2)
+                else:
+                    xy = self._path[0]
+                    heading = self._heading(0)
+                self._teleport(xy, heading, speed_mps=0.0)
             return
         if self._tick - self._arm_tick < max(
             self._start_tick if self._trigger_axis not in ("x", "y") else 0,
@@ -285,15 +279,6 @@ def spawn_scripted_actors(world: Any, actor_cfgs: Sequence[dict]) -> List[Script
         if vehicle is None:
             print("[scripted_actor] entry %d spawn failed at %s" % (i, path[0]))
             continue
-        # A vehicle cannot safely have two motion owners: CARLA dynamics and
-        # this script's per-tick set_transform(). Disable physics for scripted
-        # vehicles; the planner's tracker/CP observation boundary estimates
-        # kinematics from pose changes. Walkers retain their own control API.
-        if not bp_name.startswith("walker."):
-            try:
-                vehicle.set_simulate_physics(False)
-            except Exception:
-                pass
         out.append(
             ScriptedActor(
                 vehicle,
