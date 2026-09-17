@@ -231,6 +231,7 @@ class PlanningPipeline:
         current_acceleration_mps2=0.0, max_jerk_mps3=10.0,
         comfortable_deceleration_mps2=1.5,
         cooperative_preparation_time_s=4.0,
+        max_relevant_agents=6, max_modes_per_agent=3,
     ):
         """Classify on proposal geometry and constrain the executable geometry.
 
@@ -281,6 +282,8 @@ class PlanningPipeline:
             cached_assignments=cached_assignments,
             rebuild_corridor=bool(rebuild_corridor),
             cached_corridor=cached_corridor,
+            max_relevant_agents=int(max_relevant_agents),
+            max_modes_per_agent=int(max_modes_per_agent),
         )
         from .cav_intent_codec import sample_cav_path_at
         from .mpc_corridor_constraints import corridor_rows, homotopy_keepout_rows

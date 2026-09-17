@@ -28,6 +28,64 @@ def _cav(actor_id, xy, committed_at_s, *, path=(), speed=9.0, heading=0.0,
     )
 
 
+def test_relevant_agent_budget_keeps_the_nearest_agents_ahead():
+    # 8 obstacles all inside the default ignore window (ahead, in-lane), at
+    # increasing distance. Two-agent scenarios are not evidence four (let
+    # alone eight) hold real-time: the budget must cap Stage A/B/C's input
+    # regardless of how many objects perception reports, keeping the closest
+    # ones (the route-overlap proxy) rather than an arbitrary subset.
+    obstacles = [
+        {"id": f"obs{i}", "x": 5.0 + 4.0 * i, "y": 0.1, "v": 6.0,
+         "predicted_trajectory": [{"x": 5.0 + 4.0 * i, "y": 0.1}] * 21}
+        for i in range(8)
+    ]
+    r = resolve_conflicts(
+        reference_samples=REF, ego_snapshot=EGO, my_actor_id=1,
+        my_claim=None, obstacle_snapshots=obstacles, cav_intents=[],
+    )
+    assert r.diagnostics["conflict_agent_count"] == 6
+    assert r.diagnostics["relevant_agent_budget"] == 6
+    assert r.diagnostics["relevant_agent_dropped_count"] == 2
+    kept_ids = set(r.diagnostics["tags"].keys())
+    assert kept_ids == {f"obs{i}" for i in range(6)}
+
+
+def test_relevant_agent_budget_is_configurable():
+    obstacles = [
+        {"id": f"obs{i}", "x": 5.0 + 4.0 * i, "y": 0.1, "v": 6.0,
+         "predicted_trajectory": [{"x": 5.0 + 4.0 * i, "y": 0.1}] * 21}
+        for i in range(8)
+    ]
+    r = resolve_conflicts(
+        reference_samples=REF, ego_snapshot=EGO, my_actor_id=1,
+        my_claim=None, obstacle_snapshots=obstacles, cav_intents=[],
+        max_relevant_agents=3,
+    )
+    assert r.diagnostics["conflict_agent_count"] == 3
+    assert r.diagnostics["relevant_agent_dropped_count"] == 5
+
+
+def test_mode_budget_keeps_the_most_probable_modes():
+    agent = {
+        "id": "multi", "x": 20.0, "y": 0.1, "v": 6.0,
+        "predicted_modes": [
+            {"path": [{"x": 20.0 + k, "y": 0.1} for k in range(21)],
+             "probability": p}
+            for p in (0.5, 0.4, 0.3, 0.2, 0.1)
+        ],
+    }
+    r = resolve_conflicts(
+        reference_samples=REF, ego_snapshot=EGO, my_actor_id=1,
+        my_claim=None, obstacle_snapshots=[agent], cav_intents=[],
+    )
+    assert r.diagnostics["mode_budget_per_agent"] == 3
+    assert r.diagnostics["mode_budget_capped_agent_count"] == 1
+    # The 5 modes expand into "multi::mode<index>" entries pre-cap; only the
+    # 3 highest-probability survive (0.5, 0.4, 0.3 -- not 0.2 or 0.1).
+    kept_mode_ids = {k for k in r.diagnostics["tags"] if k.startswith("multi::mode")}
+    assert kept_mode_ids == {"multi::mode0", "multi::mode1", "multi::mode2"}
+
+
 def test_end_to_end_follow_is_delegated_to_speed_planner():
     lead = {"id": "lead", "x": 40.0, "y": 0.1, "v": 6.0,
             "predicted_trajectory": [{"x": 40.0, "y": 0.1}] * 21}

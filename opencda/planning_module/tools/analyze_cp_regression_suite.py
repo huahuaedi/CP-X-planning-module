@@ -205,6 +205,20 @@ def _min_make_gap_gate_margin_m(rows):
     return min(margins) if margins else None
 
 
+def _mission_completed(row):
+    # destination_mission_complete (DestinationSpeedStage) is the real
+    # arrival contract: a vehicle latches its terminal stop one footprint
+    # buffer before the route endpoint, so route_reached_destination (a
+    # tighter, purely geometric RouteManager threshold) can stay False
+    # forever even after the mission is genuinely done. Older logs
+    # predating this field fall back to the geometric one; the staleness
+    # check (destination_speed_stage.py is a tracked dependency) is what
+    # actually catches a case that needs re-running to get the real signal.
+    if "destination_mission_complete" in row:
+        return bool(row.get("destination_mission_complete", False))
+    return bool(row.get("route_reached_destination", False))
+
+
 def _corridor_binding_frames(rows):
     # cav_conflict_roles (proceed/yield/make_gap) is peer-negotiation only --
     # it stays empty against a non-cooperative hazard (a red-light violator
@@ -248,7 +262,12 @@ def analyze_case(root, name, contract):
     code_paths = tuple(
         REPO_ROOT / str(name) for name in contract.get("dependencies", ())
     )
-    dependencies = code_paths + config_paths
+    # Every case's route-completion check reads _mission_completed(), which
+    # is only as fresh as this file regardless of what else a case declares.
+    always_dependencies = (
+        REPO_ROOT / "opencda/planning_module/pipeline/destination_speed_stage.py",
+    )
+    dependencies = code_paths + config_paths + always_dependencies
     newest_input_mtime = max(
         dependency.stat().st_mtime
         for dependency in dependencies
@@ -260,7 +279,7 @@ def analyze_case(root, name, contract):
         failures.append("collision")
     if (
         bool(contract.get("route_completion_expected", True))
-        and not bool(last.get("route_reached_destination", False))
+        and not _mission_completed(last)
     ):
         failures.append("route_not_completed")
     if infeasible_frames:
@@ -291,7 +310,7 @@ def analyze_case(root, name, contract):
         "frames": len(rows),
         "sim_time_s": float(last.get("sim_time_s", 0.0) or 0.0),
         "collision_count": collision_count,
-        "route_completed": bool(last.get("route_reached_destination", False)),
+        "route_completed": _mission_completed(last),
         "remaining_distance_m": float(
             last.get("route_remaining_distance_m", float("inf"))
         ),

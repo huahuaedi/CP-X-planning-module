@@ -31,6 +31,7 @@ from opencda.planning_module.pipeline.conflict_classifier import (
     ClassifierParams,
     ConflictTag,
     classify_conflicts,
+    _f,
 )
 from opencda.planning_module.pipeline.cooperative_arbitration import (
     ArbitrationLatchEntry,
@@ -109,6 +110,49 @@ def _agent_id(agent: Mapping[str, Any]) -> str:
         "id",
         agent.get("vehicle_id", agent.get("track_id", agent.get("actor_id", ""))),
     ))
+
+
+def _relevant_physical_agents(
+    agents: Sequence[Mapping[str, Any]],
+    reference_samples: Sequence[Any],
+    *,
+    max_agents: int,
+    ignore_lateral_m: float,
+    ignore_longitudinal_ahead_m: float,
+    ignore_longitudinal_behind_m: float,
+) -> Tuple[List[Mapping[str, Any]], int]:
+    """Cap how many physical agents reach Stage A/B/C this tick.
+
+    A cheap current-position pre-filter, not a replacement for Stage A's own
+    (track-aware) IGNORE gate: it uses the same lateral/longitudinal window
+    so an agent this keeps is never one Stage A would have ignored anyway,
+    then ranks survivors by along-route distance (a route-overlap proxy) and
+    keeps the nearest ``max_agents``. Two CAVs negotiating is not evidence
+    four can hold real-time -- classify/assign/corridor all scale with
+    however many agents reach them, so the bound has to be enforced before
+    that point, not after. Returns (kept_agents, dropped_count).
+    """
+
+    if max_agents <= 0 or len(agents) <= max_agents:
+        return list(agents), 0
+    poly = _polyline_xy(reference_samples)
+    if len(poly) < 2:
+        return list(agents)[:max_agents], len(agents) - max_agents
+    scored = []
+    for agent in agents:
+        lateral_m, along_m = project_to_extended_polyline(
+            _f(agent, "x", "x_m"), _f(agent, "y", "y_m"), poly,
+        )
+        ahead = along_m >= 0.0
+        within_window = abs(lateral_m) <= float(ignore_lateral_m) and (
+            (ahead and along_m <= float(ignore_longitudinal_ahead_m))
+            or (not ahead and abs(along_m) <= float(ignore_longitudinal_behind_m))
+        )
+        relevance_m = abs(along_m) if within_window else float("inf")
+        scored.append((relevance_m, agent))
+    scored.sort(key=lambda item: item[0])
+    kept = [agent for _, agent in scored[:max_agents]]
+    return kept, len(agents) - len(kept)
 
 
 def _prediction_evidence(agent: Mapping[str, Any]) -> dict:
@@ -352,6 +396,8 @@ def resolve_conflicts(
     rebuild_corridor: bool = True,
     cached_corridor: Optional[Corridor] = None,
     corridor_reference_samples: Optional[Sequence[Any]] = None,
+    max_relevant_agents: int = 6,
+    max_modes_per_agent: int = 3,
 ) -> ConflictResolution:
     cavs = list(cav_intents or [])
     # Only a peer carrying an actual shared plan owns future-trajectory data.
@@ -378,15 +424,34 @@ def resolve_conflicts(
             a.setdefault("trajectory_source", "prediction")
         perception_agents.append(a)
     physical_agents: List[Mapping[str, Any]] = perception_agents + cav_agents
+    physical_agents, dropped_agent_count = _relevant_physical_agents(
+        physical_agents, reference_samples,
+        max_agents=int(max_relevant_agents),
+        ignore_lateral_m=float(classifier_params.ignore_lateral_m),
+        ignore_longitudinal_ahead_m=float(
+            classifier_params.ignore_longitudinal_ahead_m
+        ),
+        ignore_longitudinal_behind_m=float(
+            classifier_params.ignore_longitudinal_behind_m
+        ),
+    )
     all_agents: List[Mapping[str, Any]] = []
     mode_groups: Dict[str, List[Tuple[Mapping[str, Any], float]]] = {}
     retained_mode_count = 0
+    mode_capped_agent_count = 0
     for agent in physical_agents:
         modes = as_modes(agent.get("predicted_modes"))
         retained = [
             mode for mode in modes
             if float(mode.probability) >= max(0.0, float(mode_probability_floor))
         ]
+        if int(max_modes_per_agent) > 0 and len(retained) > int(max_modes_per_agent):
+            # Keep the most probable modes; a low-probability tail contributes
+            # the least to the corridor's worst-case envelope anyway.
+            retained = sorted(
+                retained, key=lambda mode: -float(mode.probability)
+            )[: int(max_modes_per_agent)]
+            mode_capped_agent_count += 1
         if len(retained) == 1:
             # Stage A consumes ``predicted_trajectory``. Do not silently drop
             # the prediction module's only hypothesis merely because no
@@ -544,7 +609,12 @@ def resolve_conflicts(
         "mode_conflict_count": len(all_agents),
         "deduplicated_agent_count": (
             len(raw_obstacles) + len(cav_agents) - len(physical_agents)
+            - dropped_agent_count
         ),
+        "relevant_agent_budget": int(max_relevant_agents),
+        "relevant_agent_dropped_count": int(dropped_agent_count),
+        "mode_budget_per_agent": int(max_modes_per_agent),
+        "mode_budget_capped_agent_count": int(mode_capped_agent_count),
         "cav_count": len(cavs),
         "shared_plan_cav_count": sum(1 for c in cavs if c.planned_path),
         "shared_plan_sample_count": sum(len(c.planned_path) for c in cavs),

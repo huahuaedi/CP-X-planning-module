@@ -3327,6 +3327,12 @@ class CPXMPCPlannerBridge:
                 cooperative_preparation_time_s=float(self.config.get(
                     "candidate_lane_change_normal_duration_s", 4.0
                 )),
+                max_relevant_agents=int(self.config.get(
+                    "cav_conflict_max_relevant_agents", 6
+                )),
+                max_modes_per_agent=int(self.config.get(
+                    "cav_conflict_max_modes_per_agent", 3
+                )),
             )
             self._accum_stage_ms(
                 "sub_resolve_cav_interaction", time.monotonic() - _ts_sub

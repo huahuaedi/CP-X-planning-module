@@ -201,6 +201,25 @@ class MPCExecutionStage:
                     request.speed_crossing_deadband_mps
                 ),
             ))
+            if 12.5 <= float(request.sim_time_s) <= 14.5:
+                print(
+                    "[buffer_debug] t=%.3f replan=%s reason=%s ego_v=%.2f "
+                    "target_v=%.2f age_s=%s dt_s=%.3f" % (
+                        float(request.sim_time_s), replan,
+                        self._buffer._last_reason,
+                        float(request.ego_speed_mps),
+                        float(request.target_speed_mps),
+                        (
+                            "n/a" if self._buffer.plan_time_s is None
+                            else "%.3f" % (
+                                float(request.sim_time_s)
+                                - float(self._buffer.plan_time_s)
+                            )
+                        ),
+                        float(self._buffer._dt_s),
+                    ),
+                    flush=True,
+                )
             if replan:
                 _ts_plan = time.monotonic()
                 self._mpc.plan_trajectory(
@@ -253,6 +272,9 @@ class MPCExecutionStage:
                 )
                 acceleration = float(solution[0, 0])
                 steering = float(solution[0, 1])
+                if 12.5 <= float(request.sim_time_s) <= 14.5:
+                    accel_seq = [round(float(solution[i, 0]), 2) for i in range(min(5, len(solution)))]
+                    print(f"[buffer_debug]   fresh u_solution accel[0:5]={accel_seq}", flush=True)
             else:
                 buffered = self._buffer.sample(
                     sim_time_s=float(request.sim_time_s),
@@ -262,6 +284,8 @@ class MPCExecutionStage:
                 if buffered is None:
                     raise RuntimeError("MPC control buffer empty")
                 acceleration, steering, _ = buffered
+                if 12.5 <= float(request.sim_time_s) <= 14.5:
+                    print(f"[buffer_debug]   sampled accel={round(acceleration,2)} reason={buffered[2]}", flush=True)
                 status = (
                     "stop_hold_direct"
                     if request.stationary_stop_hold else "buffer_reuse"
