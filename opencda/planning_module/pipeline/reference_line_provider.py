@@ -1008,7 +1008,7 @@ class ReferenceLineProvider(StableReferenceLineProvider):
         reference, reason = self._turn_master_window(
             master=master, ego_location=ego_location, config=config,
             step_distance_m=step_distance_m, horizon_steps=horizon_steps,
-            reason=reason,
+            reason=reason, ego_yaw_rad=ego_yaw_rad,
         )
         reference, destination, reason = self._turn_reference_finish(
             reference=reference, ego_location=ego_location,
@@ -1115,6 +1115,7 @@ class ReferenceLineProvider(StableReferenceLineProvider):
     def _turn_master_window(
         self, *, master: list, ego_location: Any, config: Mapping[str, Any],
         step_distance_m: float, horizon_steps: int, reason: str,
+        ego_yaw_rad: float,
     ) -> tuple[list, str]:
         """Window the installed TURN master, or fall back to it unwindowed."""
 
@@ -1130,6 +1131,11 @@ class ReferenceLineProvider(StableReferenceLineProvider):
                 spacing_m=float(step_distance_m),
                 count=int(horizon_steps),
                 max_projection_advance_m=max(2.0, 2.0 * float(step_distance_m)),
+                ego_heading_rad=float(ego_yaw_rad),
+                min_body_forward_m=float(config.get(
+                    "reference_contract_intersection_turn_min_first_forward_m",
+                    0.2,
+                )),
             )
             reference = [dict(sample) for sample in window.samples]
             reason = ";".join(
@@ -2066,35 +2072,13 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             spacing_m=float(spacing_m),
             count=int(count),
             max_projection_advance_m=float(max_projection_advance_m),
+            ego_heading_rad=ego_heading_rad,
+            min_body_forward_m=min_body_forward_m,
         )
-        # Arc-length lookahead is not identical to longitudinal lookahead in
-        # the ego body frame.  This matters near the end of a lane change,
-        # where the vehicle heading and the immutable master can differ by a
-        # few degrees: a nominal 0.25 m arc offset was observed as only
-        # 0.15 m forward and intermittently violated the reference contract.
-        # Drop only leading samples that are behind the requested body-frame
-        # anchor; do not rebuild or otherwise mutate the persistent master.
-        if ego_heading_rad is not None and min_body_forward_m is not None:
-            cosine = math.cos(float(ego_heading_rad))
-            sine = math.sin(float(ego_heading_rad))
-            rows = [dict(sample) for sample in result.samples]
-            first_kept = 0
-            for index, sample in enumerate(rows):
-                dx_m = float(sample.get("x_ref_m", sample.get("x", 0.0))) - float(ego_x_m)
-                dy_m = float(sample.get("y_ref_m", sample.get("y", 0.0))) - float(ego_y_m)
-                if dx_m * cosine + dy_m * sine >= float(min_body_forward_m):
-                    first_kept = index
-                    break
-            else:
-                first_kept = max(0, len(rows) - 1)
-            if first_kept:
-                rows = rows[first_kept:]
-                result = StableReferenceWindow(
-                    tuple(rows),
-                    float(result.projection_s_m),
-                    float(rows[0].get("s_ref_m", result.start_s_m)),
-                    str(result.reason) + ":body_forward_anchored",
-                )
+        # Body-forward anchoring is solved continuously on the immutable
+        # master inside ``window_from_reference``. Do not drop a whole
+        # sampled point here: with a coarse turn horizon that caused the
+        # published anchor to jump by one complete spacing interval.
         self._snapshots[normalized_mode] = ReferenceLineSnapshot(
             mode=current.mode,
             active=current.active,

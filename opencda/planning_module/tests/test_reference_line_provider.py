@@ -271,8 +271,8 @@ def test_window_anchor_is_measured_in_ego_body_frame():
     )
 
     # With a 60 degree ego heading, 0.25 m of master arc is only 0.125 m
-    # forward in the body frame.  The provider must advance to the next
-    # sample instead of delivering a contract-invalid first point.
+    # forward in the body frame. The provider must solve the exact station
+    # on the immutable master instead of dropping a complete sampled point.
     window = provider.window(
         LANE_CHANGE,
         ego_x_m=7.0,
@@ -286,7 +286,9 @@ def test_window_anchor_is_measured_in_ego_body_frame():
 
     first = window.samples[0]
     forward_m = (float(first["x_ref_m"]) - 7.0) * 0.5
-    assert forward_m >= 0.2
+    assert forward_m == pytest.approx(0.2, abs=1.0e-5)
+    assert float(first["x_ref_m"]) == pytest.approx(7.4, abs=1.0e-5)
+    assert len(window.samples) == 10
     assert "body_forward_anchored" in window.reason
 
 

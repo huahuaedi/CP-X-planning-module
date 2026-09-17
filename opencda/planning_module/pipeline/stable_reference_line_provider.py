@@ -62,6 +62,60 @@ def _project_s(samples, arc, *, x_m, y_m, lower_s_m, upper_s_m=float("inf")):
     return float(best_s)
 
 
+def _body_forward_anchor_station(
+        samples, arc, *, start_s_m, ego_x_m, ego_y_m,
+        ego_heading_rad, minimum_forward_m):
+    """Return the first station crossing an ego-frame forward plane."""
+
+    cosine = math.cos(float(ego_heading_rad))
+    sine = math.sin(float(ego_heading_rad))
+    target_m = float(minimum_forward_m) + 1.0e-6
+
+    def forward_at(segment_index, station_m):
+        span_m = max(
+            1.0e-9,
+            float(arc[segment_index + 1]) - float(arc[segment_index]),
+        )
+        ratio = min(1.0, max(
+            0.0,
+            (float(station_m) - float(arc[segment_index])) / span_m,
+        ))
+        ax, ay = _xy(samples[segment_index])
+        bx, by = _xy(samples[segment_index + 1])
+        x_m = ax + ratio * (bx - ax)
+        y_m = ay + ratio * (by - ay)
+        return (
+            (x_m - float(ego_x_m)) * cosine
+            + (y_m - float(ego_y_m)) * sine
+        )
+
+    start_s_m = min(float(arc[-1]), max(0.0, float(start_s_m)))
+    segment = 0
+    while segment + 1 < len(arc) - 1 and arc[segment + 1] < start_s_m:
+        segment += 1
+    if forward_at(segment, start_s_m) >= target_m:
+        return float(start_s_m), False
+
+    for index in range(segment, len(arc) - 1):
+        segment_start_s = max(float(start_s_m), float(arc[index]))
+        segment_end_s = float(arc[index + 1])
+        start_forward_m = forward_at(index, segment_start_s)
+        end_forward_m = forward_at(index, segment_end_s)
+        if (
+            start_forward_m <= target_m <= end_forward_m
+            and end_forward_m > start_forward_m + 1.0e-9
+        ):
+            ratio = (
+                (target_m - start_forward_m)
+                / (end_forward_m - start_forward_m)
+            )
+            return (
+                segment_start_s + ratio * (segment_end_s - segment_start_s),
+                True,
+            )
+    return float(start_s_m), False
+
+
 def _interpolate(first, second, ratio, station_m):
     ratio = min(1.0, max(0.0, float(ratio)))
     result = dict(first if ratio < 0.5 else second)
@@ -612,7 +666,9 @@ class StableReferenceLineProvider:
 
     def window_from_reference(self, reference, *, ego_x_m, ego_y_m,
                               lower_s_m, first_forward_m, spacing_m, count,
-                              max_projection_advance_m=float("inf")):
+                              max_projection_advance_m=float("inf"),
+                              ego_heading_rad=None,
+                              min_body_forward_m=None):
         samples = [dict(sample) for sample in list(reference or [])]
         if len(samples) < 2 or int(count) <= 0:
             return StableReferenceWindow((), float(lower_s_m), float(lower_s_m),
@@ -630,6 +686,22 @@ class StableReferenceLineProvider:
         )
         start_s = min(arc[-1], max(float(lower_s_m), projection_s)
                       + max(0.0, float(first_forward_m)))
+        body_forward_anchored = False
+        if ego_heading_rad is not None and min_body_forward_m is not None:
+            # Arc lookahead and body-frame forward distance diverge on a
+            # curve. Find the exact station where the master crosses the
+            # requested body-forward plane. Selecting the next already
+            # sampled point instead made a coarse turn window alternate
+            # between ~0.2 m and ~1.4 m anchors as the ego advanced.
+            start_s, body_forward_anchored = _body_forward_anchor_station(
+                samples,
+                arc,
+                start_s_m=float(start_s),
+                ego_x_m=float(ego_x_m),
+                ego_y_m=float(ego_y_m),
+                ego_heading_rad=float(ego_heading_rad),
+                minimum_forward_m=float(min_body_forward_m),
+            )
         spacing = max(0.05, float(spacing_m))
         # Never fill a fixed horizon by repeating the terminal master point.
         # Consumers that require a full horizon own geometric extrapolation;
@@ -653,11 +725,16 @@ class StableReferenceLineProvider:
             result.append(_interpolate(samples[segment], samples[segment + 1],
                                        (station - arc[segment]) / span, station))
         bounded = math.isfinite(float(max_projection_advance_m))
+        reason = (
+            "arc_length_projection_stitched_bounded"
+            if bounded
+            else "arc_length_projection_stitched"
+        )
+        if body_forward_anchored:
+            reason += ":body_forward_anchored"
         return StableReferenceWindow(
             tuple(result),
             projection_s,
             start_s,
-            "arc_length_projection_stitched_bounded"
-            if bounded
-            else "arc_length_projection_stitched",
+            reason,
         )

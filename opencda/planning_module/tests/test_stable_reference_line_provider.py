@@ -1,5 +1,7 @@
 import math
 
+import pytest
+
 from pipeline.stable_reference_line_provider import StableReferenceLineProvider
 from pipeline.local_map_snapshot import build_local_map_snapshot
 
@@ -23,6 +25,48 @@ def test_window_uses_interpolated_arc_station_not_discrete_master_index():
     assert 5.6 < window.start_s_m < 6.1
     assert all(abs((b["reference_global_s_m"] - a["reference_global_s_m"]) - 1.1) < 1e-6
                for a, b in zip(window.samples, window.samples[1:]))
+
+
+def test_coarse_curve_body_anchor_does_not_jump_one_spacing_interval():
+    radius_m = 10.0
+    angle_step_rad = 0.12  # about 1.2 m between source samples
+    reference = [
+        {
+            "x_ref_m": radius_m * math.cos(index * angle_step_rad),
+            "y_ref_m": radius_m * math.sin(index * angle_step_rad),
+            "heading_rad": index * angle_step_rad + 0.5 * math.pi,
+        }
+        for index in range(50)
+    ]
+    ego_angle_rad = 1.2
+    ego_x_m = radius_m * math.cos(ego_angle_rad)
+    ego_y_m = radius_m * math.sin(ego_angle_rad)
+    # Model a vehicle whose heading trails the local turn tangent by 0.2 rad.
+    ego_heading_rad = ego_angle_rad + 0.5 * math.pi - 0.2
+
+    window = StableReferenceLineProvider().window_from_reference(
+        reference,
+        ego_x_m=ego_x_m,
+        ego_y_m=ego_y_m,
+        lower_s_m=0.0,
+        first_forward_m=0.2,
+        spacing_m=1.2,
+        count=24,
+        ego_heading_rad=ego_heading_rad,
+        min_body_forward_m=0.2,
+    )
+
+    first = window.samples[0]
+    dx_m = float(first["x_ref_m"]) - ego_x_m
+    dy_m = float(first["y_ref_m"]) - ego_y_m
+    body_forward_m = (
+        dx_m * math.cos(ego_heading_rad)
+        + dy_m * math.sin(ego_heading_rad)
+    )
+    assert body_forward_m == pytest.approx(0.2, abs=1.0e-5)
+    assert body_forward_m < 0.25
+    assert len(window.samples) == 24
+    assert "body_forward_anchored" in window.reason
 
 
 def test_projection_is_monotonic_with_lower_arc_bound():
