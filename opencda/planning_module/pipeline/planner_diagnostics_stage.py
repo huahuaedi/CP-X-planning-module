@@ -45,6 +45,28 @@ def _cav_conflict_summary(diag: Mapping[str, Any]) -> str:
     return ";".join(parts) if parts else "no_conflict"
 
 
+def _route_points_for_display(owner: Any, route_revision: str) -> list:
+    """Emit the full route polyline only on the tick it actually changes.
+
+    global_route_points is the whole planned route -- hundreds to
+    thousands of (x, y) pairs -- yet it was serialized into every single
+    debug row regardless of whether the route had moved since the last
+    tick. On a multi-thousand-frame run that alone was the overwhelming
+    majority of the debug JSONL's size (189MB of a lane-change scenario's
+    log measured at ~73% attributable to this one repeated field), for
+    data that a sequential reader can just as well carry forward from the
+    last tick it changed. Route replans are rare relative to planning
+    ticks, so this trades a rarely-needed "what was the route on this
+    exact tick" convenience for a large, unconditional size cost.
+    """
+
+    revision = str(route_revision)
+    if revision == str(getattr(owner, "_debug_last_route_revision", None)):
+        return []
+    owner._debug_last_route_revision = revision
+    return owner._display_global_route_points()
+
+
 def _wrap_angle_rad(angle_rad: float) -> float:
     return (float(angle_rad) + math.pi) % (2.0 * math.pi) - math.pi
 
@@ -1029,7 +1051,9 @@ class PlannerDiagnosticsStage:
             ),
             "stop_target_forward_m": stop_target_forward_m_debug,
             "mpc_trajectory_points": self._last_mpc_trajectory_points(),
-            "global_route_points": self._display_global_route_points(),
+            "global_route_points": _route_points_for_display(
+                self, str(getattr(self.route_manager, "route_revision", ""))
+            ),
             "lane_reference_points": [
                 [
                     float(sample.get("x_ref_m", sample.get("x", 0.0))),

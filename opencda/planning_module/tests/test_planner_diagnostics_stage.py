@@ -2,7 +2,44 @@ import math
 
 import pytest
 
-from pipeline.planner_diagnostics_stage import _executed_reference_tracking
+from pipeline.planner_diagnostics_stage import (
+    _executed_reference_tracking,
+    _route_points_for_display,
+)
+
+
+class _FakeOwner:
+    def __init__(self, points):
+        self._points = list(points)
+        self.display_calls = 0
+
+    def _display_global_route_points(self):
+        self.display_calls += 1
+        return list(self._points)
+
+
+def test_route_points_for_display_emits_full_route_on_first_call():
+    owner = _FakeOwner([[0.0, 0.0], [10.0, 0.0]])
+    result = _route_points_for_display(owner, "route-1")
+    assert result == [[0.0, 0.0], [10.0, 0.0]]
+    assert owner.display_calls == 1
+
+
+def test_route_points_for_display_omits_unchanged_route_on_later_ticks():
+    owner = _FakeOwner([[0.0, 0.0], [10.0, 0.0]])
+    _route_points_for_display(owner, "route-1")
+    result = _route_points_for_display(owner, "route-1")
+    assert result == []
+    assert owner.display_calls == 1
+
+
+def test_route_points_for_display_re_emits_on_route_change():
+    owner = _FakeOwner([[0.0, 0.0], [10.0, 0.0]])
+    _route_points_for_display(owner, "route-1")
+    owner._points = [[0.0, 0.0], [20.0, 0.0], [30.0, 0.0]]
+    result = _route_points_for_display(owner, "route-2")
+    assert result == [[0.0, 0.0], [20.0, 0.0], [30.0, 0.0]]
+    assert owner.display_calls == 2
 
 
 def test_executed_reference_tracking_uses_published_reference_tangent():
