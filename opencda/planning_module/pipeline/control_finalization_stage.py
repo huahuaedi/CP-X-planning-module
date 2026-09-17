@@ -1,4 +1,12 @@
-"""Finalize one MPC result into the sole platform-safe control command."""
+"""Finalize one MPC result into the sole platform-safe control command.
+
+This is step 3 of the bridge's control-writing precedence
+(TrajectoryFallbackManager reference substitution -> MPCExecutionStage's
+normal/safe/emergency stop controls -> this stage's own hard-gate +
+SafetySupervisor last-mile filter -> CPXMPCPlannerBridge.run_step()'s
+try/except as the absolute last resort) -- see run_step()'s docstring for
+the full chain in one place before changing what any single layer does.
+"""
 
 from __future__ import annotations
 

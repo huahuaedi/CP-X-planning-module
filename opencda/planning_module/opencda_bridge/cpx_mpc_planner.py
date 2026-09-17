@@ -1185,7 +1185,36 @@ class CPXMPCPlannerBridge:
             self._per_tick_waypoint_repeat_pct = []
 
     def run_step(self) -> carla.VehicleControl:
-        """Plan and return a low-level CARLA control command."""
+        """Plan and return a low-level CARLA control command.
+
+        This is the sole write point: every other safety/fallback system
+        (TrajectoryFallbackManager, MPCExecutionStage's normal/safe/emergency
+        stop controls, SafetySupervisor) feeds into the one ``control`` this
+        method returns -- none of them hands a command to CARLA on its own.
+        The full precedence, upstream to downstream, in case a future change
+        needs to reason about which layer wins when several are active at
+        once:
+
+        1. TrajectoryFallbackManager.bounded_safe_stop() -- reference layer.
+           Replaces the trajectory the MPC tracks, not a control command.
+        2. MPCExecutionStage ("execute_mpc") -- solves the QP against that
+           reference, or (infeasible / suspended / catastrophic) substitutes
+           one of normal_stop_control (gentle suspend-brake hold),
+           safe_stop_control (bounded decel matching the MPC's own
+           acceleration/steering intent), or emergency_stop_control (hard
+           brake=1, steer=0). Produces ``execution.control``.
+        3. ControlFinalizationStage.run() ("finalize_control") -- the hard
+           gate (candidate_hard_gate / emergency_brake maneuver) selects the
+           platform target velocity; apply_velocity_steering (PID) converts
+           it to a raw carla.VehicleControl; SafetySupervisor.run() is the
+           last-mile filter (steer/throttle/brake rate limits, red/yellow
+           signal-stop envelope, boundary-recovery hard-stop, stuck-release)
+           and owns whatever control this stage returns.
+        4. This method's own try/except -- the absolute last resort. Only
+           reached if steps 1-3 raise; returns self._emergency_stop_control()
+           (a bare hard brake) unconditionally, never the platform's normal
+           control path.
+        """
 
         try:
             planner_output = self.execute_planning_pipeline()
