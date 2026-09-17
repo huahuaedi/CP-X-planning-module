@@ -450,6 +450,7 @@ class BehaviorStage:
                 and not bool(frame.map_lane.in_junction)
             ),
         ))
+        lane_to_offset = dict(frame.map_lane.lane_to_offset)
         preferred = (
             int(authorization.target_lane_id)
             if bool(authorization.allowed)
@@ -479,6 +480,7 @@ class BehaviorStage:
             route_points=request.route_points,
             nearest_front_obstacles_by_lane=nearest,
             available_lane_ids=available,
+            lane_to_offset=lane_to_offset,
             behavior_traffic_state=str(request.behavior_traffic_state),
             behavior_stop_target=request.behavior_stop_target,
             signal_context=request.signal_context,
@@ -530,6 +532,7 @@ class BehaviorStage:
         lane_change_reference_active: bool, config: Mapping[str, object],
         runtime_config: Mapping[str, object],
         attempt_replan: Any, object_track_id: Any,
+        lane_to_offset: Mapping[int, int] = MappingProxyType({}),
     ) -> BehaviorCommandResult:
         """Produce one behavior command through the sole obstacle arbitration path."""
 
@@ -588,6 +591,7 @@ class BehaviorStage:
             available_lane_ids=tuple(available_lane_ids),
             lane_safety_scores=lane_safety_scores,
             lane_prediction_risks=lane_prediction_risks,
+            lane_to_offset=lane_to_offset,
             attempt_replan=lambda: attempt_replan(dict(front_obstacle or {})),
         )
         local_avoidance = bool(obstacle_result.local_avoidance_active)

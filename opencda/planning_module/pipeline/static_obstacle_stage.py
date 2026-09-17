@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Callable, Mapping, Optional, Sequence
 
 
@@ -10,18 +11,31 @@ def select_local_avoidance_lane(*, current_lane_id: int,
                                 available_lane_ids: Sequence[int],
                                 lane_safety_scores: Mapping[int, float],
                                 lane_prediction_risks: Mapping[int, Mapping[str, object]],
-                                minimum_safety_score: float) -> Optional[int]:
+                                minimum_safety_score: float,
+                                lane_to_offset: Mapping[int, int] = MappingProxyType({}),
+                                ) -> Optional[int]:
     current = int(current_lane_id)
+    # AD-map lane ids are opaque -- |id_a - id_b| carries no lateral meaning
+    # (see OpenCDAPlanningAdapter.build). Rank candidates by their real
+    # corridor offset (0 = current lane, +/-1 = one lane over, ...) instead;
+    # a lane missing from the map (no offset on file) is dropped rather than
+    # silently treated as "very far" or "very near" by a meaningless id
+    # subtraction. Ties in offset (opposite-side neighbors, both |1|) still
+    # fall through to the safety-score comparison below, same as before.
+    current_offset = int(lane_to_offset.get(current, 0))
     alternatives = sorted(
-        {int(x) for x in available_lane_ids if int(x) not in {0, current}},
-        key=lambda lane_id: abs(lane_id - current),
+        (
+            int(x) for x in available_lane_ids
+            if int(x) not in {0, current} and int(x) in lane_to_offset
+        ),
+        key=lambda lane_id: abs(int(lane_to_offset[lane_id]) - current_offset),
     )
     if not alternatives:
         return None
-    nearest_delta = abs(alternatives[0] - current)
+    nearest_delta = abs(int(lane_to_offset[alternatives[0]]) - current_offset)
     safe = []
     for lane_id in alternatives:
-        if abs(lane_id - current) != nearest_delta:
+        if abs(int(lane_to_offset[lane_id]) - current_offset) != nearest_delta:
             continue
         score = float(lane_safety_scores.get(lane_id, 0.0))
         risk = dict(lane_prediction_risks.get(lane_id, {}) or {})
@@ -73,7 +87,9 @@ class StaticObstacleStage:
                  normal_mode: bool, available_lane_ids: Sequence[int],
                  lane_safety_scores: Mapping[int, float],
                  lane_prediction_risks: Mapping[int, Mapping[str, object]],
-                 attempt_replan: Callable[[], tuple[bool, bool, str]]) -> StaticObstacleResult:
+                 attempt_replan: Callable[[], tuple[bool, bool, str]],
+                 lane_to_offset: Mapping[int, int] = MappingProxyType({}),
+                 ) -> StaticObstacleResult:
         if (
             self.target_lane_id is not None
             and int(current_lane_id) == int(self.target_lane_id)
@@ -130,6 +146,7 @@ class StaticObstacleStage:
                     lane_prediction_risks=lane_prediction_risks,
                     minimum_safety_score=float(self.config.get(
                         "static_obstacle_local_lane_min_safety_score", 0.55)),
+                    lane_to_offset=lane_to_offset,
                 ) if normal_mode and bool(self.config.get(
                     "static_obstacle_local_avoidance_enabled", True)) else None
                 if target is not None:

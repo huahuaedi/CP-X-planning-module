@@ -10,6 +10,11 @@ def _evaluate(stage, **overrides):
         lane_safety_scores={10: 1.0, 11: 1.0},
         lane_prediction_risks={},
         attempt_replan=lambda: (True, True, "replanned"),
+        # AD-map lane ids are opaque; these fixtures use consecutive small
+        # integers purely for readability, so pin down that 11 really is
+        # one real lane over from 10 rather than relying on that being
+        # true by coincidence of the id values chosen.
+        lane_to_offset={10: 0, 11: 1},
     )
     values.update(overrides)
     return stage.evaluate(**values)
@@ -41,6 +46,24 @@ def test_committed_lane_borrow_is_not_reselected_during_execution():
     assert executing.status == "local_avoidance_executing"
     assert executing.local_avoidance_active
     assert not executing.stop_active
+
+
+def test_lane_borrow_ignores_lane_id_proximity_when_not_actually_adjacent():
+    # Regression: AD-map lane ids are opaque and do not encode lateral
+    # position. Lane 12 is numerically closer to current (10) than lane 30,
+    # but its real corridor offset (+3, three lanes over -- e.g. a
+    # different road segment reachable via the same local frame) makes it a
+    # far worse local-avoidance target than lane 30, which is genuinely one
+    # lane over. The old id-subtraction heuristic picked 12 every time;
+    # this must pick 30 instead.
+    stage = StaticObstacleStage({"static_obstacle_blocked_confirm_s": 0.0})
+    ready = _evaluate(
+        stage,
+        available_lane_ids=(10, 12, 30),
+        lane_safety_scores={10: 1.0, 12: 1.0, 30: 1.0},
+        lane_to_offset={10: 0, 12: 3, 30: 1},
+    )
+    assert ready.target_lane_id == 30
 
 
 def test_lane_borrow_releases_after_stable_target_lane_match():

@@ -192,6 +192,17 @@ class OpenCDAPlanningAdapter:
                 )
                 else {}
             )
+        # AD-map lane ids are opaque -- |id_a - id_b| carries no lateral
+        # meaning. local_corridors already keys each real lateral slot
+        # (0 = current lane, +/-1 = one lane over, ...) to the lane ids
+        # occupying it this tick; invert it once here so downstream lane
+        # selection (e.g. static-obstacle local avoidance) can ask "how many
+        # lanes over is this" instead of subtracting ids.
+        lane_to_offset: Dict[int, int] = {}
+        for offset, corridor_lane_ids in local_corridors.items():
+            for lane_id in list(corridor_lane_ids or []):
+                if int(lane_id or 0) != 0:
+                    lane_to_offset[int(lane_id)] = int(offset)
         for corridor_lane_ids in local_corridors.values():
             for lane_id in list(corridor_lane_ids or []):
                 if int(lane_id or 0) != 0:
@@ -373,6 +384,7 @@ class OpenCDAPlanningAdapter:
                 section_id=int(getattr(ego_waypoint, "section_id", 0) or 0),
                 lane_count=len(lane_ids),
                 allowed_lane_ids=list(lane_ids),
+                lane_to_offset=dict(lane_to_offset),
                 in_junction=bool(
                     getattr(
                         ego_waypoint,

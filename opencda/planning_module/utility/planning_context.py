@@ -224,6 +224,13 @@ class MapLaneContext:
     lateral_offset_m: float = 0.0
     heading_error_rad: float = 0.0
     match_valid: bool = False
+    # AD-map lane ids are opaque identifiers -- numeric id difference has no
+    # lateral meaning (see OpenCDAPlanningAdapter.build). This maps each
+    # allowed lane id to its actual lateral corridor slot (0 = current lane,
+    # +/-1 = one lane over, ...), built from the local lane frame's real
+    # corridor topology, for anything that needs genuine "how many lanes
+    # over" distance rather than an id subtraction.
+    lane_to_offset: Mapping[int, int] = field(default_factory=dict)
 
     @classmethod
     def from_local_context(
@@ -251,6 +258,12 @@ class MapLaneContext:
             lateral_offset_m=_to_float(context.get("lateral_offset_m", 0.0)),
             heading_error_rad=_to_float(context.get("heading_error_rad", 0.0)),
             match_valid=bool(context.get("match_valid", False)),
+            lane_to_offset={
+                _to_int(lane_id): _to_int(offset)
+                for lane_id, offset in dict(
+                    context.get("lane_to_offset", {}) or {}
+                ).items()
+            },
         )
 
 
