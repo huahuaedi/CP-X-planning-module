@@ -55,6 +55,69 @@ def test_pending_corridor_keeps_original_time_and_expires_after_forecast():
     assert schedule.corridor is None
 
 
+def test_fresh_clear_permanently_retires_cached_actor_bound():
+    schedule = CAVConflictSchedule()
+    reference = [
+        {"x_ref_m": float(x), "y_ref_m": 0.0} for x in range(20)
+    ]
+    cached = Corridor(
+        s_lo=[-_BIG] * 4,
+        s_hi=[10.0] * 4,
+        binding=["peer-7"] * 4,
+    )
+    schedule.corridor = cached
+    schedule.corridor_reference = tuple(reference)
+    schedule.corridor_time_s = 1.0
+
+    schedule.observe(
+        sim_time_s=1.1,
+        reference_samples=reference,
+        result=SimpleNamespace(
+            latch_state={}, tag_state={"peer-7": "IGNORE"},
+            veto_state={}, assignments=(), released_actor_ids=("peer-7",),
+            fresh_corridor=Corridor(
+                s_lo=[-_BIG] * 4, s_hi=[_BIG] * 4, binding=[""] * 4,
+            ),
+            diagnostics={"corridor_rebuilt": True},
+        ),
+    )
+
+    assert schedule.corridor is None
+    assert schedule.cached_corridor_for_tick(
+        sim_time_s=1.15,
+        reference_samples=reference,
+        ego_x_m=0.0,
+        ego_y_m=0.0,
+        dt_s=0.1,
+    ) is None
+
+
+def test_route_reset_clears_every_conflict_lifecycle_state():
+    schedule = CAVConflictSchedule(
+        latch_state={"7": object()},
+        tag_state={"7": "CROSSING"},
+        veto_state={"7::mode0": {"dangerous": True}},
+        assignments=(object(),),
+        corridor=Corridor(
+            s_lo=[-_BIG], s_hi=[10.0], binding=["7"],
+        ),
+        corridor_reference=({"x_ref_m": 0.0, "y_ref_m": 0.0},),
+        corridor_time_s=4.0,
+    )
+    old_revision = schedule.revision
+
+    schedule.reset(reason="route_revision_changed:r2")
+
+    assert schedule.latch_state == {}
+    assert schedule.tag_state == {}
+    assert schedule.veto_state == {}
+    assert schedule.assignments == ()
+    assert schedule.corridor is None
+    assert schedule.corridor_reference == ()
+    assert schedule.revision == old_revision + 1
+    assert schedule.last_reset_reason == "route_revision_changed:r2"
+
+
 def test_constraint_revision_ignores_scheduler_refresh_revision():
     base = {
         "roles": {7: "yield"}, "tags": {7: "FOLLOW"},

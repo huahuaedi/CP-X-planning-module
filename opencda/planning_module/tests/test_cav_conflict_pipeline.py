@@ -2,7 +2,11 @@ import math
 
 from pipeline.cav_conflict_pipeline import resolve_conflicts
 from pipeline.conflict_classifier import CROSSING, FOLLOW, IGNORE, MERGE
-from pipeline.cooperative_arbitration import CavIntent, ResourceClaim
+from pipeline.cooperative_arbitration import (
+    ArbitrationLatchEntry,
+    CavIntent,
+    ResourceClaim,
+)
 from pipeline.spatiotemporal_corridor import Corridor
 
 REF = [{"x_ref_m": float(x), "y_ref_m": 0.0} for x in range(0, 121, 2)]
@@ -388,6 +392,55 @@ def test_latch_state_round_trips_and_holds():
         latch_state=r1.latch_state, hysteresis_ticks=3,
     )
     assert r2.diagnostics["roles"].get("2") == "proceed"
+
+
+def test_scheduled_role_refresh_prunes_a_disappeared_peer_latch():
+    stale = {
+        "99": ArbitrationLatchEntry(role="yield", side="left"),
+    }
+    result = resolve_conflicts(
+        reference_samples=REF,
+        ego_snapshot=EGO,
+        my_actor_id=1,
+        my_claim=_claim(committed_at_s=10.0),
+        cav_intents=[],
+        latch_state=stale,
+        refresh_assignments=True,
+    )
+
+    assert result.latch_state == {}
+    assert result.assignments == []
+
+
+def test_fresh_geometric_clear_reports_actor_for_cache_retirement():
+    cached = Corridor(
+        s_lo=[-_BIG] * len(REF),
+        s_hi=[12.0] * len(REF),
+        binding=["departed"] * len(REF),
+    )
+    departed = {
+        "id": "departed",
+        "x": 20.0,
+        "y": 20.0,
+        "v": 0.0,
+        "predicted_trajectory": [
+            {"x": 20.0, "y": 20.0} for _ in range(len(REF))
+        ],
+    }
+    result = resolve_conflicts(
+        reference_samples=REF,
+        ego_snapshot=EGO,
+        my_actor_id=1,
+        obstacle_snapshots=[departed],
+        cached_corridor=cached,
+        rebuild_corridor=False,
+        refresh_assignments=False,
+    )
+
+    assert result.diagnostics["tags"]["departed"] == IGNORE
+    assert result.released_actor_ids == ("departed",)
+    assert result.diagnostics["released_actor_ids"] == ("departed",)
+    assert all(value >= _BIG for value in result.corridor.s_hi)
 
 
 def test_connected_cav_replaces_same_actor_perception_track():

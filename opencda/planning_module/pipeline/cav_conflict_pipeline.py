@@ -70,6 +70,11 @@ class ConflictResolution:
     latch_state: Dict[str, ArbitrationLatchEntry]
     tag_state: Dict[str, str] = field(default_factory=dict)
     veto_state: Dict[str, Any] = field(default_factory=dict)
+    # Fresh Stage-A evidence that permanently retires these actors' cached
+    # bounds.  The schedule applies this to its original-time cache; doing it
+    # only to the per-tick rebased copy lets the old constraint reappear on
+    # the next tick.
+    released_actor_ids: Tuple[str, ...] = ()
     speed_constraint: Optional[SpeedConstraint] = None
     # Stage C owns ``corridor`` in its classification-reference station
     # coordinates. Stage D owns this rebased view in the coordinates of the
@@ -568,12 +573,19 @@ def resolve_conflicts(
     # Stage B (only cooperative cavs, only when ego holds an active claim) ---
     assignments: List[ConflictAssignment] = []
     arbitration_diagnostics: Dict[str, Any] = {}
-    new_latch: Dict[str, ArbitrationLatchEntry] = dict(latch_state or {})
     current_tag_state = {tag.agent_id: tag.tag for tag in tags}
     tag_changed = bool(
         tag_state is not None and current_tag_state != dict(tag_state or {})
     )
     roles_refreshed = bool(refresh_assignments or tag_changed)
+    # A scheduled refresh is authoritative for membership.  Preserve the
+    # previous latch only while roles are deliberately cached between
+    # coordination ticks; otherwise disappeared/ineligible peers would keep
+    # stale role state indefinitely and could inherit it if an actor id is
+    # later reused.
+    new_latch: Dict[str, ArbitrationLatchEntry] = (
+        {} if roles_refreshed else dict(latch_state or {})
+    )
     if not roles_refreshed:
         live_ids = {int(c.actor_id) for c in cavs if bool(c.cooperative)}
         assignments = [
@@ -743,6 +755,7 @@ def resolve_conflicts(
             else "cached_roles"
         ),
         "corridor_rebuilt": bool(corridor_rebuilt),
+        "released_actor_ids": tuple(sorted(cleared_actor_ids)),
     }
     return ConflictResolution(
         tags=tags, assignments=assignments, corridor=corridor,
@@ -750,5 +763,6 @@ def resolve_conflicts(
         latch_state=new_latch,
         tag_state=current_tag_state,
         veto_state=dict(new_veto_state or {}),
+        released_actor_ids=tuple(sorted(cleared_actor_ids)),
         diagnostics=diagnostics,
     )

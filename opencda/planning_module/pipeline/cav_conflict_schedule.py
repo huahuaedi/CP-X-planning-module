@@ -29,6 +29,23 @@ class CAVConflictSchedule:
     _last_structure_revision: str = ""
     _has_observation: bool = False
     revision: int = 0
+    last_reset_reason: str = "initial"
+
+    def reset(self, *, reason: str) -> None:
+        """Atomically retire all runtime state at a topology boundary."""
+
+        self.latch_state.clear()
+        self.tag_state.clear()
+        self.veto_state.clear()
+        self.assignments = ()
+        self.corridor = None
+        self.corridor_reference = ()
+        self.corridor_time_s = 0.0
+        self._last_refresh_s = -float("inf")
+        self._last_structure_revision = ""
+        self._has_observation = False
+        self.revision += 1
+        self.last_reset_reason = str(reason)
 
     @staticmethod
     def constraint_revision(diagnostics: Mapping[str, Any]) -> str:
@@ -141,6 +158,21 @@ class CAVConflictSchedule:
         self.veto_state = dict(getattr(result, "veto_state", {}) or {})
         self.assignments = tuple(getattr(result, "assignments", ()) or ())
         self._has_observation = True
+        released_actor_ids = tuple(
+            str(actor_id)
+            for actor_id in getattr(result, "released_actor_ids", ()) or ()
+        )
+        if released_actor_ids and self.corridor is not None:
+            from .spatiotemporal_corridor import release_cleared_actor_bounds
+            self.corridor = release_cleared_actor_bounds(
+                self.corridor, released_actor_ids,
+            )
+            if self.corridor is not None and not any(
+                float(cap) < 1.0e9 for cap in self.corridor.s_hi
+            ):
+                self.corridor = None
+                self.corridor_reference = ()
+                self.corridor_time_s = 0.0
         if bool(getattr(result, "diagnostics", {}).get(
             "corridor_rebuilt", False
         )):
