@@ -21,6 +21,7 @@ class TrafficLightMemory:
         hold_green_unknown_s: float = 0.2,
         green_confirm_s: float = 0.0,
         hold_stop_unknown_until_green: bool = False,
+        fail_safe_max_unknown_hold_s: float = 6.0,
     ) -> None:
         self.hold_unknown_s = max(0.0, float(hold_unknown_s))
         self.hold_green_unknown_s = max(0.0, float(hold_green_unknown_s))
@@ -28,9 +29,23 @@ class TrafficLightMemory:
         self.hold_stop_unknown_until_green = bool(
             hold_stop_unknown_until_green
         )
+        # A stop-requiring reading that goes unknown (occlusion, a dropped
+        # frame, sensor noise) must not resolve to "go" just because
+        # hold_unknown_s's short debounce window passed -- that is a real
+        # fail-open gap, not a design choice, for every scenario that
+        # doesn't opt into the indefinite hold_stop_unknown_until_green.
+        # This bounds the same fail-safe hold instead of leaving it off by
+        # default: long enough to bridge a real, temporary detection gap,
+        # but not indefinite, so a genuinely broken/never-confirms-green
+        # signal path still releases eventually instead of deadlocking the
+        # vehicle at the intersection forever.
+        self.fail_safe_max_unknown_hold_s = max(
+            0.0, float(fail_safe_max_unknown_hold_s)
+        )
         self._last_stop_state = "unknown"
         self._last_stop_target: dict[str, object] | None = None
         self._hold_until_s = -float("inf")
+        self._fail_safe_hold_until_s = -float("inf")
         self._green_since_s: float | None = None
         self._latched_stop_target: dict[str, object] | None = None
         self._latched_stop_state = "unknown"
@@ -122,6 +137,9 @@ class TrafficLightMemory:
                 else None
             )
             self._hold_until_s = float(sim_time_s) + float(self.hold_unknown_s)
+            self._fail_safe_hold_until_s = float(sim_time_s) + float(
+                self.fail_safe_max_unknown_hold_s
+            )
             return str(normalized_state), self._last_stop_target, "raw_stop"
 
         if normalized_state == "green":
@@ -161,6 +179,9 @@ class TrafficLightMemory:
             reason = f"traffic_memory_hold_{self._last_stop_state}"
             return str(self._last_stop_state), self._last_stop_target, reason
 
+        # Opt-in indefinite hold takes precedence over the bounded one right
+        # below so a caller that explicitly asked for it keeps its exact
+        # existing (unbounded) semantics and reason string.
         if (
             normalized_state == "unknown"
             and bool(self.hold_stop_unknown_until_green)
@@ -171,6 +192,28 @@ class TrafficLightMemory:
                 str(self._last_stop_state),
                 self._last_stop_target,
                 f"traffic_memory_fail_safe_hold_{self._last_stop_state}_until_green",
+            )
+
+        # Bounded fail-safe hold: hold_unknown_s's debounce window above is
+        # only meant to absorb a single dropped frame, not a real multi-
+        # second occlusion/detection gap -- past it, this holds the same
+        # stop-requiring state for up to fail_safe_max_unknown_hold_s before
+        # falling through to plain "unknown" below. Unlike
+        # hold_stop_unknown_until_green (indefinite, opt-in only), this is
+        # bounded and unconditional: it closes the fail-open gap for every
+        # caller that hasn't opted into the indefinite hold above, without
+        # risking a permanent stop if the signal path is genuinely broken
+        # rather than just briefly occluded.
+        if (
+            normalized_state == "unknown"
+            and float(sim_time_s) <= float(self._fail_safe_hold_until_s)
+            and self._last_stop_state in {"red", "yellow"}
+            and self._last_stop_target is not None
+        ):
+            return (
+                str(self._last_stop_state),
+                self._last_stop_target,
+                f"traffic_memory_fail_safe_hold_{self._last_stop_state}",
             )
 
         if (

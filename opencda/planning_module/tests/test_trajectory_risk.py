@@ -245,6 +245,29 @@ class LaneFollowingObstaclePredictionTests(unittest.TestCase):
 
         self.assertEqual(with_lane_step_fn, straight)
 
+    def test_cyclists_ignore_lane_step_fn_and_stay_straight_line(self):
+        # A crossing cyclist is not lane-following either -- before this,
+        # _NON_LANE_FOLLOWING_ACTOR_TYPES only listed pedestrian/walker, so a
+        # cyclist was snapped onto the lane centerline like a car (the exact
+        # error this file's own docstring warns about, just for the wrong
+        # actor type).
+        cyclist_snapshot = {
+            "x": 0.0, "y": 0.0, "v": 4.0, "psi": 0.0, "a": 0.0,
+            "object_type": "cyclist",
+        }
+        straight = obstacle_future_trajectory(
+            cyclist_snapshot, horizon_s=2.0, dt_s=0.5, model="constant_acceleration"
+        )
+        with_lane_step_fn = obstacle_future_trajectory(
+            cyclist_snapshot,
+            horizon_s=2.0,
+            dt_s=0.5,
+            model="constant_acceleration",
+            lane_step_fn=self._circular_lane_step_fn(20.0),
+        )
+
+        self.assertEqual(with_lane_step_fn, straight)
+
     def test_omitting_lane_step_fn_keeps_previous_behaviour(self):
         snapshot = {"x": 0.0, "y": 0.0, "v": 5.0, "psi": 0.0, "a": 0.0}
         without_param = obstacle_future_trajectory(

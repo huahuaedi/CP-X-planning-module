@@ -36,6 +36,13 @@ class ControlFinalizationRequest:
     # MPC's near-term state to the downstream PID would apply acceleration
     # dynamics twice and make turns unnecessarily slow.
     mpc_velocity_safety_cap_active: bool = False
+    # Set once a CAV corridor has been infeasible (even true max braking
+    # cannot satisfy it) for several consecutive ticks -- see
+    # CPXMPCPlannerBridge._update_corridor_infeasible_streak. Escalates to
+    # the same full brake + zero-steer response already reserved for a
+    # confirmed collision-risk hard gate below, instead of continuing to
+    # trust whatever the (slack-relaxed) QP solution produced.
+    corridor_infeasible_escalate: bool = False
 
 
 @dataclass(frozen=True)
@@ -140,6 +147,7 @@ class ControlFinalizationStage:
                     stop_goal_active=bool(request.stop_goal_active),
                 )
                 or maneuver == "emergency_brake"
+                or bool(request.corridor_infeasible_escalate)
             )
             platform_target = self._extractor.platform_target_velocity(
                 nominal_velocity_mps=float(request.target_speed_mps),
@@ -172,6 +180,9 @@ class ControlFinalizationStage:
                 "pid_target_velocity_mps": float(platform_target),
                 "mpc_velocity_safety_cap_active": bool(
                     request.mpc_velocity_safety_cap_active
+                ),
+                "corridor_infeasible_escalate": bool(
+                    request.corridor_infeasible_escalate
                 ),
                 "velocity_command_source": (
                     "mpc_corridor_velocity_safety_cap"

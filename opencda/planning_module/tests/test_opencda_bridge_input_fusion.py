@@ -46,6 +46,51 @@ from pipeline.reference_line_provider import LANE_FOLLOW, TURN, ReferenceLinePro
 from pipeline.perception_stage import PerceptionStage
 
 
+class CorridorInfeasibleEscalationTests(unittest.TestCase):
+    """CPXMPCPlannerBridge._update_corridor_infeasible_streak -- see
+    control_finalization_stage tests for what the escalation actually does
+    to the control output once this returns True."""
+
+    @staticmethod
+    def _bridge(streak_threshold=2):
+        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
+        bridge._corridor_infeasible_streak = 0
+        bridge.corridor_infeasible_emergency_streak = int(streak_threshold)
+        return bridge
+
+    @staticmethod
+    def _cav_result(feasible):
+        return SimpleNamespace(
+            constraint_corridor=SimpleNamespace(feasible=bool(feasible))
+        )
+
+    def test_no_cav_result_never_escalates(self):
+        bridge = self._bridge()
+        for _ in range(5):
+            self.assertFalse(bridge._update_corridor_infeasible_streak(None))
+
+    def test_single_infeasible_tick_does_not_escalate_below_the_streak(self):
+        bridge = self._bridge(streak_threshold=2)
+        self.assertFalse(
+            bridge._update_corridor_infeasible_streak(self._cav_result(False))
+        )
+
+    def test_escalates_once_the_streak_threshold_is_reached(self):
+        bridge = self._bridge(streak_threshold=2)
+        bridge._update_corridor_infeasible_streak(self._cav_result(False))
+        self.assertTrue(
+            bridge._update_corridor_infeasible_streak(self._cav_result(False))
+        )
+
+    def test_a_feasible_tick_resets_the_streak(self):
+        bridge = self._bridge(streak_threshold=2)
+        bridge._update_corridor_infeasible_streak(self._cav_result(False))
+        bridge._update_corridor_infeasible_streak(self._cav_result(True))
+        self.assertFalse(
+            bridge._update_corridor_infeasible_streak(self._cav_result(False))
+        )
+
+
 class OpenCDABridgeInputFusionTests(unittest.TestCase):
     def test_static_obstacle_local_avoidance_selects_safest_adjacent_lane(self):
         selected = _select_static_obstacle_local_avoidance_lane(
@@ -54,6 +99,10 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
             lane_safety_scores={1: 0.72, 2: 0.1, 3: 0.91},
             lane_prediction_risks={1: {"risk": False}, 3: {"risk": False}},
             minimum_safety_score=0.55,
+            # AD-map lane ids are opaque; 1 and 3 are both one real lane
+            # over from 2 (opposite sides), same as the id-distance the old
+            # (buggy) heuristic happened to get right in this toy case.
+            lane_to_offset={1: -1, 2: 0, 3: 1},
         )
 
         self.assertEqual(selected, 3)
@@ -65,6 +114,7 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
             lane_safety_scores={1: 0.1, 2: 0.95},
             lane_prediction_risks={2: {"risk": True}},
             minimum_safety_score=0.55,
+            lane_to_offset={1: 0, 2: 1},
         )
 
         self.assertIsNone(selected)
@@ -1504,6 +1554,67 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         self.assertEqual(state, "green")
         self.assertIsNone(target)
         self.assertEqual(reason, "traffic_memory_green_release")
+
+    def test_bounded_fail_safe_hold_survives_a_gap_past_the_short_debounce(self):
+        # Before this, once hold_unknown_s's short debounce window passed,
+        # a stop-requiring red/yellow that went unknown (occlusion, a
+        # dropped frame) resolved to plain "unknown" -- which the behavior
+        # stage treats as no stop required -- unless a caller opted into
+        # the indefinite hold_stop_unknown_until_green. This bounded hold
+        # closes that fail-open gap by default, without opting in.
+        memory = TrafficLightMemory(
+            hold_unknown_s=0.8,
+            fail_safe_max_unknown_hold_s=6.0,
+        )
+        stop_target = {"x_m": 10.0, "y_m": 0.0}
+        memory.update(state="red", stop_target=stop_target, sim_time_s=1.0)
+
+        # Past hold_unknown_s (until 1.8) but well inside the 6s bound.
+        state, target, reason = memory.update(
+            state="unknown", stop_target=None, sim_time_s=4.0,
+        )
+        self.assertEqual(state, "red")
+        self.assertEqual(target, stop_target)
+        self.assertEqual(reason, "traffic_memory_fail_safe_hold_red")
+
+    def test_bounded_fail_safe_hold_still_releases_once_its_own_bound_elapses(self):
+        # The bound exists specifically so a signal path that never
+        # recovers doesn't deadlock the vehicle at the intersection forever
+        # -- unlike hold_stop_unknown_until_green, this must let go
+        # eventually.
+        memory = TrafficLightMemory(
+            hold_unknown_s=0.8,
+            fail_safe_max_unknown_hold_s=6.0,
+        )
+        memory.update(
+            state="red", stop_target={"x_m": 10.0, "y_m": 0.0}, sim_time_s=1.0,
+        )
+
+        state, target, reason = memory.update(
+            state="unknown", stop_target=None, sim_time_s=8.0,
+        )
+        self.assertEqual(state, "unknown")
+        self.assertIsNone(target)
+
+    def test_explicit_indefinite_hold_still_wins_over_the_bounded_default(self):
+        # hold_stop_unknown_until_green stays available for a caller that
+        # explicitly wants no bound at all -- it must keep working past
+        # fail_safe_max_unknown_hold_s's own window, and keep its own
+        # distinct reason string.
+        memory = TrafficLightMemory(
+            hold_unknown_s=0.8,
+            fail_safe_max_unknown_hold_s=6.0,
+            hold_stop_unknown_until_green=True,
+        )
+        stop_target = {"x_m": 10.0, "y_m": 0.0}
+        memory.update(state="red", stop_target=stop_target, sim_time_s=1.0)
+
+        state, target, reason = memory.update(
+            state="unknown", stop_target=None, sim_time_s=60.0,
+        )
+        self.assertEqual(state, "red")
+        self.assertEqual(target, stop_target)
+        self.assertEqual(reason, "traffic_memory_fail_safe_hold_red_until_green")
 
     def test_full_mode_holds_red_through_long_unknown_until_green(self):
         memory = TrafficLightMemory(

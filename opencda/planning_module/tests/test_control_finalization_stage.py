@@ -138,6 +138,79 @@ def test_longitudinal_corridor_may_apply_mpc_preview_safety_cap():
     )
 
 
+def _run_solved_finalization_with_corridor_escalation(*, corridor_infeasible_escalate):
+    extractor = _TrackingExtractor(optimized_velocity_mps=1.5)
+    mpc = SimpleNamespace(
+        constraints=SimpleNamespace(min_acceleration_mps2=-3.0, max_velocity_mps=20.0),
+        dt_s=0.1,
+        _last_x_solution=[[0.0, 0.0, 1.5, 0.0]],
+    )
+    stage = ControlFinalizationStage(
+        mpc=mpc,
+        command_extractor=extractor,
+        feedback=_Feedback(),
+        control_safety=_AcceptingSafety(),
+        config={},
+        # The escalation must fire on its own signal, not by piggybacking on
+        # the hard-gate path -- this always returns False so a passing test
+        # can't be explained by that other trigger.
+        hard_gate_requires_emergency_stop=lambda **_kwargs: False,
+    )
+    request = ControlFinalizationRequest(
+        execution=SimpleNamespace(
+            acceleration_mps2=0.0, steering_rad=0.1, control=None,
+            fallback_reason="", status="solved",
+            failed_replan_buffer_reused=False,
+        ),
+        # A non-emergency maneuver -- the escalation must not depend on the
+        # behavior FSM having already recognized the hazard.
+        behavior=SimpleNamespace(maneuver="lane_follow", target_lane_id=1),
+        ego_transform=object(), ego_speed_mps=1.0, target_speed_mps=3.0,
+        destination_state=(), reference_samples=(), stop_goal_active=False,
+        stop_target_forward_m="", final_reference_accepted=True,
+        candidate_status="feasible", safety_manager=None,
+        carla_module=object(), sim_time_s=1.0,
+        corridor_infeasible_escalate=bool(corridor_infeasible_escalate),
+    )
+    applied = {}
+
+    def apply_velocity_steering(**kwargs):
+        applied.update(kwargs)
+        return "pid-control", 0.0, 0.1, {}
+
+    result = stage.run(
+        request,
+        set_actuator_context=lambda **_kwargs: None,
+        acceleration_from_control=lambda _control: 0.0,
+        steering_from_control=lambda _control: 0.1,
+        apply_velocity_steering=apply_velocity_steering,
+        control_factory=lambda *_args: None,
+        boundary_metrics=lambda *_args: {},
+        update_boundary_recovery=lambda *_args: None,
+        reset_boundary_recovery=lambda *_args: None,
+    )
+    return applied, result
+
+
+def test_corridor_infeasible_escalation_forces_full_emergency_stop():
+    applied, result = _run_solved_finalization_with_corridor_escalation(
+        corridor_infeasible_escalate=True
+    )
+
+    assert applied["emergency_stop"] is True
+    assert result.platform_debug["corridor_infeasible_escalate"] is True
+
+
+def test_no_corridor_escalation_leaves_normal_pid_tracking_untouched():
+    applied, result = _run_solved_finalization_with_corridor_escalation(
+        corridor_infeasible_escalate=False
+    )
+
+    assert applied["emergency_stop"] is False
+    assert applied["target_speed_mps"] == 3.0
+    assert result.platform_debug["corridor_infeasible_escalate"] is False
+
+
 def test_failed_mpc_control_goes_through_one_safety_exit_without_pid_remap():
     feedback_calls = []
 

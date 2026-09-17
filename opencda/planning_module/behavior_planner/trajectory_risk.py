@@ -198,13 +198,18 @@ def _constant_acceleration_points(
     return points
 
 
-_NON_LANE_FOLLOWING_ACTOR_TYPES = {"pedestrian", "walker"}
+_NON_LANE_FOLLOWING_ACTOR_TYPES = {"pedestrian", "walker", "cyclist", "bicycle"}
 
 
 def _is_lane_following_actor(snapshot: Mapping[str, object]) -> bool:
-    """Vehicles are constrained to the lane network; pedestrians are not --
-    snapping a crossing pedestrian's prediction onto the nearest driving
-    lane would predict it walking along the road instead of across it."""
+    """Vehicles are constrained to the lane network; pedestrians and
+    cyclists are not -- snapping a crossing pedestrian's or cyclist's
+    prediction onto the nearest driving lane would predict it moving along
+    the road instead of across it. observation_contract.normalize_object_type
+    maps "bicycle" to "cyclist" before a snapshot reaches here, but a
+    snapshot built without going through that normalization (e.g. straight
+    from a raw CARLA actor type_id) could still carry the unnormalized
+    value, so both are listed."""
 
     actor_type = str(
         snapshot.get("object_type", snapshot.get("actor_type", snapshot.get("type", "")))

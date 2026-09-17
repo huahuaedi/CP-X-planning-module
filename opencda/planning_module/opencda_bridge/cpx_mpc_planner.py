@@ -259,6 +259,23 @@ class CPXMPCPlannerBridge:
         # that reaches the governor always takes the reset branch below --
         # harmless (it is already fresh) and avoids a separate first-tick case.
         self._cav_conflict_governor_route_revision = "\x00uninitialized"
+        # A CAV corridor is built from true max-braking limits (not an
+        # arbitrarily weak substitute -- see build_longitudinal_corridor's
+        # own clamp), so Corridor.feasible=False means even max braking from
+        # here cannot satisfy every constraint: an unavoidable conflict, not
+        # a normal negotiation state. Before this, that was only ever a
+        # logged diagnostic (corridor_feasible/corridor_first_infeasible_stage
+        # in cav_conflict_pipeline.py) -- nothing downstream read it, so the
+        # planner kept issuing whatever speed/steering the (slack-relaxed) QP
+        # solution happened to produce instead of the full emergency stop the
+        # rest of the codebase already reserves for a confirmed collision
+        # hazard. Escalating only after a short streak (not the first tick)
+        # avoids one noisy/transient infeasible tick during negotiation
+        # forcing a full brake + zero-steer response.
+        self._corridor_infeasible_streak = 0
+        self.corridor_infeasible_emergency_streak = max(1, int(
+            self.config.get("corridor_infeasible_emergency_streak", 2)
+        ))
         self._cav_transport_diagnostics: dict[str, Any] = {}
         # This CAV's own broadcast for nearby CP-X CAVs to read (its planned
         # trajectory + ResourceClaim + pose). Read peer-to-peer through
@@ -300,6 +317,9 @@ class CPXMPCPlannerBridge:
                     "full_traffic_hold_stop_unknown_until_green",
                     False,
                 )
+            ),
+            fail_safe_max_unknown_hold_s=float(
+                self.config.get("full_traffic_fail_safe_max_unknown_hold_s", 6.0)
             ),
         )
         from opencda.planning_module.pipeline.scenario_manager import (
@@ -1320,6 +1340,28 @@ class CPXMPCPlannerBridge:
             debug,
         )
 
+    def _update_corridor_infeasible_streak(self, cav_result: Any) -> bool:
+        """Escalate to a full emergency stop once a CAV corridor has been
+        infeasible for several consecutive ticks.
+
+        ``Corridor.feasible=False`` means max braking from here cannot
+        satisfy every constraint the corridor encodes -- an unavoidable
+        conflict under the corridor's own (true max-deceleration) bound, not
+        a normal negotiation state. A streak requirement instead of firing
+        on the first infeasible tick keeps one noisy/transient tick during
+        negotiation from forcing a full brake + zero-steer response.
+        """
+
+        corridor = None if cav_result is None else cav_result.constraint_corridor
+        if corridor is not None and not bool(getattr(corridor, "feasible", True)):
+            self._corridor_infeasible_streak += 1
+        else:
+            self._corridor_infeasible_streak = 0
+        return (
+            self._corridor_infeasible_streak
+            >= self.corridor_infeasible_emergency_streak
+        )
+
     def execute_planning_pipeline(self):
         """Public OpenCDA bridge port for one full CP-X planning tick."""
 
@@ -1616,6 +1658,9 @@ class CPXMPCPlannerBridge:
             cav_constraint_revision = self._cav_schedule.constraint_revision(
                 cav_diagnostics
             )
+        corridor_infeasible_escalate = self._update_corridor_infeasible_streak(
+            cav_result
+        )
         self._maybe_capture_execute_mpc_frame(
             sim_time_s=float(sim_time_s),
             current_state=current_state,
@@ -1720,6 +1765,7 @@ class CPXMPCPlannerBridge:
                     str(getattr(row, "slack_group", "")) == "corridor"
                     for row in cav_constraint_rows
                 ),
+                corridor_infeasible_escalate=bool(corridor_infeasible_escalate),
             ),
             set_actuator_context=self._set_actuator_context,
             acceleration_from_control=self._accel_from_control,
