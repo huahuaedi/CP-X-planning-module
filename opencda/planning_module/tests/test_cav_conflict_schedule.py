@@ -103,6 +103,7 @@ def test_route_reset_clears_every_conflict_lifecycle_state():
         ),
         corridor_reference=({"x_ref_m": 0.0, "y_ref_m": 0.0},),
         corridor_time_s=4.0,
+        conflict_reference=object(),
     )
     old_revision = schedule.revision
 
@@ -114,8 +115,27 @@ def test_route_reset_clears_every_conflict_lifecycle_state():
     assert schedule.assignments == ()
     assert schedule.corridor is None
     assert schedule.corridor_reference == ()
+    assert schedule.conflict_reference is None
     assert schedule.revision == old_revision + 1
     assert schedule.last_reset_reason == "route_revision_changed:r2"
+
+
+def test_conflict_reference_rebuilds_only_on_coordination_refresh():
+    schedule = CAVConflictSchedule()
+    built = []
+
+    def build():
+        reference = object()
+        built.append(reference)
+        return reference
+
+    first = schedule.reference_for_tick(refresh=True, build=build)
+    cached = schedule.reference_for_tick(refresh=False, build=build)
+    refreshed = schedule.reference_for_tick(refresh=True, build=build)
+
+    assert cached is first
+    assert refreshed is not first
+    assert built == [first, refreshed]
 
 
 def test_constraint_revision_ignores_scheduler_refresh_revision():

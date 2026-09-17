@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Sequence, Tuple
+from typing import Any, Callable, Mapping, Sequence, Tuple
 
 
 @dataclass(frozen=True)
@@ -25,6 +25,7 @@ class CAVConflictSchedule:
     corridor: Any = None
     corridor_reference: tuple = ()
     corridor_time_s: float = 0.0
+    conflict_reference: Any = None
     _last_refresh_s: float = -float("inf")
     _last_structure_revision: str = ""
     _has_observation: bool = False
@@ -41,11 +42,27 @@ class CAVConflictSchedule:
         self.corridor = None
         self.corridor_reference = ()
         self.corridor_time_s = 0.0
+        self.conflict_reference = None
         self._last_refresh_s = -float("inf")
         self._last_structure_revision = ""
         self._has_observation = False
         self.revision += 1
         self.last_reset_reason = str(reason)
+
+    def reference_for_tick(
+        self, *, refresh: bool, build: Callable[[], Any],
+    ) -> Any:
+        """Return the 5 Hz proposal reference used by conflict stages.
+
+        The reference is a world-frame polyline, so Stage A can continue to
+        project the moving ego pose onto it between coordination refreshes.
+        Its lifecycle follows the same proposal/route revision as roles and
+        corridors; the 20 Hz bridge must not independently rebuild it.
+        """
+
+        if bool(refresh) or self.conflict_reference is None:
+            self.conflict_reference = build()
+        return self.conflict_reference
 
     @staticmethod
     def constraint_revision(diagnostics: Mapping[str, Any]) -> str:

@@ -3299,20 +3299,6 @@ class CPXMPCPlannerBridge:
                 s_begin_m=claim_interval.s_begin_m,
                 s_end_m=claim_interval.s_end_m,
             )
-            _ts_sub = time.monotonic()
-            conflict_reference = self.pipeline.cooperative_conflict_reference(
-                proposal=cooperative_proposal,
-                local_map=local_map_snapshot,
-                current_state=current_state,
-                baseline_reference=local_lane_center_reference,
-                target_speed_mps=float(planned_speed_mps),
-                horizon_steps=int(self.mpc.horizon_steps),
-                dt_s=float(self.mpc.dt_s),
-                lane_width_m=float(getattr(self.mpc, "lane_width_m", 3.5)),
-            )
-            self._accum_stage_ms(
-                "sub_cooperative_conflict_reference", time.monotonic() - _ts_sub
-            )
             cav_claim = self._cooperative_claim_manager.claim(
                 proposal=cooperative_proposal,
                 sim_time_s=float(sim_time_s),
@@ -3325,6 +3311,23 @@ class CPXMPCPlannerBridge:
                 ),
                 claim=cav_claim, peers=cav_intents,
                 proposal=cooperative_proposal,
+            )
+            _ts_sub = time.monotonic()
+            conflict_reference = self._cav_schedule.reference_for_tick(
+                refresh=bool(schedule.refresh_roles),
+                build=lambda: self.pipeline.cooperative_conflict_reference(
+                    proposal=cooperative_proposal,
+                    local_map=local_map_snapshot,
+                    current_state=current_state,
+                    baseline_reference=local_lane_center_reference,
+                    target_speed_mps=float(planned_speed_mps),
+                    horizon_steps=int(self.mpc.horizon_steps),
+                    dt_s=float(self.mpc.dt_s),
+                    lane_width_m=float(getattr(self.mpc, "lane_width_m", 3.5)),
+                ),
+            )
+            self._accum_stage_ms(
+                "sub_cooperative_conflict_reference", time.monotonic() - _ts_sub
             )
             cached_corridor = self._cav_schedule.cached_corridor_for_tick(
                 sim_time_s=float(sim_time_s),
