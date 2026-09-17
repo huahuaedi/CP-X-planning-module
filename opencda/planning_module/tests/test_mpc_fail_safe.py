@@ -242,6 +242,7 @@ class ModeCostProfileTests(unittest.TestCase):
             qpsi=0.0,
             qa=5.0,
             qdelta=100.0,
+            qdelta_reference=0.0,
         )
         mpc.lane_center_follow_weight = 20.0
         mpc.lane_center_follow_xy_weight = 20.0
@@ -260,6 +261,7 @@ class ModeCostProfileTests(unittest.TestCase):
                 "lane_center_q_psi": 3.0,
                 "road_boundary_w": 16000.0,
                 "w_control": 8.0,
+                "q_delta_reference": 12.0,
             }
         }
         mpc.mode_cost_profile_blend_alpha = 1.0
@@ -273,6 +275,7 @@ class ModeCostProfileTests(unittest.TestCase):
         self.assertAlmostEqual(mpc.road_boundary_weight, 16000.0)
         self.assertAlmostEqual(mpc.lane_keep_boundary_weight, 16000.0)
         self.assertAlmostEqual(mpc.comfort_cost.w_comf, 8.0)
+        self.assertAlmostEqual(mpc.comfort_cost.qdelta_reference, 12.0)
 
 
 class MPCFeasibilityProbeTests(unittest.TestCase):

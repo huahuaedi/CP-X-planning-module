@@ -90,6 +90,7 @@ class MPCComfortCostSpec:
     qpsi: float
     qa: float
     qdelta: float
+    qdelta_reference: float = 0.0
 
 
 @dataclass
@@ -396,6 +397,14 @@ class MPC:
             # Control-rate weights (legacy fallback: cost.q_a, cost.q_delta).
             qa=max(0.0, float(control_cfg.get("q_a", cost_cfg.get("q_a", 2.0)))),
             qdelta=max(0.0, float(control_cfg.get("q_delta", cost_cfg.get("q_delta", 4.0)))),
+            # Absolute road-wheel feed-forward tracking.  This is separate
+            # from q_delta: q_delta smooths steering-rate error, whereas this
+            # term removes the otherwise-unobservable constant steering
+            # offset on a constant-curvature road.
+            qdelta_reference=max(
+                0.0,
+                float(control_cfg.get("q_delta_reference", 0.0)),
+            ),
         )
         # Temporal-consistency term: penalizes deviation of the solved input
         # trajectory from the previous tick's (shifted) solution. Damps the
@@ -834,6 +843,7 @@ class MPC:
             "w_control": float(self.comfort_cost.w_comf),
             "q_a": float(self.comfort_cost.qa),
             "q_delta": float(self.comfort_cost.qdelta),
+            "q_delta_reference": float(self.comfort_cost.qdelta_reference),
             "lane_center_w0": float(self.lane_center_follow_weight),
             "lane_center_xy_w0": float(self.lane_center_follow_xy_weight),
             "lane_center_q_psi": float(self.lane_center_follow_qpsi),
@@ -872,6 +882,10 @@ class MPC:
             "w_control": ("w_control", "w_comf"),
             "q_a": ("q_a", "qa"),
             "q_delta": ("q_delta", "qdelta"),
+            "q_delta_reference": (
+                "q_delta_reference",
+                "qdelta_reference",
+            ),
             "lane_center_w0": ("lane_center_w0", "lane_center_weight", "w_lane_center", "w0"),
             "lane_center_xy_w0": (
                 "lane_center_xy_w0",
@@ -928,6 +942,9 @@ class MPC:
         self.comfort_cost.w_comf = float(blended["w_control"])
         self.comfort_cost.qa = float(blended["q_a"])
         self.comfort_cost.qdelta = float(blended["q_delta"])
+        self.comfort_cost.qdelta_reference = float(
+            blended["q_delta_reference"]
+        )
         self.lane_center_follow_weight = float(blended["lane_center_w0"])
         self.lane_center_follow_xy_weight = float(blended["lane_center_xy_w0"])
         self.lane_center_follow_qpsi = float(blended["lane_center_q_psi"])
@@ -3301,9 +3318,24 @@ class MPC:
             lane_center_reference=lane_center_reference,
         )
 
+        # Track the persistent reference's curvature feed-forward directly.
+        # The rate-error term below cannot observe a constant steering offset:
+        # on a constant-radius turn, both the required steering rate and the
+        # rate of an incorrectly-straight command are zero.  Keeping these two
+        # terms separate lets mode profiles trade tracking against comfort
+        # without changing constraints or the calibrated vehicle model.
+        qd_reference_eff = (
+            comfort_scale * float(self.comfort_cost.qdelta_reference)
+        )
+
         for k in range(self.horizon_steps):
             a_idx = index.control_index(k, 0)
             d_idx = index.control_index(k, 1)
+            add_tracking(
+                d_idx,
+                qd_reference_eff,
+                float(nominal_steering_profile[k + 1]),
+            )
             if k == 0:
                 add_rate_penalty(a_idx, None, float(current_acceleration_mps2), qa_eff)
                 add_rate_penalty(
@@ -4057,6 +4089,7 @@ class MPC:
         current_acceleration_mps2: float,
         current_steering_rad: float,
         lane_center_reference: Sequence[Mapping[str, object]] | None,
+        steering_reference_profile: Sequence[float] | None = None,
     ) -> Dict[str, float]:
         """
         Evaluate per-term objective values for the most recent planned trajectory.
@@ -4147,12 +4180,34 @@ class MPC:
         inv_dt = 1.0 / max(1e-9, float(self.dt_s))
         qa = float(self.comfort_cost.qa)
         qd = float(self.comfort_cost.qdelta)
+        qd_reference = float(self.comfort_cost.qdelta_reference)
+        steering_reference = np.asarray(
+            (
+                list(steering_reference_profile)
+                if steering_reference_profile is not None
+                else []
+            ),
+            dtype=float,
+        )
         for k in range(self.horizon_steps):
             a_k = float(u_traj[k, 0])
             d_k = float(u_traj[k, 1])
             da = (a_k - a_prev) * inv_dt
-            dd = (d_k - d_prev) * inv_dt
-            j_ctrl += qa * da * da + qd * dd * dd
+            reference_difference = 0.0
+            steering_target = 0.0
+            if steering_reference.size > k + 1:
+                steering_target = float(steering_reference[k + 1])
+                reference_difference = float(
+                    steering_reference[k + 1] - steering_reference[k]
+                )
+            dd_error = (
+                d_k - d_prev - reference_difference
+            ) * inv_dt
+            j_ctrl += (
+                qa * da * da
+                + qd * dd_error * dd_error
+                + qd_reference * (d_k - steering_target) ** 2
+            )
             a_prev = a_k
             d_prev = d_k
         cost_control = float(self.comfort_cost.w_comf) * j_ctrl
@@ -4647,6 +4702,10 @@ class MPC:
             )
             x_solution[k, 3] = self._wrap_angle(float(x_solution[k, 3]))
 
+        diagnostic_steering_reference = self._nominal_path_steering_profile(
+            x_ref_rollout=np.asarray(tracking_x_ref_rollout, dtype=float),
+            lane_center_reference=lane_center_reference,
+        )
         self._last_cost_terms = self._evaluate_plan_cost_terms(
             x_traj=x_solution,
             u_traj=u_solution,
@@ -4655,6 +4714,7 @@ class MPC:
             current_acceleration_mps2=float(current_acceleration_mps2),
             current_steering_rad=float(current_steering_rad),
             lane_center_reference=lane_center_reference,
+            steering_reference_profile=diagnostic_steering_reference,
         )
 
         world_x_solution = np.asarray(x_solution, dtype=float).copy()

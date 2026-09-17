@@ -1435,6 +1435,58 @@ class CrossTrackLateralScaleTests(unittest.TestCase):
         )
 
 
+class SteeringReferenceCostTests(unittest.TestCase):
+    def test_qp_tracks_absolute_curvature_feedforward(self):
+        mpc = MPC(
+            {
+                "horizon_s": 0.2,
+                "plan_dt_s": 0.1,
+                "wheelbase_m": 2.7,
+                "cost": {
+                    "attractive": {"w_attractive": 0.0},
+                    "lane_center_follow": {"enabled": False, "w0": 0.0},
+                    "road_boundary": {"enabled": False},
+                    "control": {
+                        "w_control": 1.0,
+                        "q_a": 0.0,
+                        "q_delta": 0.0,
+                        "q_delta_reference": 7.0,
+                    },
+                    "repulsive_potential": {"enabled": False},
+                    "speed_soft_constraint": {"enabled": False},
+                },
+            },
+            {"lane_width_m": 4.0, "lane_count": 3},
+        )
+        steering_profile = np.array([0.0, 0.2, 0.3], dtype=float)
+        mpc._nominal_path_steering_profile = lambda **_kwargs: steering_profile
+        rollout = np.zeros((mpc.horizon_steps + 1, 4), dtype=float)
+        controls = np.zeros((mpc.horizon_steps, 2), dtype=float)
+
+        P, q, _, _, _, index = mpc._build_qp(
+            x0=np.zeros(4, dtype=float),
+            x_ref_target=np.zeros(4, dtype=float),
+            object_snapshots=[],
+            current_acceleration_mps2=0.0,
+            current_steering_rad=0.0,
+            x_ref_rollout=rollout,
+            u_ref_rollout=controls,
+            lane_center_reference=[{"x_ref_m": 0.0, "y_ref_m": 0.0}],
+            speed_upper_bound_mps=None,
+            reachable_speed_floor_profile_mps=None,
+        )
+
+        first_steer = index.control_index(0, 1)
+        second_steer = index.control_index(1, 1)
+        self.assertAlmostEqual(
+            float(P[first_steer, first_steer]),
+            14.0,
+            delta=1.0e-5,
+        )
+        self.assertAlmostEqual(float(q[first_steer]), -2.0 * 7.0 * 0.2)
+        self.assertAlmostEqual(float(q[second_steer]), -2.0 * 7.0 * 0.3)
+
+
 class CrossTrackSuppressionIntegrationTests(unittest.TestCase):
     @staticmethod
     def _obstacle_mpc_config(*, cross_track_suppression_enabled: bool):

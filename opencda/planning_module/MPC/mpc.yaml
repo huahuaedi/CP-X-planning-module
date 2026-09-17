@@ -645,6 +645,9 @@ mpc:
       w_control: 5.0
       q_a: 5.0
       q_delta: 60.0
+      # Absolute curvature feed-forward tracking.  q_delta above controls
+      # steering-rate smoothness; this term removes steady turn-in lag.
+      q_delta_reference: 12.0
 
     stop:
       w_attractive: 1.2
