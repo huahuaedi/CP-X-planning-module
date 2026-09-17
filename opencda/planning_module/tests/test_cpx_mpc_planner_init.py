@@ -172,3 +172,9 @@ def test_control_finalization_shares_mpc_command_extractor_and_control_safety(br
 
 def test_cp_provider_disabled_by_config(bridge):
     assert bridge.cp_provider is None
+
+
+def test_cav_conflict_governor_starts_at_the_configured_ceiling(bridge):
+    governor = bridge._cav_conflict_governor
+    assert governor.current_max_relevant_agents == 6
+    assert governor.current_max_modes_per_agent == 3

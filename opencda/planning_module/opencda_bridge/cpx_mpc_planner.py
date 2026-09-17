@@ -238,6 +238,23 @@ class CPXMPCPlannerBridge:
                 self.config.get("cav_coordination_period_s", 0.2)
             )
         )
+        from opencda.planning_module.pipeline.cav_conflict_compute_governor import (
+            CAVConflictComputeGovernor,
+        )
+        self._cav_conflict_governor = CAVConflictComputeGovernor(
+            max_agents=int(self.config.get("cav_conflict_max_relevant_agents", 6)),
+            max_modes=int(self.config.get("cav_conflict_max_modes_per_agent", 3)),
+            min_agents=int(self.config.get("cav_conflict_min_relevant_agents", 2)),
+            min_modes=int(self.config.get("cav_conflict_min_modes_per_agent", 1)),
+            budget_ms=float(self.config.get("cav_conflict_budget_ms", 100.0)),
+            window=int(self.config.get("cav_conflict_budget_window_ticks", 5)),
+            degrade_streak=int(
+                self.config.get("cav_conflict_budget_degrade_streak", 3)
+            ),
+            recover_streak=int(
+                self.config.get("cav_conflict_budget_recover_streak", 5)
+            ),
+        )
         self._cav_transport_diagnostics: dict[str, Any] = {}
         # This CAV's own broadcast for nearby CP-X CAVs to read (its planned
         # trajectory + ResourceClaim + pose). Read peer-to-peer through
@@ -3327,16 +3344,24 @@ class CPXMPCPlannerBridge:
                 cooperative_preparation_time_s=float(self.config.get(
                     "candidate_lane_change_normal_duration_s", 4.0
                 )),
-                max_relevant_agents=int(self.config.get(
-                    "cav_conflict_max_relevant_agents", 6
-                )),
-                max_modes_per_agent=int(self.config.get(
-                    "cav_conflict_max_modes_per_agent", 3
-                )),
+                max_relevant_agents=self._cav_conflict_governor.current_max_relevant_agents,
+                max_modes_per_agent=self._cav_conflict_governor.current_max_modes_per_agent,
             )
+            _cav_interaction_elapsed_s = time.monotonic() - _ts_sub
             self._accum_stage_ms(
-                "sub_resolve_cav_interaction", time.monotonic() - _ts_sub
+                "sub_resolve_cav_interaction", _cav_interaction_elapsed_s
             )
+            # Feeds next tick's budget, not this one: this tick already ran
+            # at whatever budget was decided last tick, so retroactively
+            # shrinking its own inputs here would just make the measurement
+            # describe a call that never happened.
+            budget_decision = self._cav_conflict_governor.observe_stage_ms(
+                _cav_interaction_elapsed_s * 1000.0
+            )
+            if budget_decision.degraded:
+                cav_result.diagnostics["cav_conflict_budget_decision"] = (
+                    budget_decision.reason
+                )
             self._cav_schedule.observe(
                 sim_time_s=float(sim_time_s), result=cav_result,
                 reference_samples=local_lane_center_reference,
