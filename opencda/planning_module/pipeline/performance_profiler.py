@@ -136,10 +136,25 @@ class PlannerStageProfiler:
         self.wrap_method(pipeline, "condition", "profile.reference_pipeline.condition")
         self.wrap_method(pipeline, "finalize", "profile.reference_pipeline.finalize")
 
+    def instrument_cav_conflict_pipeline(self, pipeline):
+        """Measure the two public cooperative-conflict stage boundaries."""
+
+        self.wrap_method(
+            pipeline,
+            "cooperative_conflict_reference",
+            "profile.cav_conflict.reference",
+        )
+        self.wrap_method(
+            pipeline,
+            "resolve_cav_interaction",
+            "profile.cav_conflict.resolve_interaction",
+        )
+
     def instrument_bridge(self, bridge):
         """Measure bridge-owned reference work and install shared function timers."""
         if bridge is None:
             return
+        self.instrument_cav_conflict_pipeline(getattr(bridge, "pipeline", None))
         self.instrument_reference_generator(getattr(bridge, "reference_generator", None))
         self.instrument_reference_pipeline(getattr(bridge, "reference_pipeline", None))
         self.wrap_method(bridge, "_active_global_route_points", "profile.route_manager.active_route_geometry")
