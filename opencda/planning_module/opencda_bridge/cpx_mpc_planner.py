@@ -2664,6 +2664,9 @@ class CPXMPCPlannerBridge:
             "mpc_road_boundary_peak": (
                 self.mpc.get_last_road_boundary_peak_diagnostic()
             ),
+            "mpc_heading_tracking": (
+                self.mpc.get_last_heading_tracking_diagnostic()
+            ),
             "Cost_Repulsive": cost_terms.get("Cost_Repulsive", ""),
             "Cost_Repulsive_Safe": cost_terms.get("Cost_Repulsive_Safe", ""),
             "Cost_Repulsive_Collision": cost_terms.get(

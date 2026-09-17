@@ -50,8 +50,12 @@ mpc:
     min_steer_rad: -0.6
     max_steer_rad: 0.6
 
-    # The former implicit default of 0.02 rad/s prevented steering reversal
-    # across an S-shaped lane-change connector for several seconds.
+    # Road-wheel steering authority.  The former implicit default of
+    # 0.02 rad/s prevented steering reversal across an S-shaped lane-change
+    # connector for several seconds.  A closed-loop 0.60 rad/s turn experiment
+    # reduced rate binding but increased mean heading and lateral errors, so
+    # 0.35 remains the validated platform envelope.  Real-vehicle deployments
+    # should replace it with their measured steering actuator limit.
     min_steer_rate_rps: -0.35
     max_steer_rate_rps: 0.35
 
@@ -647,10 +651,9 @@ mpc:
       q_delta: 60.0
       # Absolute curvature feed-forward tracking.  Keep this term subordinate
       # to state/lane-heading feedback: it supplies the steady-state steering
-      # bias for the connector but must not force geometric curvature when the
-      # measured vehicle heading is already ahead of the reference.  Closed-
-      # loop Town06 data showed that 80 reduced lateral error while increasing
-      # the turn heading overshoot to about 15--21 degrees.
+      # bias for the connector but must not overpower heading feedback.
+      # Closed-loop Town06 data showed that 80 reduced lateral error while
+      # increasing absolute turn-heading error to about 15--21 degrees.
       q_delta_reference: 12.0
 
     stop:

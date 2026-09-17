@@ -8,6 +8,21 @@ from MPC.mpc import MPC
 
 
 class MPCLaneReferenceTests(unittest.TestCase):
+    def test_linearized_heading_dynamics_do_not_wrap_at_pi(self):
+        mpc = object.__new__(MPC)
+        mpc.dt_s = 0.1
+        mpc.l_r_m = 1.4
+        mpc.wheelbase_m = 2.8
+        mpc.kinematic_steering_effectiveness = 1.0
+        x_bar = np.asarray([0.0, 0.0, 4.0, math.pi + 0.02])
+        u_bar = np.asarray([0.0, 0.0])
+
+        _a, _b, affine = mpc._linearize_dynamics(x_bar, u_bar)
+
+        # With zero steering, yaw_{k+1}=yaw_k; the affine term must not
+        # contain the -2*pi jump produced by per-stage angle wrapping.
+        self.assertAlmostEqual(float(affine[3]), 0.0, places=9)
+
     def test_query_aware_lane_reference_stays_local_to_stage_window(self):
         mpc = object.__new__(MPC)
         mpc.lane_center_reference_local_window = 1
@@ -219,6 +234,41 @@ class MPCLaneReferenceTests(unittest.TestCase):
         self.assertAlmostEqual(progress_ref[0], 3.0)
         self.assertAlmostEqual(progress_ref[1], 0.0)
         self.assertNotAlmostEqual(index_ref[0], progress_ref[0])
+
+    def test_shared_stage_sample_builder_uses_rollout_arc_length(self):
+        mpc = object.__new__(MPC)
+        mpc.horizon_steps = 2
+        mpc.lane_width_m = 4.0
+        mpc.lane_center_follow_use_progress_lookup = True
+        mpc.lane_center_reference_local_window = 0
+        reference = [
+            {
+                "x_ref_m": float(progress),
+                "y_ref_m": 0.0,
+                "heading_rad": 0.0,
+                "progress_m": float(progress),
+                "lane_width_m": 4.0,
+            }
+            for progress in range(7)
+        ]
+        rollout = np.asarray(
+            [
+                [0.0, 0.0, 3.0, 0.0],
+                [3.0, 0.0, 3.0, 0.0],
+                [6.0, 0.0, 3.0, 0.0],
+            ],
+            dtype=float,
+        )
+
+        samples = mpc._lane_center_stage_samples_for_rollout(
+            lane_center_reference=reference,
+            rollout=rollout,
+        )
+
+        self.assertEqual(
+            [float(sample["progress_m"]) for sample in samples],
+            [0.0, 3.0, 6.0],
+        )
 
     def test_rollout_progress_has_no_nonphysical_minimum_step(self):
         """Low-speed turns must consume reference arc length at v * dt."""

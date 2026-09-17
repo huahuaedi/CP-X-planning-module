@@ -45,6 +45,22 @@ def _constant_u_solution(step_count: int, *, accel: float = 0.5, steer: float = 
 
 
 class MPCWarmStartSeedHorizonChangeTests(unittest.TestCase):
+    def test_seed_unwraps_heading_across_pi(self):
+        mpc = _bare_mpc(horizon_steps=3)
+        previous = _linear_x_solution(4)
+        previous[:, 3] = np.asarray([3.10, -3.12, -3.04, -2.96])
+        mpc._previous_x_solution = previous
+        mpc._previous_u_solution = _constant_u_solution(3)
+
+        seed = mpc._build_shifted_previous_solution_seed(
+            x0=np.array([0.0, 0.0, 5.0, 3.10])
+        )
+
+        self.assertIsNotNone(seed)
+        x_seed, _ = seed
+        self.assertGreater(x_seed[1, 3], np.pi)
+        self.assertTrue(np.all(np.diff(x_seed[:, 3]) > -0.2))
+
     def test_same_horizon_length_still_seeds(self):
         mpc = _bare_mpc(horizon_steps=10)
         mpc._previous_x_solution = _linear_x_solution(11)

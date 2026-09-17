@@ -820,6 +820,11 @@ class MPC:
         # cannot distinguish a true predicted excursion from a bad
         # stage-to-reference association.
         self._last_road_boundary_peak_diagnostic: Dict[str, object] = {}
+        # One aligned explanation of heading tracking and steering effort.
+        # It uses the same per-stage reference samples as the QP and the
+        # road-boundary diagnostic, so a heading error cannot be attributed
+        # to a different point on the reference line.
+        self._last_heading_tracking_diagnostic: Dict[str, object] = {}
         self._last_nominal_steering_profile: tuple[float, ...] = tuple()
         self._last_steering_reference_weight = 0.0
         self._last_x_solution: np.ndarray | None = None
@@ -1891,7 +1896,13 @@ class MPC:
         for k in range(1, self.horizon_steps + 1):
             src_idx = min(best_idx + k, prev_x.shape[0] - 1)
             x_seed[k] = np.asarray(prev_x[src_idx], dtype=float)
-            x_seed[k, 3] = self._wrap_angle(float(x_seed[k, 3]))
+            # QP headings live on one continuous branch.  The externally
+            # published previous solution may cross +pi/-pi, so align every
+            # copied stage with its predecessor instead of wrapping each row
+            # independently and injecting a 2*pi jump into the linearisation.
+            x_seed[k, 3] = self._align_angle_near(
+                float(x_seed[k, 3]), float(x_seed[k - 1, 3])
+            )
 
         for k in range(self.horizon_steps):
             src_idx = min(best_idx + k, prev_u.shape[0] - 1)
@@ -2252,6 +2263,11 @@ class MPC:
         """Return a copy of the worst-stage road-boundary explanation."""
 
         return dict(self._last_road_boundary_peak_diagnostic)
+
+    def get_last_heading_tracking_diagnostic(self) -> Dict[str, object]:
+        """Return the aligned horizon heading/control explanation."""
+
+        return dict(self._last_heading_tracking_diagnostic)
 
     def clear_previous_solution_seed(self) -> None:
         """Drop any stored warm-start solution used for rollout seeding."""
@@ -2841,7 +2857,12 @@ class MPC:
                     float(self.constraints.min_velocity_mps),
                     seed_clamp_upper_mps,
                 )
-            x_seed[:, 3] = np.asarray([self._wrap_angle(float(angle)) for angle in x_seed[:, 3]], dtype=float)
+            x_seed[0, 3] = float(x0[3])
+            for stage_index in range(1, int(x_seed.shape[0])):
+                x_seed[stage_index, 3] = self._align_angle_near(
+                    float(x_seed[stage_index, 3]),
+                    float(x_seed[stage_index - 1, 3]),
+                )
             return x_seed, u_seed
 
         x_ref_traj = np.zeros((self.horizon_steps + 1, self.nx), dtype=float)
@@ -3002,7 +3023,11 @@ class MPC:
                 self.constraints.min_velocity_mps,
                 float(next_stage_speed_upper_bound_mps),
             )
-            psi_next = self._wrap_angle(psi_rad + self.dt_s * (v_mps / self.l_r_m) * math.sin(beta_rad))
+            # Keep the optimization horizon on one continuous yaw branch.
+            # Wrapping each stage independently creates a false 2*pi state
+            # discontinuity whenever a maneuver crosses +/-pi.  Public
+            # trajectories are normalized only after the solve.
+            psi_next = psi_rad + self.dt_s * (v_mps / self.l_r_m) * math.sin(beta_rad)
             x_ref_traj[k + 1] = np.array([x_next, y_next, v_next, psi_next], dtype=float)
             if progress_lookup_active:
                 current_progress_m += math.hypot(float(x_next) - x_m, float(y_next) - y_m)
@@ -3147,7 +3172,7 @@ class MPC:
                 float(x_bar[0] + dt_s * v_mps * cos_sum),
                 float(x_bar[1] + dt_s * v_mps * sin_sum),
                 float(x_bar[2] + dt_s * u_bar[0]),
-                float(self._wrap_angle(x_bar[3] + dt_s * (v_mps / l_r_m) * sin_beta)),
+                float(x_bar[3] + dt_s * (v_mps / l_r_m) * sin_beta),
             ],
             dtype=float,
         )
@@ -4017,7 +4042,6 @@ class MPC:
         for k in range(self.horizon_steps + 1):
             for i in range(self.nx):
                 x_traj[k, i] = float(solution[index.state_index(k, i)])
-            x_traj[k, 3] = self._wrap_angle(float(x_traj[k, 3]))
         for k in range(self.horizon_steps):
             for i in range(self.nu):
                 u_traj[k, i] = float(solution[index.control_index(k, i)])
@@ -4179,6 +4203,15 @@ class MPC:
                 x_traj=x_traj,
                 lane_stage_samples=lane_stage_samples,
                 lane_keep_profile=lane_keep_profile,
+            )
+        )
+        self._last_heading_tracking_diagnostic = (
+            self._heading_tracking_diagnostic(
+                x_traj=x_traj,
+                u_traj=u_traj,
+                lane_stage_samples=lane_stage_samples,
+                steering_reference_profile=steering_reference_profile,
+                current_steering_rad=float(current_steering_rad),
             )
         )
         cost_lane_center = 0.0
@@ -4420,6 +4453,152 @@ class MPC:
             "road_right_width_m": float(peak.road_right_width_m),
             "outside_lane": bool(peak.outside_lane),
             "outside_road": bool(peak.outside_road),
+        }
+
+    def _heading_tracking_diagnostic(
+        self,
+        *,
+        x_traj: np.ndarray,
+        u_traj: np.ndarray,
+        lane_stage_samples: Sequence[Mapping[str, object] | None],
+        steering_reference_profile: Sequence[float] | None,
+        current_steering_rad: float,
+    ) -> Dict[str, object]:
+        """Explain heading tracking and steering objectives on one horizon.
+
+        This is intentionally diagnostic-only.  It does not recreate a
+        second reference lookup or alter the QP; it consumes the exact stage
+        samples already resolved for the solve/cost evaluation.
+        """
+
+        stage_count = min(int(x_traj.shape[0]), len(lane_stage_samples))
+        heading_rows: List[Tuple[int, float, float, float]] = []
+        for stage_index in range(1, stage_count):
+            lane_reference = normalize_lane_reference_sample(
+                lane_stage_samples[stage_index],
+                default_lane_width_m=float(getattr(self, "lane_width_m", 4.0)),
+            )
+            if lane_reference is None:
+                continue
+            predicted_heading_rad = float(x_traj[stage_index, 3])
+            reference_heading_rad = float(lane_reference.heading_rad)
+            heading_error_rad = self._wrap_angle(
+                predicted_heading_rad - reference_heading_rad
+            )
+            heading_rows.append(
+                (
+                    int(stage_index),
+                    float(heading_error_rad),
+                    predicted_heading_rad,
+                    reference_heading_rad,
+                )
+            )
+        if not heading_rows:
+            return {}
+
+        worst = max(heading_rows, key=lambda row: abs(float(row[1])))
+        mean_abs_heading_error_rad = sum(
+            abs(float(row[1])) for row in heading_rows
+        ) / float(len(heading_rows))
+
+        steering_reference = np.asarray(
+            (
+                list(steering_reference_profile)
+                if steering_reference_profile is not None
+                else []
+            ),
+            dtype=float,
+        )
+        control_count = min(int(u_traj.shape[0]), max(0, stage_count - 1))
+        steering_reference_cost = 0.0
+        steering_rate_error_cost = 0.0
+        lane_heading_cost = 0.0
+        previous_steering_rad = float(current_steering_rad)
+        inv_dt = 1.0 / max(1.0e-9, float(self.dt_s))
+        comfort_scale = float(self.comfort_cost.w_comf)
+        steering_reference_weight = (
+            comfort_scale * float(self.comfort_cost.qdelta_reference)
+        )
+        steering_rate_weight = comfort_scale * float(self.comfort_cost.qdelta)
+        lane_heading_weight = (
+            float(self.lane_center_follow_weight)
+            * float(self.lane_center_follow_qpsi)
+            if bool(self.lane_center_follow_enabled)
+            else 0.0
+        )
+        for control_index in range(control_count):
+            steering_rad = float(u_traj[control_index, 1])
+            target_index = control_index + 1
+            target_steering_rad = (
+                float(steering_reference[target_index])
+                if steering_reference.size > target_index
+                else 0.0
+            )
+            previous_target_steering_rad = (
+                float(steering_reference[control_index])
+                if steering_reference.size > control_index
+                else 0.0
+            )
+            rate_error = (
+                steering_rad
+                - previous_steering_rad
+                - (target_steering_rad - previous_target_steering_rad)
+            ) * inv_dt
+            steering_reference_cost += steering_reference_weight * (
+                steering_rad - target_steering_rad
+            ) ** 2
+            steering_rate_error_cost += steering_rate_weight * rate_error ** 2
+            previous_steering_rad = steering_rad
+        for _, heading_error_rad, _, _ in heading_rows:
+            lane_heading_cost += lane_heading_weight * heading_error_rad ** 2
+
+        first_optimal_steering_rad: object = ""
+        if control_count > 0:
+            first_optimal_steering_rad = float(u_traj[0, 1])
+        first_nominal_steering_rad: object = ""
+        if steering_reference.size > 1:
+            first_nominal_steering_rad = float(steering_reference[1])
+        first_steering_delta_rad: object = ""
+        first_steering_rate_rps: object = ""
+        first_steering_rate_bound_active = False
+        if control_count > 0:
+            first_steering_delta_rad = (
+                float(u_traj[0, 1]) - float(current_steering_rad)
+            )
+            first_steering_rate_rps = (
+                float(first_steering_delta_rad) * inv_dt
+            )
+            rate_tolerance_rps = 1.0e-3
+            first_steering_rate_bound_active = bool(
+                float(first_steering_rate_rps)
+                >= float(self.constraints.max_steer_rate_rps)
+                - rate_tolerance_rps
+                or float(first_steering_rate_rps)
+                <= float(self.constraints.min_steer_rate_rps)
+                + rate_tolerance_rps
+            )
+
+        return {
+            "stage_count": int(len(heading_rows)),
+            "mean_abs_heading_error_deg": math.degrees(
+                float(mean_abs_heading_error_rad)
+            ),
+            "worst_stage_index": int(worst[0]),
+            "worst_stage_time_s": float(worst[0]) * float(self.dt_s),
+            "worst_heading_error_deg": math.degrees(float(worst[1])),
+            "worst_predicted_heading_deg": math.degrees(float(worst[2])),
+            "worst_reference_heading_deg": math.degrees(float(worst[3])),
+            "current_steering_rad": float(current_steering_rad),
+            "first_optimal_steering_rad": first_optimal_steering_rad,
+            "first_nominal_steering_rad": first_nominal_steering_rad,
+            "first_steering_delta_rad": first_steering_delta_rad,
+            "first_steering_rate_rps": first_steering_rate_rps,
+            "first_steering_rate_bound_active": bool(
+                first_steering_rate_bound_active
+            ),
+            "lane_heading_cost": float(lane_heading_cost),
+            "steering_reference_cost": float(steering_reference_cost),
+            "steering_rate_error_cost": float(steering_rate_error_cost),
         }
 
     def plan_trajectory(
@@ -4832,7 +5011,6 @@ class MPC:
                 float(self.constraints.min_velocity_mps),
                 clamp_upper_mps,
             )
-            x_solution[k, 3] = self._wrap_angle(float(x_solution[k, 3]))
 
         diagnostic_steering_reference = self._nominal_path_steering_profile(
             x_ref_rollout=np.asarray(tracking_x_ref_rollout, dtype=float),
@@ -4852,14 +5030,23 @@ class MPC:
             ),
         )
 
-        world_x_solution = np.asarray(x_solution, dtype=float).copy()
-        world_x_solution[:, 0] += float(origin_x_m)
-        world_x_solution[:, 1] += float(origin_y_m)
+        world_x_solution_internal = np.asarray(x_solution, dtype=float).copy()
+        world_x_solution_internal[:, 0] += float(origin_x_m)
+        world_x_solution_internal[:, 1] += float(origin_y_m)
+        # Consumers outside MPC receive conventional wrapped headings.  The
+        # warm-start owner retains the continuous internal solution below.
+        world_x_solution = np.asarray(world_x_solution_internal, dtype=float).copy()
+        world_x_solution[:, 3] = np.asarray(
+            [self._wrap_angle(float(angle)) for angle in world_x_solution[:, 3]],
+            dtype=float,
+        )
         self._last_x_solution = np.asarray(world_x_solution, dtype=float)
         self._last_u_solution = np.asarray(u_solution, dtype=float)
 
         if best_x_solution is not None and best_u_solution is not None:
-            self._previous_x_solution = np.asarray(world_x_solution, dtype=float)
+            self._previous_x_solution = np.asarray(
+                world_x_solution_internal, dtype=float
+            )
             self._previous_u_solution = np.asarray(u_solution, dtype=float)
 
         # Record whether this call was a stop goal so the next call can detect
@@ -4898,6 +5085,8 @@ class MPC:
             "_last_active_max_velocity_mps",
             "_last_cost_terms",
             "_last_lane_keeping_profile",
+            "_last_road_boundary_peak_diagnostic",
+            "_last_heading_tracking_diagnostic",
             "_last_x_solution",
             "_last_u_solution",
             "_previous_x_solution",

@@ -239,6 +239,54 @@ class LaneKeepingMathTests(unittest.TestCase):
         self.assertGreater(diagnostic["boundary_excess_m"], 0.0)
         self.assertFalse(diagnostic["outside_road"])
 
+    def test_heading_tracking_diagnostic_uses_aligned_stage_samples(self):
+        mpc = object.__new__(MPC)
+        mpc.dt_s = 0.1
+        mpc.lane_width_m = 4.0
+        mpc.lane_center_follow_enabled = True
+        mpc.lane_center_follow_weight = 10.0
+        mpc.lane_center_follow_qpsi = 2.0
+        mpc.comfort_cost = types.SimpleNamespace(
+            w_comf=5.0,
+            qdelta=3.0,
+            qdelta_reference=4.0,
+        )
+        mpc.constraints = types.SimpleNamespace(
+            min_steer_rate_rps=-1.0,
+            max_steer_rate_rps=1.0,
+        )
+        x_traj = np.asarray(
+            [
+                [0.0, 0.0, 2.0, 0.0],
+                [1.0, 0.0, 2.0, 0.2],
+                [2.0, 0.0, 2.0, 0.5],
+            ],
+            dtype=float,
+        )
+        u_traj = np.asarray([[0.0, 0.2], [0.0, 0.3]], dtype=float)
+        lane_samples = [
+            {"x_ref_m": 0.0, "y_ref_m": 0.0, "heading_rad": 0.0},
+            {"x_ref_m": 1.0, "y_ref_m": 0.0, "heading_rad": 0.1},
+            {"x_ref_m": 2.0, "y_ref_m": 0.0, "heading_rad": 0.2},
+        ]
+
+        diagnostic = mpc._heading_tracking_diagnostic(
+            x_traj=x_traj,
+            u_traj=u_traj,
+            lane_stage_samples=lane_samples,
+            steering_reference_profile=[0.0, 0.1, 0.2],
+            current_steering_rad=0.0,
+        )
+
+        self.assertEqual(diagnostic["worst_stage_index"], 2)
+        self.assertAlmostEqual(diagnostic["worst_heading_error_deg"], math.degrees(0.3))
+        self.assertAlmostEqual(diagnostic["first_optimal_steering_rad"], 0.2)
+        self.assertAlmostEqual(diagnostic["first_nominal_steering_rad"], 0.1)
+        self.assertAlmostEqual(diagnostic["first_steering_rate_rps"], 2.0)
+        self.assertTrue(diagnostic["first_steering_rate_bound_active"])
+        self.assertGreater(diagnostic["lane_heading_cost"], 0.0)
+        self.assertGreater(diagnostic["steering_reference_cost"], 0.0)
+
 
 class RoadEnvelopeBlockMathTests(unittest.TestCase):
     @staticmethod
