@@ -329,8 +329,6 @@ def send(
         "cp_obstacles": cp_obstacles,
         "communication_range_m": float(getattr(v2x_manager, "communication_range", 0.0) or 0.0),
     }
-    # Only lane events are sent through the cooperative topic for now.
-    # Traffic-light information comes through /cpx/traffic_light.
     raw_cooperative_payload = (
         cooperative_payload
         if isinstance(cooperative_payload, dict)
@@ -351,6 +349,20 @@ def send(
             dict(item)
             for item in list(
                 raw_cooperative_payload.get("lane_events", raw_cooperative_payload.get("lane_closures", []))
+            )
+            if isinstance(item, dict)
+        ],
+        # cpx_interfaces/TrafficControl.msg and cooperative_message_publisher.py
+        # on the ROS side already parse this (accepting either key name, same
+        # as lane_events/lane_closures above) -- the CP message schema
+        # (utility/cp_messages.py) calls this list "control", so that is
+        # checked first.
+        "traffic_controls": [
+            dict(item)
+            for item in list(
+                raw_cooperative_payload.get(
+                    "control", raw_cooperative_payload.get("traffic_controls", [])
+                )
             )
             if isinstance(item, dict)
         ],
