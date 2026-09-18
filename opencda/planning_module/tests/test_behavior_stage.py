@@ -353,6 +353,17 @@ def test_behavior_stage_owns_route_authorization_latch():
             next_macro_maneuver="lane_follow",
             route_geometry_direction="",
             route_geometry_distance_m=None,
+            # Also drop the topology target -- it alone is now enough to
+            # authorize a lane change even on a "go straight" macro maneuver
+            # (see authorize_route_lane_change's topology_requires_change
+            # override, added for CP-F lane-closure reroutes), so leaving it
+            # at the fixture's default would authorize this call outright
+            # instead of exercising the latch this test is about. Only the
+            # target id is cleared, not topology_lane_offset -- offset=0
+            # with target_in_local_frame=True (the fixture default) reads as
+            # "already in the target lane" to lane_change_target_reached and
+            # would reset the latch instead of exercising it.
+            topology_target_lane_id=0,
         ),
         maneuver_manager=manager,
     )

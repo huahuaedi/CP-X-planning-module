@@ -161,6 +161,28 @@ CASES = {
         "route_completion_expected": False,
         "dependencies": (),
     },
+    # F's hazard is a CP lane-closure event, not a locally observed obstacle
+    # or actor -- the scenario deliberately spawns nothing at the closure
+    # (see the yaml's own description), so the only proof this exercised CP
+    # transport + topology rerouting (and not just an ordinary route to the
+    # same destination) is a route_replan_reason that actually names
+    # "cp_lane_closure" and succeeded. route_completion_expected alone would
+    # pass even if the reroute never fired and the run got lucky/never hit
+    # the closed lane, so it is checked in addition to, not instead of,
+    # requires_cp_lane_closure_reroute.
+    "lane_closure": {
+        "directory": "debug_cp_lane_closure",
+        "configs": ("cpx_cp_lane_closure.yaml",),
+        "route_completion_expected": True,
+        "requires_cp_lane_closure_reroute": True,
+        "dependencies": (
+            "opencda/planning_module/pipeline/route_authorization.py",
+            "opencda/planning_module/pipeline/route_manager.py",
+            "opencda/planning_module/pipeline/planner_diagnostics_stage.py",
+            "opencda/planning_module/opencda_bridge/cpx_mpc_planner.py",
+            "opencda/scenario_testing/cpx_mature_runner.py",
+        ),
+    },
 }
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -219,6 +241,19 @@ def _mission_completed(row):
     return bool(row.get("route_reached_destination", False))
 
 
+def _cp_lane_closure_reroute_frames(rows):
+    # route_replan_reason for a CP lane closure reads
+    # "admap_route_replanned:cp_lane_closure:<message id>" -- a substring
+    # match on "cp_lane_closure" (rather than the full reason string) so a
+    # multi-message run or a future reason-string tweak upstream doesn't
+    # silently stop this from matching.
+    return sum(
+        bool(row.get("route_replan_succeeded"))
+        and "cp_lane_closure" in str(row.get("route_replan_reason", ""))
+        for row in rows
+    )
+
+
 def _corridor_binding_frames(rows):
     # cav_conflict_roles (proceed/yield/make_gap) is peer-negotiation only --
     # it stays empty against a non-cooperative hazard (a red-light violator
@@ -252,6 +287,7 @@ def analyze_case(root, name, contract):
     decision_frames = _count(rows, "behavior_decision", contract.get("decision"))
     role_frames = _role_frames(rows, contract.get("role"))
     corridor_binding_frames = _corridor_binding_frames(rows)
+    cp_lane_closure_reroute_frames = _cp_lane_closure_reroute_frames(rows)
     min_make_gap_gate_margin_m = _min_make_gap_gate_margin_m(rows)
 
     failures = []
@@ -302,6 +338,11 @@ def analyze_case(root, name, contract):
         failures.append("expected_cav_role_missing")
     if bool(contract.get("requires_corridor_binding")) and corridor_binding_frames == 0:
         failures.append("expected_corridor_binding_missing")
+    if (
+        bool(contract.get("requires_cp_lane_closure_reroute"))
+        and cp_lane_closure_reroute_frames == 0
+    ):
+        failures.append("expected_cp_lane_closure_reroute_missing")
 
     return {
         "case": name,
@@ -320,6 +361,7 @@ def analyze_case(root, name, contract):
         "expected_decision_frames": decision_frames,
         "expected_role_frames": role_frames,
         "corridor_binding_frames": corridor_binding_frames,
+        "cp_lane_closure_reroute_frames": cp_lane_closure_reroute_frames,
         "min_make_gap_gate_margin_m": min_make_gap_gate_margin_m,
         "mpc_failure_frames": infeasible_frames,
         "log": str(path),

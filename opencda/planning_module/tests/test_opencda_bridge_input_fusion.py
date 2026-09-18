@@ -2,7 +2,7 @@ import sys
 import types
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 
 if "carla" not in sys.modules:
@@ -51,6 +51,7 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
         bridge.config = {"cp_lane_closure_reroute_enabled": True}
         bridge.route_manager = Mock()
+        bridge.route_manager.route_revision = "route-2"
         bridge.route_manager.apply_lane_closures.return_value = (
             LaneClosureRouteResult(
                 attempted=True, success=True, route_changed=True,
@@ -60,6 +61,42 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         )
         bridge._reset_pipeline_for_route_revision = Mock()
 
+        with patch("builtins.print") as mock_print:
+            result = bridge._apply_cp_lane_closures(
+                ego_location=SimpleNamespace(x=3.0, y=4.0, z=0.0),
+                cp_payload={"lane_events": [{
+                    "id": "closure-1", "type": "lane_closure",
+                    "position": {"x": 8.0, "y": 4.0},
+                }]},
+            )
+
+        self.assertTrue(result.route_changed)
+        bridge.route_manager.apply_lane_closures.assert_called_once()
+        bridge._reset_pipeline_for_route_revision.assert_called_once_with(
+            reason="cp_lane_closure_route_replanned"
+        )
+        # The scenario deliberately spawns no visible obstacle at the
+        # closure, so this print is the only externally visible sign a CP
+        # lane closure actually drove a reroute -- without it, a human
+        # watching the run (or its console log) sees an unexplained lane
+        # change indistinguishable from any other one.
+        printed = " ".join(str(call.args[0]) for call in mock_print.call_args_list)
+        self.assertIn("CP lane closure applied", printed)
+        self.assertIn("17", printed)
+        self.assertIn("route-2", printed)
+
+    def test_cp_lane_closure_apply_exception_becomes_a_typed_failure_not_a_raise(self):
+        # apply_lane_closures raising must not escape into
+        # BehaviorReferenceExecutionStage's generic per-tick degradation --
+        # that path only prints when self.debug is set, which would hide a
+        # case where RouteManager's own state moves ahead of what the rest
+        # of this tick (and every diagnostic derived from this return
+        # value) believes happened.
+        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
+        bridge.config = {"cp_lane_closure_reroute_enabled": True}
+        bridge.route_manager = Mock()
+        bridge.route_manager.apply_lane_closures.side_effect = RuntimeError("boom")
+
         result = bridge._apply_cp_lane_closures(
             ego_location=SimpleNamespace(x=3.0, y=4.0, z=0.0),
             cp_payload={"lane_events": [{
@@ -68,11 +105,32 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
             }]},
         )
 
-        self.assertTrue(result.route_changed)
-        bridge.route_manager.apply_lane_closures.assert_called_once()
-        bridge._reset_pipeline_for_route_revision.assert_called_once_with(
-            reason="cp_lane_closure_route_replanned"
+        self.assertTrue(result.attempted)
+        self.assertFalse(result.success)
+        self.assertFalse(result.route_changed)
+        self.assertIn("cp_lane_closure_apply_exception", result.reason)
+
+    def test_reset_pipeline_for_route_revision_runs_every_step_despite_a_failure(self):
+        # One sub-reset raising must not skip the rest and leave a mix of
+        # new-route and still-stale state -- worse than any single
+        # subsystem staying stale on its own.
+        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
+        bridge.route_manager = SimpleNamespace(active_route_summary="SUMMARY")
+        bridge.nominal_trajectory_generator = Mock()
+        bridge.nominal_trajectory_generator.reset.side_effect = RuntimeError("boom")
+        bridge._reset_route_tracking_lane_change_reference = Mock(
+            side_effect=RuntimeError("boom too")
         )
+        bridge.maneuver_manager = Mock()
+        bridge.control_buffer = Mock()
+        bridge.mpc = Mock()
+
+        bridge._reset_pipeline_for_route_revision(reason="test_reason")
+
+        self.assertEqual(bridge._active_route_summary, "SUMMARY")
+        bridge.maneuver_manager.reset.assert_called_once_with(reason="test_reason")
+        bridge.control_buffer.reset.assert_called_once_with(reason="test_reason")
+        bridge.mpc.clear_previous_solution_seed.assert_called_once()
 
     def test_static_obstacle_local_avoidance_selects_safest_adjacent_lane(self):
         selected = _select_static_obstacle_local_avoidance_lane(

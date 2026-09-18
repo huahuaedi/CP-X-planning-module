@@ -350,7 +350,15 @@ def authorize_route_lane_change(
         is_explicit_lane_change = True
         via_route_model = True
     else:
-        if maneuver in _NO_LANE_CHANGE_MANEUVERS:
+        # A route-map macro maneuver of "go straight"/"lane follow" only
+        # rules out a lane change driven by an upcoming turn -- it says
+        # nothing about a same-direction reroute (a lane closure blocking
+        # the current lane, say) that keeps the macro maneuver the same but
+        # moves the topology-resolved target to a different lane. The
+        # reliable local-frame offset (topology_requires_change) is checked
+        # first and, when it disagrees, wins over the macro-maneuver-only
+        # classification below.
+        if maneuver in _NO_LANE_CHANGE_MANEUVERS and not topology_requires_change:
             return _denied(
                 "route_maneuver_does_not_require_lane_change",
                 maneuver,

@@ -17,7 +17,7 @@ import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 import yaml
 
@@ -4587,6 +4587,10 @@ class CPXMPCPlannerBridge:
     ) -> Any:
         """Submit CP lane events to RouteManager's atomic route lifecycle."""
 
+        from opencda.planning_module.pipeline.route_manager import (
+            LaneClosureRouteResult,
+        )
+
         if not bool(self.config.get("cp_lane_closure_reroute_enabled", True)):
             return None
         payload = dict(cp_payload or {})
@@ -4596,33 +4600,105 @@ class CPXMPCPlannerBridge:
         apply_closures = getattr(self.route_manager, "apply_lane_closures", None)
         if not messages or not callable(apply_closures):
             return None
-        result = apply_closures(
-            messages=messages,
-            start_point={
-                "x": float(ego_location.x),
-                "y": float(ego_location.y),
-                "z": float(getattr(ego_location, "z", 0.0)),
-            },
-        )
+        try:
+            result = apply_closures(
+                messages=messages,
+                start_point={
+                    "x": float(ego_location.x),
+                    "y": float(ego_location.y),
+                    "z": float(getattr(ego_location, "z", 0.0)),
+                },
+            )
+        except Exception as exc:
+            # apply_lane_closures' own contract keeps a *failed* proposal
+            # from mutating anything -- but an unexpected exception here
+            # must not be allowed to vanish into
+            # BehaviorReferenceExecutionStage's generic per-tick
+            # degradation, which only prints when self.debug is set. That
+            # silence is exactly what would hide RouteManager ending up
+            # ahead of what the rest of this tick (and every diagnostic
+            # field derived from its return value) believes happened.
+            print(
+                "[CP-X OpenCDA Bridge] CP lane closure apply_lane_closures "
+                "raised: " + repr(exc)
+            )
+            return LaneClosureRouteResult(
+                attempted=True, success=False, route_changed=False,
+                reason="cp_lane_closure_apply_exception:" + repr(exc),
+            )
         if bool(getattr(result, "route_changed", False)):
+            # This is the only externally visible sign a CP lane closure
+            # actually drove a reroute: the scenario deliberately spawns no
+            # local obstacle at the closure (see cpx_cp_lane_closure.yaml's
+            # description -- the point is to prove CP transport + topology
+            # rerouting, not reactive avoidance), so nothing else marks this
+            # moment for a human watching the run, and the ensuing lane
+            # change looks identical to any other one in the log.
+            print(
+                "[CP-X OpenCDA Bridge] CP lane closure applied: blocked_lane_ids=%s "
+                "route_revision=%s reason=%s"
+                % (
+                    list(getattr(result, "blocked_lane_ids", ()) or ()),
+                    str(self.route_manager.route_revision),
+                    str(getattr(result, "reason", "")),
+                )
+            )
             self._reset_pipeline_for_route_revision(
                 reason="cp_lane_closure_route_replanned"
             )
         return result
 
     def _reset_pipeline_for_route_revision(self, *, reason: str) -> None:
-        """Retire all trajectory/control state after an accepted route swap."""
+        """Retire all trajectory/control state after an accepted route swap.
 
-        self._active_route_summary = self.route_manager.active_route_summary
-        self.nominal_trajectory_generator.reset(source=str(reason))
-        self._reset_route_tracking_lane_change_reference()
+        Best-effort across every sub-reset: one step raising must not skip
+        the rest and leave a mix of new-route and still-stale state, which
+        is worse than any single subsystem staying stale on its own. This
+        call only ever follows a route change RouteManager has already
+        committed to, so a failure here must be loud (printed
+        unconditionally, not gated on self.debug) -- silence would hide
+        exactly the case where the visible route stops matching what
+        RouteManager now believes is active.
+        """
+
+        def _step(name: str, fn: Callable[[], None]) -> None:
+            try:
+                fn()
+            except Exception as exc:
+                print(
+                    "[CP-X OpenCDA Bridge] route-revision reset step "
+                    "'%s' failed (reason=%s): %r" % (name, reason, exc)
+                )
+
+        _step(
+            "active_route_summary",
+            lambda: setattr(
+                self,
+                "_active_route_summary",
+                self.route_manager.active_route_summary,
+            ),
+        )
+        _step(
+            "nominal_trajectory_generator",
+            lambda: self.nominal_trajectory_generator.reset(source=str(reason)),
+        )
+        _step(
+            "lane_change_reference",
+            self._reset_route_tracking_lane_change_reference,
+        )
         maneuver_manager = getattr(self, "maneuver_manager", None)
         if maneuver_manager is not None:
-            maneuver_manager.reset(reason=str(reason))
-        self.control_buffer.reset(reason=str(reason))
+            _step(
+                "maneuver_manager",
+                lambda: maneuver_manager.reset(reason=str(reason)),
+            )
+        _step(
+            "control_buffer",
+            lambda: self.control_buffer.reset(reason=str(reason)),
+        )
         mpc = getattr(self, "mpc", None)
         if mpc is not None and hasattr(mpc, "clear_previous_solution_seed"):
-            mpc.clear_previous_solution_seed()
+            _step("mpc_seed", mpc.clear_previous_solution_seed)
 
     def _load_cp_message_payload(self) -> dict[str, Any]:
         try:

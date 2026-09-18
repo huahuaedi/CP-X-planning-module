@@ -159,6 +159,22 @@ def test_result_shape_is_stable(bridge):
     assert isinstance(result.reference_debug, dict)
 
 
+def test_reference_debug_carries_the_route_replan_fields(bridge):
+    # PlannerDiagnosticsStage.build_reference_debug used to silently drop
+    # route_replan_attempted/succeeded/reason from its context dict -- they
+    # were computed correctly upstream (from a CP lane-closure replan
+    # attempt) but never read back out, so PlannerDiagnosticsStage.build's
+    # own reference_debug.get("route_replan_attempted", False) always fell
+    # through to its default regardless of what actually happened. This
+    # doesn't need a replan to actually fire to catch a dropped key -- the
+    # fields must merely be present (their default, no-replan-requested
+    # values are enough) since the bug was that they were absent entirely.
+    result = _call(bridge)
+    assert "route_replan_attempted" in result.reference_debug
+    assert "route_replan_succeeded" in result.reference_debug
+    assert "route_replan_reason" in result.reference_debug
+
+
 def test_reference_samples_are_dicts_with_xy(bridge):
     result = _call(bridge)
     assert len(result.reference_samples) > 0

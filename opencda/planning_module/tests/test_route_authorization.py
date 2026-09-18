@@ -290,6 +290,38 @@ class RouteAuthorizationTest(unittest.TestCase):
         self.assertFalse(auth.required_by_route)
         self.assertEqual(auth.reason, "route_maneuver_does_not_require_lane_change")
 
+    def test_topology_confirmed_reroute_authorizes_despite_continue_straight(self):
+        # A CP lane-closure reroute keeps the macro maneuver "continue
+        # straight" (there's no turn ahead) while moving the topology-
+        # resolved target to the open adjacent lane -- this must not be
+        # denied just because the macro-maneuver classification alone would
+        # never call that a lane change. Before the topology_requires_change
+        # override, this was CP-F's actual failure: the route's own target
+        # lane correctly switched, but nothing ever authorized crossing over
+        # to it, so the vehicle kept following the closed lane forever.
+        auth = authorize_route_lane_change(
+            route_lane_change_allowed=True,
+            current_lane_id=1,
+            route_required_lane_id=2,
+            next_macro_maneuver="Continue Straight",
+            current_road_option="LANEFOLLOW",
+            remaining_distance_m=30.0,
+            available_lane_ids=[1, 2],
+            lane_safety_scores={2: 1.0},
+            lane_prediction_risks={},
+            preparation_start_distance_m=45.0,
+            latest_start_distance_m=12.0,
+            target_safety_threshold=0.65,
+            topology_current_lane_id=1,
+            topology_target_lane_id=2,
+            topology_lane_offset=-1,
+            topology_target_in_local_frame=True,
+        )
+        self.assertTrue(auth.allowed)
+        self.assertTrue(auth.required_by_route)
+        self.assertEqual(auth.reason, "route_lane_change_authorized_by_topology")
+        self.assertEqual(auth.direction, "right")
+
     def test_left_turn_authorizes_left_adjacent_lane_in_window(self):
         auth = authorize_route_lane_change(
             route_lane_change_allowed=True,

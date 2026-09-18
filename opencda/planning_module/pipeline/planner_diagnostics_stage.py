@@ -250,6 +250,17 @@ class PlannerDiagnosticsStage:
             "route_upcoming_turn_reason": str(c["upcoming_turn_reason"]),
         })
         debug.update(c["source_quality"])
+        # These three were computed by the caller (from the CP lane-closure
+        # /route-replan attempt this tick) and passed in as part of the same
+        # context dict, but nothing above ever read them back out of `c` --
+        # they were silently dropped here, so PlannerDiagnosticsStage.build's
+        # own reference_debug.get("route_replan_attempted", False) always
+        # fell through to its default, regardless of what actually happened.
+        debug.update({
+            "route_replan_attempted": bool(c["route_replan_attempted"]),
+            "route_replan_succeeded": bool(c["route_replan_succeeded"]),
+            "route_replan_reason": str(c["route_replan_reason"]),
+        })
         return debug
 
     @staticmethod
