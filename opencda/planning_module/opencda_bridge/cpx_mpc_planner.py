@@ -1004,17 +1004,10 @@ class CPXMPCPlannerBridge:
             ),
             pet_bin_size_m=float(self.config.get("metrics_pet_bin_size_m", 3.0)),
         )
-        self._metrics_collision_sensor = None
-        self._metrics_collision_sensor_available = False
-        self._metrics_collision_sensor_error = ""
-        self._metrics_last_emitted_collision_count = 0
         self._metrics_boundary_breach_count = 0
         self._metrics_boundary_sample_count = 0
-        self._metrics_last_collision_actor_type = ""
-        self._metrics_last_collision_impulse = ""
         self._prediction_lane_step_resolved_count = 0
         self._prediction_lane_step_none_count = 0
-        self._spawn_metrics_collision_sensor()
 
     @staticmethod
     def _ensure_planning_module_import_path() -> None:
@@ -2051,84 +2044,6 @@ class CPXMPCPlannerBridge:
                 traceback.print_exc()
                 self._debug_record_traceback_printed = True
 
-    def _spawn_metrics_collision_sensor(self) -> None:
-        """Attach one dedicated collision sensor for formal run metrics."""
-
-        if not bool(self.config.get("record_evaluation_metrics", True)):
-            return
-        if not bool(self.config.get("record_collision_sensor", True)):
-            self._metrics_collision_sensor_error = "disabled_by_config"
-            return
-        vehicle_manager = getattr(self, "vehicle_manager", None)
-        vehicle = getattr(vehicle_manager, "vehicle", None)
-        try:
-            world = vehicle.get_world()
-            blueprint = world.get_blueprint_library().find("sensor.other.collision")
-            sensor = world.spawn_actor(
-                blueprint,
-                self.carla.Transform(),
-                attach_to=vehicle,
-                attachment_type=self.carla.AttachmentType.Rigid,
-            )
-            sensor.listen(self._on_metrics_collision)
-            self._metrics_collision_sensor = sensor
-            self._metrics_collision_sensor_available = True
-        except Exception as exc:
-            self._metrics_collision_sensor_error = str(exc)
-            if self.debug:
-                print(
-                    "[CP-X OpenCDA Bridge] collision metrics sensor unavailable: "
-                    f"{exc}"
-                )
-
-    def _on_metrics_collision(self, event: Any) -> None:
-        """Convert a CARLA collision event into a de-duplicated metric event."""
-
-        vehicle = getattr(self.vehicle_manager, "vehicle", None)
-        other_actor = getattr(event, "other_actor", None)
-        other_actor_type = str(
-            getattr(other_actor, "type_id", type(other_actor).__name__ or "unknown")
-        )
-        impulse = getattr(event, "normal_impulse", None)
-        impulse_magnitude = None
-        if impulse is not None:
-            try:
-                impulse_magnitude = math.sqrt(
-                    float(impulse.x) ** 2
-                    + float(impulse.y) ** 2
-                    + float(impulse.z) ** 2
-                )
-            except Exception:
-                impulse_magnitude = None
-        ego_x = ego_y = ego_speed_mps = None
-        try:
-            location = vehicle.get_location()
-            velocity = vehicle.get_velocity()
-            ego_x = float(location.x)
-            ego_y = float(location.y)
-            ego_speed_mps = math.sqrt(
-                float(velocity.x) ** 2
-                + float(velocity.y) ** 2
-                + float(velocity.z) ** 2
-            )
-        except Exception:
-            pass
-        event_frame = getattr(event, "frame", "")
-        other_actor_id = getattr(other_actor, "id", "")
-        event_id = f"{event_frame}:{other_actor_id}"
-        self.evaluation_metrics.record_collision(
-            event_id,
-            sim_time_s=float(self._sim_time_s()),
-            ego_x=ego_x,
-            ego_y=ego_y,
-            ego_speed_mps=ego_speed_mps,
-            other_actor_type=other_actor_type,
-            impulse_magnitude=impulse_magnitude,
-        )
-        self._metrics_last_collision_actor_type = other_actor_type
-        self._metrics_last_collision_impulse = (
-            "" if impulse_magnitude is None else float(impulse_magnitude)
-        )
 
     def _update_boundary_recovery_request(
         self,
@@ -2544,12 +2459,7 @@ class CPXMPCPlannerBridge:
         """Update run metrics and return fields for the unified debug row."""
 
         if not bool(self.config.get("record_evaluation_metrics", True)):
-            return {
-                "evaluation_metrics_available": False,
-                "collision_sensor_available": bool(
-                    self._metrics_collision_sensor_available
-                ),
-            }
+            return {"evaluation_metrics_available": False}
         sim_time_s = float(self._sim_time_s())
         self.evaluation_metrics.update(
             ego_state={
@@ -2562,10 +2472,6 @@ class CPXMPCPlannerBridge:
             sim_time_s=sim_time_s,
             behavior_decision=str(behavior_decision),
             fsm_state=str(behavior_fsm_state),
-            collision_count=int(self.evaluation_metrics.collision_count),
-            last_collision_actor_type=str(
-                self._metrics_last_collision_actor_type
-            ),
             cp_provider_source=str(cp_summary.get("provider_source", "")),
             native_opencda_available=bool(
                 cp_summary.get("native_opencda_available", False)
@@ -2618,25 +2524,9 @@ class CPXMPCPlannerBridge:
         )
         summary = self.evaluation_metrics.summary()
         boundary_sample_count = int(self._metrics_boundary_sample_count)
-        collision_count = int(self.evaluation_metrics.collision_count)
-        collision_this_frame = (
-            collision_count > int(self._metrics_last_emitted_collision_count)
-        )
-        self._metrics_last_emitted_collision_count = collision_count
         cost_terms = dict(self.mpc.get_last_cost_terms())
         return {
             "evaluation_metrics_available": True,
-            "collision_sensor_available": bool(
-                self._metrics_collision_sensor_available
-            ),
-            "collision_sensor_error": str(self._metrics_collision_sensor_error),
-            "collision_event_this_frame": bool(collision_this_frame),
-            "collision_count": collision_count,
-            "collision_rate_per_km": summary.get("collision_rate_per_km", ""),
-            "last_collision_actor_type": str(
-                self._metrics_last_collision_actor_type
-            ),
-            "last_collision_impulse": self._metrics_last_collision_impulse,
             "nearest_ttc_s": sample.get("nearest_ttc_s", ""),
             "min_ttc_s": summary.get("min_ttc_s", ""),
             "nearest_ttc_obstacle_id": sample.get(
@@ -2698,17 +2588,6 @@ class CPXMPCPlannerBridge:
         }
 
     def destroy(self) -> None:
-        sensor = getattr(self, "_metrics_collision_sensor", None)
-        if sensor is not None:
-            try:
-                sensor.stop()
-            except Exception:
-                pass
-            try:
-                sensor.destroy()
-            except Exception:
-                pass
-            self._metrics_collision_sensor = None
         if bool(self.config.get("record_evaluation_metrics", True)):
             try:
                 debug_dir = self._resolved_debug_output_dir()
@@ -3031,6 +2910,9 @@ class CPXMPCPlannerBridge:
                 runtime_config=self.behavior_runtime_cfg,
                 route_recovery_requested=bool(
                     self.maneuver_manager.route_recovery_pending
+                ),
+                static_obstacle_mpc_stall_failure_count=int(
+                    self._static_obstacle_mpc_stall_failure_count()
                 ),
             ),
             behavior_planner=self.behavior_planner,
@@ -4016,6 +3898,34 @@ class CPXMPCPlannerBridge:
         """
 
         target_lane_id = int(self.maneuver_manager.lane_change.target_lane_id)
+        if target_lane_id == 0:
+            return 0
+        best = 0
+        for record in self.mpc_feedback.active_records:
+            if int(record.get("target_lane_id", 0)) != target_lane_id:
+                continue
+            best = max(best, int(record.get("consecutive_failures", 0)))
+        return best
+
+    def _static_obstacle_mpc_stall_failure_count(self) -> int:
+        """Consecutive MPC infeasibility count for the static-obstacle
+        local-avoidance stage's own committed target lane.
+
+        Same data source and shape as ``_lane_change_mpc_stall_failure_count``
+        (self.mpc_feedback.active_records keys failures by
+        (decision, target_lane_id) regardless of which FSM owns the target),
+        but reads StaticObstacleStage's own target_lane_id -- borrowing a
+        lane to get around a blocked lane is a separate state machine from
+        the general lane_change maneuver and was not covered by that
+        watchdog, so a target this stage commits to that turns out to be
+        geometrically infeasible had no timeout: MPC keeps reporting
+        "primal infeasible" every tick, the vehicle coasts to a stop, and
+        StaticObstacleStage only ever clears target_lane_id on actually
+        *reaching* it -- never on failing to.
+        """
+
+        stage = getattr(self.pipeline, "static_obstacle", None)
+        target_lane_id = int(getattr(stage, "target_lane_id", 0) or 0)
         if target_lane_id == 0:
             return 0
         best = 0
