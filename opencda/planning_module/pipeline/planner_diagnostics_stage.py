@@ -557,79 +557,79 @@ class PlannerDiagnosticsStage:
             "global_route_point_count": len(self._display_global_route_points()),
             "global_route_topology_point_count": len(self._active_global_route_points()),
             "map_match_valid": bool(
-                self._diagnostic_map_matching.get("valid", False)
+                self._route_context.map_matching.get("valid", False)
             ),
-            "map_match_ad_lane_id": self._diagnostic_map_matching.get(
+            "map_match_ad_lane_id": self._route_context.map_matching.get(
                 "ad_lane_id", ""
             ),
-            "map_match_road_id": self._diagnostic_map_matching.get("road_id", ""),
-            "map_match_section_id": self._diagnostic_map_matching.get(
+            "map_match_road_id": self._route_context.map_matching.get("road_id", ""),
+            "map_match_section_id": self._route_context.map_matching.get(
                 "section_id", ""
             ),
-            "map_match_raw_lane_id": self._diagnostic_map_matching.get(
+            "map_match_raw_lane_id": self._route_context.map_matching.get(
                 "raw_lane_id", ""
             ),
-            "map_match_center_x_m": self._diagnostic_map_matching.get(
+            "map_match_center_x_m": self._route_context.map_matching.get(
                 "center_x_m", ""
             ),
-            "map_match_center_y_m": self._diagnostic_map_matching.get(
+            "map_match_center_y_m": self._route_context.map_matching.get(
                 "center_y_m", ""
             ),
-            "map_match_lane_width_m": self._diagnostic_map_matching.get(
+            "map_match_lane_width_m": self._route_context.map_matching.get(
                 "lane_width_m", ""
             ),
-            "map_match_lateral_offset_m": self._diagnostic_map_matching.get(
+            "map_match_lateral_offset_m": self._route_context.map_matching.get(
                 "lateral_offset_m", ""
             ),
-            "map_match_heading_error_rad": self._diagnostic_map_matching.get(
+            "map_match_heading_error_rad": self._route_context.map_matching.get(
                 "heading_error_rad", ""
             ),
-            "map_match_score": self._diagnostic_map_matching.get("score", ""),
-            "map_match_confidence": self._diagnostic_map_matching.get(
+            "map_match_score": self._route_context.map_matching.get("score", ""),
+            "map_match_confidence": self._route_context.map_matching.get(
                 "confidence", ""
             ),
-            "map_match_reason": self._diagnostic_map_matching.get(
+            "map_match_reason": self._route_context.map_matching.get(
                 "match_reason", ""
             ),
-            "map_match_candidate_count": self._diagnostic_map_matching.get(
+            "map_match_candidate_count": self._route_context.map_matching.get(
                 "candidate_count", ""
             ),
             "local_lane_frame_cache_reused": bool(
-                self._diagnostic_local_lane_frame.get("cache_reused", False)
+                self._route_context.local_lane_frame.get("cache_reused", False)
             ),
-            "local_lane_frame_generation_reason": self._diagnostic_local_lane_frame.get(
+            "local_lane_frame_generation_reason": self._route_context.local_lane_frame.get(
                 "generation_reason", ""
             ),
-            "local_lane_frame_ego_ad_lane_id": self._diagnostic_local_lane_frame.get(
+            "local_lane_frame_ego_ad_lane_id": self._route_context.local_lane_frame.get(
                 "ego_ad_lane_id", ""
             ),
-            "local_lane_frame_forward_distance_m": self._diagnostic_local_lane_frame.get(
+            "local_lane_frame_forward_distance_m": self._route_context.local_lane_frame.get(
                 "forward_distance_m", ""
             ),
-            "local_lane_frame_backward_distance_m": self._diagnostic_local_lane_frame.get(
+            "local_lane_frame_backward_distance_m": self._route_context.local_lane_frame.get(
                 "backward_distance_m", ""
             ),
             "local_lane_frame_corridors": json.dumps(
-                self._diagnostic_local_lane_frame.get("corridors", {}),
+                self._route_context.local_lane_frame.get("corridors", {}),
                 sort_keys=True,
             ),
             "local_lane_frame_lane_to_offset": json.dumps(
-                self._diagnostic_local_lane_frame.get("lane_to_offset", {}),
+                self._route_context.local_lane_frame.get("lane_to_offset", {}),
                 sort_keys=True,
             ),
-            "local_lane_frame_route_target_ad_lane_id": self._diagnostic_local_lane_frame.get(
+            "local_lane_frame_route_target_ad_lane_id": self._route_context.local_lane_frame.get(
                 "route_target_ad_lane_id", ""
             ),
-            "local_lane_frame_target_in_frame": self._diagnostic_local_lane_frame.get(
+            "local_lane_frame_target_in_frame": self._route_context.local_lane_frame.get(
                 "route_target_in_frame", ""
             ),
-            "local_lane_frame_target_offset": self._diagnostic_local_lane_frame.get(
+            "local_lane_frame_target_offset": self._route_context.local_lane_frame.get(
                 "route_target_offset", ""
             ),
             "local_lane_frame_invariant_violations": ";".join(
                 str(value)
                 for value in list(
-                    self._diagnostic_local_lane_frame.get(
+                    self._route_context.local_lane_frame.get(
                         "invariant_violations", []
                     )
                     or []

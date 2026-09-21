@@ -31,6 +31,7 @@ from opencda_bridge.cpx_mpc_planner import (
 )
 from pipeline.reference_generator import ReferenceGenerator
 from pipeline.local_map_snapshot import LocalMapSnapshot, build_local_map_snapshot
+from pipeline.route_context_stage import RouteContextStage
 from pipeline.maneuver_manager import ManeuverManager
 from pipeline.fallback_manager import TrajectoryFallbackManager
 from pipeline.candidate_evaluation import CandidateTrajectoryEvaluator
@@ -250,7 +251,8 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
                 for index in range(80)
             ], "master_source")
 
-        bridge._local_map_snapshot = types.SimpleNamespace(valid=True)
+        bridge._route_context = RouteContextStage()
+        bridge._route_context.local_map_snapshot = types.SimpleNamespace(valid=True)
         bridge._stable_reference_line_provider.reference_from_local_map = (
             reference_from_local_map
         )
@@ -704,7 +706,8 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
     def test_post_turn_exit_locks_admap_topology_centerline(self):
         bridge = self._bridge()
         bridge.config["post_turn_exit_reference_arc_m"] = 12.0
-        bridge._local_map_snapshot = build_local_map_snapshot(
+        bridge._route_context = RouteContextStage()
+        bridge._route_context.local_map_snapshot = build_local_map_snapshot(
             frame_id=1,
             timestamp_s=1.0,
             match={"valid": True, "ad_lane_id": 5960149},
@@ -778,7 +781,8 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
             {"x_m": 10.0, "y_m": -35.0 - float(index)}
             for index in range(64)
         ]
-        bridge._local_map_snapshot = build_local_map_snapshot(
+        bridge._route_context = RouteContextStage()
+        bridge._route_context.local_map_snapshot = build_local_map_snapshot(
             frame_id=1,
             timestamp_s=1.0,
             match={"valid": True, "ad_lane_id": 5960149},

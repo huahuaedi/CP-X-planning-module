@@ -164,8 +164,8 @@ class OpenCDAPlanningAdapter:
             or 0
         )
         authoritative_waypoint = getattr(
-            bridge,
-            "_authoritative_ego_waypoint",
+            getattr(bridge, "_route_context", None),
+            "authoritative_ego_waypoint",
             None,
         )
         if authoritative_lane_id != 0:

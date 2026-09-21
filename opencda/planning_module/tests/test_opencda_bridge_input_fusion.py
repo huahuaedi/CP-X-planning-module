@@ -38,6 +38,7 @@ from pipeline.reference_gate import FinalReferenceGate
 from pipeline.reference_generator import GeneratedReference, ReferenceGenerator
 from pipeline.reference_pipeline import ReferencePipeline, ReferencePipelineRequest
 from pipeline.route_manager import LaneClosureRouteResult, RouteReplanResult
+from pipeline.route_context_stage import RouteContextStage
 from pipeline.mpc_entry_stage import MPCEntryStage
 from pipeline.maneuver_manager import ManeuverManager
 from pipeline.fallback_manager import TrajectoryFallbackManager
@@ -1435,6 +1436,7 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
 
     def test_admap_target_preserves_opaque_lane_identity(self):
         bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
+        bridge._route_context = RouteContextStage()
         bridge.vehicle_manager = types.SimpleNamespace(vehicle=types.SimpleNamespace(id=7))
         bridge.global_planner_backend = "custom_admap_dijkstra"
         carla_right = types.SimpleNamespace(
