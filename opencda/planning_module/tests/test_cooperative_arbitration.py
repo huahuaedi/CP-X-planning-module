@@ -1,244 +1,422 @@
-import math
-import unittest
+"""Cooperative arbitration with a real peer, through the real bridge.
 
-from opencda.planning_module.pipeline.cooperative_arbitration import (
-    CavIntent,
-    ResourceClaim,
-    assign_conflict_roles,
-    lateral_side,
+CPXMPCPlannerBridge._resolve_cooperative_arbitration turns one tick's proposal,
+the peers' broadcast intents and the ego reference into (cav_resolution,
+defer-the-lane-change).  Peers reach it only as serialized intent payloads on
+``v2x_manager.cav_nearby[id].cpx_planner.last_cav_intent_payload`` -- the same
+boundary a real V2X transport would use -- so these tests build genuine
+payloads with the intent codec instead of mocking the resolver.
+
+The earlier characterization tests ran this path with no peers at all, which
+left every peer-dependent decision unprotected.
+"""
+
+from __future__ import annotations
+
+import math
+import sys
+import tempfile
+import types
+from pathlib import Path
+
+import pytest
+
+if "carla" not in sys.modules:
+    fake_carla = types.ModuleType("carla")
+
+    class _Location:
+        def __init__(self, x=0.0, y=0.0, z=0.0):
+            self.x, self.y, self.z = x, y, z
+
+    class _Rotation:
+        def __init__(self, pitch=0.0, yaw=0.0, roll=0.0):
+            self.pitch, self.yaw, self.roll = pitch, yaw, roll
+
+    class _Transform:
+        def __init__(self, location=None, rotation=None):
+            self.location = location or _Location()
+            self.rotation = rotation or _Rotation()
+
+    class _VehicleControl:
+        def __init__(self, throttle=0.0, brake=0.0, steer=0.0):
+            self.throttle, self.brake, self.steer = throttle, brake, steer
+
+    fake_carla.Location = _Location
+    fake_carla.Rotation = _Rotation
+    fake_carla.Transform = _Transform
+    fake_carla.VehicleControl = _VehicleControl
+
+    class _GenericStub:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    fake_carla.__getattr__ = lambda name: _GenericStub
+    sys.modules["carla"] = fake_carla
+
+from opencda_bridge.cpx_mpc_planner import CPXMPCPlannerBridge  # noqa: E402
+from pipeline.cav_intent_codec import (  # noqa: E402
+    build_ego_cav_intent,
+    cav_intent_to_payload,
+)
+from pipeline.cooperative_arbitration import ResourceClaim  # noqa: E402
+from pipeline.cooperative_maneuver_proposal import (  # noqa: E402
+    CooperativeManeuverProposal,
 )
 
+_TOWN06_XODR = (
+    Path(__file__).resolve().parents[3]
+    / "opencda" / "planning_module" / "Global_Planner" / "maps" / "Town06.xodr"
+)
+# Known-good Town06 route; the ego drives toward -x from the start.
+START_XYZ = {"x": 225.10, "y": -20.1, "z": 0.3}
+GOAL_XYZ = {"x": 10.113184332893075, "y": -96.89902155894256, "z": 0.3}
+EGO_YAW_RAD = math.pi
+PEER_ID = 77
 
-def _claim(kind="lane_change", committed_at_s=10.0, active=True,
-           require_ahead=True, phase="committed"):
+
+class _BoundingBox:
+    class extent:
+        x, y = 2.25, 1.0
+
+
+class _Vehicle:
+    id = 1
+
+    def __init__(self):
+        self.bounding_box = _BoundingBox()
+
+    def get_transform(self):
+        import carla
+
+        return carla.Transform()
+
+
+class _Controller:
+    def lon_run_step(self, *args, **kwargs):
+        return 0.0
+
+
+def _released_claim():
     return ResourceClaim(
-        kind=kind, resource_id=kind, committed_at_s=committed_at_s,
-        active=active, require_ahead=require_ahead, phase=phase,
+        kind="lane_change", resource_id="lane_change", committed_at_s=0.0,
+        active=False, require_ahead=False, phase="released",
     )
 
 
-def test_spatial_claims_require_corridor_and_station_overlap():
-    ego = ResourceClaim(
-        kind="lane_change", resource_id="transition", committed_at_s=1.0,
-        active=True, source_corridor_id=10, target_corridor_id=20,
-        station_corridor_id=20,
-        s_begin_m=100.0, s_end_m=130.0,
+def _peer(*, claim, gap_m, speed_mps=5.0, ego_x=START_XYZ["x"]):
+    """A nearby CAV whose broadcast intent is a straight plan ahead of ego."""
+
+    x = ego_x - gap_m  # ahead along the route (-x)
+    states = [
+        [x - speed_mps * 0.1 * k, START_XYZ["y"], speed_mps, math.pi]
+        for k in range(30)
+    ]
+    intent = build_ego_cav_intent(
+        actor_id=PEER_ID, position_xy=(x, START_XYZ["y"]),
+        heading_rad=math.pi, speed_mps=speed_mps, claim=claim,
+        planned_states=states, dt_s=0.1, generated_at_s=0.0,
+        valid_for_s=5.0, sequence=1, length_m=4.5, width_m=2.0,
     )
-    same_target = ResourceClaim(
-        kind="lane_change", resource_id="other", committed_at_s=2.0,
-        active=True, source_corridor_id=30, target_corridor_id=20,
-        station_corridor_id=20,
-        s_begin_m=120.0, s_end_m=150.0,
+    return types.SimpleNamespace(cpx_planner=types.SimpleNamespace(
+        last_cav_intent_payload=cav_intent_to_payload(intent),
+    ))
+
+
+@pytest.fixture(scope="module")
+def cache_root():
+    return tempfile.mkdtemp(prefix="cpx_coop_arbitration_")
+
+
+def _make_bridge(cache_root, **config_extra):
+    if not _TOWN06_XODR.is_file():
+        pytest.skip(f"fixture map not found: {_TOWN06_XODR}")
+    vehicle_manager = types.SimpleNamespace(
+        vehicle=_Vehicle(), controller=_Controller(), carla_map=None,
+        v2x_manager=types.SimpleNamespace(cav_nearby={}),
     )
-    lane_swap = ResourceClaim(
-        kind="lane_change", resource_id="swap", committed_at_s=2.0,
-        active=True, source_corridor_id=20, target_corridor_id=10,
-        station_corridor_id=10,
-        s_begin_m=110.0, s_end_m=125.0,
+    config = {
+        "enabled": True, "debug": False, "record_evaluation_metrics": False,
+        "publish_cp_message": False,
+        "global_planner_xodr_path": str(_TOWN06_XODR),
+        "global_planner_cache_root": cache_root,
+        "cav_conflict_enabled": True,
+    }
+    config.update(config_extra)
+    bridge = CPXMPCPlannerBridge(vehicle_manager, config)
+    bridge.route_manager.set_destination(
+        start_point=START_XYZ, goal_point=GOAL_XYZ,
     )
-    far_away = ResourceClaim(
-        kind="lane_change", resource_id="transition", committed_at_s=2.0,
-        active=True, source_corridor_id=30, target_corridor_id=20,
-        station_corridor_id=20,
-        s_begin_m=200.0, s_end_m=230.0,
-    )
-    assert ego.conflicts_with(same_target)
-    assert ego.conflicts_with(lane_swap)
-    assert not ego.conflicts_with(far_away)
+    return bridge, vehicle_manager
 
 
-def test_bilateral_lane_change_claims_produce_complementary_roles():
-    front = _cav(actor_id=10, committed_at_s=2.0, xy=(10.0, 0.0))
-    rear = _cav(actor_id=20, committed_at_s=4.0, xy=(0.0, 0.0))
-    front_roles, _ = assign_conflict_roles(
-        my_claim=_claim(committed_at_s=2.0, require_ahead=False),
-        my_actor_id=10,
-        my_position_xy=front.position_xy,
-        my_heading_rad=0.0,
-        cavs=[rear],
-        latch_state={},
-    )
-    rear_roles, _ = assign_conflict_roles(
-        my_claim=_claim(committed_at_s=4.0, require_ahead=False),
-        my_actor_id=20,
-        my_position_xy=rear.position_xy,
-        my_heading_rad=0.0,
-        cavs=[front],
-        latch_state={},
-    )
-    assert [role.role for role in front_roles] == ["proceed"]
-    assert [role.role for role in rear_roles] == ["make_gap"]
+def _ego_location():
+    import carla
+
+    return carla.Location(**START_XYZ)
 
 
-def _cav(actor_id, xy, committed_at_s, *, kind="lane_change", active=True,
-          cooperative=True):
-    return CavIntent(
-        actor_id=actor_id, position_xy=xy,
-        claim=_claim(kind=kind, committed_at_s=committed_at_s, active=active),
-        cooperative=cooperative,
+def _frame(bridge):
+    """The per-tick inputs the bridge feeds the arbitration, from a real tick."""
+
+    result = bridge._plan_behavior_and_reference(
+        ego_location=_ego_location(), ego_yaw_rad=EGO_YAW_RAD,
+        ego_speed_mps=5.0, speed_ref_mps=8.0, object_snapshots=[],
+        stop_goal_active=False, cp_payload=None,
+    )
+    return result, dict(
+        current_state=[START_XYZ["x"], START_XYZ["y"], 5.0, EGO_YAW_RAD],
+        ego_location=_ego_location(), ego_yaw_rad=EGO_YAW_RAD,
+        ego_speed_mps=5.0,
+        local_lane_center_reference=[dict(s) for s in result.reference_samples],
+        local_map_snapshot=bridge._local_map_snapshot,
+        object_snapshots=[], planned_speed_mps=8.0,
+        planner_input_frame=types.SimpleNamespace(
+            prediction=types.SimpleNamespace(revision="r1", predicted_objects=[])
+        ),
     )
 
 
-class ConflictRoleAssignmentTest(unittest.TestCase):
-    def _assign(self, cavs, *, my_commit=10.0, kind="lane_change", latch=None,
-                **kw):
-        return assign_conflict_roles(
-            my_claim=_claim(kind=kind, committed_at_s=my_commit),
-            my_actor_id=5,
-            my_position_xy=(0.0, 0.0),
-            my_heading_rad=0.0,
-            cavs=cavs,
-            latch_state=latch,
-            **kw,
-        )
+def _lane_change_lanes(bridge):
+    """(source, target) lane ids: the ego lane and its neighbour to the right."""
 
-    def test_earlier_cav_on_merge_makes_ego_open_a_gap(self):
-        a, _ = self._assign([_cav(2, (12.0, 0.0), committed_at_s=5.0)])
-        self.assertEqual(len(a), 1)
-        self.assertEqual(a[0].role, "make_gap")
-        self.assertTrue(a[0].cav_wins)
+    snapshot = bridge._local_map_snapshot
+    source = int(snapshot.ego_lane_id)
+    target = next(
+        int(lane) for lane, _offset in snapshot.lane_to_offset_items
+        if int(lane) != source
+    )
+    return source, target
 
-    def test_earlier_cav_on_non_merge_makes_ego_yield(self):
-        a, _ = self._assign(
-            [_cav(2, (12.0, 0.0), committed_at_s=5.0, kind="junction_entry")],
-            kind="junction_entry",
-        )
-        self.assertEqual(a[0].role, "yield")
 
-    def test_later_cav_lets_ego_proceed(self):
-        a, _ = self._assign([_cav(2, (12.0, 0.0), committed_at_s=20.0)])
-        self.assertEqual(a[0].role, "proceed")
-        self.assertFalse(a[0].cav_wins)
+def _proposal(bridge):
+    source, target = _lane_change_lanes(bridge)
+    return CooperativeManeuverProposal.from_behavior(
+        maneuver="lane_change_right", source_corridor_id=source,
+        target_corridor_id=target, route_required=True,
+        maneuver_active=False, committed_at_s=0.0,
+    )
 
-    def test_committed_claim_wins_over_earlier_proposal(self):
-        proposed = CavIntent(
-            actor_id=2, position_xy=(12.0, 0.0),
-            claim=_claim(committed_at_s=1.0, phase="proposed"),
-        )
-        roles, _ = assign_conflict_roles(
-            my_claim=_claim(committed_at_s=10.0, phase="committed"),
-            my_actor_id=5, my_position_xy=(0.0, 0.0),
-            my_heading_rad=0.0, cavs=[proposed],
-        )
-        self.assertEqual(roles[0].role, "proceed")
-        self.assertFalse(roles[0].cav_wins)
 
-    def test_two_proposals_use_timestamp_then_actor_id(self):
-        peer = CavIntent(
-            actor_id=2, position_xy=(12.0, 0.0),
-            claim=_claim(committed_at_s=10.0, phase="proposed"),
-        )
-        roles, _ = assign_conflict_roles(
-            my_claim=_claim(committed_at_s=10.0, phase="proposed"),
-            my_actor_id=5, my_position_xy=(0.0, 0.0),
-            my_heading_rad=0.0, cavs=[peer],
-        )
-        self.assertEqual(roles[0].role, "make_gap")
-        self.assertTrue(roles[0].cav_wins)
+def _peer_lane_change_claim(bridge, *, committed_at_s, phase="committed"):
+    source, target = _lane_change_lanes(bridge)
+    return ResourceClaim(
+        kind="lane_change", resource_id=f"lane_change:{source}:{target}",
+        committed_at_s=float(committed_at_s), active=True,
+        require_ahead=False, phase=phase,
+        source_corridor_id=source, target_corridor_id=target,
+    )
 
-    def test_released_claim_does_not_participate(self):
-        peer = CavIntent(
-            actor_id=2, position_xy=(12.0, 0.0),
-            claim=_claim(phase="released"),
-        )
-        roles, _ = self._assign([peer])
-        self.assertEqual(roles, [])
 
-    def test_side_is_latched_with_role(self):
-        a1, latch = self._assign(
-            [_cav(2, (12.0, 2.0), committed_at_s=10.2)], hysteresis_ticks=3
-        )
-        self.assertEqual(a1[0].homotopy_side, "right")
-        a2, _ = self._assign(
-            [_cav(2, (12.0, -2.0), committed_at_s=10.2)],
-            latch=latch, hysteresis_ticks=3,
-        )
-        self.assertEqual(a2[0].homotopy_side, "right")
+def _arbitrate(bridge, frame, *, sim_time_s, proposal):
+    return bridge._resolve_cooperative_arbitration(
+        cooperative_proposal=proposal, sim_time_s=sim_time_s, **frame,
+    )
 
-    def test_lateral_side_helper(self):
-        self.assertEqual(lateral_side((0.0, 0.0), 0.0, (5.0, 2.0)), "left")
-        self.assertEqual(lateral_side((0.0, 0.0), 0.0, (5.0, -2.0)), "right")
 
-    def test_non_cooperative_cav_is_not_assigned(self):
-        a, _ = self._assign(
-            [_cav(2, (12.0, 0.0), committed_at_s=5.0, cooperative=False)]
-        )
-        self.assertEqual(a, [])
+def _roles(resolution):
+    return {a.cav_actor_id: a.role for a in resolution.assignments}
 
-    def test_inactive_or_behind_cav_skipped(self):
-        self.assertEqual(
-            self._assign([_cav(2, (12.0, 0.0), 5.0, active=False)])[0], []
-        )
-        self.assertEqual(
-            self._assign([_cav(2, (-12.0, 0.0), 5.0)])[0], []
-        )
 
-    def test_stage_b_does_not_repeat_stage_a_distance_filtering(self):
-        diagnostics = {}
-        roles, _ = assign_conflict_roles(
-            my_claim=_claim(committed_at_s=10.0),
-            my_actor_id=5,
-            my_position_xy=(0.0, 0.0),
-            my_heading_rad=0.0,
-            cavs=[_cav(2, (42.0, 0.0), committed_at_s=5.0)],
-            diagnostics=diagnostics,
-        )
-        self.assertEqual(len(roles), 1)
-        self.assertEqual(
-            diagnostics["eligibility"]["2"]["reason"],
-            "assigned",
-        )
-        self.assertEqual(diagnostics["assignment_count"], 1)
+def test_disabled_arbitration_returns_nothing_and_touches_no_claim_state(cache_root):
+    bridge, _ = _make_bridge(cache_root, cav_conflict_enabled=False)
+    _, frame = _frame(bridge)
 
-    def test_hysteresis_holds_role_through_a_transient_flip(self):
-        # tick 1: cav commits later -> ego proceeds, latched.
-        a1, latch = self._assign(
-            [_cav(2, (12.0, 0.0), committed_at_s=11.0)], hysteresis_ticks=3
-        )
-        self.assertEqual(a1[0].role, "proceed")
-        # tick 2: cav re-commits slightly earlier (non-decisive 0.2s margin).
-        a2, latch = self._assign(
-            [_cav(2, (12.0, 0.0), committed_at_s=9.8)],
-            latch=latch, hysteresis_ticks=3,
-        )
-        self.assertEqual(a2[0].role, "proceed")  # held
-        a3, latch = self._assign(
-            [_cav(2, (12.0, 0.0), committed_at_s=9.8)],
-            latch=latch, hysteresis_ticks=3,
-        )
-        self.assertEqual(a3[0].role, "proceed")  # still held
-        a4, latch = self._assign(
-            [_cav(2, (12.0, 0.0), committed_at_s=9.8)],
-            latch=latch, hysteresis_ticks=3,
-        )
-        self.assertEqual(a4[0].role, "make_gap")  # 3 consistent ticks -> switch
+    resolution, deferred = _arbitrate(
+        bridge, frame, sim_time_s=0.0, proposal=_proposal(bridge)
+    )
 
-    def test_decisive_margin_switches_immediately(self):
-        a1, latch = self._assign(
-            [_cav(2, (12.0, 0.0), committed_at_s=11.0)], hysteresis_ticks=5
-        )
-        self.assertEqual(a1[0].role, "proceed")
-        # cav now clearly earlier (margin 8s >> decisive_margin_s default 1.0)
-        a2, latch = self._assign(
-            [_cav(2, (12.0, 0.0), committed_at_s=2.0)],
-            latch=latch, hysteresis_ticks=5,
-        )
-        self.assertEqual(a2[0].role, "make_gap")
+    assert resolution is None
+    assert deferred is False
+    assert bridge._cooperative_claim_manager.current_claim is None
 
-    def test_symmetric_resolution_between_two_cavs(self):
-        # ego id 5 commits at 10; cav id 2 commits at 7 -> cav wins.
-        ego_a, _ = assign_conflict_roles(
-            my_claim=_claim(committed_at_s=10.0), my_actor_id=5,
-            my_position_xy=(0.0, 0.0), my_heading_rad=0.0,
-            cavs=[_cav(2, (12.0, 0.0), committed_at_s=7.0)],
-        )
-        cav_a, _ = assign_conflict_roles(
-            my_claim=_claim(committed_at_s=7.0), my_actor_id=2,
-            my_position_xy=(12.0, 0.0), my_heading_rad=math.pi,
-            cavs=[_cav(5, (0.0, 0.0), committed_at_s=10.0)],
-        )
-        self.assertEqual(ego_a[0].role, "make_gap")   # loser opens gap
-        self.assertEqual(cav_a[0].role, "proceed")   # winner proceeds
 
-if __name__ == "__main__":
-    unittest.main()
+def test_same_lane_peer_ahead_is_followed_and_seen_over_the_transport(cache_root):
+    bridge, vehicle_manager = _make_bridge(cache_root)
+    vehicle_manager.v2x_manager.cav_nearby = {
+        PEER_ID: _peer(claim=_released_claim(), gap_m=15.0, speed_mps=2.0)
+    }
+
+    result, _ = _frame(bridge)
+
+    diagnostics = result.cav_resolution.diagnostics
+    assert diagnostics["tags"] == {str(PEER_ID): "FOLLOW"}
+    assert diagnostics["observation_sources"] == {str(PEER_ID): "peer_intent"}
+    assert diagnostics["transport"]["payload_count"] == 1
+    # Nobody claims a shared resource, so this is car-following, not a role.
+    assert list(result.cav_resolution.assignments) == []
+    assert diagnostics["arbitration"] == {"reason": "ego_claim_inactive"}
+
+
+def test_first_proposal_tick_is_deferred_so_both_peers_see_the_same_claims(cache_root):
+    bridge, _ = _make_bridge(cache_root)
+    _, frame = _frame(bridge)
+
+    resolution, deferred = _arbitrate(
+        bridge, frame, sim_time_s=0.0, proposal=_proposal(bridge)
+    )
+
+    assert resolution is not None
+    assert deferred is True
+    assert bridge._cooperative_claim_manager.current_claim.phase == "proposed"
+
+
+def test_proposal_is_released_after_the_dwell_when_no_peer_conflicts(cache_root):
+    bridge, _ = _make_bridge(cache_root)
+    _, frame = _frame(bridge)
+    proposal = _proposal(bridge)
+    _arbitrate(bridge, frame, sim_time_s=0.0, proposal=proposal)
+
+    _, deferred = _arbitrate(bridge, frame, sim_time_s=1.0, proposal=proposal)
+
+    assert deferred is False
+
+
+def _contest(bridge, vehicle_manager, frame, *, peer_claim, gap_m=8.0):
+    vehicle_manager.v2x_manager.cav_nearby = {
+        PEER_ID: _peer(claim=peer_claim, gap_m=gap_m)
+    }
+    proposal = _proposal(bridge)
+    _arbitrate(bridge, frame, sim_time_s=0.0, proposal=proposal)
+    return _arbitrate(bridge, frame, sim_time_s=1.0, proposal=proposal)
+
+
+@pytest.mark.parametrize(
+    "gap_m, peer_committed_at_s",
+    [(8.0, -5.0), (-8.0, -5.0), (8.0, 5.0)],
+    ids=["peer-ahead", "peer-behind", "peer-committed-later-still-wins"],
+)
+def test_a_committed_peer_claim_preempts_the_ego_proposal(
+    cache_root, gap_m, peer_committed_at_s
+):
+    # "A physically committed maneuver cannot be pre-empted by a proposal":
+    # commitment beats a proposal regardless of either timestamp.
+    bridge, vehicle_manager = _make_bridge(cache_root)
+    _, frame = _frame(bridge)
+
+    resolution, deferred = _contest(
+        bridge, vehicle_manager, frame, gap_m=gap_m,
+        peer_claim=_peer_lane_change_claim(
+            bridge, committed_at_s=peer_committed_at_s
+        ),
+    )
+
+    assert _roles(resolution) == {PEER_ID: "make_gap"}
+    assert resolution.assignments[0].cav_wins is True
+    assert deferred is True, "the loser must not install its lane change yet"
+
+
+def test_between_two_proposals_the_earlier_one_wins(cache_root):
+    bridge, vehicle_manager = _make_bridge(cache_root)
+    _, frame = _frame(bridge)
+
+    resolution, deferred = _contest(
+        bridge, vehicle_manager, frame,
+        peer_claim=_peer_lane_change_claim(
+            bridge, committed_at_s=5.0, phase="proposed"
+        ),
+    )
+
+    assert resolution.assignments[0].cav_wins is False
+    assert deferred is False
+
+
+def test_between_two_proposals_the_later_one_makes_way(cache_root):
+    bridge, vehicle_manager = _make_bridge(cache_root)
+    _, frame = _frame(bridge)
+
+    resolution, deferred = _contest(
+        bridge, vehicle_manager, frame,
+        peer_claim=_peer_lane_change_claim(
+            bridge, committed_at_s=-5.0, phase="proposed"
+        ),
+    )
+
+    assert _roles(resolution) == {PEER_ID: "make_gap"}
+    assert resolution.assignments[0].cav_wins is True
+    assert deferred is True
+
+
+def test_route_change_retires_the_stale_claim_so_a_new_proposal_dwells_again(cache_root):
+    bridge, _ = _make_bridge(cache_root)
+    _, frame = _frame(bridge)
+    proposal = _proposal(bridge)
+    _arbitrate(bridge, frame, sim_time_s=0.0, proposal=proposal)
+    _, past_dwell = _arbitrate(bridge, frame, sim_time_s=1.0, proposal=proposal)
+    assert past_dwell is False  # the same proposal, 1 s later, is released
+
+    bridge.route_manager.set_destination(
+        start_point=START_XYZ, goal_point=GOAL_XYZ,
+    )
+    _, deferred = _arbitrate(bridge, frame, sim_time_s=1.0, proposal=proposal)
+
+    assert deferred is True, "a new route must restart the proposal dwell"
+
+
+def test_config_knobs_and_planner_limits_reach_the_interaction_resolver(cache_root):
+    knobs = {
+        "cav_conflict_comfort_deceleration_mps2": 0.77,
+        "candidate_lane_change_normal_duration_s": 5.5,
+        "prediction_mode_min_probability": 0.11,
+        "prediction_credible_probability_min": 0.22,
+        "prediction_credible_ttc_s": 3.3,
+        "prediction_credible_veto_release_ticks": 9,
+    }
+    bridge, _ = _make_bridge(cache_root, **knobs)
+    _, frame = _frame(bridge)
+    captured = []
+    real = bridge.pipeline.resolve_cav_interaction
+
+    def spy(**kwargs):
+        captured.append(kwargs)
+        return real(**kwargs)
+
+    bridge.pipeline.resolve_cav_interaction = spy
+
+    _arbitrate(bridge, frame, sim_time_s=0.0, proposal=_proposal(bridge))
+
+    assert len(captured) == 1
+    seen = captured[0]
+    assert seen["comfortable_deceleration_mps2"] == pytest.approx(0.77)
+    assert seen["cooperative_preparation_time_s"] == pytest.approx(5.5)
+    assert seen["mode_probability_floor"] == pytest.approx(0.11)
+    assert seen["credible_mode_probability_min"] == pytest.approx(0.22)
+    assert seen["credible_mode_ttc_s"] == pytest.approx(3.3)
+    assert seen["credible_mode_veto_release_ticks"] == 9
+    constraints = bridge.mpc.constraints
+    assert seen["max_braking_mps2"] == pytest.approx(
+        abs(constraints.min_acceleration_mps2)
+    )
+    assert seen["max_jerk_mps3"] == pytest.approx(constraints.max_jerk_mps3)
+    assert seen["actor_id"] == 1
+    assert seen["current_acceleration_mps2"] == pytest.approx(
+        bridge._last_accel_mps2
+    )
+    assert seen["max_relevant_agents"] == (
+        bridge._cav_conflict_governor.current_max_relevant_agents
+    )
+
+
+def test_unconfigured_resolver_knobs_keep_their_documented_defaults(cache_root):
+    # These defaults shape cooperative behavior on every run that does not
+    # override them, so changing one must be a deliberate, visible decision.
+    bridge, _ = _make_bridge(cache_root)
+    _, frame = _frame(bridge)
+    captured = []
+    real = bridge.pipeline.resolve_cav_interaction
+
+    def spy(**kwargs):
+        captured.append(kwargs)
+        return real(**kwargs)
+
+    bridge.pipeline.resolve_cav_interaction = spy
+
+    _arbitrate(bridge, frame, sim_time_s=0.0, proposal=_proposal(bridge))
+
+    seen = captured[0]
+    assert seen["comfortable_deceleration_mps2"] == pytest.approx(1.5)
+    assert seen["cooperative_preparation_time_s"] == pytest.approx(4.0)
+    assert seen["mode_probability_floor"] == pytest.approx(0.05)
+    assert seen["credible_mode_probability_min"] == pytest.approx(0.15)
+    assert seen["credible_mode_ttc_s"] == pytest.approx(2.0)
+    assert seen["credible_mode_veto_release_ticks"] == 12
+
