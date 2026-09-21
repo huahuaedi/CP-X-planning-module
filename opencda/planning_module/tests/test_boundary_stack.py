@@ -14,17 +14,10 @@ path of the first two and nothing at all of the envelope.
 from __future__ import annotations
 
 import math
-import sys
-import types
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
-
-if "carla" not in sys.modules:
-    fake_carla = types.ModuleType("carla")
-    fake_carla.__getattr__ = lambda name: type(name, (), {"__init__": lambda self, *a, **k: None})
-    sys.modules["carla"] = fake_carla
 
 from opencda_bridge.cpx_mpc_planner import CPXMPCPlannerBridge  # noqa: E402
 
