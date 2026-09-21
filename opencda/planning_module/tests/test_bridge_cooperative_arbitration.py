@@ -227,7 +227,7 @@ def test_disabled_arbitration_returns_nothing_and_touches_no_claim_state(cache_r
 
     assert resolution is None
     assert deferred is False
-    assert bridge._cooperative_claim_manager.current_claim is None
+    assert bridge._cooperative.claims.current_claim is None
 
 
 def test_same_lane_peer_ahead_is_followed_and_seen_over_the_transport(cache_root):
@@ -257,7 +257,7 @@ def test_first_proposal_tick_is_deferred_so_both_peers_see_the_same_claims(cache
 
     assert resolution is not None
     assert deferred is True
-    assert bridge._cooperative_claim_manager.current_claim.phase == "proposed"
+    assert bridge._cooperative.claims.current_claim.phase == "proposed"
 
 
 def test_proposal_is_released_after_the_dwell_when_no_peer_conflicts(cache_root):
@@ -392,7 +392,7 @@ def test_config_knobs_and_planner_limits_reach_the_interaction_resolver(cache_ro
         bridge._last_accel_mps2
     )
     assert seen["max_relevant_agents"] == (
-        bridge._cav_conflict_governor.current_max_relevant_agents
+        bridge._cooperative.governor.current_max_relevant_agents
     )
 
 

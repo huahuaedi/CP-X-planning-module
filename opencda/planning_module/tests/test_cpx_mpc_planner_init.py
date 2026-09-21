@@ -175,6 +175,6 @@ def test_cp_provider_disabled_by_config(bridge):
 
 
 def test_cav_conflict_governor_starts_at_the_configured_ceiling(bridge):
-    governor = bridge._cav_conflict_governor
+    governor = bridge._cooperative.governor
     assert governor.current_max_relevant_agents == 6
     assert governor.current_max_modes_per_agent == 3

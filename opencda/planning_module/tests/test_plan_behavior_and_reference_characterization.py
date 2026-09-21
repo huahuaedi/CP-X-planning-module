@@ -212,14 +212,14 @@ def test_cav_conflict_governor_resets_when_the_route_changes():
     bridge = CPXMPCPlannerBridge(_VehicleManager(), config)
     bridge.route_manager.set_destination(start_point=START_XYZ, goal_point=GOAL_XYZ)
     _call(bridge)
-    assert bridge._cav_conflict_governor_route_revision == str(
+    assert bridge._cooperative.governor_route_revision == str(
         bridge.route_manager.route_revision
     )
 
     for _ in range(20):
-        bridge._cav_conflict_governor.observe_stage_ms(500.0)
-    assert bridge._cav_conflict_governor.current_max_relevant_agents < 6
+        bridge._cooperative.governor.observe_stage_ms(500.0)
+    assert bridge._cooperative.governor.current_max_relevant_agents < 6
 
     bridge.route_manager.set_destination(start_point=START_XYZ, goal_point=GOAL_XYZ)
     _call(bridge)
-    assert bridge._cav_conflict_governor.current_max_relevant_agents == 6
+    assert bridge._cooperative.governor.current_max_relevant_agents == 6
