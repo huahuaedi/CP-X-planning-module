@@ -3184,191 +3184,21 @@ class CPXMPCPlannerBridge:
         # exchange the same proposed claims before either installs a locked
         # lane-change reference.  This is also the sole CAV resolution call
         # for the tick; its corridor rows are reused by MPC below.
-        cav_result = None
-        cooperative_lane_change_deferred = False
-        if self._cav_conflict_enabled:
-            # A compute budget degraded by a complex intersection must not
-            # keep constraining an unrelated later maneuver or route -- the
-            # pressure that earned the degradation is gone once the route
-            # itself has changed, so the ceiling should be too.
-            current_route_revision = str(self.route_manager.route_revision)
-            if current_route_revision != self._cav_conflict_governor_route_revision:
-                self._cav_conflict_governor_route_revision = current_route_revision
-                self._cav_conflict_governor.reset()
-                self._cav_schedule.reset(
-                    reason="route_revision_changed:" + current_route_revision
-                )
-                self._cooperative_claim_manager.reset()
-            lane_change = self.maneuver_manager.lane_change
-            if bool(lane_change.active):
-                cooperative_proposal = cooperative_proposal.with_commitment(
-                    maneuver=(
-                        "lane_change_left"
-                        if str(lane_change.option) == "CHANGELANELEFT"
-                        else "lane_change_right"
-                    ),
-                    target_corridor_id=int(lane_change.target_lane_id),
-                    committed_at_s=float(lane_change.committed_at_s),
-                )
-            claim_interval = project_claim_interval(
-                local_map=local_map_snapshot,
-                corridor_id=int(cooperative_proposal.target_corridor_id),
-                x_m=float(ego_location.x),
-                y_m=float(ego_location.y),
-                lookbehind_m=float(
-                    self.config.get("cav_claim_lookbehind_m", 10.0)
-                ),
-                lookahead_m=float(
-                    self.config.get("cav_claim_lookahead_m", 50.0)
-                ),
-            )
-            cooperative_proposal = cooperative_proposal.with_station_interval(
-                corridor_id=int(claim_interval.corridor_id),
-                s_begin_m=claim_interval.s_begin_m,
-                s_end_m=claim_interval.s_end_m,
-            )
-            cav_claim = self._cooperative_claim_manager.claim(
-                proposal=cooperative_proposal,
-                sim_time_s=float(sim_time_s),
-            )
-            cav_intents = self._collect_cav_intents()
-            schedule = self._cav_schedule.decide(
-                sim_time_s=float(sim_time_s),
-                prediction_revision=str(
-                    planner_input_frame.prediction.revision
-                ),
-                claim=cav_claim, peers=cav_intents,
-                proposal=cooperative_proposal,
-            )
-            _ts_sub = time.monotonic()
-            conflict_reference = self._cav_schedule.reference_for_tick(
-                refresh=bool(schedule.refresh_roles),
-                build=lambda: self.pipeline.cooperative_conflict_reference(
-                    proposal=cooperative_proposal,
-                    local_map=local_map_snapshot,
-                    current_state=current_state,
-                    baseline_reference=local_lane_center_reference,
-                    target_speed_mps=float(planned_speed_mps),
-                    horizon_steps=int(self.mpc.horizon_steps),
-                    dt_s=float(self.mpc.dt_s),
-                    lane_width_m=float(getattr(self.mpc, "lane_width_m", 3.5)),
-                ),
-            )
-            self._accum_stage_ms(
-                "sub_cooperative_conflict_reference", time.monotonic() - _ts_sub
-            )
-            cached_corridor = self._cav_schedule.cached_corridor_for_tick(
-                sim_time_s=float(sim_time_s),
-                reference_samples=local_lane_center_reference,
-                ego_x_m=float(ego_location.x), ego_y_m=float(ego_location.y),
-                dt_s=float(self.mpc.dt_s),
-            )
-            _ts_sub = time.monotonic()
-            cav_result = self.pipeline.resolve_cav_interaction(
-                reference_samples=conflict_reference.mutable_samples(),
-                # Stage D's QP rows must linearize against the reference the
-                # vehicle is actually driving, not the lane-change preview
-                # curve used only to classify a proposed maneuver -- see
-                # PlanningPipeline.resolve_cav_interaction's docstring.
-                constraint_reference_samples=local_lane_center_reference,
+        cav_result, cooperative_lane_change_deferred = (
+            self._resolve_cooperative_arbitration(
+                cooperative_proposal=cooperative_proposal,
+                current_state=current_state,
                 ego_location=ego_location,
-                ego_yaw_rad=float(ego_yaw_rad),
-                ego_speed_mps=float(ego_speed_mps),
-                actor_id=int(getattr(self.vehicle_manager.vehicle, "id", -1)),
-                claim=cav_claim,
-                obstacle_snapshots=self._interaction_obstacle_snapshots(
-                    object_snapshots,
-                    predicted_objects=(
-                        planner_input_frame.prediction.predicted_objects
-                    ),
-                ),
-                cav_intents=cav_intents,
-                latch_state=self._cav_schedule.latch_state,
-                tag_state=self._cav_schedule.tag_state,
-                veto_state=self._cav_schedule.veto_state,
-                horizon_steps=int(self.mpc.horizon_steps),
-                dt_s=float(self.mpc.dt_s),
-                mode_probability_floor=float(self.config.get(
-                    "prediction_mode_min_probability", 0.05
-                )),
-                credible_mode_probability_min=float(self.config.get(
-                    "prediction_credible_probability_min", 0.15
-                )),
-                credible_mode_ttc_s=float(self.config.get(
-                    "prediction_credible_ttc_s", 2.0
-                )),
-                credible_mode_veto_release_ticks=int(self.config.get(
-                    "prediction_credible_veto_release_ticks", 12
-                )),
-                nominal_progress_limit_m=(
-                    float(self.route_manager.last_status.remaining_distance_m)
-                    if (
-                        math.isfinite(float(
-                            self.route_manager.last_status.remaining_distance_m
-                        ))
-                        and (
-                            float(self.route_manager.last_status.remaining_distance_m) > 0.0
-                            or bool(self.route_manager.last_status.reached_destination)
-                        )
-                    )
-                    else None
-                ),
-                refresh_assignments=bool(schedule.refresh_roles),
-                cached_assignments=self._cav_schedule.assignments,
-                rebuild_corridor=bool(schedule.refresh_roles),
-                cached_corridor=cached_corridor,
-                max_braking_mps2=abs(float(self.mpc.constraints.min_acceleration_mps2)),
-                current_acceleration_mps2=float(self._last_accel_mps2),
-                max_jerk_mps3=float(self.mpc.constraints.max_jerk_mps3),
-                comfortable_deceleration_mps2=float(self.config.get(
-                    "cav_conflict_comfort_deceleration_mps2", 1.5
-                )),
-                cooperative_preparation_time_s=float(self.config.get(
-                    "candidate_lane_change_normal_duration_s", 4.0
-                )),
-                max_relevant_agents=self._cav_conflict_governor.current_max_relevant_agents,
-                max_modes_per_agent=self._cav_conflict_governor.current_max_modes_per_agent,
+                ego_yaw_rad=ego_yaw_rad,
+                ego_speed_mps=ego_speed_mps,
+                local_lane_center_reference=local_lane_center_reference,
+                local_map_snapshot=local_map_snapshot,
+                object_snapshots=object_snapshots,
+                planned_speed_mps=planned_speed_mps,
+                planner_input_frame=planner_input_frame,
+                sim_time_s=sim_time_s,
             )
-            _cav_interaction_elapsed_s = time.monotonic() - _ts_sub
-            self._accum_stage_ms(
-                "sub_resolve_cav_interaction", _cav_interaction_elapsed_s
-            )
-            # Feeds next tick's budget, not this one: this tick already ran
-            # at whatever budget was decided last tick, so retroactively
-            # shrinking its own inputs here would just make the measurement
-            # describe a call that never happened.
-            budget_decision = self._cav_conflict_governor.observe_stage_ms(
-                _cav_interaction_elapsed_s * 1000.0
-            )
-            if budget_decision.degraded:
-                cav_result.diagnostics["cav_conflict_budget_decision"] = (
-                    budget_decision.reason
-                )
-            self._cav_schedule.observe(
-                sim_time_s=float(sim_time_s), result=cav_result,
-                reference_samples=local_lane_center_reference,
-            )
-            cav_result.diagnostics["coordination_schedule_reason"] = str(
-                schedule.reason
-            )
-            cav_result.diagnostics["coordination_revision"] = int(
-                self._cav_schedule.revision
-            )
-            cav_result.diagnostics["transport"] = dict(
-                self._cav_transport_diagnostics
-            )
-            cav_result.diagnostics["conflict_reference_source"] = str(
-                conflict_reference.source
-            )
-            cav_result.diagnostics["conflict_reference_reason"] = str(
-                conflict_reference.reason
-            )
-            cooperative_lane_change_deferred = (
-                self._cooperative_claim_manager.defer_candidate(
-                    sim_time_s=float(sim_time_s),
-                    assignments=cav_result.assignments,
-                )
-            )
+        )
         if bool(self.full_candidate_pipeline_enabled):
             candidate_reference_context = CandidateReferenceBuildContext(
                 map_planner=self.reference_map,
@@ -3624,6 +3454,202 @@ class CPXMPCPlannerBridge:
             speed_plan=speed_plan,
             cav_resolution=cav_result,
         )
+
+    def _resolve_cooperative_arbitration(
+        self, *, cooperative_proposal, current_state, ego_location,
+        ego_yaw_rad, ego_speed_mps, local_lane_center_reference,
+        local_map_snapshot, object_snapshots, planned_speed_mps,
+        planner_input_frame, sim_time_s,
+    ):
+        """Cooperative arbitration for one tick: returns (cav_result, deferred)."""
+
+        cav_result = None
+        cooperative_lane_change_deferred = False
+        if not self._cav_conflict_enabled:
+            return cav_result, cooperative_lane_change_deferred
+        # A compute budget degraded by a complex intersection must not
+        # keep constraining an unrelated later maneuver or route -- the
+        # pressure that earned the degradation is gone once the route
+        # itself has changed, so the ceiling should be too.
+        current_route_revision = str(self.route_manager.route_revision)
+        if current_route_revision != self._cav_conflict_governor_route_revision:
+            self._cav_conflict_governor_route_revision = current_route_revision
+            self._cav_conflict_governor.reset()
+            self._cav_schedule.reset(
+                reason="route_revision_changed:" + current_route_revision
+            )
+            self._cooperative_claim_manager.reset()
+        lane_change = self.maneuver_manager.lane_change
+        if bool(lane_change.active):
+            cooperative_proposal = cooperative_proposal.with_commitment(
+                maneuver=(
+                    "lane_change_left"
+                    if str(lane_change.option) == "CHANGELANELEFT"
+                    else "lane_change_right"
+                ),
+                target_corridor_id=int(lane_change.target_lane_id),
+                committed_at_s=float(lane_change.committed_at_s),
+            )
+        claim_interval = project_claim_interval(
+            local_map=local_map_snapshot,
+            corridor_id=int(cooperative_proposal.target_corridor_id),
+            x_m=float(ego_location.x),
+            y_m=float(ego_location.y),
+            lookbehind_m=float(
+                self.config.get("cav_claim_lookbehind_m", 10.0)
+            ),
+            lookahead_m=float(
+                self.config.get("cav_claim_lookahead_m", 50.0)
+            ),
+        )
+        cooperative_proposal = cooperative_proposal.with_station_interval(
+            corridor_id=int(claim_interval.corridor_id),
+            s_begin_m=claim_interval.s_begin_m,
+            s_end_m=claim_interval.s_end_m,
+        )
+        cav_claim = self._cooperative_claim_manager.claim(
+            proposal=cooperative_proposal,
+            sim_time_s=float(sim_time_s),
+        )
+        cav_intents = self._collect_cav_intents()
+        schedule = self._cav_schedule.decide(
+            sim_time_s=float(sim_time_s),
+            prediction_revision=str(
+                planner_input_frame.prediction.revision
+            ),
+            claim=cav_claim, peers=cav_intents,
+            proposal=cooperative_proposal,
+        )
+        _ts_sub = time.monotonic()
+        conflict_reference = self._cav_schedule.reference_for_tick(
+            refresh=bool(schedule.refresh_roles),
+            build=lambda: self.pipeline.cooperative_conflict_reference(
+                proposal=cooperative_proposal,
+                local_map=local_map_snapshot,
+                current_state=current_state,
+                baseline_reference=local_lane_center_reference,
+                target_speed_mps=float(planned_speed_mps),
+                horizon_steps=int(self.mpc.horizon_steps),
+                dt_s=float(self.mpc.dt_s),
+                lane_width_m=float(getattr(self.mpc, "lane_width_m", 3.5)),
+            ),
+        )
+        self._accum_stage_ms(
+            "sub_cooperative_conflict_reference", time.monotonic() - _ts_sub
+        )
+        cached_corridor = self._cav_schedule.cached_corridor_for_tick(
+            sim_time_s=float(sim_time_s),
+            reference_samples=local_lane_center_reference,
+            ego_x_m=float(ego_location.x), ego_y_m=float(ego_location.y),
+            dt_s=float(self.mpc.dt_s),
+        )
+        _ts_sub = time.monotonic()
+        cav_result = self.pipeline.resolve_cav_interaction(
+            reference_samples=conflict_reference.mutable_samples(),
+            # Stage D's QP rows must linearize against the reference the
+            # vehicle is actually driving, not the lane-change preview
+            # curve used only to classify a proposed maneuver -- see
+            # PlanningPipeline.resolve_cav_interaction's docstring.
+            constraint_reference_samples=local_lane_center_reference,
+            ego_location=ego_location,
+            ego_yaw_rad=float(ego_yaw_rad),
+            ego_speed_mps=float(ego_speed_mps),
+            actor_id=int(getattr(self.vehicle_manager.vehicle, "id", -1)),
+            claim=cav_claim,
+            obstacle_snapshots=self._interaction_obstacle_snapshots(
+                object_snapshots,
+                predicted_objects=(
+                    planner_input_frame.prediction.predicted_objects
+                ),
+            ),
+            cav_intents=cav_intents,
+            latch_state=self._cav_schedule.latch_state,
+            tag_state=self._cav_schedule.tag_state,
+            veto_state=self._cav_schedule.veto_state,
+            horizon_steps=int(self.mpc.horizon_steps),
+            dt_s=float(self.mpc.dt_s),
+            mode_probability_floor=float(self.config.get(
+                "prediction_mode_min_probability", 0.05
+            )),
+            credible_mode_probability_min=float(self.config.get(
+                "prediction_credible_probability_min", 0.15
+            )),
+            credible_mode_ttc_s=float(self.config.get(
+                "prediction_credible_ttc_s", 2.0
+            )),
+            credible_mode_veto_release_ticks=int(self.config.get(
+                "prediction_credible_veto_release_ticks", 12
+            )),
+            nominal_progress_limit_m=(
+                float(self.route_manager.last_status.remaining_distance_m)
+                if (
+                    math.isfinite(float(
+                        self.route_manager.last_status.remaining_distance_m
+                    ))
+                    and (
+                        float(self.route_manager.last_status.remaining_distance_m) > 0.0
+                        or bool(self.route_manager.last_status.reached_destination)
+                    )
+                )
+                else None
+            ),
+            refresh_assignments=bool(schedule.refresh_roles),
+            cached_assignments=self._cav_schedule.assignments,
+            rebuild_corridor=bool(schedule.refresh_roles),
+            cached_corridor=cached_corridor,
+            max_braking_mps2=abs(float(self.mpc.constraints.min_acceleration_mps2)),
+            current_acceleration_mps2=float(self._last_accel_mps2),
+            max_jerk_mps3=float(self.mpc.constraints.max_jerk_mps3),
+            comfortable_deceleration_mps2=float(self.config.get(
+                "cav_conflict_comfort_deceleration_mps2", 1.5
+            )),
+            cooperative_preparation_time_s=float(self.config.get(
+                "candidate_lane_change_normal_duration_s", 4.0
+            )),
+            max_relevant_agents=self._cav_conflict_governor.current_max_relevant_agents,
+            max_modes_per_agent=self._cav_conflict_governor.current_max_modes_per_agent,
+        )
+        _cav_interaction_elapsed_s = time.monotonic() - _ts_sub
+        self._accum_stage_ms(
+            "sub_resolve_cav_interaction", _cav_interaction_elapsed_s
+        )
+        # Feeds next tick's budget, not this one: this tick already ran
+        # at whatever budget was decided last tick, so retroactively
+        # shrinking its own inputs here would just make the measurement
+        # describe a call that never happened.
+        budget_decision = self._cav_conflict_governor.observe_stage_ms(
+            _cav_interaction_elapsed_s * 1000.0
+        )
+        if budget_decision.degraded:
+            cav_result.diagnostics["cav_conflict_budget_decision"] = (
+                budget_decision.reason
+            )
+        self._cav_schedule.observe(
+            sim_time_s=float(sim_time_s), result=cav_result,
+            reference_samples=local_lane_center_reference,
+        )
+        cav_result.diagnostics["coordination_schedule_reason"] = str(
+            schedule.reason
+        )
+        cav_result.diagnostics["coordination_revision"] = int(
+            self._cav_schedule.revision
+        )
+        cav_result.diagnostics["transport"] = dict(
+            self._cav_transport_diagnostics
+        )
+        cav_result.diagnostics["conflict_reference_source"] = str(
+            conflict_reference.source
+        )
+        cav_result.diagnostics["conflict_reference_reason"] = str(
+            conflict_reference.reason
+        )
+        cooperative_lane_change_deferred = (
+            self._cooperative_claim_manager.defer_candidate(
+                sim_time_s=float(sim_time_s),
+                assignments=cav_result.assignments,
+            )
+        )
+        return cav_result, cooperative_lane_change_deferred
 
     def _publish_cav_intent(
         self, *, ego_location: Any, ego_yaw_rad: float,
