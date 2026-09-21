@@ -752,7 +752,9 @@ class CPXMPCPlannerBridge:
             waypoint_map=self.waypoint_map_planner,
             carla_module=carla,
         )
-        self.reference_generator.map_planner = self.waypoint_map_planner
+        self._stable_reference_line_provider.rebind_map_planner(
+            self.waypoint_map_planner
+        )
         self.waypoint_backend = "admap"
         self.route_manager = CPXRouteManager(
             global_planner=self.global_planner,
@@ -1446,9 +1448,6 @@ class CPXMPCPlannerBridge:
         emergency_brake_requested = (
             behavior_decision_normalized == "emergency_brake"
         )
-        if bool(mpc_stop_goal_active) and len(destination_state) >= 3:
-            destination_state = list(destination_state)
-            destination_state[2] = 0.0
         stop_target_forward_m_debug = ""
         stop_target_debug = behavior_decision.stop_target
         if bool(mpc_stop_goal_active) and isinstance(stop_target_debug, Mapping):
@@ -2328,7 +2327,7 @@ class CPXMPCPlannerBridge:
                 ),
             ),
             resolve_actor_state=self._resolve_full_traffic_state_from_carla_actor,
-            project_stop_target=lambda *, stop_target: self.reference_generator.stop_target_forward(
+            project_stop_target=lambda *, stop_target: self._stable_reference_line_provider.stop_target_forward(
                 ego_location=ego_location, ego_yaw_rad=float(ego_yaw_rad),
                 stop_target=(dict(stop_target) if isinstance(stop_target, Mapping) else None),
                 fallback_destination_state=[],
@@ -3522,7 +3521,7 @@ class CPXMPCPlannerBridge:
                 )
             ),
         )
-        validation = self.reference_generator.validate_turn_swept_footprint(
+        validation = self._stable_reference_line_provider.validate_turn_swept_footprint(
             reference_samples=reference_samples,
             ego_half_width_m=max(0.1, float(ego_half_width_m)),
             ego_half_length_m=max(0.1, float(ego_half_length_m)),

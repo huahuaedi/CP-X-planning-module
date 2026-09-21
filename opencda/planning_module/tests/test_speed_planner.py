@@ -839,6 +839,55 @@ class SpeedPlannerTest(unittest.TestCase):
         self.assertEqual(result.reference_samples[0]["v_ref_mps"], 0.0)
         self.assertEqual(result.reference_samples[0]["speed_mps"], 0.0)
 
+    def test_stop_required_zeroes_destination_speed_only(self):
+        # The bridge used to write destination_state[2] = 0.0 after the
+        # ceiling; the ceiling now does it.  Reference samples keep their
+        # (ceiling-limited) speeds and the geometry is untouched.
+        result = enforce_speed_ceiling(
+            proposed_target_mps=2.0,
+            ceiling_mps=2.0,
+            destination_state=[1.0, 2.0, 2.0, 0.3, 1],
+            reference_samples=[{"v_ref_mps": 2.0}],
+            stop_required=True,
+        )
+        self.assertEqual(result.destination_state, [1.0, 2.0, 0.0, 0.3, 1])
+        self.assertEqual(result.reference_samples[0]["v_ref_mps"], 2.0)
+        self.assertEqual(result.target_speed_mps, 2.0)
+
+    def test_stop_not_required_keeps_destination_speed(self):
+        result = enforce_speed_ceiling(
+            proposed_target_mps=2.0,
+            ceiling_mps=2.0,
+            destination_state=[1.0, 2.0, 2.0],
+            reference_samples=[],
+            stop_required=False,
+        )
+        self.assertEqual(result.destination_state[2], 2.0)
+
+    def test_stop_required_with_short_destination_state_is_untouched(self):
+        result = enforce_speed_ceiling(
+            proposed_target_mps=2.0,
+            ceiling_mps=2.0,
+            destination_state=[1.0, 2.0],
+            reference_samples=[],
+            stop_required=True,
+        )
+        self.assertEqual(result.destination_state, [1.0, 2.0])
+
+    def test_planner_applies_the_target_stop_flag_to_the_ceiling(self):
+        for stop in (True, False):
+            with self.subTest(stop=stop):
+                target = speed_planner.SpeedTarget(
+                    requested_mps=2.0, target_mps=2.0, limiting_owner="x",
+                    stop_required=stop,
+                )
+                result = speed_planner.SpeedTargetPlanner.apply(
+                    target,
+                    destination_state=[1.0, 2.0, 2.0],
+                    reference_samples=[],
+                )
+                self.assertEqual(result.destination_state[2], 0.0 if stop else 2.0)
+
 
 if __name__ == "__main__":
     unittest.main()

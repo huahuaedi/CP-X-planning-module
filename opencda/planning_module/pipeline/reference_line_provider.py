@@ -264,6 +264,21 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             raise RuntimeError("reference builder is not attached")
         return self._builder
 
+    def rebind_map_planner(self, map_planner: Any) -> None:
+        """Point the builder at a different map (route backend switch)."""
+
+        self.builder.map_planner = map_planner
+
+    def stop_target_forward(self, **kwargs: Any) -> tuple[float, bool]:
+        """Forward distance to a stop target in the ego body frame."""
+
+        return self.builder.stop_target_forward(**kwargs)
+
+    def validate_turn_swept_footprint(self, **kwargs: Any):
+        """Check a candidate turn reference against the road corridor."""
+
+        return self.builder.validate_turn_swept_footprint(**kwargs)
+
     def snapshot(self, mode: str) -> ReferenceLineSnapshot:
         return self._snapshots[self._normalize_mode(mode)]
 

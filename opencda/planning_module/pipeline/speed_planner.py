@@ -575,6 +575,7 @@ class SpeedTargetPlanner:
             ceiling_mps=float(target.target_mps),
             destination_state=destination_state,
             reference_samples=reference_samples,
+            stop_required=bool(target.stop_required),
         )
 
     def resolve_frame(
@@ -641,8 +642,12 @@ def enforce_speed_ceiling(
     ceiling_mps: float,
     destination_state: Sequence[float],
     reference_samples: Sequence[Mapping[str, object]],
+    stop_required: bool = False,
 ) -> SpeedCeilingResult:
-    """Apply the planner speed ceiling without changing reference geometry."""
+    """Apply the planner speed ceiling without changing reference geometry.
+
+    While a stop is required the destination speed is the stop speed, zero.
+    """
 
     proposed = max(0.0, float(proposed_target_mps))
     ceiling = max(0.0, float(ceiling_mps))
@@ -650,6 +655,8 @@ def enforce_speed_ceiling(
     destination = list(destination_state)
     if len(destination) >= 3:
         destination[2] = min(max(0.0, float(destination[2])), ceiling)
+        if bool(stop_required):
+            destination[2] = 0.0
     samples = [dict(sample) for sample in reference_samples]
     for sample in samples:
         for key in ("speed_ref_mps", "v_ref_mps", "speed_mps", "v"):
