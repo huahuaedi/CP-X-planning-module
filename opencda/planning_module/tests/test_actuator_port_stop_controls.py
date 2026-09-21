@@ -34,15 +34,6 @@ def _port(*, min_accel=-4.0, max_steer=0.5, actuator_max_steer=0.7):
     )
 
 
-def test_normal_stop_holds_a_clamped_suspend_brake():
-    port = _port()
-    assert port.normal_stop_control(0.08).brake == 0.08
-    assert port.normal_stop_control(5.0).brake == 1.0
-    assert port.normal_stop_control(-1.0).brake == 0.0
-    control = port.normal_stop_control(0.08)
-    assert (control.throttle, control.steer) == (0.0, 0.0)
-
-
 def test_safe_stop_brake_is_deceleration_over_the_mpc_limit():
     control = _port(min_accel=-4.0).safe_stop_control(-2.0, 0.0)
     assert control.throttle == 0.0

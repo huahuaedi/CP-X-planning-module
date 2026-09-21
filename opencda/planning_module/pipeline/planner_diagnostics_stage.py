@@ -486,9 +486,6 @@ class PlannerDiagnosticsStage:
             "normal_stop_mpc_suspend_speed_mps": float(
                 self.config.get("normal_stop_mpc_suspend_speed_mps", 0.30)
             ),
-            "normal_stop_mpc_suspend_brake": float(
-                self.config.get("normal_stop_mpc_suspend_brake", 0.08)
-            ),
             "behavior_decision": str(behavior_decision.maneuver),
             "static_obstacle_stop_active_input": bool(
                 self.pipeline.static_obstacle.stop_active

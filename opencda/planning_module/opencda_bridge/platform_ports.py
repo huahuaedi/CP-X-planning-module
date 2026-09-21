@@ -212,13 +212,6 @@ class ActuatorPort:
             throttle=throttle, brake=brake, steer=steer,
         )
 
-    def normal_stop_control(self, suspend_brake: float):
-        return self.pedal_control(
-            throttle=0.0,
-            brake=min(1.0, max(0.0, float(suspend_brake))),
-            steer=0.0,
-        )
-
     def safe_stop_control(self, acceleration_mps2: float, steering_rad: float):
         # Steering is normalized by the MPC's planning bound, not the
         # actuator full scale used by control(); kept as the stage always was.

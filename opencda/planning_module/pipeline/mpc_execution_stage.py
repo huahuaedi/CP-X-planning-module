@@ -100,6 +100,10 @@ class MPCExecutionStage:
     The bridge supplies runtime adapters, but cannot choose between solving,
     reusing, or stopping. A failed solve may reuse one still-valid optimized
     command; otherwise it degrades to the single safe-stop control factory.
+
+    Only that bounded safe stop produces a control here.  A stop hold or a
+    hard gate carries no control: ControlFinalizationStage builds the platform
+    control for those, and alone decides whether a hard gate is an emergency.
     """
 
     def __init__(self, *, mpc: Any, control_buffer: Any,
@@ -116,9 +120,7 @@ class MPCExecutionStage:
         self,
         request: MPCExecutionRequest,
         *,
-        normal_stop_control: Callable[[], Any],
         safe_stop_control: Callable[[float, float], Any],
-        emergency_stop_control: Callable[[], Any],
     ) -> MPCExecutionResult:
         context = request.control_context
         context_key = str(context.key)
@@ -160,10 +162,9 @@ class MPCExecutionStage:
             # problem.  Returning here prevents the buffer's longitudinal
             # speed-crossing detector from scheduling one redundant solve on
             # the first stationary tick.
-            control = normal_stop_control()
             self._last_constraint_revision = str(request.constraint_revision)
             return MPCExecutionResult(
-                0.0, 0.0, control, "stop_hold_direct", "",
+                0.0, 0.0, None, "stop_hold_direct", "",
                 False, False, float(jerk_seed_acceleration_mps2),
             )
 
@@ -201,25 +202,6 @@ class MPCExecutionStage:
                     request.speed_crossing_deadband_mps
                 ),
             ))
-            if 12.5 <= float(request.sim_time_s) <= 14.5:
-                print(
-                    "[buffer_debug] t=%.3f replan=%s reason=%s ego_v=%.2f "
-                    "target_v=%.2f age_s=%s dt_s=%.3f" % (
-                        float(request.sim_time_s), replan,
-                        self._buffer._last_reason,
-                        float(request.ego_speed_mps),
-                        float(request.target_speed_mps),
-                        (
-                            "n/a" if self._buffer.plan_time_s is None
-                            else "%.3f" % (
-                                float(request.sim_time_s)
-                                - float(self._buffer.plan_time_s)
-                            )
-                        ),
-                        float(self._buffer._dt_s),
-                    ),
-                    flush=True,
-                )
             if replan:
                 _ts_plan = time.monotonic()
                 self._mpc.plan_trajectory(
@@ -272,9 +254,6 @@ class MPCExecutionStage:
                 )
                 acceleration = float(solution[0, 0])
                 steering = float(solution[0, 1])
-                if 12.5 <= float(request.sim_time_s) <= 14.5:
-                    accel_seq = [round(float(solution[i, 0]), 2) for i in range(min(5, len(solution)))]
-                    print(f"[buffer_debug]   fresh u_solution accel[0:5]={accel_seq}", flush=True)
             else:
                 buffered = self._buffer.sample(
                     sim_time_s=float(request.sim_time_s),
@@ -284,8 +263,6 @@ class MPCExecutionStage:
                 if buffered is None:
                     raise RuntimeError("MPC control buffer empty")
                 acceleration, steering, _ = buffered
-                if 12.5 <= float(request.sim_time_s) <= 14.5:
-                    print(f"[buffer_debug]   sampled accel={round(acceleration,2)} reason={buffered[2]}", flush=True)
                 status = (
                     "stop_hold_direct"
                     if request.stationary_stop_hold else "buffer_reuse"
@@ -325,8 +302,7 @@ class MPCExecutionStage:
                     ),
                 )
                 control = (
-                    emergency_stop_control()
-                    if hard_gate else safe_stop_control(
+                    None if hard_gate else safe_stop_control(
                         float(acceleration), float(steering)
                     )
                 )

@@ -1153,15 +1153,18 @@ class CPXMPCPlannerBridge:
         1. TrajectoryFallbackManager.bounded_safe_stop() -- reference layer.
            Replaces the trajectory the MPC tracks, not a control command.
         2. MPCExecutionStage ("execute_mpc") -- solves the QP against that
-           reference, or (infeasible / suspended / catastrophic) substitutes
-           one of normal_stop_control (gentle suspend-brake hold),
-           safe_stop_control (bounded decel matching the MPC's own
-           acceleration/steering intent), or emergency_stop_control (hard
-           brake=1, steer=0). Produces ``execution.control``.
-        3. ControlFinalizationStage.run() ("finalize_control") -- the hard
-           gate (candidate_hard_gate / emergency_brake maneuver) selects the
-           platform target velocity; apply_velocity_steering (PID) converts
-           it to a raw carla.VehicleControl; SafetySupervisor.run() is the
+           reference or reuses the control buffer.  Only when the solve
+           fails and no valid buffered command exists does it produce a
+           control: safe_stop_control (bounded decel matching the MPC's own
+           acceleration/steering intent).  A stop hold or a hard gate carries
+           no control.
+        3. ControlFinalizationStage.run() ("finalize_control") -- decides
+           whether the situation is an emergency (a hard gate that names a
+           stop hazard, the emergency_brake maneuver, or a corridor
+           infeasibility escalation), selects the platform target velocity,
+           and has apply_velocity_steering (PID) build the raw
+           carla.VehicleControl for every case except the bounded safe stop
+           above; SafetySupervisor.run() is the
            last-mile filter (steer/throttle/brake rate limits, red/yellow
            signal-stop envelope, boundary-recovery hard-stop, stuck-release)
            and owns whatever control this stage returns.
@@ -1629,11 +1632,7 @@ class CPXMPCPlannerBridge:
                 corridor_rows=cav_constraint_rows,
                 constraint_revision=str(cav_constraint_revision),
             ),
-            normal_stop_control=lambda: self.actuator_port.normal_stop_control(
-                float(self.config.get("normal_stop_mpc_suspend_brake", 0.08))
-            ),
             safe_stop_control=self.actuator_port.safe_stop_control,
-            emergency_stop_control=self._emergency_stop_control,
         )
         self._accum_stage_ms("execute_mpc", time.monotonic() - _ts_stage)
         mpc_jerk_seed_accel_mps2 = float(

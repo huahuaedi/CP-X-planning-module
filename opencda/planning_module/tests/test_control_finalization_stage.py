@@ -290,3 +290,105 @@ def test_failed_mpc_control_goes_through_one_safety_exit_without_pid_remap():
     assert result.control == "safe-bounded-stop"
     assert result.feedback_reason == "feedback:failure"
     assert len(feedback_calls) == 1
+
+
+# --- which execution results can put a control on the plant ------------------
+#
+# ControlFinalizationStage keeps ``execution.control`` only for a bounded safe
+# stop.  In every other case (clean solve, stop hold, hard gate, buffer reuse)
+# the platform PID path builds the control and ``execution.control`` is thrown
+# away, so the emergency decision belongs to this stage alone.  These pin that:
+# the final control must not depend on what the execution stage put there.
+
+import pytest
+
+
+class _HoldingExtractor(_TrackingExtractor):
+    def hold(self, **_kwargs):
+        return SimpleNamespace(
+            target_velocity_mps=0.0, target_steering_rad=0.0,
+            velocity_preview_time_s=0.0, velocity_source_index=0.0, valid=False,
+        )
+
+
+def _finalize(*, status, fallback_reason, control, buffer_reused=False,
+              emergency=False, stop_goal=False):
+    mpc = SimpleNamespace(
+        constraints=SimpleNamespace(min_acceleration_mps2=-3.0, max_velocity_mps=20.0),
+        dt_s=0.1, _last_x_solution=None,
+    )
+    stage = ControlFinalizationStage(
+        mpc=mpc, command_extractor=_HoldingExtractor(1.5), feedback=_Feedback(),
+        control_safety=_AcceptingSafety(), config={},
+        hard_gate_requires_emergency_stop=lambda **_kwargs: emergency,
+    )
+    request = ControlFinalizationRequest(
+        execution=SimpleNamespace(
+            acceleration_mps2=-1.0, steering_rad=0.0, control=control,
+            fallback_reason=fallback_reason, status=status,
+            failed_replan_buffer_reused=buffer_reused,
+        ),
+        behavior=SimpleNamespace(maneuver="lane_follow", target_lane_id=1),
+        ego_transform=object(), ego_speed_mps=3.0, target_speed_mps=3.0,
+        destination_state=(), reference_samples=(), stop_goal_active=stop_goal,
+        stop_target_forward_m="", final_reference_accepted=True,
+        candidate_status="ok", safety_manager=None,
+        make_pedal_control=lambda **pedals: SimpleNamespace(**pedals), sim_time_s=1.0,
+    )
+    applied = {}
+
+    def apply_velocity_steering(**kwargs):
+        applied.update(kwargs)
+        return "pid-control", 0.0, 0.0, {}
+
+    result = stage.run(
+        request,
+        set_actuator_context=lambda **_kwargs: None,
+        acceleration_from_control=lambda _control: -3.0,
+        steering_from_control=lambda _control: 0.0,
+        apply_velocity_steering=apply_velocity_steering,
+        control_factory=lambda *_args: None,
+        boundary_metrics=lambda *_args: {},
+        update_boundary_recovery=lambda *_args: None,
+        reset_boundary_recovery=lambda *_args: None,
+    )
+    return result, applied
+
+
+_PID_CASES = [
+    pytest.param(dict(status="stop_hold_direct", fallback_reason=""), id="stationary-stop-hold"),
+    pytest.param(dict(status="candidate_hard_gate",
+                      fallback_reason="candidate_hard_gate:turn_swept_footprint"),
+                 id="hard-gate-geometry-veto"),
+    pytest.param(dict(status="candidate_hard_gate",
+                      fallback_reason="candidate_hard_gate:collision_risk", emergency=True),
+                 id="hard-gate-collision-risk"),
+    pytest.param(dict(status="buffer_reuse_after_failed_replan",
+                      fallback_reason="MPC status=infeasible", buffer_reused=True),
+                 id="buffer-reused-after-failure"),
+]
+
+
+@pytest.mark.parametrize("case", _PID_CASES)
+def test_the_platform_control_ignores_whatever_the_execution_stage_produced(case):
+    with_control, applied_with = _finalize(control="STOP-CONTROL-FROM-EXECUTION", **case)
+    without_control, applied_without = _finalize(control=None, **case)
+
+    assert with_control.control == "pid-control" == without_control.control
+    assert with_control.acceleration_mps2 == without_control.acceleration_mps2
+    assert with_control.steering_rad == without_control.steering_rad
+    assert applied_with == applied_without, "the PID request must not depend on execution.control"
+    assert with_control.platform_debug == without_control.platform_debug
+
+
+def test_emergency_is_decided_here_and_only_by_the_hazard_rule():
+    geometry, applied_geometry = _finalize(
+        control="EMERGENCY", status="candidate_hard_gate",
+        fallback_reason="candidate_hard_gate:turn_swept_footprint", emergency=False)
+    collision, applied_collision = _finalize(
+        control=None, status="candidate_hard_gate",
+        fallback_reason="candidate_hard_gate:collision_risk", emergency=True)
+
+    assert applied_geometry["emergency_stop"] is False, "an emergency control upstream must not make a veto an emergency"
+    assert applied_collision["emergency_stop"] is True
+    assert geometry.control == collision.control == "pid-control"

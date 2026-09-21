@@ -78,11 +78,9 @@ def _request(**overrides):
 def _run(stage, request):
     return stage.run(
         request,
-        normal_stop_control=lambda: "hold",
         safe_stop_control=lambda acceleration, steering: (
             "safe-stop", acceleration, steering,
         ),
-        emergency_stop_control=lambda: "emergency-stop",
     )
 
 
@@ -158,15 +156,21 @@ def test_failed_solve_without_buffer_uses_bounded_safe_stop():
     assert result.acceleration_mps2 == -1.0
 
 
-def test_hard_gate_resets_buffer_and_uses_emergency_stop():
+def test_hard_gate_resets_buffer_and_carries_no_control():
+    # Whether a hard gate is an emergency is ControlFinalizationStage's call
+    # (see test_control_finalization_stage); this stage only vetoes the plan.
     buffer = _Buffer(replan=False, sample=(0.2, 0.1, "stale"))
+    mpc = _MPC()
     result = _run(
-        MPCExecutionStage(mpc=_MPC(), control_buffer=buffer),
+        MPCExecutionStage(mpc=mpc, control_buffer=buffer),
         _request(hard_gate_reason="candidate_hard_gate:reference_invalid"),
     )
     assert result.status == "candidate_hard_gate"
-    assert result.control == "emergency-stop"
+    assert result.control is None
+    assert result.steering_rad == 0.0
+    assert result.fallback_reason == "candidate_hard_gate:reference_invalid"
     assert buffer.reset_reason == "control_buffer_reference_hard_veto"
+    assert mpc.plan_kwargs == {}, "a hard-gated reference must never reach the solver"
 
 
 def test_stationary_stop_hold_never_enters_mpc_scheduler_or_solver():
@@ -183,7 +187,7 @@ def test_stationary_stop_hold_never_enters_mpc_scheduler_or_solver():
         ),
     )
     assert result.status == "stop_hold_direct"
-    assert result.control == "hold"
+    assert result.control is None
     assert not result.replan_executed
     assert buffer.last_replan_request == {}
     assert mpc.plan_kwargs == {}
