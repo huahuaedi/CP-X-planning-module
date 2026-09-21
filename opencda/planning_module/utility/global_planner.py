@@ -185,14 +185,9 @@ def waypoint_transform(waypoint: Any, carla: Any):
     `CustomGlobalPlannerAdapter` waypoint (`.position` dict, returned by the
     custom Dijkstra/AD-map backend).
 
-    Several scenario modules used to each carry their own near-identical
-    copy of this conversion (`carla_scenario/roadway_hazard/scenario.py`,
-    `carla_scenario/town10/obstacle_spawner.py`,
-    `carla_scenario/high_level_route_planning/scenario.py`,
-    `utility/coordinate_obstacle_spawner.py`); some handled only the
-    `.position` shape and raised `AttributeError` under `astar` mode. This
-    is the single shared implementation all of them now call, mirroring the
-    fallback `world_heading_rad` already used above.
+    This is the single shared implementation of that conversion: handling
+    only the `.position` shape would raise `AttributeError` under `astar`
+    mode. It mirrors the fallback `world_heading_rad` already used above.
     """
 
     if waypoint is None:

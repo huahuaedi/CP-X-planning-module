@@ -91,10 +91,9 @@ _PLANNING_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 def _candidate_dirs() -> List[str]:
     candidates: List[str] = []
-    for sub in ("carla_scenario", "opencda_scenario"):
-        pattern = os.path.join(_PLANNING_ROOT, sub, "**", "planning_metrics.json")
-        for match in glob.glob(pattern, recursive=True):
-            candidates.append(os.path.dirname(match))
+    pattern = os.path.join(_PLANNING_ROOT, "**", "planning_metrics.json")
+    for match in glob.glob(pattern, recursive=True):
+        candidates.append(os.path.dirname(match))
     candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
     return candidates
 

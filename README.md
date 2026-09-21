@@ -26,11 +26,8 @@ The module has been tested locally with:
 - `opencda/planning_module/MPC/`: MPC trajectory planner and local-goal logic.
 - `opencda/planning_module/behavior_planner/`: rule-based behavior planner.
 - `opencda/planning_module/utility/`: global planner, lane graph, tracker, metrics, and config helpers.
-- `opencda/planning_module/carla_scenario/` and `opencda_scenario/`: legacy
-  scenario definitions retained only while useful cases are migrated; they
-  are not executable entry points.
 - `opencda/planning_module/tests/`: unit tests for planner logic and scenario configuration.
-- `opencda/co_simulation/`: minimal SUMO bridge dependency used by `opencda_scenario`.
+- `opencda/co_simulation/`: minimal SUMO bridge dependency used by `opencda/scenario_testing/utils/cosim_api.py`.
 
 
 ## Custom Global Planner
@@ -227,16 +224,9 @@ See [`opencda/planning_module/README.md`](opencda/planning_module/README.md)
 for the CP-X planning stack's architecture, directory layout, and behavior
 planner/MPC internals.
 
-**Recommended test order:**
-1. `town10` — confirm the MPC loop works
-2. `traffic_light_stop` — confirm stop-line logic
-3. `roadway_hazard` — confirm obstacle avoidance
-4. `town10_scenario_1` — add live traffic
-5. `town10_scenario_5` or `6` — full stress test
-
 ### Analysing results
 
-After any run, output files are written to the scenario directory. Use the bundled analysis script:
+After any run, `planning_metrics.json` and its time-series CSV are written next to the planner debug log (the scenario's `planner.debug_output_dir`). Use the bundled analysis script:
 
 ```bash
 cd opencda/planning_module
@@ -245,13 +235,10 @@ cd opencda/planning_module
 python analyze_run.py
 
 # analyse a specific run
-python analyze_run.py opencda_scenario/town10_scenario_5
+python analyze_run.py <run_dir>
 
 # compare multiple runs side by side
-python analyze_run.py --compare \
-  opencda_scenario/town10_scenario_1 \
-  opencda_scenario/town10_scenario_5 \
-  opencda_scenario/town10_scenario_6
+python analyze_run.py --compare <run_dir_a> <run_dir_b> <run_dir_c>
 
 # list all runs that have result files
 python analyze_run.py --list
@@ -301,7 +288,6 @@ Python 3.7 syntax check:
 
 ```bash
 python -m py_compile \
-  opencda/planning_module/planning_runner.py \
   opencda/planning_module/MPC/mpc.py \
   opencda/planning_module/MPC/local_goal.py \
   opencda/planning_module/behavior_planner/planner.py \

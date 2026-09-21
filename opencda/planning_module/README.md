@@ -60,14 +60,15 @@ python -m opencda.planning_module.tools.export_full_run_plots <debug_csv> <outpu
 
 ## Directory Layout
 
-- `main.py`: discovers and runs scenarios.
-- `planning_runner.py`: shared CARLA runtime loop, actor spawning, route generation, behavior planner calls, MPC calls, camera/debug overlays, and metric export.
+- `opencda_bridge/`: the OpenCDA vehicle-manager planner bridge (`CPXMPCPlannerBridge`) and debug viewer.
+- `pipeline/`: the staged per-tick planning pipeline (perception, behavior, reference, speed, MPC execution, control finalization, diagnostics).
 - `MPC/`: trajectory optimization and local-goal generation.
 - `behavior_planner/`: rule-based behavior planner, lane-safety scoring, future trajectory risk gate, stop/reroute handling, and temporary destination selection.
-- `utility/`: global planner, CARLA lane graph extraction, tracker, cooperative message helpers, config loading, and evaluation metrics.
-- `carla_scenario/`: CARLA-only scenarios.
-- `opencda_scenario/`: scenarios with OpenCDA/SUMO-style runtime logic.
-- `tests/`: unit tests for planner behavior, scenario loading, route logic, and metrics.
+- `Global_Planner/`: CARLA-independent OpenDRIVE/AD-map route and lane-context planner.
+- `utility/`: tracker, cooperative message helpers, config loading, and evaluation metrics.
+- `tools/`: offline analysis and report exporters for planner debug logs.
+- `analyze_run.py`: post-run analysis of `planning_metrics.json` artifacts.
+- `tests/`: unit tests for planner behavior, route logic, and metrics.
 
 ## Behavior Planner
 

@@ -2,7 +2,7 @@
 Typed contract for the behavior layer's decision output.
 
 ``RuleBasedBehaviorPlanner.update()`` returns a plain ``dict`` at runtime so
-that existing call sites (tests, ``planning_runner.py``) keep working
+that existing call sites (tests, the OpenCDA bridge) keep working
 unchanged. ``BehaviorCommand`` documents the field contract for that dict —
 which keys are always present vs conditionally present — without changing
 the runtime type.

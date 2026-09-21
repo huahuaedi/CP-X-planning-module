@@ -56,7 +56,7 @@ def _ref_source_kind(cpx_debug: dict) -> str:
 
 
 class OpenCDADebugViewer:
-    """Two-camera viewer with a bottom HUD, modeled after planning_runner."""
+    """Two-camera viewer with a bottom HUD."""
 
     def __init__(
         self,

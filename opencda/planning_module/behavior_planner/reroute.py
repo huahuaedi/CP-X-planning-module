@@ -175,14 +175,6 @@ def _blocked_waypoints_around(hazard_waypoint) -> List[object]:
     return blocked
 
 
-def _location_point(location) -> Dict[str, float]:
-    return {
-        "x": float(location.x),
-        "y": float(location.y),
-        "z": float(getattr(location, "z", 0.0)),
-    }
-
-
 def _legacy_carla_reroute(
     *,
     messages,
