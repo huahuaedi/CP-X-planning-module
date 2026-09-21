@@ -8,7 +8,7 @@ treated as harmless and the ego drove on into static scene geometry.
 
 import pytest
 
-from pipeline.stop_policy import (
+from pipeline.safety_supervisor import (
     emergency_stop_reason,
     hard_gate_requires_emergency_stop,
     pipeline_failure_action,

@@ -3,7 +3,7 @@
 This is step 3 of the bridge's control-writing precedence
 (TrajectoryFallbackManager reference substitution -> MPCExecutionStage's
 bounded safe stop, its only control -> this stage, which alone decides
-whether a hard gate is an emergency (see stop_policy) and builds the
+whether a hard gate is an emergency (see safety_supervisor) and builds the
 platform control for every other case -> SafetySupervisor last-mile filter ->
 CPXMPCPlannerBridge.run_step()'s try/except as the absolute last resort) --
 see run_step()'s docstring for the full chain in one place before changing
@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
-from .stop_policy import emergency_stop_reason
+from .safety_supervisor import emergency_stop_reason
 
 
 @dataclass(frozen=True)

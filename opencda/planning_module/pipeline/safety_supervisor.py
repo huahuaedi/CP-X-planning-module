@@ -529,6 +529,23 @@ class SafetySupervisor:
         planner_accel_mps2: float,
         stuck_release_min_accel_mps2: float,
     ) -> str:
+        """Which OpenCDA safety flags still count as a hazard this tick.
+
+        Characterized by tests/test_safety_hazard_filter.py.  Known behavior,
+        recorded rather than endorsed -- changing any of it is a policy change
+        that needs a CARLA regression:
+
+        * ``ran_light`` is released only for a driving maneuver (lane follow,
+          turns, lane change, route recovery); an unclassified maneuver such as
+          ``yield_slow_down`` or ``""`` on a clear light is not released.
+        * ``stuck`` is released by the planner's own acceleration, so the gate
+          can be argued out of a hazard by the output it supervises.
+        * Any flag not named here (e.g. ``imu``) is never released.
+        * ``ran_light`` returns at once, so other active flags are not named
+          in the reason.
+        * ``stuck`` on a red/yellow with no planner acceleration is an
+          emergency even when already stopped (harmless in practice).
+        """
         hazards = {
             str(item).strip().lower()
             for item in str(hazard_reason or "").split(",")
@@ -607,3 +624,100 @@ class SafetySupervisor:
         ):
             hazards.discard("offroad")
         return ",".join(sorted(hazards))
+
+
+# --- MPC-path stop policy ----------------------------------------------------
+# When a stop must be an emergency (full braking, wheels straight).  The
+# MPC-path emergency decision lives here, beside the OpenCDA safety-flag hazard
+# gate in SafetySupervisor._filtered_hazard_reason, so the supervisor module is
+# the one home of every "is this an emergency" rule.  Three things make an MPC
+# path tick an emergency: a hard gate that names a stop hazard, the
+# ``emergency_brake`` maneuver, and a corridor-infeasibility escalation.
+# Anything else that vetoes the reference (a geometry or continuity contract
+# failure) is a bounded degradation, not an emergency.  The two gates are
+# independent and run at different points: this one decides how the control is
+# built; the hazard filter runs last on the built control.
+
+def hard_gate_requires_emergency_stop(
+    *,
+    fallback_reason: str,
+    behavior_decision: str,
+    stop_goal_active: bool,
+) -> bool:
+    """Reserve full braking for hard gates that represent a stop hazard.
+
+    A geometry/continuity contract veto means MPC must not consume that
+    reference, but it is not evidence of an imminent collision.  Those
+    failures use the bounded tracking fallback and remain subject to the
+    downstream safety supervisor.  Collision, explicit stop, and emergency
+    behavior retain deterministic full braking.
+    """
+
+    reason = str(fallback_reason or "").strip().lower()
+    decision = str(behavior_decision or "").strip().lower()
+    if not reason.startswith("candidate_hard_gate:"):
+        return False
+    if bool(stop_goal_active) or decision in {
+        "emergency_brake",
+        "stop_at_intersection",
+        "stop_sign",
+    }:
+        return True
+    hazard_tokens = (
+        "collision_risk",
+        "emergency_brake_direct_control",
+        "stop_missing_target_hard_lock",
+        # A geometry/continuity veto with nothing to fall back to is not
+        # automatically harmless just because it isn't an explicit
+        # collision-risk token -- confirmed on a real intersection turn
+        # (MDrive Intersection_Deadlock_Resolution/3): the reference
+        # pipeline hard-gated with "empty_reference;turn_swept_footprint:
+        # no_corridor_geometry" at the turn exit, the bounded-tracking
+        # fallback below applied throttle=0.2-0.23/brake=0.0 the whole
+        # window with the reference still empty, and the ego collided with
+        # unmodeled static scene geometry moments later -- then, still
+        # inside this same hard-gate window, the post-impact speed drop
+        # read as a large speed deficit against normal cruise and the
+        # bounded-tracking path answered with full throttle (brake stayed
+        # 0.0 throughout). "No usable reference at all" is at least as much
+        # a "do not know it's safe to keep moving" case as the
+        # stop-missing-target lock above; treat it the same way.
+        "empty_reference",
+        "no_corridor_geometry",
+        "too_few_forward_samples",
+    )
+    return any(token in reason for token in hazard_tokens)
+
+
+def emergency_stop_reason(
+    *,
+    fallback_reason: str,
+    behavior_decision: str,
+    stop_goal_active: bool,
+    corridor_infeasible_escalate: bool,
+) -> str:
+    """Why this tick is an emergency, or ``""`` when it is not."""
+
+    if hard_gate_requires_emergency_stop(
+        fallback_reason=fallback_reason,
+        behavior_decision=behavior_decision,
+        stop_goal_active=stop_goal_active,
+    ):
+        return "hard_gate_stop_hazard"
+    if str(behavior_decision or "").strip().lower() == "emergency_brake":
+        return "emergency_brake_maneuver"
+    if bool(corridor_infeasible_escalate):
+        return "corridor_infeasible_escalation"
+    return ""
+
+
+def pipeline_failure_action(fallback_policy: str) -> str:
+    """What to do when the planning pipeline raises: ``"raise"`` or ``"emergency_stop"``.
+
+    ``"opencda"`` is listed for parity with the old inline check, but the
+    bridge rewrites that policy to ``"emergency_stop"`` before it can get here.
+    """
+
+    if str(fallback_policy) in {"raise", "opencda"}:
+        return "raise"
+    return "emergency_stop"

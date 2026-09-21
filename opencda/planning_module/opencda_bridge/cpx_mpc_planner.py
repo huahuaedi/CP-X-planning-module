@@ -23,7 +23,7 @@ import yaml
 
 from opencda.planning_module.utility.carla_compat import carla
 from opencda.planning_module.pipeline.route_context_stage import RouteContextStage
-from opencda.planning_module.pipeline.stop_policy import pipeline_failure_action
+from opencda.planning_module.pipeline.safety_supervisor import pipeline_failure_action
 from opencda.planning_module.pipeline.boundary_recovery import BoundaryRecoveryTracker
 from opencda.planning_module.pipeline.road_boundary_monitor import RoadBoundaryMonitor
 from opencda.planning_module.pipeline.turn_road_envelope import (
