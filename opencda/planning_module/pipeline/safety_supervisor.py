@@ -55,7 +55,7 @@ class SafetySupervisor:
         self,
         *,
         control: Any,
-        carla_module: Any,
+        make_pedal_control: Callable[..., Any],
         accel_mps2: float,
         steer_rad: float,
         ego_transform: Any,
@@ -88,7 +88,7 @@ class SafetySupervisor:
                 1.0,
                 max(0.0, float(config.get("full_stop_hold_brake", 0.60))),
             )
-            held = carla_module.VehicleControl(
+            held = make_pedal_control(
                 throttle=0.0,
                 brake=float(hold_brake),
                 steer=0.0,
@@ -124,7 +124,7 @@ class SafetySupervisor:
                 1.0,
                 max(0.0, float(config.get("full_stop_hold_brake", 0.60))),
             )
-            held = carla_module.VehicleControl(
+            held = make_pedal_control(
                 throttle=0.0,
                 brake=float(hold_brake),
                 steer=0.0,
@@ -196,7 +196,6 @@ class SafetySupervisor:
         self,
         *,
         control: Any,
-        carla_module: Any,
         accel_mps2: float,
         steer_rad: float,
         ego_speed_mps: float,
@@ -398,7 +397,7 @@ class SafetySupervisor:
         self,
         *,
         control: Any,
-        carla_module: Any,
+        make_pedal_control: Callable[..., Any],
         safety_manager: Any = None,
         input_frame: Any = None,
         behavior_decision: str = "",
@@ -439,13 +438,13 @@ class SafetySupervisor:
             if not filtered_hazard:
                 self._last_control = control
                 return control, "safety_supervisor_release:" + str(hazard_reason)
-            safe = carla_module.VehicleControl(throttle=0.0, brake=1.0, steer=0.0)
+            safe = make_pedal_control(throttle=0.0, brake=1.0, steer=0.0)
             self._last_control = safe
             return safe, "safety_supervisor_emergency_stop:" + filtered_hazard
         if self._last_control is None:
             self._last_control = control
             return control, ""
-        filtered = carla_module.VehicleControl(
+        filtered = make_pedal_control(
             throttle=self._limit_delta(
                 float(getattr(control, "throttle", 0.0)),
                 float(getattr(self._last_control, "throttle", 0.0)),

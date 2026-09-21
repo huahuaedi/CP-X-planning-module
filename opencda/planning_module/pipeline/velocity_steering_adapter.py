@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 
 @dataclass(frozen=True)
@@ -50,7 +50,7 @@ class OpenCDAVelocitySteeringAdapter:
         command: VelocitySteeringCommand,
         actual_speed_mps: float,
         sim_time_s: float,
-        carla_module: Any,
+        make_pedal_control: Callable[..., Any],
     ):
         del sim_time_s  # OpenCDA PID owns its configured control timestep.
 
@@ -151,7 +151,7 @@ class OpenCDAVelocitySteeringAdapter:
         # limit (0.3 normalized == only 0.18 rad for a 0.6 rad vehicle).
         steer = max(-1.0, min(1.0, float(desired_steer)))
 
-        control = carla_module.VehicleControl(
+        control = make_pedal_control(
             throttle=float(throttle),
             brake=float(brake),
             steer=float(steer),

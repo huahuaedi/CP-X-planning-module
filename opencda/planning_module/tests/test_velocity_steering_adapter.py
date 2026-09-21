@@ -55,7 +55,7 @@ class VelocitySteeringAdapterTest(unittest.TestCase):
             command=command,
             actual_speed_mps=actual_speed_mps,
             sim_time_s=1.0,
-            carla_module=_Carla,
+            make_pedal_control=_Carla.VehicleControl,
         )
 
     def test_target_velocity_is_sent_to_opencda_pid_in_kmh(self):
@@ -124,7 +124,7 @@ class VelocitySteeringAdapterTest(unittest.TestCase):
             ),
             actual_speed_mps=6.46,
             sim_time_s=1.0,
-            carla_module=_Carla,
+            make_pedal_control=_Carla.VehicleControl,
         )
 
         self.assertEqual(reason, "opencda_pid_underspeed_coast")
@@ -140,7 +140,7 @@ class VelocitySteeringAdapterTest(unittest.TestCase):
             ),
             actual_speed_mps=6.57,
             sim_time_s=1.0,
-            carla_module=_Carla,
+            make_pedal_control=_Carla.VehicleControl,
         )
 
         self.assertEqual(reason, "opencda_pid_overspeed_coast")
@@ -158,7 +158,7 @@ class VelocitySteeringAdapterTest(unittest.TestCase):
             command=VelocitySteeringCommand(2.2, 0.0),
             actual_speed_mps=2.31,
             sim_time_s=1.0,
-            carla_module=_Carla,
+            make_pedal_control=_Carla.VehicleControl,
         )
 
         self.assertEqual(reason, "opencda_pid_deadband_coast")

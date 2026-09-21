@@ -28,7 +28,7 @@ class ControlFinalizationRequest:
     final_reference_accepted: bool
     candidate_status: str
     safety_manager: Any
-    carla_module: Any
+    make_pedal_control: Callable[..., Any]
     sim_time_s: float
     # The optimized near-term velocity is a platform safety ceiling only when
     # Stage D installed a longitudinal space-time corridor.  In an ordinary
@@ -198,7 +198,7 @@ class ControlFinalizationStage:
             })
         safety = self._safety.run(
             control=control,
-            carla_module=request.carla_module,
+            make_pedal_control=request.make_pedal_control,
             acceleration_mps2=acceleration,
             steering_rad=steering,
             ego_transform=request.ego_transform,

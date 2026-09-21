@@ -27,7 +27,7 @@ class ControlSafetyStage:
         self.config = dict(config)
 
     def run(
-        self, *, control: Any, carla_module: Any, acceleration_mps2: float,
+        self, *, control: Any, make_pedal_control: Callable, acceleration_mps2: float,
         steering_rad: float, ego_transform: Any, ego_speed_mps: float,
         destination_state: Sequence[float], behavior: Any,
         stop_goal_active: bool, stop_target_forward_m: object,
@@ -40,7 +40,7 @@ class ControlSafetyStage:
         steering_from_control: Callable,
     ) -> ControlSafetyResult:
         control, accel, steer, signal_reason = self.supervisor.enforce_signal_stop(
-            control=control, carla_module=carla_module,
+            control=control, make_pedal_control=make_pedal_control,
             accel_mps2=float(acceleration_mps2), steer_rad=float(steering_rad),
             ego_transform=ego_transform, ego_speed_mps=float(ego_speed_mps),
             destination_state=destination_state,
@@ -76,7 +76,7 @@ class ControlSafetyStage:
                 reset_boundary_recovery()
             control, accel, steer, boundary_reason = (
                 self.supervisor.enforce_turn_boundary(
-                    control=control, carla_module=carla_module,
+                    control=control,
                     accel_mps2=float(accel), steer_rad=float(steer),
                     ego_speed_mps=float(ego_speed_mps),
                     behavior_decision=str(behavior.maneuver),
@@ -98,7 +98,7 @@ class ControlSafetyStage:
         )
         pre_accel, pre_steer = float(accel), float(steer)
         control, supervisor_reason = self.supervisor.filter_control(
-            control=control, carla_module=carla_module,
+            control=control, make_pedal_control=make_pedal_control,
             safety_manager=safety_manager,
             behavior_decision=str(behavior.maneuver),
             traffic_signal_state=str(behavior.traffic_signal_state),

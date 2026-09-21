@@ -45,7 +45,7 @@ class SafetySupervisorTest(unittest.TestCase):
         supervisor = SafetySupervisor()
         control, accel, steer, reason = supervisor.enforce_signal_stop(
             control=_Control(throttle=0.5),
-            carla_module=_Carla,
+            make_pedal_control=_Carla.VehicleControl,
             accel_mps2=1.0,
             steer_rad=0.1,
             ego_transform=SimpleNamespace(
@@ -71,7 +71,7 @@ class SafetySupervisorTest(unittest.TestCase):
         original = _Control(throttle=0.4, steer=0.1)
         control, accel, steer, reason = supervisor.enforce_signal_stop(
             control=original,
-            carla_module=_Carla,
+            make_pedal_control=_Carla.VehicleControl,
             accel_mps2=0.8,
             steer_rad=0.1,
             ego_transform=SimpleNamespace(),
@@ -92,7 +92,7 @@ class SafetySupervisorTest(unittest.TestCase):
         supervisor = SafetySupervisor()
         control, accel, _, reason = supervisor.enforce_signal_stop(
             control=_Control(throttle=0.5),
-            carla_module=_Carla,
+            make_pedal_control=_Carla.VehicleControl,
             accel_mps2=1.0,
             steer_rad=0.1,
             ego_transform=SimpleNamespace(
@@ -117,7 +117,7 @@ class SafetySupervisorTest(unittest.TestCase):
         supervisor = SafetySupervisor()
         control, accel, steer, reason = supervisor.enforce_signal_stop(
             control=_Control(throttle=0.5),
-            carla_module=_Carla,
+            make_pedal_control=_Carla.VehicleControl,
             accel_mps2=1.0,
             steer_rad=0.1,
             ego_transform=SimpleNamespace(
@@ -144,7 +144,6 @@ class SafetySupervisorTest(unittest.TestCase):
         supervisor = SafetySupervisor()
         control, accel, _, reason = supervisor.enforce_turn_boundary(
             control=_Control(throttle=0.4),
-            carla_module=_Carla,
             accel_mps2=0.8,
             steer_rad=0.1,
             ego_speed_mps=0.5,
@@ -165,7 +164,6 @@ class SafetySupervisorTest(unittest.TestCase):
         supervisor = SafetySupervisor()
         control, accel, _, reason = supervisor.enforce_turn_boundary(
             control=_Control(throttle=0.4),
-            carla_module=_Carla,
             accel_mps2=0.8,
             steer_rad=0.1,
             ego_speed_mps=0.0,
@@ -185,7 +183,6 @@ class SafetySupervisorTest(unittest.TestCase):
         supervisor = SafetySupervisor()
         control, accel, _, reason = supervisor.enforce_turn_boundary(
             control=_Control(throttle=0.4),
-            carla_module=_Carla,
             accel_mps2=0.8,
             steer_rad=0.1,
             ego_speed_mps=0.0,
@@ -206,7 +203,6 @@ class SafetySupervisorTest(unittest.TestCase):
         for _ in range(8):
             control, accel, _, reason = supervisor.enforce_turn_boundary(
                 control=_Control(throttle=0.4),
-                carla_module=_Carla,
                 accel_mps2=0.8,
                 steer_rad=0.2,
                 ego_speed_mps=0.0,
@@ -230,7 +226,6 @@ class SafetySupervisorTest(unittest.TestCase):
         supervisor = SafetySupervisor()
         supervisor.enforce_turn_boundary(
             control=_Control(throttle=0.4),
-            carla_module=_Carla,
             accel_mps2=0.8,
             steer_rad=0.2,
             ego_speed_mps=0.5,
@@ -242,7 +237,6 @@ class SafetySupervisorTest(unittest.TestCase):
         )
         _, _, _, active_reason = supervisor.enforce_turn_boundary(
             control=_Control(throttle=0.4),
-            carla_module=_Carla,
             accel_mps2=0.8,
             steer_rad=0.2,
             ego_speed_mps=0.5,
@@ -254,7 +248,6 @@ class SafetySupervisorTest(unittest.TestCase):
         )
         _, _, _, released_reason = supervisor.enforce_turn_boundary(
             control=_Control(throttle=0.4),
-            carla_module=_Carla,
             accel_mps2=0.8,
             steer_rad=0.2,
             ego_speed_mps=0.5,
@@ -275,7 +268,6 @@ class SafetySupervisorTest(unittest.TestCase):
         for _ in range(8):
             result = supervisor.enforce_turn_boundary(
                 control=_Control(brake=0.3),
-                carla_module=_Carla,
                 accel_mps2=-0.9,
                 steer_rad=0.2,
                 ego_speed_mps=0.0,
@@ -301,7 +293,6 @@ class SafetySupervisorTest(unittest.TestCase):
         supervisor = SafetySupervisor()
         supervisor.enforce_turn_boundary(
             control=_Control(throttle=0.0, brake=0.3, steer=0.2),
-            carla_module=_Carla,
             accel_mps2=-0.9,
             steer_rad=0.2,
             ego_speed_mps=0.0,
@@ -314,7 +305,7 @@ class SafetySupervisorTest(unittest.TestCase):
 
         control, reason = supervisor.filter_control(
             control=_Control(throttle=0.3, steer=0.2),
-            carla_module=_Carla,
+            make_pedal_control=_Carla.VehicleControl,
             safety_manager=_SafetyManager({"stuck": True}),
             behavior_decision="intersection_turn_right",
             traffic_signal_state="unknown",
@@ -330,7 +321,6 @@ class SafetySupervisorTest(unittest.TestCase):
         supervisor = SafetySupervisor()
         supervisor.enforce_turn_boundary(
             control=_Control(throttle=0.3, steer=0.2),
-            carla_module=_Carla,
             accel_mps2=0.3,
             steer_rad=0.2,
             ego_speed_mps=0.1,
@@ -343,7 +333,7 @@ class SafetySupervisorTest(unittest.TestCase):
 
         control, reason = supervisor.filter_control(
             control=_Control(throttle=0.2, steer=0.2),
-            carla_module=_Carla,
+            make_pedal_control=_Carla.VehicleControl,
             safety_manager=_SafetyManager({"offroad": True}),
             behavior_decision="intersection_turn_right",
             traffic_signal_state="unknown",
@@ -360,7 +350,6 @@ class SafetySupervisorTest(unittest.TestCase):
 
         control, accel, steer, reason = supervisor.enforce_turn_boundary(
             control=original,
-            carla_module=_Carla,
             accel_mps2=0.75,
             steer_rad=0.2,
             ego_speed_mps=0.2,
@@ -385,7 +374,7 @@ class SafetySupervisorTest(unittest.TestCase):
         supervisor = SafetySupervisor()
         control, reason = supervisor.filter_control(
             control=_Control(throttle=0.5),
-            carla_module=_Carla,
+            make_pedal_control=_Carla.VehicleControl,
             safety_manager=_SafetyManager({"collision": True, "stuck": True}),
             behavior_decision="lane_follow",
             traffic_signal_state="green",
@@ -399,7 +388,7 @@ class SafetySupervisorTest(unittest.TestCase):
         supervisor = SafetySupervisor()
         control, reason = supervisor.filter_control(
             control=_Control(throttle=0.5),
-            carla_module=_Carla,
+            make_pedal_control=_Carla.VehicleControl,
             safety_manager=_SafetyManager({"stuck": True}),
             behavior_decision="stop_at_intersection",
             traffic_signal_state="red",
@@ -413,7 +402,7 @@ class SafetySupervisorTest(unittest.TestCase):
         supervisor = SafetySupervisor()
         control, reason = supervisor.filter_control(
             control=_Control(throttle=0.5),
-            carla_module=_Carla,
+            make_pedal_control=_Carla.VehicleControl,
             safety_manager=_SafetyManager({"stuck": True}),
             behavior_decision="lane_follow",
             traffic_signal_state="green",
@@ -428,7 +417,7 @@ class SafetySupervisorTest(unittest.TestCase):
         supervisor = SafetySupervisor()
         control, reason = supervisor.filter_control(
             control=_Control(throttle=0.5),
-            carla_module=_Carla,
+            make_pedal_control=_Carla.VehicleControl,
             safety_manager=_SafetyManager({"stuck": True}),
             behavior_decision="lane_follow",
             traffic_signal_state="unknown",
@@ -443,7 +432,7 @@ class SafetySupervisorTest(unittest.TestCase):
         supervisor = SafetySupervisor()
         control, reason = supervisor.filter_control(
             control=_Control(throttle=0.5),
-            carla_module=_Carla,
+            make_pedal_control=_Carla.VehicleControl,
             safety_manager=_SafetyManager({"stuck": True}),
             behavior_decision="lane_follow",
             traffic_signal_state="red",
@@ -458,7 +447,7 @@ class SafetySupervisorTest(unittest.TestCase):
         supervisor = SafetySupervisor()
         control, reason = supervisor.filter_control(
             control=_Control(throttle=0.35),
-            carla_module=_Carla,
+            make_pedal_control=_Carla.VehicleControl,
             safety_manager=_SafetyManager({"stuck": True}),
             behavior_decision="intersection_turn_left",
             traffic_signal_state="unknown",
@@ -473,7 +462,7 @@ class SafetySupervisorTest(unittest.TestCase):
         supervisor = SafetySupervisor(stuck_release_min_accel_mps2=0.01)
         control, reason = supervisor.filter_control(
             control=_Control(throttle=0.013),
-            carla_module=_Carla,
+            make_pedal_control=_Carla.VehicleControl,
             safety_manager=_SafetyManager({"stuck": True}),
             behavior_decision="intersection_turn_right",
             traffic_signal_state="green",
@@ -488,7 +477,7 @@ class SafetySupervisorTest(unittest.TestCase):
         supervisor = SafetySupervisor()
         control, reason = supervisor.filter_control(
             control=_Control(throttle=0.25),
-            carla_module=_Carla,
+            make_pedal_control=_Carla.VehicleControl,
             safety_manager=_SafetyManager({"stuck": True}),
             behavior_decision="route_recovery",
             traffic_signal_state="unknown",
@@ -503,7 +492,7 @@ class SafetySupervisorTest(unittest.TestCase):
         supervisor = SafetySupervisor()
         control, reason = supervisor.filter_control(
             control=_Control(throttle=0.4),
-            carla_module=_Carla,
+            make_pedal_control=_Carla.VehicleControl,
             safety_manager=_SafetyManager({"ran_light": True}),
             behavior_decision="lane_follow",
             traffic_signal_state="unknown",
@@ -518,7 +507,7 @@ class SafetySupervisorTest(unittest.TestCase):
         supervisor = SafetySupervisor()
         control, reason = supervisor.filter_control(
             control=_Control(throttle=0.4),
-            carla_module=_Carla,
+            make_pedal_control=_Carla.VehicleControl,
             safety_manager=_SafetyManager({"ran_light": True}),
             behavior_decision="stop_at_intersection",
             traffic_signal_state="red",
@@ -534,7 +523,7 @@ class SafetySupervisorTest(unittest.TestCase):
 
         control, reason = supervisor.filter_control(
             control=_Control(brake=0.2),
-            carla_module=_Carla,
+            make_pedal_control=_Carla.VehicleControl,
         )
 
         self.assertEqual(reason, "safety_supervisor_rate_limit")
@@ -549,7 +538,7 @@ class SafetySupervisorTest(unittest.TestCase):
 
         control, _ = supervisor.filter_control(
             control=_Control(throttle=1.0),
-            carla_module=_Carla,
+            make_pedal_control=_Carla.VehicleControl,
         )
 
         self.assertAlmostEqual(control.throttle, 0.10)
@@ -564,13 +553,13 @@ class SafetySupervisorTest(unittest.TestCase):
         # a previous timestamp exists, so it still uses the reference tick.
         supervisor.filter_control(
             control=_Control(throttle=0.0),
-            carla_module=_Carla,
+            make_pedal_control=_Carla.VehicleControl,
             sim_time_s=10.0,
         )
 
         control, _ = supervisor.filter_control(
             control=_Control(throttle=1.0),
-            carla_module=_Carla,
+            make_pedal_control=_Carla.VehicleControl,
             sim_time_s=10.20,
         )
 
@@ -581,13 +570,13 @@ class SafetySupervisorTest(unittest.TestCase):
         supervisor._last_control = _Control(throttle=0.0)
         supervisor.filter_control(
             control=_Control(throttle=0.0),
-            carla_module=_Carla,
+            make_pedal_control=_Carla.VehicleControl,
             sim_time_s=10.0,
         )
 
         control, _ = supervisor.filter_control(
             control=_Control(throttle=1.0),
-            carla_module=_Carla,
+            make_pedal_control=_Carla.VehicleControl,
             sim_time_s=10.025,
         )
 

@@ -90,7 +90,7 @@ def _run_solved_finalization(*, safety_cap_active):
         final_reference_accepted=True,
         candidate_status="feasible",
         safety_manager=None,
-        carla_module=object(),
+        make_pedal_control=lambda **pedals: SimpleNamespace(**pedals),
         sim_time_s=1.0,
         mpc_velocity_safety_cap_active=bool(safety_cap_active),
     )
@@ -169,7 +169,7 @@ def _run_solved_finalization_with_corridor_escalation(*, corridor_infeasible_esc
         destination_state=(), reference_samples=(), stop_goal_active=False,
         stop_target_forward_m="", final_reference_accepted=True,
         candidate_status="feasible", safety_manager=None,
-        carla_module=object(), sim_time_s=1.0,
+        make_pedal_control=lambda **pedals: SimpleNamespace(**pedals), sim_time_s=1.0,
         corridor_infeasible_escalate=bool(corridor_infeasible_escalate),
     )
     applied = {}
@@ -271,7 +271,7 @@ def test_failed_mpc_control_goes_through_one_safety_exit_without_pid_remap():
         final_reference_accepted=True,
         candidate_status="feasible",
         safety_manager=None,
-        carla_module=object(),
+        make_pedal_control=lambda **pedals: SimpleNamespace(**pedals),
         sim_time_s=1.0,
     )
     result = stage.run(

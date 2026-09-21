@@ -1275,7 +1275,7 @@ class CPXMPCPlannerBridge:
             ),
             actual_speed_mps=float(actual_speed_mps),
             sim_time_s=float(sim_time_s),
-            carla_module=carla,
+            make_pedal_control=self.actuator_port.pedal_control,
         )
         applied_steer_rad = (
             float(getattr(control, "steer", 0.0))
@@ -1700,7 +1700,7 @@ class CPXMPCPlannerBridge:
                     "candidate_pipeline_selected_status", ""
                 )),
                 safety_manager=latest_update.get("safety_manager"),
-                carla_module=self.carla,
+                make_pedal_control=self.actuator_port.pedal_control,
                 sim_time_s=float(sim_time_s),
                 mpc_velocity_safety_cap_active=any(
                     str(getattr(row, "slack_group", "")) == "corridor"
