@@ -22,6 +22,11 @@ import yaml
 
 from opencda.planning_module.utility.carla_compat import carla
 from opencda.planning_module.pipeline.route_context_stage import RouteContextStage
+from opencda.planning_module.pipeline.boundary_recovery import BoundaryRecoveryTracker
+from opencda.planning_module.pipeline.road_boundary_monitor import RoadBoundaryMonitor
+from opencda.planning_module.pipeline.turn_road_envelope import (
+    rolling_turn_envelope_payload_world,
+)
 from opencda.planning_module.pipeline.cooperative_arbitration_stage import (
     CooperativeArbitrationRequest,
     CooperativeArbitrationStage,
@@ -260,15 +265,11 @@ class CPXMPCPlannerBridge:
             ),
         )
         from opencda.planning_module.pipeline.scenario_manager import (
-            BoundaryRecoveryRequest,
             CPXScenarioManager,
         )
 
         scenario_manager = CPXScenarioManager(self.config)
-        self._boundary_recovery_request = BoundaryRecoveryRequest()
-        self._boundary_recovery_trigger_frames = 0
-        self._boundary_recovery_infeasible_frames = 0
-        self._boundary_recovery_cooldown_until_s = -float("inf")
+        self._boundary_recovery = BoundaryRecoveryTracker(self.config)
         self._full_last_behavior_mode_key = ""
         fallback_manager = TrajectoryFallbackManager(
             max_hold_age_s=float(self.config.get("fallback_hold_last_valid_s", 0.35)),
@@ -955,8 +956,11 @@ class CPXMPCPlannerBridge:
             ),
             pet_bin_size_m=float(self.config.get("metrics_pet_bin_size_m", 3.0)),
         )
-        self._metrics_boundary_breach_count = 0
-        self._metrics_boundary_sample_count = 0
+        self._road_boundary = RoadBoundaryMonitor(
+            self.config,
+            vehicle_provider=lambda: self.vehicle_manager.vehicle,
+            generator_provider=lambda: self.reference_generator,
+        )
         self._prediction_lane_step_resolved_count = 0
         self._prediction_lane_step_none_count = 0
         self._cooperative = CooperativeArbitrationStage(
@@ -1563,7 +1567,10 @@ class CPXMPCPlannerBridge:
         # after the speed target has recovered, otherwise forcing every new
         # solve to continue braking until the vehicle is almost stationary.
         mpc_jerk_seed_accel_mps2 = float(self._last_accel_mps2)
-        road_envelope_payload_world = self._rolling_turn_envelope_payload_world(
+        road_envelope_payload_world = rolling_turn_envelope_payload_world(
+            config=self.config,
+            mpc=self.mpc,
+            vehicle=getattr(getattr(self, "vehicle_manager", None), "vehicle", None),
             behavior_decision=str(behavior_decision.maneuver),
             reference_samples=lane_center_reference,
             ego_x_m=float(ego_location.x),
@@ -1677,9 +1684,9 @@ class CPXMPCPlannerBridge:
             steering_from_control=self._steer_rad_from_control,
             apply_velocity_steering=self._apply_velocity_steering_interface,
             control_factory=self._control_from_mpc,
-            boundary_metrics=self._road_boundary_metrics,
-            update_boundary_recovery=self._update_boundary_recovery_request,
-            reset_boundary_recovery=self._reset_boundary_recovery_request,
+            boundary_metrics=self._road_boundary.measure,
+            update_boundary_recovery=self._boundary_recovery.update,
+            reset_boundary_recovery=self._boundary_recovery.reset,
         )
         self._accum_stage_ms("finalize_control", time.monotonic() - _ts_stage)
         _ts_stage = time.monotonic()
@@ -1993,403 +2000,6 @@ class CPXMPCPlannerBridge:
                 self._debug_record_traceback_printed = True
 
 
-    def _update_boundary_recovery_request(
-        self,
-        *,
-        boundary_snapshot: Mapping[str, object],
-        behavior_decision: str,
-        sim_time_s: float,
-        recovery_planned: bool = False,
-        recovery_reference_feasible: bool = True,
-    ) -> None:
-        from opencda.planning_module.pipeline.scenario_manager import (
-            BoundaryRecoveryRequest,
-        )
-
-        if float(sim_time_s) < float(
-            getattr(
-                self,
-                "_boundary_recovery_cooldown_until_s",
-                -float("inf"),
-            )
-        ):
-            self._reset_boundary_recovery_request()
-            return
-
-        geometry_source = str(
-            boundary_snapshot.get(
-                "road_boundary_geometry_source",
-                "",
-            )
-        )
-        drivable_inside = boundary_snapshot.get(
-            "road_boundary_drivable_inside",
-            "",
-        )
-        if (
-            geometry_source.startswith("drivable_footprint:")
-            and drivable_inside in {True, "True", "true", "1", 1}
-        ):
-            # Consuming the soft boundary margin may request lower speed, but
-            # it must not latch hard recovery while the complete footprint is
-            # still on CARLA's driving-lane union.
-            self._boundary_recovery_infeasible_frames = 0
-            self._reset_boundary_recovery_request()
-            return
-
-        if bool(recovery_planned) and not bool(recovery_reference_feasible):
-            self._boundary_recovery_infeasible_frames = (
-                int(
-                    getattr(
-                        self,
-                        "_boundary_recovery_infeasible_frames",
-                        0,
-                    )
-                )
-                + 1
-            )
-            max_failures = max(
-                1,
-                int(
-                    self.config.get(
-                        "boundary_recovery_max_infeasible_frames",
-                        3,
-                    )
-                ),
-            )
-            if int(self._boundary_recovery_infeasible_frames) >= int(
-                max_failures
-            ):
-                self._boundary_recovery_cooldown_until_s = (
-                    float(sim_time_s)
-                    + max(
-                        0.1,
-                        float(
-                            self.config.get(
-                                "boundary_recovery_cooldown_s",
-                                2.0,
-                            )
-                        ),
-                    )
-                )
-                self._reset_boundary_recovery_request()
-            return
-        self._boundary_recovery_infeasible_frames = 0
-
-        try:
-            valid = bool(
-                boundary_snapshot.get(
-                    "road_boundary_sample_valid",
-                    False,
-                )
-            )
-            clearance_m = float(
-                boundary_snapshot.get("road_boundary_clearance_m", "")
-            )
-            lateral_offset_m = float(
-                boundary_snapshot.get(
-                    "road_boundary_lateral_offset_m",
-                    "",
-                )
-            )
-            heading_error_rad = float(
-                boundary_snapshot.get(
-                    "road_boundary_heading_error_rad",
-                    "",
-                )
-            )
-        except (TypeError, ValueError):
-            valid = False
-            clearance_m = float("inf")
-            lateral_offset_m = 0.0
-            heading_error_rad = 0.0
-        if not bool(valid) or not all(
-            math.isfinite(value)
-            for value in (
-                float(clearance_m),
-                float(lateral_offset_m),
-                float(heading_error_rad),
-            )
-        ):
-            self._reset_boundary_recovery_request()
-            return
-
-        trigger_clearance_m = float(
-            self.config.get(
-                "boundary_recovery_trigger_clearance_m",
-                -0.10,
-            )
-        )
-        release_clearance_m = max(
-            float(trigger_clearance_m),
-            float(
-                self.config.get(
-                    "boundary_recovery_release_clearance_m",
-                    0.10,
-                )
-            ),
-        )
-        if float(clearance_m) <= float(trigger_clearance_m):
-            self._boundary_recovery_trigger_frames = (
-                int(self._boundary_recovery_trigger_frames) + 1
-            )
-        else:
-            self._boundary_recovery_trigger_frames = 0
-        required_frames = max(
-            1,
-            int(
-                self.config.get(
-                    "boundary_recovery_trigger_frames",
-                    3,
-                )
-            ),
-        )
-        previous_active = bool(
-            getattr(
-                getattr(self, "_boundary_recovery_request", None),
-                "active",
-                False,
-            )
-        )
-        active = bool(
-            (
-                bool(previous_active)
-                and float(clearance_m) < float(release_clearance_m)
-            )
-            or int(self._boundary_recovery_trigger_frames)
-            >= int(required_frames)
-        )
-        decision = str(behavior_decision or "").strip().lower()
-        turn_direction = (
-            "left"
-            if decision.endswith("_left")
-            else "right"
-            if decision.endswith("_right")
-            else ""
-        )
-        self._boundary_recovery_request = BoundaryRecoveryRequest(
-            valid=True,
-            active=bool(active),
-            clearance_m=float(clearance_m),
-            lateral_offset_m=float(lateral_offset_m),
-            heading_error_rad=float(heading_error_rad),
-            turn_direction=str(turn_direction),
-            timestamp_s=float(sim_time_s),
-            reason=(
-                "boundary_recovery_latched"
-                if bool(active)
-                else "boundary_recovery_monitor"
-            ),
-        )
-
-    def _reset_boundary_recovery_request(self) -> None:
-        from opencda.planning_module.pipeline.scenario_manager import (
-            BoundaryRecoveryRequest,
-        )
-
-        self._boundary_recovery_trigger_frames = 0
-        self._boundary_recovery_request = BoundaryRecoveryRequest()
-
-    def _road_boundary_metrics(
-        self,
-        ego_location: Any,
-        *,
-        record_sample: bool = True,
-        ego_yaw_rad: float | None = None,
-        reference_samples: Sequence[Mapping[str, Any]] = (),
-    ) -> dict[str, object]:
-        """Measure ego with the same route-corridor footprint contract."""
-
-        result: dict[str, object] = {
-            "road_boundary_sample_valid": False,
-            "road_boundary_lateral_offset_m": "",
-            "road_boundary_lane_width_m": "",
-            "road_boundary_ego_half_width_m": "",
-            "road_boundary_clearance_m": "",
-            "road_boundary_breach": "",
-            "road_boundary_heading_error_rad": "",
-            "road_boundary_projection_segment_index": "",
-            "road_boundary_projection_segment_ratio": "",
-            "road_boundary_projection_raw_heading_rad": "",
-            "road_boundary_projection_conditioned_heading_rad": "",
-            "road_boundary_projection_continuity_limited": "",
-            "road_boundary_projection_reason": "",
-            "road_boundary_geometry_source": "",
-            "road_boundary_drivable_inside": "",
-        }
-        try:
-            bounding_box = getattr(self.vehicle_manager.vehicle, "bounding_box", None)
-            extent = getattr(bounding_box, "extent", None)
-            ego_half_width_m = float(
-                getattr(
-                    extent,
-                    "y",
-                    self.config.get("metrics_ego_half_width_m", 1.0),
-                )
-            )
-            ego_half_length_m = float(
-                getattr(
-                    extent,
-                    "x",
-                    self.config.get("reference_vehicle_half_length_m", 2.4),
-                )
-            )
-            if ego_yaw_rad is None:
-                ego_yaw_rad = math.radians(
-                    float(
-                        self.vehicle_manager.vehicle.get_transform().rotation.yaw
-                    )
-                )
-            projection = None
-            if len(list(reference_samples or [])) >= 2:
-                projection = self.reference_generator.project_reference_corridor(
-                    reference_samples=reference_samples,
-                    x_m=float(ego_location.x),
-                    y_m=float(ego_location.y),
-                    heading_rad=float(ego_yaw_rad),
-                    ego_half_width_m=float(ego_half_width_m),
-                    ego_half_length_m=float(ego_half_length_m),
-                    safety_margin_m=float(
-                        self.config.get(
-                            "reference_contract_turn_boundary_margin_m",
-                            0.15,
-                        )
-                    ),
-                    max_heading_step_rad=float(
-                        self.config.get(
-                            "road_boundary_projection_max_heading_step_rad",
-                            0.04,
-                        )
-                    ),
-                    continuity_reset_distance_m=float(
-                        self.config.get(
-                            "road_boundary_projection_reset_distance_m",
-                            2.5,
-                        )
-                    ),
-                    max_position_step_m=float(
-                        self.config.get(
-                            "road_boundary_projection_max_position_step_m",
-                            0.5,
-                        )
-                    ),
-                )
-                occupancy = projection.occupancy
-            else:
-                occupancy = self.reference_generator.lane_corridor_occupancy(
-                    x_m=float(ego_location.x),
-                    y_m=float(ego_location.y),
-                    heading_rad=float(ego_yaw_rad),
-                    ego_half_width_m=float(ego_half_width_m),
-                    ego_half_length_m=float(ego_half_length_m),
-                    safety_margin_m=float(
-                        self.config.get(
-                            "reference_contract_turn_boundary_margin_m",
-                            0.15,
-                        )
-                    ),
-                )
-            if not bool(occupancy.valid):
-                return result
-            lateral_offset_m = float(occupancy.lateral_offset_m)
-            lane_width_m = float(occupancy.lane_width_m)
-            clearance_m = float(occupancy.footprint_clearance_m)
-            geometry_source = "route_tangent_strip"
-            drivable_inside: object = ""
-            if bool(
-                self.config.get(
-                    "road_boundary_carla_drivable_footprint_enabled",
-                    True,
-                )
-            ):
-                drivable_occupancy = (
-                    self.reference_generator.drivable_footprint_occupancy(
-                        x_m=float(ego_location.x),
-                        y_m=float(ego_location.y),
-                        z_m=float(getattr(ego_location, "z", 0.0)),
-                        heading_rad=float(ego_yaw_rad),
-                        ego_half_width_m=float(ego_half_width_m),
-                        ego_half_length_m=float(ego_half_length_m),
-                        safety_margin_m=float(
-                            self.config.get(
-                                "reference_contract_turn_boundary_margin_m",
-                                0.15,
-                            )
-                        ),
-                    )
-                )
-                if bool(drivable_occupancy.valid):
-                    clearance_m = float(
-                        drivable_occupancy.min_clearance_m
-                    )
-                    geometry_source = str(
-                        drivable_occupancy.reason
-                    )
-                    drivable_inside = bool(
-                        drivable_occupancy.inside
-                    )
-            breach = (
-                not bool(drivable_inside)
-                if drivable_inside != ""
-                else bool(clearance_m < 0.0)
-            )
-            if bool(record_sample):
-                self._metrics_boundary_sample_count += 1
-                if breach:
-                    self._metrics_boundary_breach_count += 1
-            result.update(
-                {
-                    "road_boundary_sample_valid": True,
-                    "road_boundary_lateral_offset_m": float(lateral_offset_m),
-                    "road_boundary_lane_width_m": float(lane_width_m),
-                    "road_boundary_ego_half_width_m": float(ego_half_width_m),
-                    "road_boundary_clearance_m": float(clearance_m),
-                    "road_boundary_breach": bool(breach),
-                    "road_boundary_heading_error_rad": float(
-                        occupancy.heading_error_rad
-                    ),
-                    "road_boundary_projection_segment_index": (
-                        int(projection.segment_index)
-                        if projection is not None
-                        else ""
-                    ),
-                    "road_boundary_projection_segment_ratio": (
-                        float(projection.segment_ratio)
-                        if projection is not None
-                        else ""
-                    ),
-                    "road_boundary_projection_raw_heading_rad": (
-                        float(projection.raw_heading_rad)
-                        if projection is not None
-                        else ""
-                    ),
-                    "road_boundary_projection_conditioned_heading_rad": (
-                        float(projection.conditioned_heading_rad)
-                        if projection is not None
-                        else ""
-                    ),
-                    "road_boundary_projection_continuity_limited": (
-                        bool(projection.continuity_limited)
-                        if projection is not None
-                        else False
-                    ),
-                    "road_boundary_projection_reason": (
-                        str(projection.reason)
-                        if projection is not None
-                        else "lane_corridor_occupancy:map_fallback"
-                    ),
-                    "road_boundary_geometry_source": str(
-                        geometry_source
-                    ),
-                    "road_boundary_drivable_inside": (
-                        drivable_inside
-                    ),
-                }
-            )
-        except Exception:
-            pass
-        return result
-
     def _update_evaluation_metrics(
         self,
         *,
@@ -2440,7 +2050,7 @@ class CPXMPCPlannerBridge:
         boundary = (
             dict(boundary_snapshot)
             if boundary_snapshot is not None
-            else self._road_boundary_metrics(
+            else self._road_boundary.measure(
                 ego_location,
                 ego_yaw_rad=float(ego_yaw_rad),
                 reference_samples=reference_samples,
@@ -2471,7 +2081,7 @@ class CPXMPCPlannerBridge:
             breach=bool(boundary["road_boundary_breach"]),
         )
         summary = self.evaluation_metrics.summary()
-        boundary_sample_count = int(self._metrics_boundary_sample_count)
+        boundary_sample_count = int(self._road_boundary.sample_count)
         cost_terms = dict(self.mpc.get_last_cost_terms())
         return {
             "evaluation_metrics_available": True,
@@ -2512,11 +2122,11 @@ class CPXMPCPlannerBridge:
             "distance_traveled_m": summary.get("distance_traveled_m", ""),
             **boundary,
             "road_boundary_breach_count": int(
-                self._metrics_boundary_breach_count
+                self._road_boundary.breach_count
             ),
             "road_boundary_sample_count": boundary_sample_count,
             "road_boundary_breach_rate": (
-                float(self._metrics_boundary_breach_count)
+                float(self._road_boundary.breach_count)
                 / float(boundary_sample_count)
                 if boundary_sample_count > 0
                 else ""
@@ -2727,7 +2337,7 @@ class CPXMPCPlannerBridge:
                 sim_time_s=float(sim_time_s),
                 config=self.config,
                 boundary_recovery_request=(
-                    getattr(self, "_boundary_recovery_request", None)
+                    getattr(getattr(self, "_boundary_recovery", None), "request", None)
                     if bool(self.config.get("boundary_recovery_enabled", False))
                     else None
                 ),
@@ -3593,117 +3203,6 @@ class CPXMPCPlannerBridge:
 
         self._reset_pipeline_for_route_revision(reason="turn_route_replanned")
         return True, True, str(result.reason)
-
-    def _rolling_turn_envelope_payload_world(
-        self,
-        *,
-        behavior_decision: str,
-        reference_samples: Sequence[Mapping[str, object]],
-        ego_x_m: float,
-        ego_y_m: float,
-    ) -> Optional[Mapping[str, object]]:
-        """Build an MPC road envelope for only the current turn horizon."""
-
-        if str(behavior_decision or "").strip().lower() not in {
-            "intersection_turn_left",
-            "intersection_turn_right",
-        }:
-            return None
-        if not bool(self.config.get("turn_mpc_road_envelope_enabled", True)):
-            return None
-        from opencda.planning_module.pipeline.candidate_pipeline import (
-            build_turn_reference_envelope_blocks,
-        )
-        from opencda.planning_module.MPC.lane_keep import (
-            road_envelope_conservativeness_correction,
-        )
-
-        vehicle = getattr(getattr(self, "vehicle_manager", None), "vehicle", None)
-        extent = getattr(getattr(vehicle, "bounding_box", None), "extent", None)
-        ego_half_width_m = max(
-            0.1,
-            float(
-                getattr(
-                    extent,
-                    "y",
-                    self.config.get("metrics_ego_half_width_m", 1.0),
-                )
-            ),
-        )
-        blocks = build_turn_reference_envelope_blocks(
-            reference_samples=reference_samples,
-            ego_half_width_m=float(ego_half_width_m),
-            ego_x_m=float(ego_x_m),
-            ego_y_m=float(ego_y_m),
-            safety_margin_m=max(
-                0.0,
-                float(
-                    self.config.get(
-                        "turn_mpc_road_envelope_safety_margin_m",
-                        self.config.get(
-                            "reference_contract_turn_boundary_margin_m",
-                            0.15,
-                        ),
-                    )
-                ),
-            ),
-            default_lane_width_m=float(getattr(self.mpc, "lane_width_m", 3.5)),
-            longitudinal_overlap_m=max(
-                0.0,
-                float(self.config.get("turn_mpc_road_envelope_overlap_m", 0.75)),
-            ),
-        )
-        if not blocks:
-            return None
-        rho = float(getattr(self.mpc, "road_envelope_rho", -8.0))
-        return {
-            "blocks": blocks,
-            "epsilon0": road_envelope_conservativeness_correction(
-                blocks,
-                rho=float(rho),
-            ),
-            "rho": float(rho),
-            # This is recovery slack, not extra drivable width.  Keeping the
-            # 10k envelope penalty means MPC still prefers the body-safe tube,
-            # while the ceiling prevents a tracking error at the turn apex
-            # from making the entire QP mathematically infeasible. A finite
-            # 1.5m ceiling was observed going infeasible on a real
-            # intersection turn (MDrive Intersection_Deadlock_Resolution/3,
-            # confirmed via MPC._last_infeasibility_diagnostic:
-            # road_envelope_term_active with road_boundary/corridor/terminal
-            # all inactive).
-            #
-            # An unbounded ceiling is NOT the fix, though it was tried first:
-            # this envelope is derived from the reference/lane geometry, not
-            # from live sensing of curbs, poles, medians or other static
-            # scene geometry -- MDrive's ground-truth perception feed here
-            # only ever supplies vehicles + traffic lights (see
-            # _MDriveVehicleManager.perception_manager.objects in
-            # cpx_planner_adapter.py), never static world obstacles. With no
-            # independent check against real geometry, letting MPC accept
-            # an arbitrarily large deviation from the reference tube has no
-            # backstop: re-tested on the same scenario with the ceiling
-            # unbounded, the earlier infeasibility/stall was gone but the
-            # vehicle then drifted far enough off its reference during
-            # recovery to collide with unmodeled static scene geometry
-            # partway through the turn exit (confirmed via a sudden speed
-            # collapse -- 2.34 m/s to under 0.2 m/s in one control tick, at
-            # zero commanded curvature and no MPC-side warning beforehand --
-            # not a planner-commanded stop). 3.0m is a middle ground: about
-            # 2x the original ceiling (enough headroom for the turn geometry
-            # that made 1.5m infeasible) while still bounding how far MPC
-            # can let the solution drift from the reference tube in the
-            # absence of any static-obstacle sensing to catch it.
-            "max_slack_m": (
-                lambda configured: (
-                    float(configured)
-                    if configured is not None and float(configured) > 0.0
-                    else 3.0
-                )
-            )(
-                self.config.get("turn_mpc_road_envelope_recovery_slack_m")
-            ),
-        }
 
     def _lane_change_mpc_stall_failure_count(self) -> int:
         """Consecutive MPC infeasibility count for the active lane-change target.

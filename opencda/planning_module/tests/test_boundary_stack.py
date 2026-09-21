@@ -19,80 +19,70 @@ from unittest.mock import patch
 
 import pytest
 
-from opencda_bridge.cpx_mpc_planner import CPXMPCPlannerBridge  # noqa: E402
+from pipeline.boundary_recovery import BoundaryRecoveryTracker  # noqa: E402
+from pipeline.road_boundary_monitor import RoadBoundaryMonitor  # noqa: E402
+from pipeline.turn_road_envelope import rolling_turn_envelope_payload_world  # noqa: E402
 
 # =========================== FIXTURES (the only part tied to the layout) ===========================
 
 
 class RecoveryHarness:
     def __init__(self, config):
-        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
-        bridge.config = dict(config)
-        bridge._boundary_recovery_trigger_frames = 0
-        bridge._boundary_recovery_infeasible_frames = 0
-        bridge._boundary_recovery_cooldown_until_s = -float("inf")
-        bridge._reset_boundary_recovery_request()
-        self._bridge = bridge
+        self._tracker = BoundaryRecoveryTracker(dict(config))
 
     def update(self, **kwargs):
-        self._bridge._update_boundary_recovery_request(**kwargs)
+        self._tracker.update(**kwargs)
 
     def reset(self):
-        self._bridge._reset_boundary_recovery_request()
+        self._tracker.reset()
 
     @property
     def request(self):
-        return self._bridge._boundary_recovery_request
+        return self._tracker.request
 
     @property
     def trigger_frames(self):
-        return self._bridge._boundary_recovery_trigger_frames
+        return self._tracker.trigger_frames
 
     @property
     def infeasible_frames(self):
-        return self._bridge._boundary_recovery_infeasible_frames
+        return self._tracker.infeasible_frames
 
     @property
     def cooldown_until_s(self):
-        return self._bridge._boundary_recovery_cooldown_until_s
+        return self._tracker.cooldown_until_s
 
     def set_counters(self, *, trigger=None, infeasible=None, cooldown=None):
         if trigger is not None:
-            self._bridge._boundary_recovery_trigger_frames = trigger
+            self._tracker.trigger_frames = trigger
         if infeasible is not None:
-            self._bridge._boundary_recovery_infeasible_frames = infeasible
+            self._tracker.infeasible_frames = infeasible
         if cooldown is not None:
-            self._bridge._boundary_recovery_cooldown_until_s = cooldown
+            self._tracker.cooldown_until_s = cooldown
 
 
 class MonitorHarness:
     def __init__(self, config, vehicle, generator):
-        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
-        bridge.config = dict(config)
-        bridge.vehicle_manager = SimpleNamespace(vehicle=vehicle)
-        bridge.reference_generator = generator
-        bridge._metrics_boundary_sample_count = 0
-        bridge._metrics_boundary_breach_count = 0
-        self._bridge = bridge
+        self._monitor = RoadBoundaryMonitor(
+            dict(config),
+            vehicle_provider=lambda: vehicle,
+            generator_provider=lambda: generator,
+        )
 
     def measure(self, ego_location, **kwargs):
-        return self._bridge._road_boundary_metrics(ego_location, **kwargs)
+        return self._monitor.measure(ego_location, **kwargs)
 
     @property
     def sample_count(self):
-        return self._bridge._metrics_boundary_sample_count
+        return self._monitor.sample_count
 
     @property
     def breach_count(self):
-        return self._bridge._metrics_boundary_breach_count
+        return self._monitor.breach_count
 
 
 def envelope(config, mpc, vehicle, **kwargs):
-    bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
-    bridge.config = dict(config)
-    bridge.mpc = mpc
-    bridge.vehicle_manager = SimpleNamespace(vehicle=vehicle)
-    return bridge._rolling_turn_envelope_payload_world(**kwargs)
+    return rolling_turn_envelope_payload_world(config=dict(config), mpc=mpc, vehicle=vehicle, **kwargs)
 
 
 # =================================== shared builders ===================================

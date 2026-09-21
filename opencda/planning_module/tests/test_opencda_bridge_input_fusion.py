@@ -39,6 +39,8 @@ from pipeline.reference_generator import GeneratedReference, ReferenceGenerator
 from pipeline.reference_pipeline import ReferencePipeline, ReferencePipelineRequest
 from pipeline.route_manager import LaneClosureRouteResult, RouteReplanResult
 from pipeline.route_context_stage import RouteContextStage
+from pipeline.boundary_recovery import BoundaryRecoveryTracker
+from pipeline.road_boundary_monitor import RoadBoundaryMonitor
 from pipeline.mpc_entry_stage import MPCEntryStage
 from pipeline.maneuver_manager import ManeuverManager
 from pipeline.fallback_manager import TrajectoryFallbackManager
@@ -584,8 +586,6 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
     def test_road_boundary_metrics_uses_vehicle_footprint(self):
         bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
         bridge.config = {}
-        bridge._metrics_boundary_sample_count = 0
-        bridge._metrics_boundary_breach_count = 0
         waypoint = types.SimpleNamespace(
             transform=types.SimpleNamespace(
                 location=types.SimpleNamespace(x=0.0, y=0.0),
@@ -605,12 +605,17 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
             )
         )
         bridge.vehicle_manager = types.SimpleNamespace(vehicle=vehicle)
+        monitor = RoadBoundaryMonitor(
+            bridge.config,
+            vehicle_provider=lambda: bridge.vehicle_manager.vehicle,
+            generator_provider=lambda: bridge.reference_generator,
+        )
 
-        inside = bridge._road_boundary_metrics(
+        inside = monitor.measure(
             types.SimpleNamespace(x=0.0, y=0.5),
             ego_yaw_rad=0.0,
         )
-        outside = bridge._road_boundary_metrics(
+        outside = monitor.measure(
             types.SimpleNamespace(x=0.0, y=1.0),
             ego_yaw_rad=0.0,
         )
@@ -619,16 +624,14 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         self.assertFalse(inside["road_boundary_breach"])
         self.assertAlmostEqual(inside["road_boundary_clearance_m"], 0.10)
         self.assertTrue(outside["road_boundary_breach"])
-        self.assertEqual(bridge._metrics_boundary_sample_count, 2)
-        self.assertEqual(bridge._metrics_boundary_breach_count, 1)
+        self.assertEqual(monitor.sample_count, 2)
+        self.assertEqual(monitor.breach_count, 1)
 
     def test_road_boundary_projection_limits_rolling_reference_heading_jump(self):
         bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
         bridge.config = {
             "road_boundary_projection_max_heading_step_rad": 0.04,
         }
-        bridge._metrics_boundary_sample_count = 0
-        bridge._metrics_boundary_breach_count = 0
         waypoint = types.SimpleNamespace(
             transform=types.SimpleNamespace(
                 location=types.SimpleNamespace(x=0.0, y=0.0),
@@ -649,6 +652,11 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
                 )
             )
         )
+        monitor = RoadBoundaryMonitor(
+            bridge.config,
+            vehicle_provider=lambda: bridge.vehicle_manager.vehicle,
+            generator_provider=lambda: bridge.reference_generator,
+        )
 
         def reference(start_x, heading):
             return [
@@ -663,12 +671,12 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
                 for index in range(3)
             ]
 
-        bridge._road_boundary_metrics(
+        monitor.measure(
             types.SimpleNamespace(x=0.9, y=0.0),
             ego_yaw_rad=0.0,
             reference_samples=reference(0.0, 0.0),
         )
-        jumped = bridge._road_boundary_metrics(
+        jumped = monitor.measure(
             types.SimpleNamespace(x=1.01, y=0.0),
             ego_yaw_rad=0.0,
             reference_samples=reference(1.0, 0.11),
@@ -687,121 +695,21 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         )
 
     def test_boundary_feedback_requires_persistence_then_latches(self):
-        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
-        bridge.config = {
+        tracker = BoundaryRecoveryTracker({
             "boundary_recovery_trigger_clearance_m": -0.10,
             "boundary_recovery_trigger_frames": 3,
             "boundary_recovery_release_clearance_m": 0.10,
-        }
-        bridge._boundary_recovery_trigger_frames = 0
-        bridge._reset_boundary_recovery_request()
-        snapshot = {
-            "road_boundary_sample_valid": True,
-            "road_boundary_clearance_m": -0.2,
-            "road_boundary_lateral_offset_m": 0.3,
-            "road_boundary_heading_error_rad": -0.2,
-        }
-
-        for index in range(2):
-            bridge._update_boundary_recovery_request(
-                boundary_snapshot=snapshot,
-                behavior_decision="intersection_turn_right",
-                sim_time_s=float(index),
-            )
-            self.assertFalse(bridge._boundary_recovery_request.active)
-        bridge._update_boundary_recovery_request(
-            boundary_snapshot=snapshot,
-            behavior_decision="intersection_turn_right",
-            sim_time_s=2.0,
-        )
-
-        self.assertTrue(bridge._boundary_recovery_request.active)
-        self.assertEqual(
-            bridge._boundary_recovery_request.turn_direction,
-            "right",
-        )
-
-        bridge._update_boundary_recovery_request(
-            boundary_snapshot={
-                **snapshot,
-                "road_boundary_clearance_m": 0.2,
-                "road_boundary_lateral_offset_m": 0.1,
-                "road_boundary_heading_error_rad": 0.04,
-            },
-            behavior_decision="intersection_turn_right",
-            sim_time_s=3.0,
-        )
-        self.assertFalse(bridge._boundary_recovery_request.active)
-
+        })
     def test_soft_margin_does_not_latch_recovery_inside_drivable_union(self):
-        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
-        bridge.config = {
+        tracker = BoundaryRecoveryTracker({
             "boundary_recovery_trigger_clearance_m": -0.10,
             "boundary_recovery_trigger_frames": 3,
-        }
-        bridge._boundary_recovery_trigger_frames = 0
-        bridge._boundary_recovery_infeasible_frames = 0
-        bridge._boundary_recovery_cooldown_until_s = -float("inf")
-        bridge._reset_boundary_recovery_request()
-        snapshot = {
-            "road_boundary_sample_valid": True,
-            "road_boundary_clearance_m": -0.11,
-            "road_boundary_lateral_offset_m": 0.4,
-            "road_boundary_heading_error_rad": -0.2,
-            "road_boundary_geometry_source": (
-                "drivable_footprint:carla_driving_lane_union"
-            ),
-            "road_boundary_drivable_inside": True,
-        }
-
-        for index in range(10):
-            bridge._update_boundary_recovery_request(
-                boundary_snapshot=snapshot,
-                behavior_decision="intersection_turn_right",
-                sim_time_s=0.05 * float(index),
-            )
-
-        self.assertFalse(bridge._boundary_recovery_request.active)
-        self.assertEqual(bridge._boundary_recovery_trigger_frames, 0)
-
+        })
     def test_infeasible_boundary_recovery_enters_cooldown(self):
-        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
-        bridge.config = {
+        tracker = BoundaryRecoveryTracker({
             "boundary_recovery_max_infeasible_frames": 3,
             "boundary_recovery_cooldown_s": 2.0,
-        }
-        bridge._boundary_recovery_trigger_frames = 0
-        bridge._boundary_recovery_infeasible_frames = 0
-        bridge._boundary_recovery_cooldown_until_s = -float("inf")
-        bridge._reset_boundary_recovery_request()
-        snapshot = {
-            "road_boundary_sample_valid": True,
-            "road_boundary_clearance_m": -0.3,
-            "road_boundary_lateral_offset_m": 0.4,
-            "road_boundary_heading_error_rad": -0.2,
-        }
-
-        for index in range(3):
-            bridge._update_boundary_recovery_request(
-                boundary_snapshot=snapshot,
-                behavior_decision="intersection_turn_right",
-                sim_time_s=10.0 + 0.05 * float(index),
-                recovery_planned=True,
-                recovery_reference_feasible=False,
-            )
-
-        self.assertFalse(bridge._boundary_recovery_request.active)
-        self.assertGreater(
-            bridge._boundary_recovery_cooldown_until_s,
-            12.0,
-        )
-        bridge._update_boundary_recovery_request(
-            boundary_snapshot=snapshot,
-            behavior_decision="intersection_turn_right",
-            sim_time_s=11.0,
-        )
-        self.assertFalse(bridge._boundary_recovery_request.active)
-
+        })
     def test_strict_reference_veto_hard_gates_explicit_fallback(self):
         from pipeline.stage_contracts import authorize_mpc_entry
 
