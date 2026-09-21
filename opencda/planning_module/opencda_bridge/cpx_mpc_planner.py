@@ -2527,6 +2527,19 @@ class CPXMPCPlannerBridge:
         cost_terms = dict(self.mpc.get_last_cost_terms())
         return {
             "evaluation_metrics_available": True,
+            # Ground truth for these two comes only from whatever calls
+            # self.evaluation_metrics.record_collision() -- the planner
+            # itself has no CARLA collision sensor and never calls it; the
+            # scenario runner's own collision sensor (scenario-evaluator
+            # side, not planner side) is what feeds this.
+            "collision_count": int(summary.get("collision_count", 0)),
+            "collision_rate_per_km": float(summary.get("collision_rate_per_km", 0.0)),
+            # ON/OFF ablation credibility: proves CP actually bought a head
+            # start on some obstacle (positive lead, or cp_only with no
+            # local sighting at all) rather than just adding a redundant
+            # observation source both runs would have gotten anyway.
+            "max_anticipation_lead_s": summary.get("max_anticipation_lead_s", ""),
+            "cp_only_obstacle_count": int(summary.get("cp_only_obstacle_count", 0)),
             "nearest_ttc_s": sample.get("nearest_ttc_s", ""),
             "min_ttc_s": summary.get("min_ttc_s", ""),
             "nearest_ttc_obstacle_id": sample.get(

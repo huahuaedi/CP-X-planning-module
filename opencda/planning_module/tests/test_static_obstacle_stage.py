@@ -48,6 +48,48 @@ def test_committed_lane_borrow_is_not_reselected_during_execution():
     assert not executing.stop_active
 
 
+def test_stalled_local_avoidance_abandons_target_and_tries_next_lane():
+    # Regression: a target_lane_id that turns out to be geometrically
+    # infeasible (MPC reports "primal infeasible" every tick) used to be
+    # held forever -- target_lane_id only ever cleared on *reaching* it.
+    # A stall past the failure-count threshold must abandon it and pick a
+    # different safe lane on the very same tick, not wait for another
+    # confirm cycle.
+    stage = StaticObstacleStage({
+        "static_obstacle_blocked_confirm_s": 0.0,
+        "static_obstacle_mpc_stall_timeout_failures": 30,
+    })
+    ready = _evaluate(
+        stage,
+        available_lane_ids=(10, 11, 12),
+        lane_safety_scores={10: 1.0, 11: 1.0, 12: 1.0},
+        lane_to_offset={10: 0, 11: 1, 12: 2},
+    )
+    assert ready.target_lane_id == 11
+
+    stalled = _evaluate(
+        stage,
+        available_lane_ids=(10, 11, 12),
+        lane_safety_scores={10: 1.0, 11: 1.0, 12: 1.0},
+        lane_to_offset={10: 0, 11: 1, 12: 2},
+        lane_change_reference_active=True,
+        mpc_stall_failure_count=30,
+    )
+    assert stalled.target_lane_id == 12
+
+    # Both candidates now stalled out (still stuck on the same current
+    # lane) -- nothing left to try, so it must not silently re-pick 11.
+    stalled_again = _evaluate(
+        stage,
+        available_lane_ids=(10, 11, 12),
+        lane_safety_scores={10: 1.0, 11: 1.0, 12: 1.0},
+        lane_to_offset={10: 0, 11: 1, 12: 2},
+        lane_change_reference_active=True,
+        mpc_stall_failure_count=30,
+    )
+    assert stalled_again.target_lane_id is None
+
+
 def test_lane_borrow_ignores_lane_id_proximity_when_not_actually_adjacent():
     # Regression: AD-map lane ids are opaque and do not encode lateral
     # position. Lane 12 is numerically closer to current (10) than lane 30,

@@ -104,10 +104,43 @@ class RouteLaneChangeAuthorizationLatch:
         *,
         target_reached: bool,
         in_turn_connector: bool,
+        execution_active: bool = False,
     ) -> LaneChangeAuthorization:
         if bool(target_reached) or bool(in_turn_connector):
             self.reset()
             return authorization
+        if (
+            bool(execution_active)
+            and self._active is not None
+            and int(authorization.target_lane_id) != int(self._active.target_lane_id)
+        ):
+            # A lane change already committed and executing (geometry is
+            # live in the reference provider -- see behavior_stage's
+            # execution_active) must keep its target lane fixed. The
+            # topology/route re-authorization below is recomputed from
+            # scratch every tick and is not itself latched against
+            # retargeting -- only against fully reverting to "not
+            # required" (the _TRANSIENT_LAPSE_REASONS branch below). Without
+            # this guard a fresh authorization for a *different* target
+            # lane silently overwrites self._active mid-execution: the
+            # reference the vehicle is physically converging on jumps to a
+            # new lane with no release/re-commit cycle, so the MPC ends up
+            # chasing a moving target through a growing lateral/heading
+            # error until it can no longer find a feasible trajectory and
+            # locks into a permanent stop. Confirmed on a real stuck run:
+            # target_lane_id silently changed from 220149 to 17840149
+            # mid-EXECUTE_LANE_CHANGE_LEFT, both tagged with the same
+            # generic "route_maneuver_does_not_require_lane_change" reason.
+            active = self._active
+            return replace(
+                active,
+                reason="route_lane_change_target_latched_during_execution",
+                distance_to_maneuver_m=(
+                    authorization.distance_to_maneuver_m
+                    if authorization.distance_to_maneuver_m is not None
+                    else active.distance_to_maneuver_m
+                ),
+            )
         if bool(authorization.allowed) and bool(authorization.required_by_route):
             self._active = authorization
             return authorization

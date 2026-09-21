@@ -13,6 +13,7 @@ def select_local_avoidance_lane(*, current_lane_id: int,
                                 lane_prediction_risks: Mapping[int, Mapping[str, object]],
                                 minimum_safety_score: float,
                                 lane_to_offset: Mapping[int, int] = MappingProxyType({}),
+                                excluded_lane_ids: Sequence[int] = (),
                                 ) -> Optional[int]:
     current = int(current_lane_id)
     # AD-map lane ids are opaque -- |id_a - id_b| carries no lateral meaning
@@ -22,11 +23,14 @@ def select_local_avoidance_lane(*, current_lane_id: int,
     # silently treated as "very far" or "very near" by a meaningless id
     # subtraction. Ties in offset (opposite-side neighbors, both |1|) still
     # fall through to the safety-score comparison below, same as before.
+    excluded = {int(x) for x in excluded_lane_ids}
     current_offset = int(lane_to_offset.get(current, 0))
     alternatives = sorted(
         (
             int(x) for x in available_lane_ids
-            if int(x) not in {0, current} and int(x) in lane_to_offset
+            if int(x) not in {0, current}
+            and int(x) not in excluded
+            and int(x) in lane_to_offset
         ),
         key=lambda lane_id: abs(int(lane_to_offset[lane_id]) - current_offset),
     )
@@ -80,6 +84,13 @@ class StaticObstacleStage:
         self.route_transition_pending = False
         self.last_replan_attempt_s = -float("inf")
         self.stop_active = False
+        # Lanes a prior local-avoidance commitment stalled on (MPC never
+        # found a feasible trajectory toward them) -- excluded from
+        # re-selection so an abandoned target isn't immediately re-picked.
+        # Cleared once the vehicle physically leaves the lane it was stuck
+        # in, since that's the map context the failure was tied to.
+        self._failed_target_lane_ids: set[int] = set()
+        self._failed_target_lane_origin: Optional[int] = None
 
     def evaluate(self, *, requested: bool, traffic_control_stop_active: bool,
                  obstacle_id: str, current_lane_id: int,
@@ -89,7 +100,14 @@ class StaticObstacleStage:
                  lane_prediction_risks: Mapping[int, Mapping[str, object]],
                  attempt_replan: Callable[[], tuple[bool, bool, str]],
                  lane_to_offset: Mapping[int, int] = MappingProxyType({}),
+                 mpc_stall_failure_count: int = 0,
                  ) -> StaticObstacleResult:
+        if (
+            self._failed_target_lane_ids
+            and int(current_lane_id) != int(self._failed_target_lane_origin or 0)
+        ):
+            self._failed_target_lane_ids = set()
+            self._failed_target_lane_origin = None
         if (
             self.target_lane_id is not None
             and int(current_lane_id) == int(self.target_lane_id)
@@ -108,6 +126,43 @@ class StaticObstacleStage:
             self.target_lane_match_frames = 0
         active = self.target_lane_id is not None
         transition_hold = cooldown_hold = False
+        # 100 (borrowed from the general lane_change stall watchdog) left a
+        # vehicle stopped in/near a travel lane for 3+ seconds before this
+        # stage would abandon a hopeless target: measured on a real replay,
+        # failures accumulate at roughly 20/s once MPC is genuinely
+        # infeasible (not transient solver jitter -- "primal infeasible"
+        # held every single tick), so 100 is ~5s of exposure. A vehicle
+        # stopped that long near a blocked lane is a standing collision
+        # hazard for approaching traffic, not just a stalled maneuver in a
+        # safe spot (confirmed: a car closing at ~10 m/s hit the stopped
+        # ego at the 3.4s mark, well before the count reached 100). 30 is
+        # ~1.5s -- long enough to ride out a brief hiccup, short enough to
+        # matter for this hazard.
+        stall_timeout_failures = int(self.config.get(
+            "static_obstacle_mpc_stall_timeout_failures", 30
+        ))
+        stalled = bool(
+            active
+            and stall_timeout_failures > 0
+            and int(mpc_stall_failure_count) >= stall_timeout_failures
+        )
+        if stalled:
+            # MPC has reported "no feasible trajectory toward target_lane_id"
+            # for stall_timeout_failures ticks in a row. Unlike a committed
+            # lane_change maneuver (which LaneChangeLifecycleStage's own
+            # stall watchdog can abandon), this stage previously only ever
+            # released target_lane_id by *reaching* it -- a target picked
+            # here that turns out to be geometrically infeasible held
+            # forever, coasting the vehicle to a stop with no recovery.
+            # Blacklist it (scoped to the lane the vehicle was stuck in, see
+            # __init__) and fall through to the normal-mode selection below
+            # so a different lane -- or a clean "no safe alternative"
+            # outcome -- gets a chance the same tick.
+            self._failed_target_lane_ids.add(int(self.target_lane_id))
+            self._failed_target_lane_origin = int(current_lane_id)
+            self.target_lane_id = None
+            self.target_lane_match_frames = 0
+            active = False
         if not requested:
             self.candidate_id = ""
             self.candidate_since_s = -float("inf")
@@ -147,6 +202,7 @@ class StaticObstacleStage:
                     minimum_safety_score=float(self.config.get(
                         "static_obstacle_local_lane_min_safety_score", 0.55)),
                     lane_to_offset=lane_to_offset,
+                    excluded_lane_ids=self._failed_target_lane_ids,
                 ) if normal_mode and bool(self.config.get(
                     "static_obstacle_local_avoidance_enabled", True)) else None
                 if target is not None:

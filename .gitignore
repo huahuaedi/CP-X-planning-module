@@ -178,3 +178,6 @@ CARLA_DEPENDENCY_AND_GLOBAL_PLANNER_REPLACEMENT_REPORT.md
 # Standalone CARLA/custom-global-planner comparison artifacts
 compare_carla_custom_global_planner.py
 global_planner_comparison_output/
+
+# ROS 2 workspace (separate git repo, nested here)
+/CP-ROS-WS/

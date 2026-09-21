@@ -1,6 +1,7 @@
 import math
 from types import SimpleNamespace
 
+from pipeline.behavior_risk import SemanticBehaviorResponse
 from pipeline.behavior_stage import (
     BehaviorCandidateRequest,
     BehaviorOverrideRequest,
@@ -791,3 +792,102 @@ def test_moving_vehicle_does_not_enter_static_obstacle_lifecycle():
 
     assert response.risk_kind == "NONE"
     assert response.action == "NONE"
+
+
+def _stopped_vehicle_obstacle(vehicle_id="lead-parked-1", front_distance_m=15.0):
+    return {
+        "vehicle_id": vehicle_id,
+        "object_type": "vehicle",
+        "front_distance_m": front_distance_m,
+        "v": 0.0,
+    }
+
+
+def test_stationary_lead_vehicle_escalates_to_lane_blockage_after_sustained_stall():
+    # Below the lane-safety-score threshold that ``assess_front_observation``
+    # itself checks, so the per-tick classification alone stays NONE -- this
+    # reproduces a real CARLA-spawned parked vehicle that never trips the
+    # explicit static-object path (object_type stays "vehicle") nor the
+    # lane-score-gated stationary_vehicle_blockage path.
+    stage = BehaviorStage()
+    obstacle = _stopped_vehicle_obstacle()
+    unresolved = SemanticBehaviorResponse(
+        risk_kind="NONE", action="NONE", object_type="vehicle",
+        obstacle_id="lead-parked-1", distance_m=15.0,
+        reason="front_observation_requires_no_behavior_override",
+    )
+
+    first = stage._escalate_stationary_lead_blockage(
+        semantic_response=unresolved, front_obstacle=obstacle,
+        sim_time_s=2.63, object_track_id=lambda o: o["vehicle_id"],
+        config={}, runtime_config={},
+    )
+    assert first.action == "NONE"
+
+    still_waiting = stage._escalate_stationary_lead_blockage(
+        semantic_response=unresolved, front_obstacle=obstacle,
+        sim_time_s=2.63 + 3.9, object_track_id=lambda o: o["vehicle_id"],
+        config={}, runtime_config={},
+    )
+    assert still_waiting.action == "NONE"
+
+    escalated = stage._escalate_stationary_lead_blockage(
+        semantic_response=unresolved, front_obstacle=obstacle,
+        sim_time_s=2.63 + 4.1, object_track_id=lambda o: o["vehicle_id"],
+        config={}, runtime_config={},
+    )
+    assert escalated.risk_kind == "LANE_BLOCKAGE"
+    assert escalated.action == "LANE_BLOCKAGE"
+    assert escalated.object_type == "vehicle"
+    assert escalated.obstacle_id == "lead-parked-1"
+    assert escalated.reason == "stationary_lead_blockage_confirmed_after_stall"
+
+
+def test_stationary_lead_escalation_resets_once_obstacle_moves_again():
+    stage = BehaviorStage()
+    unresolved = SemanticBehaviorResponse(
+        risk_kind="NONE", action="NONE", object_type="vehicle",
+        obstacle_id="lead-parked-1", distance_m=15.0,
+    )
+    stage._escalate_stationary_lead_blockage(
+        semantic_response=unresolved,
+        front_obstacle=_stopped_vehicle_obstacle(),
+        sim_time_s=0.0, object_track_id=lambda o: o["vehicle_id"],
+        config={}, runtime_config={},
+    )
+
+    # The lead briefly rolls forward (e.g. easing off its own brake) before
+    # stopping again -- the stall clock must restart, not keep accumulating.
+    moving = dict(_stopped_vehicle_obstacle())
+    moving["v"] = 2.0
+    resumed = stage._escalate_stationary_lead_blockage(
+        semantic_response=unresolved, front_obstacle=moving,
+        sim_time_s=3.0, object_track_id=lambda o: o["vehicle_id"],
+        config={}, runtime_config={},
+    )
+    assert resumed.action == "NONE"
+
+    after_reset = stage._escalate_stationary_lead_blockage(
+        semantic_response=unresolved,
+        front_obstacle=_stopped_vehicle_obstacle(),
+        sim_time_s=3.0 + 4.1, object_track_id=lambda o: o["vehicle_id"],
+        config={}, runtime_config={},
+    )
+    # Only 4.1s since the lead was last actually moving (t=3.0), not since
+    # the original stop at t=0.0 -- must not have escalated yet.
+    assert after_reset.action == "NONE"
+
+
+def test_stationary_lead_escalation_does_not_override_an_already_resolved_action():
+    stage = BehaviorStage()
+    already_yielding = SemanticBehaviorResponse(
+        risk_kind="VRU_CONFLICT", action="YIELD_STOP", object_type="vehicle",
+        obstacle_id="lead-parked-1", distance_m=15.0,
+    )
+    result = stage._escalate_stationary_lead_blockage(
+        semantic_response=already_yielding,
+        front_obstacle=_stopped_vehicle_obstacle(),
+        sim_time_s=100.0, object_track_id=lambda o: o["vehicle_id"],
+        config={}, runtime_config={},
+    )
+    assert result is already_yielding

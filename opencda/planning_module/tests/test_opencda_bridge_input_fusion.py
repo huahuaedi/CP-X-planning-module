@@ -80,7 +80,9 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         # lane closure actually drove a reroute -- without it, a human
         # watching the run (or its console log) sees an unexplained lane
         # change indistinguishable from any other one.
-        printed = " ".join(str(call.args[0]) for call in mock_print.call_args_list)
+        # call[0] is the positional-args tuple -- call.args needs Python
+        # 3.8+ (this project also targets 3.7 for CARLA-side compatibility).
+        printed = " ".join(str(call[0][0]) for call in mock_print.call_args_list)
         self.assertIn("CP lane closure applied", printed)
         self.assertIn("17", printed)
         self.assertIn("route-2", printed)

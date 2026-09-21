@@ -119,6 +119,65 @@ class RouteAuthorizationTest(unittest.TestCase):
         self.assertIsNone(latch.active)
         self.assertIs(released, ready)
 
+    def test_route_authorization_target_lane_frozen_while_executing(self):
+        # Regression: a fresh topology re-authorization for a *different*
+        # target lane used to silently overwrite the committed target while
+        # a lane change was already EXECUTE_LANE_CHANGE_*/
+        # TARGET_LANE_STABILIZATION -- confirmed on a real run where
+        # target_lane_id jumped 220149 -> 17840149 mid-execution, both
+        # carrying the same generic "route_maneuver_does_not_require_lane_
+        # change" reason (so the pre-existing _TRANSIENT_LAPSE_REASONS latch
+        # never caught it -- that only guards against reverting to "not
+        # required", not against retargeting to a new lane). The reference
+        # the vehicle is physically converging on has no way to jump targets
+        # mid-flight without a release/re-commit cycle; left unguarded, the
+        # MPC ends up chasing a moving target until it can't find a
+        # feasible trajectory at all.
+        latch = RouteLaneChangeAuthorizationLatch()
+        first_target = LaneChangeAuthorization(
+            allowed=True,
+            direction="left",
+            reason="route_lane_change_authorized_by_topology",
+            required_by_route=True,
+            distance_to_maneuver_m=12.0,
+            target_lane_id=220149,
+            maneuver="lane_change_left",
+        )
+        retargeted = LaneChangeAuthorization(
+            allowed=True,
+            direction="left",
+            reason="route_maneuver_does_not_require_lane_change",
+            required_by_route=True,
+            distance_to_maneuver_m=8.0,
+            target_lane_id=17840149,
+            maneuver="lane_change_left",
+        )
+
+        self.assertTrue(
+            latch.update(
+                first_target, target_reached=False, in_turn_connector=False,
+                execution_active=False,
+            ).allowed
+        )
+        frozen = latch.update(
+            retargeted, target_reached=False, in_turn_connector=False,
+            execution_active=True,
+        )
+
+        self.assertEqual(frozen.target_lane_id, 220149)
+        self.assertEqual(
+            frozen.reason, "route_lane_change_target_latched_during_execution"
+        )
+        self.assertEqual(latch.active.target_lane_id, 220149)
+
+        # Once execution is no longer active (maneuver released/completed),
+        # a genuinely different target is free to take over again.
+        released = latch.update(
+            retargeted, target_reached=False, in_turn_connector=False,
+            execution_active=False,
+        )
+        self.assertEqual(released.target_lane_id, 17840149)
+
     def test_completion_uses_zero_offset_across_ad_road_segments(self):
         self.assertTrue(lane_change_target_reached(
             current_lane_id=1,

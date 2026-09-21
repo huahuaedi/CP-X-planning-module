@@ -133,6 +133,70 @@ def _distance_to_destination(vehicle, destination):
     return math.hypot(float(loc.x) - float(destination[0]), float(loc.y) - float(destination[1]))
 
 
+def _spawn_collision_sensor(world, vehicle, recorder):
+    """Attach a CARLA collision sensor and forward events to ``recorder``.
+
+    Collision ground truth belongs to the scenario/evaluator side, not the
+    planner: a real vehicle has no CARLA collision sensor to read, so
+    CPXMPCPlannerBridge must never depend on one. But a fixture run through
+    real CARLA still needs an independent answer to "did the ego actually
+    collide" that isn't itself computed by the planner under test.
+    """
+
+    blueprint = world.get_blueprint_library().find("sensor.other.collision")
+    sensor = world.spawn_actor(
+        blueprint,
+        carla.Transform(),
+        attach_to=vehicle,
+        attachment_type=carla.AttachmentType.Rigid,
+    )
+
+    def _on_collision(event) -> None:
+        other_actor = getattr(event, "other_actor", None)
+        type_id = str(getattr(other_actor, "type_id", "unknown"))
+        if "vehicle" in type_id:
+            actor_type = "vehicle"
+        elif "walker" in type_id or "pedestrian" in type_id:
+            actor_type = "pedestrian"
+        elif "static" in type_id or "prop" in type_id:
+            actor_type = "static"
+        else:
+            actor_type = type_id[:40]
+
+        ts = getattr(event, "timestamp", None)
+        sim_time_s = (
+            float(getattr(ts, "elapsed_seconds", 0.0)) if ts is not None else None
+        )
+        try:
+            loc = vehicle.get_location()
+            vel = vehicle.get_velocity()
+            ego_x, ego_y = float(loc.x), float(loc.y)
+            ego_speed_mps = float(math.hypot(vel.x, vel.y))
+        except Exception:
+            ego_x = ego_y = ego_speed_mps = None
+
+        impulse = getattr(event, "normal_impulse", None)
+        impulse_mag = (
+            float((impulse.x ** 2 + impulse.y ** 2 + impulse.z ** 2) ** 0.5)
+            if impulse is not None
+            else None
+        )
+        recorder.record_collision(
+            event_id="%s:%s" % (
+                getattr(event, "frame", ""), getattr(other_actor, "id", ""),
+            ),
+            sim_time_s=sim_time_s,
+            ego_x=ego_x,
+            ego_y=ego_y,
+            ego_speed_mps=ego_speed_mps,
+            other_actor_type=actor_type,
+            impulse_magnitude=impulse_mag,
+        )
+
+    sensor.listen(_on_collision)
+    return sensor
+
+
 def _manager_reached_destination(manager, destination, tolerance_m):
     """Use the active planner's terminal-stop contract when available.
 
@@ -483,6 +547,7 @@ def run_mature_scenario(opt, scenario_params, *, script_name):
     single_cav_list = []
     bg_veh_list = []
     scripted_actor_list = []
+    collision_sensors = []
     try:
         scenario_params = add_current_time(scenario_params)
         _reset_cooperative_payloads(scenario_params)
@@ -508,6 +573,15 @@ def run_mature_scenario(opt, scenario_params, *, script_name):
             application=["single"],
             map_helper=map_helper,
         )
+        for manager in single_cav_list:
+            planner = getattr(manager, "cpx_planner", None)
+            if planner is None:
+                continue
+            if not bool(planner.config.get("record_evaluation_metrics", True)):
+                continue
+            collision_sensors.append(_spawn_collision_sensor(
+                scenario_manager.world, manager.vehicle, planner.evaluation_metrics,
+            ))
         if bool(
             scenario_params.get("cpx_mature", {}).get(
                 "require_isolated_world", False
@@ -649,6 +723,9 @@ def run_mature_scenario(opt, scenario_params, *, script_name):
         # following A/B run observes it as a real stopped lead vehicle.
         if debug_viewer is not None:
             debug_viewer.destroy()
+        for sensor in collision_sensors:
+            if bool(getattr(sensor, "is_alive", True)):
+                sensor.destroy()
         for vehicle_manager in single_cav_list:
             vehicle_manager.destroy()
         for vehicle in bg_veh_list:

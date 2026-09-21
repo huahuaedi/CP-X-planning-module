@@ -187,6 +187,12 @@ class EvaluationMetricsRecorder:
     _last_obstacle_bin_time_by_id: Dict[str, Tuple[Tuple[int, int], float]] = field(default_factory=dict)
     _collision_event_ids: set[str] = field(default_factory=set)
     collision_events: list = field(default_factory=list)
+    # First-seen bookkeeping to answer "did CP actually give us a head
+    # start" -- an obstacle's *_timestamp_s from observation_contract
+    # refreshes every tick it's observed, so it cannot answer that by
+    # itself; only the first tick each channel saw a given obstacle id can.
+    _first_cp_seen_s: Dict[str, float] = field(default_factory=dict)
+    _first_local_seen_s: Dict[str, float] = field(default_factory=dict)
 
     def record_collision(
         self,
@@ -347,6 +353,16 @@ class EvaluationMetricsRecorder:
             if not isinstance(snapshot, Mapping):
                 continue
             obstacle_id = _snapshot_id(snapshot, index)
+            if (
+                bool(snapshot.get("cooperatively_observed"))
+                and obstacle_id not in self._first_cp_seen_s
+            ):
+                self._first_cp_seen_s[obstacle_id] = float(sim_time_s)
+            if (
+                bool(snapshot.get("locally_observed"))
+                and obstacle_id not in self._first_local_seen_s
+            ):
+                self._first_local_seen_s[obstacle_id] = float(sim_time_s)
             ttc_debug = compute_pairwise_ttc_drac_debug(
                 ego_state={"x": ego_x, "y": ego_y, "v": ego_v, "psi": ego_psi},
                 obstacle_snapshot=snapshot,
@@ -483,12 +499,50 @@ class EvaluationMetricsRecorder:
         self._last_ego_bin = ego_bin
         self._last_ego_bin_time_s = float(sim_time_s)
 
+    def cp_anticipation_events(self) -> list[Dict[str, object]]:
+        """Per-obstacle first-seen-by-CP vs first-seen-locally, if either.
+
+        This is the only way to tell whether CP actually bought anything: an
+        ON and an OFF run can both eventually track the same obstacle
+        through local perception alone, so seeing it in either run's object
+        list proves nothing about CP's contribution by itself. A positive
+        ``anticipation_lead_s`` means CP reported this obstacle before local
+        perception ever would have; ``first_local_seen_s`` of ``None`` means
+        local perception never observed it at all during this run.
+        """
+
+        events = []
+        for obstacle_id, cp_seen_s in sorted(self._first_cp_seen_s.items()):
+            local_seen_s = self._first_local_seen_s.get(obstacle_id)
+            events.append({
+                "obstacle_id": str(obstacle_id),
+                "first_cp_seen_s": float(cp_seen_s),
+                "first_local_seen_s": (
+                    float(local_seen_s) if local_seen_s is not None else None
+                ),
+                "anticipation_lead_s": (
+                    float(local_seen_s) - float(cp_seen_s)
+                    if local_seen_s is not None else None
+                ),
+            })
+        return events
+
     def summary(self) -> Dict[str, object]:
         distance_km = float(self.distance_traveled_m) / 1000.0
         success_rate = (
             float(self.mpc_plan_successes) / float(self.mpc_plan_attempts)
             if int(self.mpc_plan_attempts) > 0
             else 0.0
+        )
+        anticipation_events = self.cp_anticipation_events()
+        anticipation_leads = [
+            float(event["anticipation_lead_s"])
+            for event in anticipation_events
+            if event["anticipation_lead_s"] is not None
+        ]
+        cp_only_obstacle_count = sum(
+            1 for event in anticipation_events
+            if event["first_local_seen_s"] is None
         )
         return {
             "collision_count": int(self.collision_count),
@@ -509,6 +563,11 @@ class EvaluationMetricsRecorder:
             "mpc_plan_attempts": int(self.mpc_plan_attempts),
             "mpc_plan_successes": int(self.mpc_plan_successes),
             "mpc_plan_success_rate": float(success_rate),
+            "cp_anticipation_events": anticipation_events,
+            "max_anticipation_lead_s": (
+                max(anticipation_leads) if anticipation_leads else None
+            ),
+            "cp_only_obstacle_count": int(cp_only_obstacle_count),
         }
 
 

@@ -12,6 +12,8 @@ from .cooperative_maneuver_proposal import CooperativeManeuverProposal
 from .reference_line_provider import LANE_CHANGE
 from .candidate_evaluation import evaluate_behavior_candidates
 from .behavior_risk import SemanticBehaviorResponse, assess_front_observation
+from .conflict_classifier import LANE_BLOCKAGE
+from .observation_contract import normalize_object_type
 from .vru_yield_latch import VRUYieldLatch
 from .route_authorization import (
     RouteLaneChangeAuthorizationLatch,
@@ -255,6 +257,7 @@ class BehaviorCommandFrameRequest:
     config: Mapping[str, object]
     runtime_config: Mapping[str, object]
     route_recovery_requested: bool = False
+    static_obstacle_mpc_stall_failure_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -272,9 +275,88 @@ class BehaviorStage:
     def __init__(self) -> None:
         self._route_lane_change_latch = RouteLaneChangeAuthorizationLatch()
         self._vru_yield_latch = VRUYieldLatch()
+        self._stationary_lead_obstacle_id: Optional[str] = None
+        self._stationary_lead_since_s: Optional[float] = None
 
     def reset_route_lane_change_authorization(self) -> None:
         self._route_lane_change_latch.reset()
+
+    def _escalate_stationary_lead_blockage(
+        self, *, semantic_response: SemanticBehaviorResponse,
+        front_obstacle: Optional[Mapping[str, object]], sim_time_s: float,
+        object_track_id: Any, config: Mapping[str, object],
+        runtime_config: Mapping[str, object],
+    ) -> SemanticBehaviorResponse:
+        """Escalate a persistently-stopped lead vehicle to LANE_BLOCKAGE.
+
+        ``assess_front_observation`` only flags a vehicle-typed obstacle as a
+        blockage when the *lane's* soft safety score has already dropped
+        below threshold. A vehicle that is genuinely, permanently stationary
+        (e.g. a parked/broken-down car spawned as a real CARLA vehicle actor,
+        not tagged ``static_object``) can sit just above that score and never
+        trip it -- the ego then treats it as an ordinary FOLLOW target and
+        asymptotically decelerates to match its speed, i.e. to a permanent
+        stop, since plain car-following has no notion of "this lead will
+        never move again." Tracking how long the *same* obstacle id has been
+        continuously stationary directly ahead recovers that missing signal
+        without touching the lane safety score itself.
+        """
+
+        if semantic_response.action != "NONE":
+            self._stationary_lead_obstacle_id = None
+            self._stationary_lead_since_s = None
+            return semantic_response
+        if not isinstance(front_obstacle, Mapping):
+            self._stationary_lead_obstacle_id = None
+            self._stationary_lead_since_s = None
+            return semantic_response
+        object_type = normalize_object_type(
+            front_obstacle.get(
+                "object_type", front_obstacle.get("actor_type", "unknown")
+            )
+        )
+        if object_type != "vehicle":
+            self._stationary_lead_obstacle_id = None
+            self._stationary_lead_since_s = None
+            return semantic_response
+        stationary_threshold = float(config.get(
+            "static_obstacle_speed_threshold_mps",
+            runtime_config.get("static_obstacle_speed_threshold_mps", 0.5),
+        ))
+        speed_mps = max(0.0, float(
+            front_obstacle.get("v", front_obstacle.get("speed_mps", 0.0))
+        ))
+        if speed_mps > stationary_threshold:
+            self._stationary_lead_obstacle_id = None
+            self._stationary_lead_since_s = None
+            return semantic_response
+        obstacle_id = str(object_track_id(front_obstacle))
+        if self._stationary_lead_obstacle_id != obstacle_id:
+            self._stationary_lead_obstacle_id = obstacle_id
+            self._stationary_lead_since_s = float(sim_time_s)
+            return semantic_response
+        stalled_s = float(sim_time_s) - float(
+            self._stationary_lead_since_s
+            if self._stationary_lead_since_s is not None else sim_time_s
+        )
+        confirm_s = float(config.get(
+            "stationary_lead_blockage_confirm_s",
+            runtime_config.get("stationary_lead_blockage_confirm_s", 4.0),
+        ))
+        if stalled_s < confirm_s:
+            return semantic_response
+        distance_m = max(0.0, float(
+            front_obstacle.get("front_distance_m", float("inf"))
+        ))
+        return replace(
+            semantic_response,
+            risk_kind=LANE_BLOCKAGE,
+            action="LANE_BLOCKAGE",
+            object_type="vehicle",
+            obstacle_id=obstacle_id,
+            distance_m=distance_m,
+            reason="stationary_lead_blockage_confirmed_after_stall",
+        )
 
     @staticmethod
     def assess_front_observation(
@@ -492,6 +574,9 @@ class BehaviorStage:
             lane_change_reference_active=bool(
                 request.lane_change_reference_active
             ),
+            static_obstacle_mpc_stall_failure_count=int(
+                request.static_obstacle_mpc_stall_failure_count
+            ),
             config=request.config, runtime_config=request.runtime_config,
             attempt_replan=attempt_replan,
             object_track_id=object_track_id,
@@ -533,6 +618,7 @@ class BehaviorStage:
         runtime_config: Mapping[str, object],
         attempt_replan: Any, object_track_id: Any,
         lane_to_offset: Mapping[int, int] = MappingProxyType({}),
+        static_obstacle_mpc_stall_failure_count: int = 0,
     ) -> BehaviorCommandResult:
         """Produce one behavior command through the sole obstacle arbitration path."""
 
@@ -567,6 +653,14 @@ class BehaviorStage:
             runtime_config=runtime_config,
             object_track_id=object_track_id,
         )
+        semantic_response = self._escalate_stationary_lead_blockage(
+            semantic_response=semantic_response,
+            front_obstacle=front_obstacle,
+            sim_time_s=float(sim_time_s),
+            object_track_id=object_track_id,
+            config=config,
+            runtime_config=runtime_config,
+        )
         # Recomputing purely from the current ego speed lets the dynamic
         # stopping envelope shrink as the ego brakes, which can flip
         # YIELD_STOP back to NONE before the pedestrian has actually
@@ -592,6 +686,7 @@ class BehaviorStage:
             lane_safety_scores=lane_safety_scores,
             lane_prediction_risks=lane_prediction_risks,
             lane_to_offset=lane_to_offset,
+            mpc_stall_failure_count=int(static_obstacle_mpc_stall_failure_count),
             attempt_replan=lambda: attempt_replan(dict(front_obstacle or {})),
         )
         local_avoidance = bool(obstacle_result.local_avoidance_active)
@@ -1033,6 +1128,7 @@ class BehaviorStage:
         request: RouteLaneChangeRequest,
         *,
         maneuver_manager: Any,
+        execution_active: bool = False,
     ):
         """Resolve and latch one route-required maneuver exactly once."""
 
@@ -1084,6 +1180,7 @@ class BehaviorStage:
                 str(request.current_road_option).strip().upper()
                 in {"LEFT", "RIGHT"}
             ),
+            execution_active=bool(execution_active),
         )
         if bool(maneuver_manager.route_lane_change_edge_completed):
             self._route_lane_change_latch.reset()
@@ -1169,6 +1266,7 @@ class BehaviorStage:
         authorization = self.authorize_route_lane_change(
             context.request,
             maneuver_manager=maneuver_manager,
+            execution_active=bool(execution_active),
         )
         replan_reason = ""
         if bool(getattr(route_cursor, "missed_maneuver", False)) and not bool(

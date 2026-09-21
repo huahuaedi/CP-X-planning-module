@@ -184,6 +184,79 @@ class EvaluationMetricsTests(unittest.TestCase):
         self.assertEqual(rows[0]["nearest_ttc_reason"], "bumper_overlap")
         self.assertEqual(float(rows[0]["nearest_ttc_s"]), 0.0)
 
+    def test_anticipation_lead_is_the_gap_between_first_cp_and_first_local_sighting(self):
+        recorder = EvaluationMetricsRecorder()
+        recorder.update(
+            ego_state={"x": 0.0, "y": 0.0, "v": 10.0, "psi": 0.0},
+            obstacle_snapshots=[{
+                "vehicle_id": "a", "x": 40.0, "y": 0.0, "v": 0.0,
+                "cooperatively_observed": True, "locally_observed": False,
+            }],
+            sim_time_s=1.0,
+        )
+        recorder.update(
+            ego_state={"x": 5.0, "y": 0.0, "v": 10.0, "psi": 0.0},
+            obstacle_snapshots=[{
+                "vehicle_id": "a", "x": 40.0, "y": 0.0, "v": 0.0,
+                "cooperatively_observed": True, "locally_observed": False,
+            }],
+            sim_time_s=2.0,
+        )
+        recorder.update(
+            ego_state={"x": 10.0, "y": 0.0, "v": 10.0, "psi": 0.0},
+            obstacle_snapshots=[{
+                "vehicle_id": "a", "x": 40.0, "y": 0.0, "v": 0.0,
+                "cooperatively_observed": True, "locally_observed": True,
+            }],
+            sim_time_s=4.5,
+        )
+
+        summary = recorder.summary()
+        events = summary["cp_anticipation_events"]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["obstacle_id"], "a")
+        self.assertAlmostEqual(events[0]["first_cp_seen_s"], 1.0)
+        self.assertAlmostEqual(events[0]["first_local_seen_s"], 4.5)
+        self.assertAlmostEqual(events[0]["anticipation_lead_s"], 3.5)
+        self.assertAlmostEqual(summary["max_anticipation_lead_s"], 3.5)
+        self.assertEqual(summary["cp_only_obstacle_count"], 0)
+
+    def test_cp_only_obstacle_is_counted_when_local_never_sees_it(self):
+        recorder = EvaluationMetricsRecorder()
+        recorder.update(
+            ego_state={"x": 0.0, "y": 0.0, "v": 10.0, "psi": 0.0},
+            obstacle_snapshots=[{
+                "vehicle_id": "blind_spot", "x": 40.0, "y": 0.0, "v": 0.0,
+                "cooperatively_observed": True, "locally_observed": False,
+            }],
+            sim_time_s=1.0,
+        )
+
+        summary = recorder.summary()
+        self.assertEqual(summary["cp_only_obstacle_count"], 1)
+        self.assertIsNone(summary["max_anticipation_lead_s"])
+        self.assertIsNone(
+            summary["cp_anticipation_events"][0]["first_local_seen_s"]
+        )
+        self.assertIsNone(
+            summary["cp_anticipation_events"][0]["anticipation_lead_s"]
+        )
+
+    def test_locally_observed_only_obstacle_produces_no_anticipation_event(self):
+        recorder = EvaluationMetricsRecorder()
+        recorder.update(
+            ego_state={"x": 0.0, "y": 0.0, "v": 10.0, "psi": 0.0},
+            obstacle_snapshots=[{
+                "vehicle_id": "local_only", "x": 40.0, "y": 0.0, "v": 0.0,
+                "cooperatively_observed": False, "locally_observed": True,
+            }],
+            sim_time_s=1.0,
+        )
+
+        summary = recorder.summary()
+        self.assertEqual(summary["cp_anticipation_events"], [])
+        self.assertEqual(summary["cp_only_obstacle_count"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
