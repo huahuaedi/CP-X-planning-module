@@ -23,6 +23,7 @@ import yaml
 
 from opencda.planning_module.utility.carla_compat import carla
 from opencda.planning_module.pipeline.route_context_stage import RouteContextStage
+from opencda.planning_module.pipeline.stop_policy import pipeline_failure_action
 from opencda.planning_module.pipeline.boundary_recovery import BoundaryRecoveryTracker
 from opencda.planning_module.pipeline.road_boundary_monitor import RoadBoundaryMonitor
 from opencda.planning_module.pipeline.turn_road_envelope import (
@@ -818,7 +819,6 @@ class CPXMPCPlannerBridge:
             feedback=self.mpc_feedback,
             control_safety=control_safety_stage,
             config=self.config,
-            hard_gate_requires_emergency_stop=_hard_gate_requires_emergency_stop,
         )
         self.control_buffer = MPCControlBuffer(
             enabled=bool(self.config.get("control_buffer_enabled", True)),
@@ -1177,9 +1177,7 @@ class CPXMPCPlannerBridge:
         try:
             planner_output = self.execute_planning_pipeline()
         except Exception as exc:
-            if self.fallback_policy == "raise":
-                raise
-            if self.fallback_policy == "opencda":
+            if pipeline_failure_action(self.fallback_policy) == "raise":
                 raise
             control = self._emergency_stop_control()
             self.last_debug = {
@@ -4488,55 +4486,6 @@ class CPXMPCPlannerBridge:
     def _wrap_angle(angle_rad: float) -> float:
         return (float(angle_rad) + math.pi) % (2.0 * math.pi) - math.pi
 
-def _hard_gate_requires_emergency_stop(
-    *,
-    fallback_reason: str,
-    behavior_decision: str,
-    stop_goal_active: bool,
-) -> bool:
-    """Reserve full braking for hard gates that represent a stop hazard.
-
-    A geometry/continuity contract veto means MPC must not consume that
-    reference, but it is not evidence of an imminent collision.  Those
-    failures use the bounded tracking fallback and remain subject to the
-    downstream safety supervisor.  Collision, explicit stop, and emergency
-    behavior retain deterministic full braking.
-    """
-
-    reason = str(fallback_reason or "").strip().lower()
-    decision = str(behavior_decision or "").strip().lower()
-    if not reason.startswith("candidate_hard_gate:"):
-        return False
-    if bool(stop_goal_active) or decision in {
-        "emergency_brake",
-        "stop_at_intersection",
-        "stop_sign",
-    }:
-        return True
-    hazard_tokens = (
-        "collision_risk",
-        "emergency_brake_direct_control",
-        "stop_missing_target_hard_lock",
-        # A geometry/continuity veto with nothing to fall back to is not
-        # automatically harmless just because it isn't an explicit
-        # collision-risk token -- confirmed on a real intersection turn
-        # (MDrive Intersection_Deadlock_Resolution/3): the reference
-        # pipeline hard-gated with "empty_reference;turn_swept_footprint:
-        # no_corridor_geometry" at the turn exit, the bounded-tracking
-        # fallback below applied throttle=0.2-0.23/brake=0.0 the whole
-        # window with the reference still empty, and the ego collided with
-        # unmodeled static scene geometry moments later -- then, still
-        # inside this same hard-gate window, the post-impact speed drop
-        # read as a large speed deficit against normal cruise and the
-        # bounded-tracking path answered with full throttle (brake stayed
-        # 0.0 throughout). "No usable reference at all" is at least as much
-        # a "do not know it's safe to keep moving" case as the
-        # stop-missing-target lock above; treat it the same way.
-        "empty_reference",
-        "no_corridor_geometry",
-        "too_few_forward_samples",
-    )
-    return any(token in reason for token in hazard_tokens)
 
 
 _DEFAULT_ADAPTIVE_HORIZON_PROFILE_S: dict[str, float] = {

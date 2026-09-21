@@ -741,34 +741,6 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         self.assertEqual(authorization.status, "direct_emergency_control")
         self.assertIn("emergency_brake_direct_control", authorization.reason)
 
-    def test_geometry_hard_gate_does_not_request_emergency_stop(self):
-        from opencda.planning_module.opencda_bridge.cpx_mpc_planner import (
-            _hard_gate_requires_emergency_stop,
-        )
-
-        self.assertFalse(_hard_gate_requires_emergency_stop(
-            fallback_reason=(
-                "candidate_hard_gate:lane_change_left:"
-                "final_reference_gate:destination_lane_error_out_of_contract"
-            ),
-            behavior_decision="lane_change_left",
-            stop_goal_active=False,
-        ))
-
-    def test_collision_hard_gate_still_requests_emergency_stop(self):
-        from opencda.planning_module.opencda_bridge.cpx_mpc_planner import (
-            _hard_gate_requires_emergency_stop,
-        )
-
-        self.assertTrue(_hard_gate_requires_emergency_stop(
-            fallback_reason=(
-                "candidate_hard_gate:lane_change_left:"
-                "candidate_prediction_collision_risk"
-            ),
-            behavior_decision="lane_change_left",
-            stop_goal_active=False,
-        ))
-
     def test_turn_explicit_fallback_hard_stops_on_prediction_collision_veto(self):
         bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
         bridge.config = {}

@@ -68,7 +68,6 @@ def _run_solved_finalization(*, safety_cap_active):
         feedback=_Feedback(),
         control_safety=_AcceptingSafety(),
         config={},
-        hard_gate_requires_emergency_stop=lambda **_kwargs: False,
     )
     request = ControlFinalizationRequest(
         execution=SimpleNamespace(
@@ -154,7 +153,6 @@ def _run_solved_finalization_with_corridor_escalation(*, corridor_infeasible_esc
         # The escalation must fire on its own signal, not by piggybacking on
         # the hard-gate path -- this always returns False so a passing test
         # can't be explained by that other trigger.
-        hard_gate_requires_emergency_stop=lambda **_kwargs: False,
     )
     request = ControlFinalizationRequest(
         execution=SimpleNamespace(
@@ -247,7 +245,6 @@ def test_failed_mpc_control_goes_through_one_safety_exit_without_pid_remap():
         feedback=Feedback(),
         control_safety=Safety(),
         config={},
-        hard_gate_requires_emergency_stop=lambda **_kwargs: False,
     )
     request = ControlFinalizationRequest(
         execution=SimpleNamespace(
@@ -311,8 +308,8 @@ class _HoldingExtractor(_TrackingExtractor):
         )
 
 
-def _finalize(*, status, fallback_reason, control, buffer_reused=False,
-              emergency=False, stop_goal=False):
+def _finalize(*, status, fallback_reason, control, buffer_reused=False, stop_goal=False,
+              maneuver="lane_follow"):
     mpc = SimpleNamespace(
         constraints=SimpleNamespace(min_acceleration_mps2=-3.0, max_velocity_mps=20.0),
         dt_s=0.1, _last_x_solution=None,
@@ -320,7 +317,6 @@ def _finalize(*, status, fallback_reason, control, buffer_reused=False,
     stage = ControlFinalizationStage(
         mpc=mpc, command_extractor=_HoldingExtractor(1.5), feedback=_Feedback(),
         control_safety=_AcceptingSafety(), config={},
-        hard_gate_requires_emergency_stop=lambda **_kwargs: emergency,
     )
     request = ControlFinalizationRequest(
         execution=SimpleNamespace(
@@ -328,7 +324,7 @@ def _finalize(*, status, fallback_reason, control, buffer_reused=False,
             fallback_reason=fallback_reason, status=status,
             failed_replan_buffer_reused=buffer_reused,
         ),
-        behavior=SimpleNamespace(maneuver="lane_follow", target_lane_id=1),
+        behavior=SimpleNamespace(maneuver=maneuver, target_lane_id=1),
         ego_transform=object(), ego_speed_mps=3.0, target_speed_mps=3.0,
         destination_state=(), reference_samples=(), stop_goal_active=stop_goal,
         stop_target_forward_m="", final_reference_accepted=True,
@@ -361,7 +357,7 @@ _PID_CASES = [
                       fallback_reason="candidate_hard_gate:turn_swept_footprint"),
                  id="hard-gate-geometry-veto"),
     pytest.param(dict(status="candidate_hard_gate",
-                      fallback_reason="candidate_hard_gate:collision_risk", emergency=True),
+                      fallback_reason="candidate_hard_gate:collision_risk"),
                  id="hard-gate-collision-risk"),
     pytest.param(dict(status="buffer_reuse_after_failed_replan",
                       fallback_reason="MPC status=infeasible", buffer_reused=True),
@@ -384,11 +380,44 @@ def test_the_platform_control_ignores_whatever_the_execution_stage_produced(case
 def test_emergency_is_decided_here_and_only_by_the_hazard_rule():
     geometry, applied_geometry = _finalize(
         control="EMERGENCY", status="candidate_hard_gate",
-        fallback_reason="candidate_hard_gate:turn_swept_footprint", emergency=False)
+        fallback_reason="candidate_hard_gate:turn_swept_footprint")
     collision, applied_collision = _finalize(
         control=None, status="candidate_hard_gate",
-        fallback_reason="candidate_hard_gate:collision_risk", emergency=True)
+        fallback_reason="candidate_hard_gate:collision_risk")
 
     assert applied_geometry["emergency_stop"] is False, "an emergency control upstream must not make a veto an emergency"
     assert applied_collision["emergency_stop"] is True
     assert geometry.control == collision.control == "pid-control"
+
+
+# --- the finalization stage must hand the stop policy the real tick state -------
+
+_VETO = "candidate_hard_gate:turn_swept_footprint"     # not a hazard on its own
+
+
+def test_a_veto_becomes_an_emergency_when_the_maneuver_is_stop_like():
+    _, applied = _finalize(control=None, status="candidate_hard_gate", fallback_reason=_VETO,
+                           maneuver="stop_sign")
+    assert applied["emergency_stop"] is True
+
+
+def test_a_veto_becomes_an_emergency_when_a_stop_goal_is_active():
+    _, applied = _finalize(control=None, status="candidate_hard_gate", fallback_reason=_VETO,
+                           stop_goal=True)
+    assert applied["emergency_stop"] is True
+
+
+def test_a_veto_on_an_ordinary_maneuver_stays_a_non_emergency():
+    _, applied = _finalize(control=None, status="candidate_hard_gate", fallback_reason=_VETO)
+    assert applied["emergency_stop"] is False
+
+
+@pytest.mark.parametrize("kwargs, reason", [
+    (dict(status="candidate_hard_gate", fallback_reason="candidate_hard_gate:collision_risk"), "hard_gate_stop_hazard"),
+    (dict(status="solved", fallback_reason="", maneuver="emergency_brake"), "emergency_brake_maneuver"),
+    (dict(status="candidate_hard_gate", fallback_reason=_VETO), ""),
+    (dict(status="stop_hold_direct", fallback_reason=""), ""),
+])
+def test_the_emergency_reason_is_reported_in_the_platform_debug(kwargs, reason):
+    result, _ = _finalize(control=None, **kwargs)
+    assert result.platform_debug["emergency_stop_reason"] == reason

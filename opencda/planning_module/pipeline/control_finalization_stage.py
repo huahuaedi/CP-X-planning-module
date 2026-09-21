@@ -2,16 +2,20 @@
 
 This is step 3 of the bridge's control-writing precedence
 (TrajectoryFallbackManager reference substitution -> MPCExecutionStage's
-normal/safe/emergency stop controls -> this stage's own hard-gate +
-SafetySupervisor last-mile filter -> CPXMPCPlannerBridge.run_step()'s
-try/except as the absolute last resort) -- see run_step()'s docstring for
-the full chain in one place before changing what any single layer does.
+bounded safe stop, its only control -> this stage, which alone decides
+whether a hard gate is an emergency (see stop_policy) and builds the
+platform control for every other case -> SafetySupervisor last-mile filter ->
+CPXMPCPlannerBridge.run_step()'s try/except as the absolute last resort) --
+see run_step()'s docstring for the full chain in one place before changing
+what any single layer does.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
+
+from .stop_policy import emergency_stop_reason
 
 
 @dataclass(frozen=True)
@@ -66,14 +70,12 @@ class ControlFinalizationStage:
     def __init__(
         self, *, mpc: Any, command_extractor: Any, feedback: Any,
         control_safety: Any, config: Mapping[str, Any],
-        hard_gate_requires_emergency_stop: Callable[..., bool],
     ) -> None:
         self._mpc = mpc
         self._extractor = command_extractor
         self._feedback = feedback
         self._safety = control_safety
         self._config = config
-        self._hard_gate_emergency = hard_gate_requires_emergency_stop
 
     def run(
         self,
@@ -140,15 +142,15 @@ class ControlFinalizationStage:
                         else "mpc_velocity_command_hold_control_buffer"
                     ),
                 )
-            emergency = bool(
-                self._hard_gate_emergency(
-                    fallback_reason=fallback_reason,
-                    behavior_decision=maneuver,
-                    stop_goal_active=bool(request.stop_goal_active),
-                )
-                or maneuver == "emergency_brake"
-                or bool(request.corridor_infeasible_escalate)
+            emergency_reason = emergency_stop_reason(
+                fallback_reason=fallback_reason,
+                behavior_decision=maneuver,
+                stop_goal_active=bool(request.stop_goal_active),
+                corridor_infeasible_escalate=bool(
+                    request.corridor_infeasible_escalate
+                ),
             )
+            emergency = bool(emergency_reason)
             platform_target = self._extractor.platform_target_velocity(
                 nominal_velocity_mps=float(request.target_speed_mps),
                 stop_goal_active=bool(request.stop_goal_active),
@@ -184,6 +186,7 @@ class ControlFinalizationStage:
                 "corridor_infeasible_escalate": bool(
                     request.corridor_infeasible_escalate
                 ),
+                "emergency_stop_reason": str(emergency_reason),
                 "velocity_command_source": (
                     "mpc_corridor_velocity_safety_cap"
                     if (
