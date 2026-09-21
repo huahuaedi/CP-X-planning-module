@@ -95,7 +95,6 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
         bridge.pipeline = types.SimpleNamespace(resolve_fallback=fallback.resolve)
         bridge.route_manager = types.SimpleNamespace(route_revision="route-test")
         bridge._sim_time_s = lambda: 1.0
-        bridge.strict_explicit_fallback_speed_mps = 0.8
         bridge.carla = sys.modules["carla"]
         bridge.reference_generator = ReferenceGenerator(
             config=bridge.config,

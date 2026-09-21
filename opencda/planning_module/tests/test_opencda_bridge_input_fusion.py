@@ -552,7 +552,6 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
 
     def test_low_speed_lane_follow_forces_closed_loop_replan(self):
         bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
-        bridge.full_control_buffer_min_speed_mps = 1.5
         check = MPCEntryStage.low_speed_replan_required
 
         self.assertTrue(
@@ -935,9 +934,7 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         bridge.config = {}
         bridge.target_speed_mps = 3.0
         bridge.mpc = types.SimpleNamespace(dt_s=0.1, horizon_steps=4)
-        bridge.full_reference_stabilizer_min_forward_m = -0.25
         bridge.full_reference_stabilizer_min_spacing_m = 0.35
-        bridge.full_reference_stabilizer_max_heading_step_rad = 0.75
         bridge.full_lane_follow_max_destination_lateral_m = 1.2
         bridge.full_lane_follow_max_reference_first_lateral_m = 0.65
         bridge.full_stop_max_destination_lateral_m = 1.0
@@ -982,9 +979,7 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         bridge.config = {}
         bridge.target_speed_mps = 3.0
         bridge.mpc = types.SimpleNamespace(dt_s=0.1, horizon_steps=3)
-        bridge.full_reference_stabilizer_min_forward_m = -0.25
         bridge.full_reference_stabilizer_min_spacing_m = 0.35
-        bridge.full_reference_stabilizer_max_heading_step_rad = 0.75
         bridge.full_lane_follow_max_destination_lateral_m = 1.2
         bridge.full_lane_follow_max_reference_first_lateral_m = 0.65
         bridge.full_stop_max_destination_lateral_m = 1.0
@@ -1166,7 +1161,6 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
 
     def test_fuses_local_and_cp_obstacles_with_source_priority_and_ttl(self):
         bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
-        bridge.max_mpc_obstacles = 10
 
         stage = PerceptionStage(
             max_mpc_obstacles=10,
@@ -1222,8 +1216,6 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         self.assertEqual(by_id["42"]["source"], "opencda_perception")
         self.assertAlmostEqual(by_id["42"]["x"], 10.0)
         self.assertEqual(by_id["99"]["source"], "opencda_v2x")
-
-        bridge.max_mpc_obstacles = 1
         perception_stage = PerceptionStage(
             max_mpc_obstacles=1,
         )
@@ -1273,7 +1265,6 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
 
     def test_skips_duplicate_native_perception_cp_obstacles_by_position(self):
         bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
-        bridge.max_mpc_obstacles = 10
 
         stage = PerceptionStage(
             max_mpc_obstacles=10,

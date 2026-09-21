@@ -16,6 +16,7 @@ import re
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Mapping, Optional, Sequence
 
 import yaml
@@ -155,16 +156,19 @@ class CPXMPCPlannerBridge:
         map_planner: Any = None,
     ):
         self._ensure_planning_module_import_path()
-        self._init_core_config_and_behavior_stages(
+        parts = self._init_core_config_and_behavior_stages(
             vehicle_manager, config, map_planner,
         )
-        self._init_mpc_and_reference_generation()
-        self._init_pipeline_route_and_finalization()
+        self._init_mpc_and_reference_generation(parts)
+        self._init_pipeline_route_and_finalization(parts)
 
     def _init_core_config_and_behavior_stages(
         self, vehicle_manager: Any,
         config: Optional[Mapping[str, Any]], map_planner: Any,
-    ) -> None:
+    ) -> SimpleNamespace:
+        """Phase 1. Returns the construction-only values later phases consume."""
+
+        parts = SimpleNamespace()
         self.vehicle_manager = vehicle_manager
         from opencda.planning_module.pipeline.architecture_profile import (
             normalize_architecture_config,
@@ -174,13 +178,6 @@ class CPXMPCPlannerBridge:
         self.carla = carla
         self.map_planner = map_planner or getattr(vehicle_manager, "carla_map", None)
         self.waypoint_map_planner = self.map_planner
-        # A real `carla.Map` exposes `get_topology`; the CARLA-free path passes a
-        # CustomGlobalPlannerAdapter here instead, which the CARLA-GRP route
-        # builder must not be handed.
-        self._map_planner_is_carla_map = (
-            self.map_planner is not None
-            and callable(getattr(self.map_planner, "get_topology", None))
-        )
         self.enabled = bool(self.config.get("enabled", True))
         self.mode = str(self.config.get("mode", "full_cpx_mpc")).strip().lower()
         self.fallback_policy = str(
@@ -212,7 +209,7 @@ class CPXMPCPlannerBridge:
         self.min_front_gap_time_s = float(
             self.config.get("min_front_gap_time_s", 8.0 / 11.18)
         )
-        self.max_mpc_obstacles = max(0, int(self.config.get("max_mpc_obstacles", 4)))
+        parts.max_mpc_obstacles = max(0, int(self.config.get("max_mpc_obstacles", 4)))
         # Scenario-only isolation switch.  Map topology, route/reference
         # generation, road boundaries and MPC remain active; dynamic actor
         # observations are withheld from behavior, prediction and MPC so the
@@ -302,7 +299,7 @@ class CPXMPCPlannerBridge:
             self.config.get("draw_world_debug_destination", False)
         )
         self.world_debug_life_time_s = float(self.config.get("world_debug_life_time_s", 0.15))
-        self.full_control_buffer_min_speed_mps = max(
+        parts.full_control_buffer_min_speed_mps = max(
             0.0,
             float(self.config.get("full_control_buffer_min_speed_mps", 1.5)),
         )
@@ -333,7 +330,7 @@ class CPXMPCPlannerBridge:
         self.full_candidate_pipeline_enabled = bool(
             self.config.get("full_candidate_pipeline_enabled", True)
         )
-        self.full_candidate_reference_min_object_distance_m = max(
+        parts.full_candidate_reference_min_object_distance_m = max(
             0.0,
             float(self.config.get("full_candidate_reference_min_object_distance_m", 2.0)),
         )
@@ -350,7 +347,7 @@ class CPXMPCPlannerBridge:
         # isn't moving). Use a tighter, still-conservative clearance just for
         # the candidate whose target lane matches the selected local-
         # avoidance lane; every other candidate keeps the full margin above.
-        self.static_obstacle_local_avoidance_min_object_distance_m = max(
+        parts.static_obstacle_local_avoidance_min_object_distance_m = max(
             0.0,
             float(
                 self.config.get(
@@ -367,44 +364,44 @@ class CPXMPCPlannerBridge:
         # which candidate) wins every other tick and reading to MPC as a
         # discontinuous reference. Keyed by candidate name so each logical
         # candidate slot keeps its own hysteresis state across ticks.
-        self.candidate_risk_hysteresis_margin_m = max(
+        parts.candidate_risk_hysteresis_margin_m = max(
             0.0,
             float(self.config.get("candidate_risk_hysteresis_margin_m", 1.5)),
         )
-        self.candidate_mpc_probe_enabled = bool(
+        parts.candidate_mpc_probe_enabled = bool(
             self.config.get("candidate_mpc_probe_enabled", True)
         )
-        self.candidate_mpc_probe_top_k = max(
+        parts.candidate_mpc_probe_top_k = max(
             2,
             int(self.config.get("candidate_mpc_probe_top_k", 2)),
         )
-        self.candidate_mpc_probe_interval_s = max(
+        parts.candidate_mpc_probe_interval_s = max(
             0.05,
             float(self.config.get("candidate_mpc_probe_interval_s", 0.2)),
         )
-        self._candidate_trajectory_evaluator = CandidateTrajectoryEvaluator(
-            mpc_probe_enabled=bool(self.candidate_mpc_probe_enabled),
-            mpc_probe_top_k=int(self.candidate_mpc_probe_top_k),
-            mpc_probe_interval_s=float(self.candidate_mpc_probe_interval_s),
+        parts.candidate_trajectory_evaluator = CandidateTrajectoryEvaluator(
+            mpc_probe_enabled=bool(parts.candidate_mpc_probe_enabled),
+            mpc_probe_top_k=int(parts.candidate_mpc_probe_top_k),
+            mpc_probe_interval_s=float(parts.candidate_mpc_probe_interval_s),
         )
-        self.strict_decision_ownership_enabled = bool(
+        parts.strict_decision_ownership_enabled = bool(
             self.config.get("strict_decision_ownership_enabled", True)
         )
         self.strict_reference_validator_veto_enabled = bool(
             self.config.get("strict_reference_validator_veto_enabled", True)
         )
-        self.strict_explicit_fallback_speed_mps = max(
+        parts.strict_explicit_fallback_speed_mps = max(
             0.0,
             float(self.config.get("strict_explicit_fallback_speed_mps", 0.8)),
         )
-        self.full_reference_stabilizer_min_forward_m = float(
+        parts.full_reference_stabilizer_min_forward_m = float(
             self.config.get("full_reference_stabilizer_min_forward_m", -0.25)
         )
         self.full_reference_stabilizer_min_spacing_m = max(
             0.0,
             float(self.config.get("full_reference_stabilizer_min_spacing_m", 0.35)),
         )
-        self.full_reference_stabilizer_max_heading_step_rad = max(
+        parts.full_reference_stabilizer_max_heading_step_rad = max(
             0.0,
             float(self.config.get("full_reference_stabilizer_max_heading_step_rad", 0.75)),
         )
@@ -414,14 +411,15 @@ class CPXMPCPlannerBridge:
         # CSV columns are derived from the typed diagnostics payload on the
         # first recorded frame; the bridge does not own a duplicate schema.
 
-        self._init_speed_target_planner = speed_target_planner
-        self._init_behavior_stage = behavior_stage
-        self._init_scenario_manager = scenario_manager
-        self._init_fallback_manager = fallback_manager
-        self._init_destination_speed_stage = destination_speed_stage
-        self._init_behavior_reference_execution_stage = behavior_reference_execution_stage
+        parts.speed_target_planner = speed_target_planner
+        parts.behavior_stage = behavior_stage
+        parts.scenario_manager = scenario_manager
+        parts.fallback_manager = fallback_manager
+        parts.destination_speed_stage = destination_speed_stage
+        parts.behavior_reference_execution_stage = behavior_reference_execution_stage
+        return parts
 
-    def _init_mpc_and_reference_generation(self) -> None:
+    def _init_mpc_and_reference_generation(self, parts: SimpleNamespace) -> None:
         self._ensure_planning_module_import_path()
         from opencda.planning_module.MPC.mpc import MPC
         from opencda.planning_module.behavior_planner import LaneSafetyScorer, RuleBasedBehaviorPlanner
@@ -589,7 +587,7 @@ class CPXMPCPlannerBridge:
         )
         perception_stage = PerceptionStage(
             obstacle_tracker=self.tracker,
-            max_mpc_obstacles=int(self.max_mpc_obstacles),
+            max_mpc_obstacles=int(parts.max_mpc_obstacles),
             ego_length_m=2.0 * float(getattr(ego_extent, "x", 2.25)),
             ego_width_m=2.0 * float(getattr(ego_extent, "y", 1.0)),
             lane_width_m=float(getattr(self.mpc, "lane_width_m", 3.5)),
@@ -612,11 +610,11 @@ class CPXMPCPlannerBridge:
             config=self.config,
         )
 
-        self._init_runtime_input_stage = runtime_input_stage
-        self._init_perception_stage = perception_stage
-        self._init_reference_publication_stage = reference_publication_stage
+        parts.runtime_input_stage = runtime_input_stage
+        parts.perception_stage = perception_stage
+        parts.reference_publication_stage = reference_publication_stage
 
-    def _init_pipeline_route_and_finalization(self) -> None:
+    def _init_pipeline_route_and_finalization(self, parts: SimpleNamespace) -> None:
         from opencda.planning_module.behavior_planner import RuleBasedBehaviorPlanner
         from opencda.planning_module.opencda_bridge.cp_provider import OpenCDACPProvider
         from opencda.planning_module.opencda_bridge.platform_ports import MapLookupPort
@@ -654,47 +652,38 @@ class CPXMPCPlannerBridge:
             supervisor=self.safety_supervisor, config=self.config
         )
         candidate_selection_stage = CandidateSelectionStage(
-            evaluator=self._candidate_trajectory_evaluator,
+            evaluator=parts.candidate_trajectory_evaluator,
             provider=self._stable_reference_line_provider,
             maneuver_manager=self.maneuver_manager,
             reference_pipeline=self.reference_pipeline,
-            fallback_manager=self._init_fallback_manager,
+            fallback_manager=parts.fallback_manager,
             static_obstacle_stage=static_obstacle_stage,
             mpc=self.mpc,
             config=self.config,
             map_epoch="admap",
-            normal_clearance_m=self.full_candidate_reference_min_object_distance_m,
-            static_clearance_m=self.static_obstacle_local_avoidance_min_object_distance_m,
-            risk_hysteresis_margin_m=self.candidate_risk_hysteresis_margin_m,
-            strict_ownership=self.strict_decision_ownership_enabled,
+            normal_clearance_m=parts.full_candidate_reference_min_object_distance_m,
+            static_clearance_m=parts.static_obstacle_local_avoidance_min_object_distance_m,
+            risk_hysteresis_margin_m=parts.candidate_risk_hysteresis_margin_m,
+            strict_ownership=parts.strict_decision_ownership_enabled,
             target_speed_mps=self.target_speed_mps,
         )
         self.pipeline = PlanningPipeline(
-            runtime_input=self._init_runtime_input_stage,
-            perception=self._init_perception_stage,
-            behavior=self._init_behavior_stage,
-            scenario=self._init_scenario_manager,
+            runtime_input=parts.runtime_input_stage,
+            perception=parts.perception_stage,
+            behavior=parts.behavior_stage,
+            scenario=parts.scenario_manager,
             static_obstacle=static_obstacle_stage,
             control_safety=control_safety_stage,
-            speed=self._init_speed_target_planner,
-            destination_speed=self._init_destination_speed_stage,
-            reference_publication=self._init_reference_publication_stage,
+            speed=parts.speed_target_planner,
+            destination_speed=parts.destination_speed_stage,
+            reference_publication=parts.reference_publication_stage,
             mpc_entry=mpc_entry_stage,
-            fallback=self._init_fallback_manager,
-            behavior_reference_execution=self._init_behavior_reference_execution_stage,
+            fallback=parts.fallback_manager,
+            behavior_reference_execution=parts.behavior_reference_execution_stage,
             candidate_selection=candidate_selection_stage,
         )
         # Construction-only scratch state threaded from the earlier
         # _init_* phases; nothing outside __init__ may depend on it.
-        del self._init_speed_target_planner
-        del self._init_behavior_stage
-        del self._init_scenario_manager
-        del self._init_fallback_manager
-        del self._init_destination_speed_stage
-        del self._init_behavior_reference_execution_stage
-        del self._init_runtime_input_stage
-        del self._init_perception_stage
-        del self._init_reference_publication_stage
 
         self.velocity_steering_adapter = OpenCDAVelocitySteeringAdapter(
             self.vehicle_manager.controller,
@@ -814,7 +803,6 @@ class CPXMPCPlannerBridge:
                 self.config.get("turn_replan_max_added_length_m", 100.0)
             ),
         )
-        self.road_cfg_from_map = dict(road_cfg_from_map or {})
         self._active_route_summary = None
         self.mpc_feedback = BehaviorMPCFeedback(
             enabled=bool(self.config.get("mpc_feedback_enabled", True)),
@@ -891,7 +879,7 @@ class CPXMPCPlannerBridge:
         self.pipeline.mpc_execution = MPCExecutionStage(
             mpc=self.mpc,
             control_buffer=self.control_buffer,
-            minimum_replan_speed_mps=float(self.full_control_buffer_min_speed_mps),
+            minimum_replan_speed_mps=float(parts.full_control_buffer_min_speed_mps),
         )
         self.cp_message_path = str(
             self.config.get(
