@@ -23,7 +23,7 @@ import yaml
 
 from opencda.planning_module.utility.carla_compat import carla
 from opencda.planning_module.pipeline.route_context_stage import RouteContextStage
-from opencda.planning_module.pipeline.safety_supervisor import pipeline_failure_action
+from opencda.planning_module.pipeline.safety_supervisor import pipeline_failure_stop
 from opencda.planning_module.pipeline.boundary_recovery import BoundaryRecoveryTracker
 from opencda.planning_module.pipeline.road_boundary_monitor import RoadBoundaryMonitor
 from opencda.planning_module.pipeline.turn_road_envelope import (
@@ -1171,32 +1171,29 @@ class CPXMPCPlannerBridge:
            signal-stop envelope, boundary-recovery hard-stop, stuck-release)
            and owns whatever control this stage returns.
         4. This method's own try/except -- the absolute last resort. Only
-           reached if steps 1-3 raise; returns self._emergency_stop_control()
-           (a bare hard brake) unconditionally, never the platform's normal
+           reached if steps 1-3 raise; returns pipeline_failure_stop()'s
+           bare hard brake unconditionally, never the platform's normal
            control path.
         """
 
         try:
             planner_output = self.execute_planning_pipeline()
         except Exception as exc:
-            if pipeline_failure_action(self.fallback_policy) == "raise":
-                raise
-            control = self._emergency_stop_control()
-            self.last_debug = {
-                "sim_time_s": float(self._sim_time_s()),
-                "vehicle_id": int(getattr(self.vehicle_manager.vehicle, "id", -1)),
-                "planner": "cpx_mpc",
-                "planner_requested": True,
-                "planner_executed": False,
-                "fallback_active": True,
-                "fallback_reason": str(exc),
-                "mpc_fallback_reason": str(exc),
-                "control_guard_reason": "fallback_policy_emergency_stop",
-                "accel_cmd_mps2": float(getattr(self.mpc.constraints, "min_acceleration_mps2", -3.0)),
-                "steer_cmd_rad": 0.0,
-            }
+            stop = pipeline_failure_stop(
+                error=exc,
+                fallback_policy=self.fallback_policy,
+                emergency_stop_control=self.actuator_port.emergency_stop_control,
+                min_acceleration_mps2=float(
+                    getattr(self.mpc.constraints, "min_acceleration_mps2", -3.0)
+                ),
+                sim_time_s=float(self._sim_time_s()),
+                vehicle_id=int(getattr(self.vehicle_manager.vehicle, "id", -1)),
+            )
+            self._last_accel_mps2 = float(stop.acceleration_mps2)
+            self._last_steer_rad = float(stop.steering_rad)
+            self.last_debug = dict(stop.debug)
             self._record_debug(self.last_debug)
-            return control
+            return stop.control
         self.last_output = planner_output
         self.last_debug = planner_output.diagnostics_dict()
         self._record_debug(self.last_debug)
@@ -4475,11 +4472,6 @@ class CPXMPCPlannerBridge:
 
     def _steer_rad_from_control(self, control: carla.VehicleControl) -> float:
         return self.actuator_port.steering(control)
-
-    def _emergency_stop_control(self) -> carla.VehicleControl:
-        self._last_accel_mps2 = float(getattr(self.mpc.constraints, "min_acceleration_mps2", -3.0))
-        self._last_steer_rad = 0.0
-        return self.actuator_port.emergency_stop_control()
 
     @staticmethod
     def _wrap_angle(angle_rad: float) -> float:

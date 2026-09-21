@@ -12,6 +12,7 @@ from pipeline.safety_supervisor import (
     emergency_stop_reason,
     hard_gate_requires_emergency_stop,
     pipeline_failure_action,
+    pipeline_failure_stop,
 )
 
 GATE = "candidate_hard_gate:"
@@ -123,7 +124,9 @@ def _bridge_whose_pipeline_raises(policy):
     bridge.mpc = SimpleNamespace(constraints=SimpleNamespace(min_acceleration_mps2=-3.0))
     bridge._sim_time_s = lambda: 1.0
     bridge._record_debug = lambda payload: None
-    bridge._emergency_stop_control = lambda: "EMERGENCY-CONTROL"
+    bridge.actuator_port = SimpleNamespace(
+        emergency_stop_control=lambda: "EMERGENCY-CONTROL"
+    )
 
     def boom():
         raise RuntimeError("pipeline blew up")
@@ -143,3 +146,68 @@ def test_run_step_falls_back_to_an_emergency_stop_by_default():
 def test_run_step_lets_the_exception_through_under_the_raise_policy():
     with pytest.raises(RuntimeError, match="pipeline blew up"):
         _bridge_whose_pipeline_raises("raise").run_step()
+
+
+def test_run_step_records_the_hard_brake_as_the_last_command():
+    bridge = _bridge_whose_pipeline_raises("emergency_stop")
+    bridge.run_step()
+    assert bridge._last_accel_mps2 == -3.0
+    assert bridge._last_steer_rad == 0.0
+
+
+def test_raise_policy_leaves_the_last_command_alone():
+    bridge = _bridge_whose_pipeline_raises("raise")
+    with pytest.raises(RuntimeError):
+        bridge.run_step()
+    assert not hasattr(bridge, "_last_accel_mps2")
+
+
+# ---- pipeline_failure_stop itself -------------------------------------------
+
+def _failure(policy, error=None, control=lambda: "BRAKE"):
+    return pipeline_failure_stop(
+        error=error or RuntimeError("boom"),
+        fallback_policy=policy,
+        emergency_stop_control=control,
+        min_acceleration_mps2=-4.5,
+        sim_time_s=12.0,
+        vehicle_id=7,
+    )
+
+
+def test_failure_stop_is_a_hard_brake_with_the_mpc_deceleration_limit():
+    stop = _failure("emergency_stop")
+    assert stop.control == "BRAKE"
+    assert stop.acceleration_mps2 == -4.5
+    assert stop.steering_rad == 0.0
+
+
+def test_failure_stop_debug_payload_is_exact():
+    assert dict(_failure("emergency_stop").debug) == {
+        "sim_time_s": 12.0,
+        "vehicle_id": 7,
+        "planner": "cpx_mpc",
+        "planner_requested": True,
+        "planner_executed": False,
+        "fallback_active": True,
+        "fallback_reason": "boom",
+        "mpc_fallback_reason": "boom",
+        "control_guard_reason": "fallback_policy_emergency_stop",
+        "accel_cmd_mps2": -4.5,
+        "steer_cmd_rad": 0.0,
+    }
+
+
+@pytest.mark.parametrize("policy", ["raise", "opencda"])
+def test_failure_stop_reraises_the_same_error_without_building_a_control(policy):
+    error = RuntimeError("original")
+    built = []
+
+    def control():
+        built.append(1)
+        return "BRAKE"
+
+    with pytest.raises(RuntimeError) as caught:
+        _failure(policy, error=error, control=control)
+    assert caught.value is error
+    assert built == []

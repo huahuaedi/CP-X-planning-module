@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional, Sequence, Tuple
 
 # Reference tick length max_*_delta below are expressed against (CARLA's
@@ -721,3 +722,50 @@ def pipeline_failure_action(fallback_policy: str) -> str:
     if str(fallback_policy) in {"raise", "opencda"}:
         return "raise"
     return "emergency_stop"
+
+
+@dataclass(frozen=True)
+class PipelineFailureStop:
+    """The last-resort stop when the planning pipeline raised."""
+
+    control: Any
+    acceleration_mps2: float
+    steering_rad: float
+    debug: Mapping[str, object]
+
+
+def pipeline_failure_stop(
+    *,
+    error: Exception,
+    fallback_policy: str,
+    emergency_stop_control: Callable[[], Any],
+    min_acceleration_mps2: float,
+    sim_time_s: float,
+    vehicle_id: int,
+) -> PipelineFailureStop:
+    """Decide and build the response to a pipeline exception.
+
+    Under the ``raise`` policy the error is re-raised.  Otherwise the answer is
+    a bare hard brake, never the platform's normal control path.
+    """
+
+    if pipeline_failure_action(fallback_policy) == "raise":
+        raise error
+    return PipelineFailureStop(
+        control=emergency_stop_control(),
+        acceleration_mps2=float(min_acceleration_mps2),
+        steering_rad=0.0,
+        debug={
+            "sim_time_s": float(sim_time_s),
+            "vehicle_id": int(vehicle_id),
+            "planner": "cpx_mpc",
+            "planner_requested": True,
+            "planner_executed": False,
+            "fallback_active": True,
+            "fallback_reason": str(error),
+            "mpc_fallback_reason": str(error),
+            "control_guard_reason": "fallback_policy_emergency_stop",
+            "accel_cmd_mps2": float(min_acceleration_mps2),
+            "steer_cmd_rad": 0.0,
+        },
+    )
