@@ -1670,26 +1670,10 @@ class CPXMPCPlannerBridge:
                 corridor_rows=cav_constraint_rows,
                 constraint_revision=str(cav_constraint_revision),
             ),
-            normal_stop_control=lambda: self.carla.VehicleControl(
-                throttle=0.0,
-                brake=min(1.0, max(0.0, float(self.config.get(
-                    "normal_stop_mpc_suspend_brake", 0.08,
-                )))),
-                steer=0.0,
+            normal_stop_control=lambda: self.actuator_port.normal_stop_control(
+                float(self.config.get("normal_stop_mpc_suspend_brake", 0.08))
             ),
-            safe_stop_control=lambda acceleration_mps2, steering_rad: self.carla.VehicleControl(
-                throttle=0.0,
-                brake=min(1.0, max(
-                    0.0,
-                    -float(acceleration_mps2) / max(
-                        1e-6,
-                        abs(float(self.mpc.constraints.min_acceleration_mps2)),
-                    ),
-                )),
-                steer=min(1.0, max(-1.0, float(steering_rad) / max(
-                    1e-6, float(self.mpc.constraints.max_steer_rad),
-                ))),
-            ),
+            safe_stop_control=self.actuator_port.safe_stop_control,
             emergency_stop_control=self._emergency_stop_control,
         )
         self._accum_stage_ms("execute_mpc", time.monotonic() - _ts_stage)
@@ -5547,7 +5531,7 @@ class CPXMPCPlannerBridge:
     def _emergency_stop_control(self) -> carla.VehicleControl:
         self._last_accel_mps2 = float(getattr(self.mpc.constraints, "min_acceleration_mps2", -3.0))
         self._last_steer_rad = 0.0
-        return carla.VehicleControl(throttle=0.0, brake=1.0, steer=0.0)
+        return self.actuator_port.emergency_stop_control()
 
     @staticmethod
     def _wrap_angle(angle_rad: float) -> float:
