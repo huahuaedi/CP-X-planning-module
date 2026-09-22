@@ -3,6 +3,7 @@ from types import MappingProxyType, SimpleNamespace
 from pipeline.nominal_trajectory import NominalTrajectoryGenerator
 from pipeline.reference_planning_stage import (
     BehaviorReferenceRequest,
+    CandidatePlanningRequest,
     PostTurnReferenceRequest,
     ReferencePlanningStage,
 )
@@ -31,6 +32,20 @@ class _Provider:
         self.releases.append((mode, event))
 
 
+class _CandidateSelection:
+    def __init__(self):
+        self.request = None
+        self.kwargs = None
+
+    def arbitrate(self, request, **kwargs):
+        self.request = request
+        self.kwargs = kwargs
+        return "candidate-result"
+
+    def cooperative_conflict_reference(self, **kwargs):
+        return kwargs
+
+
 def _behavior_request():
     return BehaviorReferenceRequest(
         map_planner="map", local_map="local-map", ego_pose={"x": 1.0},
@@ -56,7 +71,8 @@ def test_stage_builds_from_last_accepted_nominal_trajectory():
         source="test",
     )
     stage = ReferencePlanningStage(
-        provider=provider, nominal_trajectory_generator=nominal
+        provider=provider, nominal_trajectory_generator=nominal,
+        candidate_selection=_CandidateSelection(),
     )
 
     frame = stage.build_behavior_reference(_behavior_request())
@@ -71,7 +87,8 @@ def test_stage_owns_post_turn_release_and_nominal_publication():
     provider = _Provider()
     nominal = NominalTrajectoryGenerator()
     stage = ReferencePlanningStage(
-        provider=provider, nominal_trajectory_generator=nominal
+        provider=provider, nominal_trajectory_generator=nominal,
+        candidate_selection=_CandidateSelection(),
     )
     request = PostTurnReferenceRequest(
         maneuver_manager="maneuver", decision="lane_follow",
@@ -92,3 +109,56 @@ def test_stage_owns_post_turn_release_and_nominal_publication():
     assert nominal.current.source == "post_turn"
     assert nominal.current.reference_freeze_count == 5
     assert nominal.current.target.x_m == 9.0
+
+
+def test_stage_builds_candidate_context_and_delegates_arbitration():
+    provider = _Provider()
+    candidate_selection = _CandidateSelection()
+    stage = ReferencePlanningStage(
+        provider=provider,
+        nominal_trajectory_generator=NominalTrajectoryGenerator(),
+        candidate_selection=candidate_selection,
+    )
+    baseline_request = _behavior_request()
+    baseline_frame = SimpleNamespace(
+        built_reference=SimpleNamespace(reference_freeze_count=3),
+        mutable_previous_reference=lambda: [{"x_ref_m": 0.0}],
+        mutable_previous_target_state=lambda: [0.0, 0.0, 4.0, 0.0],
+    )
+    authorization = SimpleNamespace(
+        allowed=False, target_lane_id=0, direction="",
+        distance_to_maneuver_m=None,
+    )
+    request = CandidatePlanningRequest(
+        baseline_request=baseline_request, baseline_frame=baseline_frame,
+        baseline_destination_state=[8.0, 0.0, 4.0, 0.0],
+        baseline_reference=[{"x_ref_m": 1.0}], baseline_debug={"base": True},
+        planner_config={}, selected_decision="lane_follow",
+        selected_target_lane_id=4, current_lane_id=4, target_speed_mps=8.0,
+        candidate_lane_ids=[4], lane_safety_scores={4: 1.0},
+        lane_prediction_risks={}, stop_goal_active=False,
+        traffic_stop_active=False, lane_change_authorization=authorization,
+        opportunistic_lane_change_allowed=False, stop_target=None,
+        local_obstacle_avoidance_active=False,
+        current_state=[1.0, 2.0, 3.0, 0.0],
+        ego_location=SimpleNamespace(x=1.0, y=2.0), ego_yaw_rad=0.0,
+        object_snapshots=[], prediction_trajectories={},
+        current_acceleration_mps2=0.1, current_steering_rad=0.0,
+        route_required=False, scenario_stop_required=False,
+        speed_plan="speed-plan", turn_prepare_speed_suppressed=False,
+        cooperative_lane_change_deferred=False,
+        lane_change_mpc_stall_failure_count=0,
+        route_revision="route-1", map_epoch="admap",
+        upcoming_turn_direction="", upcoming_turn_distance_m=100.0,
+        lane_change_duration_s=4.0, lane_change_duration_reason="comfort",
+        lane_width_m=3.5, validate_contract=lambda **_kwargs: True,
+    )
+
+    result = stage.arbitrate_candidates(request)
+
+    assert result == "candidate-result"
+    assert candidate_selection.request.reference_context.baseline_debug == {
+        "base": True
+    }
+    assert candidate_selection.request.baseline_lane_change_state == "LANE_KEEP"
+    assert candidate_selection.kwargs["route_revision"] == "route-1"

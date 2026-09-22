@@ -81,6 +81,7 @@ from .reference_line_provider import (
 from .reference_planning_stage import (
     BehaviorReferenceFrame,
     BehaviorReferenceRequest,
+    CandidatePlanningRequest,
     PostTurnReferenceRequest,
     ReferencePlanningStage,
 )
@@ -172,6 +173,7 @@ __all__ = [
     "ReferencePlanningStage",
     "BehaviorReferenceRequest",
     "BehaviorReferenceFrame",
+    "CandidatePlanningRequest",
     "PostTurnReferenceRequest",
     "MPCControlBuffer",
     "BehaviorConstraint",

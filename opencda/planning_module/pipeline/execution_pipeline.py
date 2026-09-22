@@ -230,7 +230,6 @@ class PlanningPipeline:
         mpc_execution: Any = None,
         fallback: Any = None,
         behavior_reference_execution: Any = None,
-        candidate_selection: Any = None,
         reference_planning: Any = None,
         control_finalization: Any = None,
     ) -> None:
@@ -247,7 +246,6 @@ class PlanningPipeline:
         self.mpc_execution = mpc_execution
         self.fallback = fallback
         self.behavior_reference_execution = behavior_reference_execution
-        self.candidate_selection = candidate_selection
         self.reference_planning = reference_planning
         self.control_finalization = control_finalization
 
@@ -1088,9 +1086,9 @@ class PlanningPipeline:
         return self.behavior_reference_execution.run(request, planner=planner)
 
     def arbitrate_candidates(self, request, **kwargs):
-        if self.candidate_selection is None:
-            raise RuntimeError("candidate selection stage is not configured")
-        return self.candidate_selection.arbitrate(request, **kwargs)
+        if self.reference_planning is None:
+            raise RuntimeError("reference planning stage is not configured")
+        return self.reference_planning.arbitrate_candidates(request, **kwargs)
 
     def build_behavior_reference(self, request):
         if self.reference_planning is None:
@@ -1103,6 +1101,6 @@ class PlanningPipeline:
         return self.reference_planning.finalize_post_turn(request)
 
     def cooperative_conflict_reference(self, **kwargs):
-        if self.candidate_selection is None:
-            raise RuntimeError("candidate selection stage is not configured")
-        return self.candidate_selection.cooperative_conflict_reference(**kwargs)
+        if self.reference_planning is None:
+            raise RuntimeError("reference planning stage is not configured")
+        return self.reference_planning.cooperative_conflict_reference(**kwargs)

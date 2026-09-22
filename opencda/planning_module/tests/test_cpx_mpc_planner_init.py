@@ -143,7 +143,7 @@ def test_pipeline_wires_all_stage_owners(bridge):
         "_runtime_input", "_perception", "behavior", "scenario",
         "static_obstacle", "control_safety", "speed", "destination_speed",
         "reference_publication", "mpc_entry", "fallback",
-        "behavior_reference_execution", "candidate_selection",
+        "behavior_reference_execution", "reference_planning",
         "control_finalization", "mpc_execution",
     ):
         assert getattr(pipeline, attr, None) is not None, (
@@ -159,7 +159,7 @@ def test_global_planner_and_route_manager_share_the_same_backend(bridge):
 
 def test_candidate_selection_stage_receives_lane_change_lifecycle(bridge):
     assert (
-        bridge.pipeline.candidate_selection._lane_change_lifecycle
+        bridge.pipeline.reference_planning.candidate_selection._lane_change_lifecycle
         is bridge.lane_change_lifecycle_stage
     )
 

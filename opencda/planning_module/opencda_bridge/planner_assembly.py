@@ -690,6 +690,7 @@ def _pipeline_route_and_finalization(bridge, parts: SimpleNamespace) -> None:
     reference_planning_stage = ReferencePlanningStage(
         provider=bridge._stable_reference_line_provider,
         nominal_trajectory_generator=bridge.nominal_trajectory_generator,
+        candidate_selection=candidate_selection_stage,
     )
     bridge.pipeline = PlanningPipeline(
         runtime_input=parts.runtime_input_stage,
@@ -704,7 +705,6 @@ def _pipeline_route_and_finalization(bridge, parts: SimpleNamespace) -> None:
         mpc_entry=mpc_entry_stage,
         fallback=parts.fallback_manager,
         behavior_reference_execution=parts.behavior_reference_execution_stage,
-        candidate_selection=candidate_selection_stage,
         reference_planning=reference_planning_stage,
     )
     # Construction-only scratch state threaded from the earlier
