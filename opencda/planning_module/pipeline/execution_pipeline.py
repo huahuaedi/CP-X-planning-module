@@ -18,6 +18,7 @@ from .behavior_reference_finalization_stage import (
     BehaviorReferenceFinalizationStage,
 )
 from .speed_planning_stage import SpeedPlanningRequest, SpeedPlanningStage
+from .route_update_stage import RouteUpdateRequest, RouteUpdateStage
 
 
 @dataclass(frozen=True)
@@ -270,6 +271,7 @@ class PlanningPipeline:
             perception=perception,
             speed=speed,
         )
+        self.route_update = RouteUpdateStage()
 
     def attach_cooperative(self, cooperative: Any) -> None:
         """Complete late assembly after the route owner exists."""
@@ -286,6 +288,9 @@ class PlanningPipeline:
             ego_transform=ego_transform,
             ego_speed_kmh=float(ego_speed_kmh),
         )
+
+    def update_route_from_cp(self, request: RouteUpdateRequest):
+        return self.route_update.run(request)
 
     def perceive(
         self,

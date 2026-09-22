@@ -62,6 +62,9 @@ from opencda.planning_module.pipeline.behavior_reference_finalization_stage impo
 from opencda.planning_module.pipeline.speed_planning_stage import (
     SpeedPlanningRequest,
 )
+from opencda.planning_module.pipeline.route_update_stage import (
+    RouteUpdateRequest,
+)
 from opencda.planning_module.pipeline.candidate_selection_stage import (
     CandidateSelectionStage,
 )
@@ -1213,33 +1216,22 @@ class CPXMPCPlannerBridge:
         cp_payload: Mapping[str, Any] | None = None,
     ):
         sim_time_s = self._sim_time_s()
-        lane_closure_update = self._apply_cp_lane_closures(
-            ego_location=ego_location,
-            cp_payload=cp_payload,
-        )
-        route_replan_attempted = bool(
-            getattr(lane_closure_update, "attempted", False)
-        )
-        route_replan_succeeded = bool(
-            getattr(lane_closure_update, "success", False)
-            and getattr(lane_closure_update, "route_changed", False)
-        )
-        route_replan_reason = str(
-            getattr(
-                lane_closure_update,
-                "reason",
-                "route_replan_not_requested",
+        route_update = self.pipeline.update_route_from_cp(
+            RouteUpdateRequest(
+                route_manager=self.route_manager,
+                ego_location=ego_location,
+                cp_payload=cp_payload,
+                stop_goal_active=bool(stop_goal_active),
+                lane_closure_reroute_enabled=bool(
+                    self.config.get("cp_lane_closure_reroute_enabled", True)
+                ),
+                reset_for_route_revision=self._reset_pipeline_for_route_revision,
             )
         )
-        # A valid closure for which no alternate topology exists is a typed
-        # route failure, not permission to continue into the closed lane.
-        stop_goal_active = bool(
-            stop_goal_active
-            or (
-                route_replan_attempted
-                and not bool(getattr(lane_closure_update, "success", False))
-            )
-        )
+        route_replan_attempted = route_update.route_replan_attempted
+        route_replan_succeeded = route_update.route_replan_succeeded
+        route_replan_reason = route_update.route_replan_reason
+        stop_goal_active = route_update.stop_goal_active
         _ts_sub = time.monotonic()
         adapter_output = self.input_adapter.build(
             ego_location=ego_location,
@@ -1371,21 +1363,7 @@ class CPXMPCPlannerBridge:
             )
         route_lane_change_required = bool(lane_change_authorization.required_by_route)
         source_quality = dict(adapter_output.source_quality)
-        source_quality.update({
-            "cp_lane_closure_attempted": bool(route_replan_attempted),
-            "cp_lane_closure_route_changed": bool(
-                getattr(lane_closure_update, "route_changed", False)
-            ),
-            "cp_lane_closure_reason": str(
-                getattr(lane_closure_update, "reason", "")
-            ),
-            "cp_lane_closure_handled_ids": list(
-                getattr(lane_closure_update, "handled_message_ids", ()) or ()
-            ),
-            "cp_lane_closure_blocked_lane_ids": list(
-                getattr(lane_closure_update, "blocked_lane_ids", ()) or ()
-            ),
-        })
+        source_quality.update(route_update.trace_fields())
         scenario_observation = behavior_context.scenario_observation
         turn_context = scenario_observation.turn_context
         scenario_result = scenario_observation.scenario
@@ -2561,72 +2539,6 @@ class CPXMPCPlannerBridge:
             reason="static_obstacle_route_replanned"
         )
         return True, True, str(result.reason)
-
-    def _apply_cp_lane_closures(
-        self, *, ego_location: Any, cp_payload: Mapping[str, Any] | None,
-    ) -> Any:
-        """Submit CP lane events to RouteManager's atomic route lifecycle."""
-
-        from opencda.planning_module.pipeline.route_manager import (
-            LaneClosureRouteResult,
-        )
-
-        if not bool(self.config.get("cp_lane_closure_reroute_enabled", True)):
-            return None
-        payload = dict(cp_payload or {})
-        messages = list(
-            payload.get("lane_closures", payload.get("lane_events", ())) or ()
-        )
-        apply_closures = getattr(self.route_manager, "apply_lane_closures", None)
-        if not messages or not callable(apply_closures):
-            return None
-        try:
-            result = apply_closures(
-                messages=messages,
-                start_point={
-                    "x": float(ego_location.x),
-                    "y": float(ego_location.y),
-                    "z": float(getattr(ego_location, "z", 0.0)),
-                },
-            )
-        except Exception as exc:
-            # apply_lane_closures' own contract keeps a *failed* proposal
-            # from mutating anything -- but an unexpected exception here
-            # must not be allowed to vanish into
-            # BehaviorReferenceExecutionStage's generic per-tick
-            # degradation, which only prints when self.debug is set. That
-            # silence is exactly what would hide RouteManager ending up
-            # ahead of what the rest of this tick (and every diagnostic
-            # field derived from its return value) believes happened.
-            print(
-                "[CP-X OpenCDA Bridge] CP lane closure apply_lane_closures "
-                "raised: " + repr(exc)
-            )
-            return LaneClosureRouteResult(
-                attempted=True, success=False, route_changed=False,
-                reason="cp_lane_closure_apply_exception:" + repr(exc),
-            )
-        if bool(getattr(result, "route_changed", False)):
-            # This is the only externally visible sign a CP lane closure
-            # actually drove a reroute: the scenario deliberately spawns no
-            # local obstacle at the closure (see cpx_cp_lane_closure.yaml's
-            # description -- the point is to prove CP transport + topology
-            # rerouting, not reactive avoidance), so nothing else marks this
-            # moment for a human watching the run, and the ensuing lane
-            # change looks identical to any other one in the log.
-            print(
-                "[CP-X OpenCDA Bridge] CP lane closure applied: blocked_lane_ids=%s "
-                "route_revision=%s reason=%s"
-                % (
-                    list(getattr(result, "blocked_lane_ids", ()) or ()),
-                    str(self.route_manager.route_revision),
-                    str(getattr(result, "reason", "")),
-                )
-            )
-            self._reset_pipeline_for_route_revision(
-                reason="cp_lane_closure_route_replanned"
-            )
-        return result
 
     def _reset_pipeline_for_route_revision(self, *, reason: str) -> None:
         """Retire all trajectory/control state after an accepted route swap.
