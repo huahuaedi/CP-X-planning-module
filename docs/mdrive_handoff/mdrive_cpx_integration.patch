@@ -1,0 +1,2683 @@
+diff --git a/simulation/leaderboard/leaderboard/leaderboard_evaluator_parameter.py b/simulation/leaderboard/leaderboard/leaderboard_evaluator_parameter.py
+index 16028c01..ad546407 100755
+--- a/simulation/leaderboard/leaderboard/leaderboard_evaluator_parameter.py
++++ b/simulation/leaderboard/leaderboard/leaderboard_evaluator_parameter.py
+@@ -13,6 +13,7 @@ Provisional code to evaluate Autonomous Agents for the CARLA Autonomous Driving
+ from __future__ import print_function
+ 
+ import traceback
++import faulthandler
+ import argparse
+ from argparse import RawTextHelpFormatter
+ from datetime import datetime
+@@ -903,7 +904,22 @@ class LeaderboardEvaluator(object):
+         settings = self.world.get_settings()
+         settings.fixed_delta_seconds = 1.0 / self.frame_rate
+         settings.synchronous_mode = True
+-        settings.deterministic_ragdolls = True
++        # CARLA 0.9.12 can segfault in UE4 while spawning/ticking walkers when
++        # deterministic ragdolls are forced on.  They are not required for
++        # route evaluation or CARLA-GT perception, so keep the engine default
++        # unless a run explicitly opts in.
++        settings.deterministic_ragdolls = (
++            os.environ.get("CUSTOM_DETERMINISTIC_RAGDOLLS", "0")
++            .strip()
++            .lower()
++            in ("1", "true", "yes", "on")
++        )
++        print(
++            "[CARLA SETTINGS] deterministic_ragdolls={}".format(
++                settings.deterministic_ragdolls
++            ),
++            flush=True,
++        )
+         self.world.apply_settings(settings)
+ 
+         self.world.reset_all_traffic_lights()
+@@ -1333,15 +1349,61 @@ class LeaderboardEvaluator(object):
+             world_sensor_actors=gate_counts_before["world_sensor_actors"],
+             ego_refs=gate_counts_before["ego_refs"],
+         )
+-        self._teardown_barrier(stage="route_start_gate")
+-        gate_counts_after = self._collect_teardown_counts()
+-        self._emit_actor_snapshot(
+-            "route_start_gate_end",
+-            route_name=config.name,
+-            route_index=config.index,
+-            repetition=config.repetition_index,
+-            teardown_seq=int(self._last_teardown_completed_seq),
++        manager_agent = getattr(getattr(self, "manager", None), "_agent", None)
++        gate_is_already_clean = (
++            gate_counts_before["tracked_sensors"] == 0
++            and gate_counts_before["tracked_actor_pool"] == 0
++            and gate_counts_before["world_sensor_actors"] == 0
++            and gate_counts_before["ego_refs"] == 0
++            and manager_agent is None
++            and getattr(self, "agent_instance", None) is None
+         )
++        if gate_is_already_clean:
++            # The first route has no previous runtime to tear down. Calling
++            # world.get_actors() again from the full barrier can wedge CARLA
++            # 0.9.12 even though every tracked resource count is already zero.
++            print(
++                "[ROUTE START GATE] No prior route resources; skipping "
++                "teardown RPCs.",
++                flush=True,
++            )
++            log_carla_event(
++                "ROUTE_START_GATE_TEARDOWN_SKIPPED",
++                process_name=EVALUATOR_PROCESS_NAME,
++                route_name=config.name,
++                route_index=config.index,
++                repetition=config.repetition_index,
++                reason="already_clean",
++            )
++            gate_counts_after = dict(gate_counts_before)
++        else:
++            self._teardown_barrier(stage="route_start_gate")
++            gate_counts_after = self._collect_teardown_counts()
++        if gate_is_already_clean:
++            # Reuse the verified clean counts. A diagnostic snapshot must not
++            # issue another world.get_actors() RPC on this fragile boundary.
++            snapshot = {
++                "label": "route_start_gate_end",
++                **gate_counts_after,
++                "world_actor_total": None,
++                "hero_alive": 0,
++                "route_name": config.name,
++                "route_index": config.index,
++                "repetition": config.repetition_index,
++                "teardown_seq": int(self._last_teardown_completed_seq),
++            }
++            print(
++                "[ACTOR SNAPSHOT] " + json.dumps(snapshot, sort_keys=True),
++                flush=True,
++            )
++        else:
++            self._emit_actor_snapshot(
++                "route_start_gate_end",
++                route_name=config.name,
++                route_index=config.index,
++                repetition=config.repetition_index,
++                teardown_seq=int(self._last_teardown_completed_seq),
++            )
+         log_carla_event(
+             "ROUTE_START_GATE_END",
+             process_name=EVALUATOR_PROCESS_NAME,
+@@ -1376,13 +1438,29 @@ class LeaderboardEvaluator(object):
+             else:
+                 # Set up the user's agent, and the timer self._agent_watchdog to avoid freezing the simulation
+                 try:
++                    setup_started_at = time.time()
++                    print("[AGENT SETUP] starting watchdog", flush=True)
+                     self._agent_watchdog.start()
+                     # agent_class_name for example 'AutoPilot', 'PnP_Agent' .etc
+                     agent_class_name = getattr(self.module_agent, 'get_entry_point')()
++                    print(
++                        "[AGENT SETUP] constructing {} from config {}".format(
++                            agent_class_name, args.agent_config
++                        ),
++                        flush=True,
++                    )
++                    faulthandler.dump_traceback_later(30, repeat=True)
+                     self.agent_instance = getattr(self.module_agent, agent_class_name)(
+                         args.agent_config,
+                         self.ego_vehicles_num,
+                     )
++                    faulthandler.cancel_dump_traceback_later()
++                    print(
++                        "[AGENT SETUP] constructed {} in {:.2f}s".format(
++                            agent_class_name, time.time() - setup_started_at
++                        ),
++                        flush=True,
++                    )
+                     config.agent = self.agent_instance
+                     if hasattr(self.agent_instance, "get_save_path"):
+                         print("Data Generation Confirmed!")
+@@ -1398,19 +1476,34 @@ class LeaderboardEvaluator(object):
+                             print('load save path failed')
+ 
+                     # save source code
++                    print("[AGENT SETUP] backing up source", flush=True)
+                     backup_script(os.environ["RESULT_ROOT"])
++                    print("[AGENT SETUP] source backup complete", flush=True)
+ 
+                     # Check and store the sensors
+                     if not self.sensors:
++                        print("[AGENT SETUP] reading sensor configuration", flush=True)
+                         self.sensors = self.agent_instance.sensors()
+                         track = self.agent_instance.track
+                         AgentWrapper.validate_sensor_configuration(self.sensors, track, args.track)
+                         self.sensor_icons = [sensors_to_icons[sensor['type']] for sensor in self.sensors]
+                         for j in range(self.ego_vehicles_num):
+                             self.statistics_manager[j].save_sensors(self.sensor_icons, args.checkpoint)
++                        print(
++                            "[AGENT SETUP] sensor configuration ready "
++                            "({} sensors)".format(len(self.sensors)),
++                            flush=True,
++                        )
+                     self._agent_watchdog.stop()
++                    print(
++                        "[AGENT SETUP] complete in {:.2f}s".format(
++                            time.time() - setup_started_at
++                        ),
++                        flush=True,
++                    )
+ 
+                 except SensorConfigurationInvalid as e:
++                    faulthandler.cancel_dump_traceback_later()
+                     # The sensors are invalid -> set the execution to rejected and stop
+                     print("\n\033[91mThe sensor's configuration used is invalid:")
+                     print("> {}\033[0m\n".format(e))
+@@ -1429,6 +1522,7 @@ class LeaderboardEvaluator(object):
+                     )
+ 
+                 except Exception as e:
++                    faulthandler.cancel_dump_traceback_later()
+                     # The agent setup has failed -> start the next route
+                     print("\n\033[91mCould not set up the required agent:")
+                     print("> {}\033[0m\n".format(e))
+diff --git a/simulation/leaderboard/leaderboard/scenarios/scenario_manager.py b/simulation/leaderboard/leaderboard/scenarios/scenario_manager.py
+index c0d21a7b..51ca8e1e 100755
+--- a/simulation/leaderboard/leaderboard/scenarios/scenario_manager.py
++++ b/simulation/leaderboard/leaderboard/scenarios/scenario_manager.py
+@@ -1778,26 +1778,68 @@ class ScenarioManager(object):
+                             self._agent.cleanup_rsu(idx)
+                         except Exception:
+                             pass
+-                        completed_actor = CarlaDataProvider.get_hero_actor(hero_id=idx)
+-                        completed_actor_id = getattr(completed_actor, "id", None)
+-                        if completed_actor_id is not None:
+-                            try:
+-                                CarlaDataProvider.remove_actor_by_id(
+-                                    int(completed_actor_id),
+-                                    max_retries=0,
+-                                    timeout_s=0.5,
+-                                    poll_s=0.02,
+-                                    direct_fallback=False,
+-                                    reason="scenario_manager_completed_ego_cleanup",
+-                                    phase="route_completion_success",
+-                                )
+-                            except Exception:
+-                                pass
+                         self._runtime_completed_ego_cleanup_done.add(idx)
+                         self._runtime_dead_ego_cleanup_done.add(idx)
++                        # apply_control is never called again for idx once
++                        # it's in _runtime_completed_ego_cleanup_done (see
++                        # the control loop above), so CARLA keeps replaying
++                        # whatever control it last received -- typically
++                        # nonzero throttle from finishing the route at
++                        # speed. Left in place until scenario teardown (see
++                        # below), it would keep driving straight under that
++                        # stale command with no more steering correction and
++                        # drift off the road. Apply one final hard stop so
++                        # it settles in place instead.
++                        try:
++                            self.ego_vehicles[idx].apply_control(
++                                carla.VehicleControl(
++                                    throttle=0.0, brake=1.0, steer=0.0,
++                                    hand_brake=True,
++                                )
++                            )
++                        except Exception:
++                            pass
++                        # Only despawn the vehicle actor itself once every
++                        # ego in this scenario has finished. Multi-ego
++                        # agents (e.g. perception_swap_agent) poll
++                        # world.get_actors() each tick expecting exactly
++                        # ego_vehicles_num hero-role actors; destroying one
++                        # early while other egos are still active shrinks
++                        # that count for the rest of the run and hits their
++                        # "heroes not all spawned yet" startup guard, which
++                        # silently freezes every OTHER still-active ego into
++                        # idle control for good (confirmed via
++                        # Interactive_Lane_Change and Roundabout_Navigation
++                        # multi-CAV runs, both stalling their second ego
++                        # this way as soon as the first ego completed).
++                        # Control is already gated off via
++                        # _runtime_completed_ego_cleanup_done above, so
++                        # leaving the actor's body in place until teardown
++                        # costs nothing but a harmless static leftover.
++                        other_egos_still_active = (
++                            len(self._runtime_completed_ego_cleanup_done)
++                            < self.ego_vehicles_num
++                        )
++                        if not other_egos_still_active:
++                            completed_actor = CarlaDataProvider.get_hero_actor(hero_id=idx)
++                            completed_actor_id = getattr(completed_actor, "id", None)
++                            if completed_actor_id is not None:
++                                try:
++                                    CarlaDataProvider.remove_actor_by_id(
++                                        int(completed_actor_id),
++                                        max_retries=0,
++                                        timeout_s=0.5,
++                                        poll_s=0.02,
++                                        direct_fallback=False,
++                                        reason="scenario_manager_completed_ego_cleanup",
++                                        phase="route_completion_success",
++                                    )
++                                except Exception:
++                                    pass
+                         if os.environ.get('DEBUG_FINISH', '').lower() in ('1', 'true', 'yes'):
+                             print(
+-                                f"[DEBUG FINISH] Ego {idx}: completed ego despawn triggered "
++                                f"[DEBUG FINISH] Ego {idx}: completed ego despawn "
++                                f"{'triggered' if not other_egos_still_active else 'deferred (other egos still active)'} "
+                                 f"(success={ego_completed}, rc100={ego_route_completion_100})"
+                             )
+                     # Position-based stuck detector.  Independent backstop
+diff --git a/simulation/leaderboard/leaderboard/sensors/fixed_sensors.py b/simulation/leaderboard/leaderboard/sensors/fixed_sensors.py
+index 2a4e0239..e2a41d14 100755
+--- a/simulation/leaderboard/leaderboard/sensors/fixed_sensors.py
++++ b/simulation/leaderboard/leaderboard/sensors/fixed_sensors.py
+@@ -707,7 +707,9 @@ class SensorUnit(object):
+         data = {}
+         _id = 0
+         for actor_type in list(TPE.keys()):
+-            actors = CarlaDataProvider.get_world().get_level_bbs(actor_type=actor_type)
++            # CARLA 0.9.12's Boost.Python binding accepts this only as a
++            # positional argument.
++            actors = CarlaDataProvider.get_world().get_level_bbs(actor_type)
+             for actor in actors:
+                 loc = actor.location
+                 if loc.distance(self._rsu_loc) > 50:
+diff --git a/simulation/leaderboard/team_code/auto_pilot.py b/simulation/leaderboard/team_code/auto_pilot.py
+index 48db82b0..85e2de9b 100755
+--- a/simulation/leaderboard/team_code/auto_pilot.py
++++ b/simulation/leaderboard/team_code/auto_pilot.py
+@@ -337,8 +337,20 @@ class AutoPilot(MapAgent):
+         if not self.initialized:
+             self._init()
+ 
++        # Always return one valid control per ego.  ScenarioManager retires an
++        # ego (and destroys its sensors) as soon as that ego completes its
++        # route, while the other egos may continue for several more ticks.
++        # A braking control is safe both for a retired ego and for the brief
++        # actor/sensor teardown window.
+         control_all = []
+-        control_all.extend([[] for _ in range(0,self.ego_vehicles_num)])
++        for _ in range(self.ego_vehicles_num):
++            neutral_control = carla.VehicleControl()
++            neutral_control.steer = 0.0
++            neutral_control.throttle = 0.0
++            neutral_control.brake = 1.0
++            neutral_control.hand_brake = False
++            neutral_control.manual_gear_shift = False
++            control_all.append(neutral_control)
+         self.step += 1
+ 
+         # spawn new rsus and delete the last ones
+@@ -365,8 +377,23 @@ class AutoPilot(MapAgent):
+         # produce control signal and save sensor data
+         for vehicle_num in range(self.ego_vehicles_num):
+             self._vehicle = CarlaDataProvider.get_hero_actor(hero_id=vehicle_num) # current hero
+-            if self._vehicle is None:
+-            # if not self._vehicle.is_alive:
++            # Route completion cleanup removes an ego's sensors before every
++            # cached actor reference has necessarily disappeared.  Guard both
++            # sides of that lifecycle transition.  ``map_N`` is the first key
++            # consumed by MapAgent.tick; the remaining keys are consumed by
++            # BaseAgent.tick.
++            required_sensor_keys = (
++                "map_{}".format(vehicle_num),
++                "rgb_front_{}".format(vehicle_num),
++                "gps_{}".format(vehicle_num),
++                "speed_{}".format(vehicle_num),
++                "imu_{}".format(vehicle_num),
++            )
++            if (
++                self._vehicle is None
++                or not getattr(self._vehicle, "is_alive", True)
++                or any(key not in input_data for key in required_sensor_keys)
++            ):
+                 continue
+             if self._vehicle not in self._vehicle_id:
+                 self._vehicle_id.append(self._vehicle.id)
+diff --git a/simulation/leaderboard/team_code/base_agent.py b/simulation/leaderboard/team_code/base_agent.py
+index f24ae367..5813272c 100755
+--- a/simulation/leaderboard/team_code/base_agent.py
++++ b/simulation/leaderboard/team_code/base_agent.py
+@@ -821,7 +821,10 @@ class BaseAgent(autonomous_agent.AutonomousAgent):
+         data = {}
+         _id = 0
+         for actor_type in list(TPE.keys()):
+-            actors = CarlaDataProvider.get_world().get_level_bbs(actor_type=actor_type)
++            # CARLA 0.9.12 exposes ``bb_type`` through Boost.Python as a
++            # positional-only argument; using the newer ``actor_type`` keyword
++            # raises a signature mismatch at runtime.
++            actors = CarlaDataProvider.get_world().get_level_bbs(actor_type)
+             for actor in actors:
+                 loc = actor.location
+                 if loc.distance(self._vehicle.get_location()) > 100:
+diff --git a/simulation/leaderboard/team_code/perception_swap_agent.py b/simulation/leaderboard/team_code/perception_swap_agent.py
+index 0aaaf919..b2d26b94 100644
+--- a/simulation/leaderboard/team_code/perception_swap_agent.py
++++ b/simulation/leaderboard/team_code/perception_swap_agent.py
+@@ -23,13 +23,47 @@ forward pass per ego, with itself as primary).
+ from __future__ import annotations
+ 
+ import json
++import math
+ import os
+ import sys
++import time
+ from typing import Any, Dict, List, Optional
+ 
+ import numpy as np
+ import yaml
+ 
++# `import carla` below is what first resolves the process's libstdc++.so.6
++# to the conda env's own (older) copy -- confirmed via /proc/self/maps that
++# neither numpy nor anything above this line touches it. That's too late for
++# cpx_planner_adapter.py's own _preload_newer_libstdcxx() (called much later,
++# inside MDriveCPXPlanner construction) to matter: once a libstdc++.so.6 is
++# resident in the process under that SONAME, a later ctypes.CDLL call for
++# the same SONAME is a no-op -- it returns the already-loaded (older) one
++# rather than replacing it. convert_to_ros's AD-map global planner needs
++# GLIBCXX_3.4.29+; tcp_codriving_clean's own libstdc++ only goes to 3.4.28.
++# Preload the system's newer one here, before `import carla` gets a chance
++# to load the older one first -- confirmed via a controlled repro that doing
++# it in this order lets CPXMPCPlannerBridge's AD-map runtime
++# (ensure_runtime_ready) initialize cleanly, where the later-only preload
++# still failed with GLIBCXX_3.4.29 not found. Harmless no-op for every
++# non-CP-X planner: it's just a system library load, no CP-X repo
++# dependency.
++def _preload_newer_libstdcxx_before_carla_import() -> None:
++    import ctypes
++
++    for _candidate in (
++        "/usr/lib/x86_64-linux-gnu/libstdc++.so.6",
++        "libstdc++.so.6",
++    ):
++        try:
++            ctypes.CDLL(_candidate, mode=ctypes.RTLD_GLOBAL)
++            return
++        except OSError:
++            continue
++
++
++_preload_newer_libstdcxx_before_carla_import()
++
+ import carla
+ 
+ from leaderboard.autoagents.autonomous_agent import AutonomousAgent, Track
+@@ -41,7 +75,6 @@ if REPO_ROOT not in sys.path:
+ from tools.perception_runner import PerceptionRunner
+ from team_code.rule_planner import RulePlanner, EgoState, Detection
+ from team_code.basic_agent_planner import BasicAgentPlanner
+-from team_code.behavior_agent_planner import BehaviorAgentPlanner
+ from team_code.infra_lidar_config import INFRA_LIDAR_POSES, is_infra_collab_enabled
+ 
+ # Default radius for the planner-side self-filter. A detection whose center
+@@ -193,6 +226,15 @@ def _env_flag(name: str, default: bool = False) -> bool:
+     return os.environ.get(name, "1" if default else "").lower() in ("1", "true", "yes", "on")
+ 
+ 
++def _primary_ego_exclusion_ids(hero_actors, primary_idx: int) -> set:
++    """Return only the current ego id for GT planner self-filtering."""
++    try:
++        actor = hero_actors[int(primary_idx)]
++        return {int(actor.id)}
++    except (IndexError, TypeError, ValueError, AttributeError):
++        return set()
++
++
+ def get_entry_point():
+     return "PerceptionSwapAgent"
+ 
+@@ -308,9 +350,44 @@ class PerceptionSwapAgent(AutonomousAgent):
+         self._planner_kind     = os.environ.get(
+             "PERCEPTION_PLANNER", str(cfg.get("planner", "rule"))
+         ).lower().strip()
+-        if self._planner_kind not in ("rule", "basicagent", "behavior"):
++        if self._planner_kind not in ("rule", "basicagent", "behavior", "cpx"):
+             print(f"[perception_swap] unknown PERCEPTION_PLANNER={self._planner_kind!r}, falling back to 'rule'")
+             self._planner_kind = "rule"
++        self._cpx_planner_config = dict(cfg.get("cpx", {}) or {})
++        legacy_primary_ego_only = bool(
++            self._cpx_planner_config.pop("primary_ego_only", False)
++        )
++        configured_cpx_ego_count = self._cpx_planner_config.pop(
++            "controlled_ego_count", None
++        )
++        if configured_cpx_ego_count is None:
++            configured_cpx_ego_count = (
++                1 if legacy_primary_ego_only else self.ego_vehicles_num
++            )
++        self._cpx_controlled_ego_count = max(
++            1, min(self.ego_vehicles_num, int(configured_cpx_ego_count))
++        )
++        # Retain the old attribute for compatibility with diagnostics and
++        # third-party code that may inspect it.
++        self._cpx_primary_ego_only = self._cpx_controlled_ego_count == 1
++        self._cpx_secondary_planner = str(
++            self._cpx_planner_config.pop("secondary_planner", "behavior")
++        ).lower().strip()
++        if self._cpx_secondary_planner not in ("basicagent", "behavior"):
++            raise ValueError(
++                "cpx.secondary_planner must be 'basicagent' or 'behavior'"
++            )
++        # Off by default: secondary (non-CP-X) egos otherwise look like
++        # ordinary GT-perceived obstacles to the CP-X ego(s), with no intent/
++        # plan sharing. When enabled, each secondary ego also publishes its
++        # own already-decided plan as a CavIntent (position + predicted path,
++        # cooperative=False so CP-X's Stage B never assigns it a yield role)
++        # so CP-X can react to where it's actually going, not just where it
++        # is right now. Negotiation stays one-directional: secondary
++        # planners never read anyone else's intent or change their own plan.
++        self._cpx_secondary_intent_broadcast_enabled = bool(
++            self._cpx_planner_config.pop("secondary_intent_broadcast_enabled", False)
++        )
+         self._use_gt_perception = _env_flag(
+             "PERCEPTION_USE_GT", bool(cfg.get("use_gt_perception", False))
+         )
+@@ -326,7 +403,17 @@ class PerceptionSwapAgent(AutonomousAgent):
+             f"use_gt_perception={self._use_gt_perception} "
+             f"target_speed_kmh={self._target_speed_kmh:.1f} "
+             f"disable_brake={self._disable_brake}"
+-        )
++        , flush=True)
++        if (
++            self._planner_kind == "cpx"
++            and self._cpx_controlled_ego_count < self.ego_vehicles_num
++        ):
++            cpx_ego_ids = list(range(self._cpx_controlled_ego_count))
++            print(
++                f"[perception_swap] planner ownership: egos {cpx_ego_ids}=CP-X; "
++                f"secondary egos={self._cpx_secondary_planner}",
++                flush=True,
++            )
+         if self._disable_brake:
+             print(
+                 "[perception_swap] WARNING: disable_brake=True hides ALL detections "
+@@ -394,15 +481,51 @@ class PerceptionSwapAgent(AutonomousAgent):
+         # in run_step to keep at most latency+1 entries.
+         self._latency_ring: Dict[int, Any] = {}
+ 
+-        # Single perception model loaded once. Reused across all egos and frames.
+-        self.perception = PerceptionRunner(
+-            detector=self._detector_name,
+-            score_threshold=self._score_threshold,
+-        )
++        # GT mode reads actors directly from CARLA. Do not construct the
++        # detector merely to obtain its configured evaluation range.
++        if self._use_gt_perception:
++            self.perception = None
++            self._lidar_range = list(cfg.get(
++                "gt_lidar_range",
++                [-102.4, -102.4, -3.0, 102.4, 102.4, 1.0],
++            ))
++            if len(self._lidar_range) != 6:
++                raise ValueError("gt_lidar_range must contain six values")
++            print(
++                "[perception_swap] GT perception enabled; detector load skipped",
++                flush=True,
++            )
++        else:
++            # Single perception model loaded once and reused across all egos.
++            print(
++                f"[perception_swap] loading detector={self._detector_name!r}",
++                flush=True,
++            )
++            self.perception = PerceptionRunner(
++                detector=self._detector_name,
++                score_threshold=self._score_threshold,
++            )
++            self._lidar_range = list(
++                self.perception.config["heter"]["modality_setting"]["m1"]
++                ["preprocess"]["cav_lidar_range"]
++            )
++            print(
++                f"[perception_swap] detector={self._detector_name!r} ready",
++                flush=True,
++            )
+ 
+         # One planner per ego — each ego has its own route + state.
+-        # Type is RulePlanner | BasicAgentPlanner depending on self._planner_kind.
++        # Type is RulePlanner | BasicAgentPlanner | BehaviorAgentPlanner |
++        # MDriveCPXPlanner depending on self._planner_kind.
+         self.planners: List[Optional[Any]] = [None] * self.ego_vehicles_num
++        # Parallel to self.planners; only populated for secondary (non-CP-X)
++        # egos when cpx.secondary_intent_broadcast_enabled is set. See
++        # MDriveSecondaryIntentPublisher in cpx_planner_adapter.py.
++        self._secondary_intent_publishers: List[Optional[Any]] = (
++            [None] * self.ego_vehicles_num
++        )
++        self._planner_hud = None
++        self._planner_hud_failed = False
+ 
+         # Per-ego visible-actor sets from the v2x-real-pnp source dataset:
+         # for each frame in the source, ``{frame_idx: {role_name, ...}}``
+@@ -440,9 +563,6 @@ class PerceptionSwapAgent(AutonomousAgent):
+             os.environ.get("PERCEPTION_SWAP_REAL_DATASET_FPS", "10.0")
+         )
+ 
+-        # Cached LiDAR range from the model config — used by the GT projector.
+-        self._lidar_range = list(self.perception.config["heter"]["modality_setting"]["m1"]["preprocess"]["cav_lidar_range"])
+-
+         # AP eval region. The detector keeps its native cav_lidar_range
+         # (typically 204.8 × 204.8 m) for the model forward pass, but AP
+         # scoring + BEV display use a tighter crop centered on the planner-
+@@ -858,6 +978,17 @@ class PerceptionSwapAgent(AutonomousAgent):
+                 except Exception as exc:
+                     print(f"[perception_swap] AP save failed for ego {ego_i}: {exc}")
+ 
++        for planner in list(getattr(self, "planners", []) or []):
++            destroy_planner = getattr(planner, "destroy", None)
++            if callable(destroy_planner):
++                try:
++                    destroy_planner()
++                except Exception as exc:
++                    print(f"[perception_swap] planner cleanup failed: {exc}")
++        if getattr(self, "_planner_hud", None) is not None:
++            self._planner_hud.destroy()
++            self._planner_hud = None
++
+         # Free CUDA memory if torch sets up persistent caches.
+         try:
+             import torch
+@@ -2294,7 +2425,56 @@ class PerceptionSwapAgent(AutonomousAgent):
+         except Exception:
+             return []
+ 
+-    def _gt_perception_pass(self, primary_pose_world, ego_actor_ids):
++    def _build_gt_actor_snapshot(self, world) -> List[Dict[str, Any]]:
++        """One CARLA RPC round-trip per actor property, shared by every ego's
++        ``_gt_perception_pass`` call this tick.
++
++        ``_gt_perception_pass`` used to issue this same batch of ``get_actors``
++        + per-actor ``get_transform``/``bounding_box.get_world_vertices``/
++        ``get_velocity``/``get_acceleration``/``get_angular_velocity`` calls
++        independently for every controlled ego, every tick -- the underlying
++        world state is identical for all of them within one tick, so a 5-ego
++        scenario paid 5x the RPC round-trips for the same data. Call this once
++        per ``run_step`` and pass the result to every ego's
++        ``_gt_perception_pass`` instead.
++        """
++        all_v = list(world.get_actors().filter("vehicle.*"))
++        all_v += list(world.get_actors().filter("walker.pedestrian.*"))
++        all_v += list(world.get_actors().filter("static.prop.*"))
++        snapshot: List[Dict[str, Any]] = []
++        for actor in all_v:
++            try:
++                actor_transform = actor.get_transform()
++                world_verts = actor.bounding_box.get_world_vertices(actor_transform)
++            except Exception:
++                continue
++            try:
++                velocity = actor.get_velocity()
++            except Exception:
++                velocity = None
++            try:
++                acceleration = actor.get_acceleration()
++            except Exception:
++                acceleration = None
++            try:
++                angular_velocity = actor.get_angular_velocity()
++            except Exception:
++                angular_velocity = None
++            snapshot.append({
++                "actor": actor,
++                "id": int(actor.id),
++                "transform": actor_transform,
++                "world_verts": world_verts,
++                "velocity": velocity,
++                "acceleration": acceleration,
++                "angular_velocity": angular_velocity,
++            })
++        return snapshot
++
++    def _gt_perception_pass(
++        self, primary_pose_world, excluded_actor_ids, extra_viewpoints_world=None,
++        world_snapshot=None,
++    ):
+         """Replace one perception forward pass with a CARLA-ground-truth one.
+ 
+         Returns a ``Detections``-shaped result (same fields as PerceptionRunner
+@@ -2304,41 +2484,86 @@ class PerceptionSwapAgent(AutonomousAgent):
+         Range-gated to ``self._lidar_range`` so the oracle isn't unfairly
+         omniscient — perception models only see things within sensor range,
+         and GT must respect the same horizon for the comparison to be valid.
++
++        ``extra_viewpoints_world`` (optional): world poses of other CAVs.
++        When given, an actor is kept if it falls within range of the primary
++        ego's own box OR any of these extra viewpoints' boxes — i.e. the
++        union of what every CAV independently sees within its own 100 m,
++        merged and shared across the fleet (mirrors the range-extension
++        benefit of cooperative-perception fusion, but GT-exact). Output
++        corners stay in the primary ego's own frame regardless of which
++        viewpoint admitted the actor.
++
++        ``world_snapshot`` (optional): pre-fetched output of
++        ``_build_gt_actor_snapshot``, shared across every ego this tick. Falls
++        back to fetching its own (unshared) snapshot when omitted, so existing
++        callers keep working.
+         """
+         # Imports gated to avoid eager carla_data_provider load.
+         from srunner.scenariomanager.carla_data_provider import CarlaDataProvider
+         from tools.perception_runner import Detections as _DetResult
+         _, _, _, _, x_to_world = _lazy_eval_imports()
+ 
+-        world = CarlaDataProvider.get_world()
+         empty = _DetResult(
+             corners=np.zeros((0, 8, 3), dtype=np.float32),
+             scores=np.zeros((0,), dtype=np.float32),
+             centers_xy=np.zeros((0, 2), dtype=np.float32),
+             P=0,
+         )
+-        if world is None:
+-            return empty
++        empty.actor_states = []
+ 
+-        all_v = list(world.get_actors().filter("vehicle.*"))
+-        gt_actors = [a for a in all_v if a.id not in (ego_actor_ids or set())]
+-        if not gt_actors:
++        if world_snapshot is None:
++            world = CarlaDataProvider.get_world()
++            if world is None:
++                return empty
++            # Ground truth isn't vehicle-only: pedestrians and static
++            # obstacles (construction cones/barriers, blocked-lane props,
++            # etc.) are real collision risks the planner needs to see, even
++            # though the detector-based cooperative-perception path only
++            # ever emits vehicle boxes (OPV2V-style models are vehicle-only
++            # by training). _build_gt_actor_snapshot covers all three.
++            world_snapshot = self._build_gt_actor_snapshot(world)
++
++        gt_entries = [
++            e for e in world_snapshot
++            if e["id"] not in (excluded_actor_ids or set())
++        ]
++        if not gt_entries:
+             return empty
+ 
+         T_ego_world = np.linalg.inv(x_to_world(primary_pose_world))
+         lr = self._lidar_range  # [xmin, ymin, zmin, xmax, ymax, zmax]
++        T_extra_list = [
++            np.linalg.inv(x_to_world(p)) for p in (extra_viewpoints_world or [])
++        ]
+ 
+         corners_list: List[np.ndarray] = []
+-        for actor in gt_actors:
+-            try:
+-                world_verts = actor.bounding_box.get_world_vertices(actor.get_transform())
+-            except Exception:
+-                continue
++        actor_states: List[Dict[str, Any]] = []
++        controlled_ego_ids = {
++            int(actor.id)
++            for actor in self._get_hero_actors()[:self._cpx_controlled_ego_count]
++        }
++        for e in gt_entries:
++            actor = e["actor"]
++            actor_transform = e["transform"]
++            world_verts = e["world_verts"]
+             cw = np.array([[v.x, v.y, v.z] for v in world_verts], dtype=np.float64)
+             if cw.shape != (8, 3):
+                 continue
+             hom = np.concatenate([cw, np.ones((8, 1))], axis=1)
+             ce = (T_ego_world @ hom.T).T[:, :3]                        # (8, 3) ego frame
++
++            c = ce.mean(axis=0)
++            in_range = lr[0] <= c[0] <= lr[3] and lr[1] <= c[1] <= lr[4]
++            if not in_range and T_extra_list:
++                for T_extra in T_extra_list:
++                    c_extra = ((T_extra @ hom.T).T[:, :3]).mean(axis=0)
++                    if lr[0] <= c_extra[0] <= lr[3] and lr[1] <= c_extra[1] <= lr[4]:
++                        in_range = True
++                        break
++            if not in_range:
++                continue
++
+             # Reorder to clean CCW bottom face (same fix as the AP collector).
+             order_z = np.argsort(ce[:, 2])
+             bot, top = ce[order_z[:4]], ce[order_z[4:]]
+@@ -2354,19 +2579,48 @@ class PerceptionSwapAgent(AutonomousAgent):
+                 used[j] = True
+                 mt[i] = top[j]
+             cor = np.concatenate([bot, mt], axis=0)                    # (8, 3)
+-
+-            c = cor.mean(axis=0)
+-            if not (lr[0] <= c[0] <= lr[3] and lr[1] <= c[1] <= lr[4]):
+-                continue
+             corners_list.append(cor)
+ 
++            velocity = e["velocity"]
++            acceleration = e["acceleration"]
++            angular_velocity = e["angular_velocity"]
++            extent = getattr(getattr(actor, "bounding_box", None), "extent", None)
++            actor_states.append({
++                "actor_id": int(actor.id),
++                "actor_type": str(getattr(actor, "type_id", "")),
++                "role_name": str(getattr(actor, "attributes", {}).get("role_name", "")),
++                "world_xy": np.asarray([
++                    float(actor_transform.location.x),
++                    float(actor_transform.location.y),
++                ], dtype=np.float64),
++                "velocity_world": np.asarray([
++                    float(getattr(velocity, "x", 0.0)),
++                    float(getattr(velocity, "y", 0.0)),
++                ], dtype=np.float64),
++                "acceleration_world": np.asarray([
++                    float(getattr(acceleration, "x", 0.0)),
++                    float(getattr(acceleration, "y", 0.0)),
++                ], dtype=np.float64),
++                "angular_velocity_world": np.asarray([
++                    float(getattr(angular_velocity, "x", 0.0)),
++                    float(getattr(angular_velocity, "y", 0.0)),
++                    float(getattr(angular_velocity, "z", 0.0)),
++                ], dtype=np.float64),
++                "yaw": float(np.radians(float(actor_transform.rotation.yaw))),
++                "length_m": 2.0 * float(getattr(extent, "x", 1.0)),
++                "width_m": 2.0 * float(getattr(extent, "y", 0.5)),
++                "is_controlled_ego": int(actor.id) in controlled_ego_ids,
++            })
++
+         if not corners_list:
+             return empty
+         corners = np.stack(corners_list, axis=0).astype(np.float32)
+         centers_xy = corners.mean(axis=1)[:, :2].astype(np.float32)
+         scores = np.ones((len(corners),), dtype=np.float32)
+-        return _DetResult(corners=corners, scores=scores,
+-                          centers_xy=centers_xy, P=len(corners))
++        result = _DetResult(corners=corners, scores=scores,
++                            centers_xy=centers_xy, P=len(corners))
++        result.actor_states = actor_states
++        return result
+ 
+     # ─────── Sensor declaration ───────────────────────────────────────
+     # The harness reads this and feeds matching keys via input_data.
+@@ -2374,6 +2628,21 @@ class PerceptionSwapAgent(AutonomousAgent):
+     # `lidar_0`, `gps_0`, `imu_0`, `speed_0`.
+ 
+     def sensors(self):
++        # CARLA-GT mode obtains ego state and surrounding actors directly from
++        # the live world.  It does not consume detector LiDAR, semantic LiDAR,
++        # or camera streams.  Spawning the full seven-sensor perception suite
++        # for every ego is therefore wasted work and can crash CARLA 0.9.12
++        # during multi-ego sensor setup.  Keep one lightweight pseudo-sensor so
++        # the Leaderboard SENSORS track still has a valid sensor interface.
++        if self._use_gt_perception:
++            return [
++                {
++                    "type": "sensor.speedometer",
++                    "id": "speed",
++                    "reading_frequency": 20,
++                }
++            ]
++
+         # LiDAR config — yaw=0 so the sensor frame equals the ego frame and
+         # the detector's predictions land directly in ego coords. Camera is
+         # declared so we can save real driver-view images alongside the BEV
+@@ -2494,6 +2763,26 @@ class PerceptionSwapAgent(AutonomousAgent):
+                 # first run_step that sees the actor.
+                 self._stored_world_plans[ego_i] = ego_route
+ 
++    # ─────── Per-tick phase timing (diagnostic; ~free when unused) ────
++    # Ad-hoc instrumentation for locating the dominant cost inside the
++    # per-ego run_step loop -- tick_timing.log's "agent_call" bucket wraps
++    # this whole method, but doesn't say which phase inside it is slow.
++    def _accum_phase_ms(self, name: str, seconds: float) -> None:
++        stats = self.__dict__.setdefault("_phase_ms_stats", {})
++        total, count = stats.get(name, (0.0, 0))
++        stats[name] = (total + seconds * 1000.0, count + 1)
++
++    def _print_and_reset_phase_ms(self) -> None:
++        stats = self.__dict__.get("_phase_ms_stats", {})
++        if not stats:
++            return
++        parts = [
++            f"{name}: total={total:.0f}ms n={count} avg={total / max(1, count):.1f}ms"
++            for name, (total, count) in stats.items()
++        ]
++        print("[phase_timing] last 50 ticks -- " + " | ".join(parts), flush=True)
++        self._phase_ms_stats = {}
++
+     # ─────── Pose-noise injector (codriving-compatible) ───────────────
+ 
+     def _apply_pose_noise(self, poses: List[List[float]], primary_idx: int) -> List[List[float]]:
+@@ -2711,6 +3000,8 @@ class PerceptionSwapAgent(AutonomousAgent):
+             # OpenCDA BehaviorAgent (collision/overtake/car-follow rewired
+             # to consume our Detection list). Same lazy-construction pattern
+             # as BasicAgent: needs the hero actor in __init__.
++            from team_code.behavior_agent_planner import BehaviorAgentPlanner
++
+             for slot in range(self.ego_vehicles_num):
+                 if self.planners[slot] is None:
+                     plan_for_slot = self._stored_world_plans[slot]
+@@ -2725,6 +3016,81 @@ class PerceptionSwapAgent(AutonomousAgent):
+                         f"(target_speed={self._target_speed_kmh:.1f} km/h, "
+                         f"route_len={len(plan_for_slot)})"
+                     )
++        elif self._planner_kind == "cpx":
++            # Import only for the CP-X variant, so BasicAgent/BehaviorAgent
++            # runs do not depend on the external planning repository.
++            from team_code.cpx_planner_adapter import (
++                MDriveCAVRegistry,
++                MDriveCPXPlanner,
++                MDriveSecondaryIntentPublisher,
++            )
++
++            if not hasattr(self, "_cpx_cav_registry"):
++                self._cpx_cav_registry = MDriveCAVRegistry()
++
++            for slot in range(self.ego_vehicles_num):
++                if self.planners[slot] is None:
++                    plan_for_slot = self._stored_world_plans[slot]
++                    if slot >= self._cpx_controlled_ego_count:
++                        if self._cpx_secondary_planner == "behavior":
++                            from team_code.behavior_agent_planner import (
++                                BehaviorAgentPlanner,
++                            )
++
++                            self.planners[slot] = BehaviorAgentPlanner(
++                                actor=hero_actors[slot],
++                                target_speed_kmh=self._target_speed_kmh,
++                                terminal_radius_m=self._terminal_radius_m,
++                            )
++                        else:
++                            self.planners[slot] = BasicAgentPlanner(
++                                actor=hero_actors[slot],
++                                target_speed_kmh=self._target_speed_kmh,
++                                brake_persistence_ticks=self._brake_persistence_ticks,
++                                lateral_clearance_m=self._lateral_clearance_m,
++                                stopped_speed_m_s=self._stopped_speed_m_s,
++                            )
++                        self.planners[slot].set_global_plan(plan_for_slot)
++                        if self._cpx_secondary_intent_broadcast_enabled:
++                            self._secondary_intent_publishers[slot] = (
++                                MDriveSecondaryIntentPublisher(
++                                    actor=hero_actors[slot],
++                                    planner=self.planners[slot],
++                                    cav_registry=self._cpx_cav_registry,
++                                    ego_index=slot,
++                                )
++                            )
++                        print(
++                            f"[perception_swap] {type(self.planners[slot]).__name__} "
++                            f"built for secondary ego {slot} "
++                            f"(owner=mdrive, route_len={len(plan_for_slot)}, "
++                            f"intent_broadcast={self._cpx_secondary_intent_broadcast_enabled})"
++                        )
++                        continue
++                    cpx_debug_root = os.path.join(
++                        os.environ.get("SAVE_PATH", "/tmp"),
++                        "cpx_planner",
++                        f"ego_{slot}",
++                    )
++                    self.planners[slot] = MDriveCPXPlanner(
++                        actor=hero_actors[slot],
++                        target_speed_kmh=self._target_speed_kmh,
++                        config=dict(getattr(self, "_cpx_planner_config", {}) or {}),
++                        debug_output_dir=cpx_debug_root,
++                        cav_registry=self._cpx_cav_registry,
++                        ego_index=slot,
++                    )
++                    self.planners[slot].set_global_plan(plan_for_slot)
++                    print(
++                        f"[perception_swap] MDriveCPXPlanner built for ego {slot} "
++                        f"(target_speed={self._target_speed_kmh:.1f} km/h, "
++                        f"route_len={len(plan_for_slot)}, debug={cpx_debug_root})"
++                    )
++
++            # Freeze the previous complete tick's messages before any ego
++            # plans this tick. New messages remain staged until every ego has
++            # finished, avoiding order-dependent intent visibility.
++            self._cpx_cav_registry.begin_tick(float(timestamp))
+ 
+         # GT-perception oracle path: skip the perception model entirely and
+         # build Detections directly from world.get_actors(). One forward-pass-
+@@ -2732,16 +3098,63 @@ class PerceptionSwapAgent(AutonomousAgent):
+         if self._use_gt_perception and self._ego_actor_ids is None:
+             self._ego_actor_ids = self._resolve_ego_actor_ids()
+ 
++        # Fetch every actor's transform/bbox/velocity ONCE for this tick and
++        # share it across every ego's _gt_perception_pass call below, instead
++        # of each ego independently re-issuing the same CARLA RPC batch (see
++        # _build_gt_actor_snapshot).
++        gt_world_snapshot = None
++        if self._use_gt_perception:
++            from srunner.scenariomanager.carla_data_provider import CarlaDataProvider
++            _gt_world = CarlaDataProvider.get_world()
++            if _gt_world is not None:
++                gt_world_snapshot = self._build_gt_actor_snapshot(_gt_world)
++
+         # 2. Run perception (or GT oracle) per ego, then plan.
+         ctrls: List[carla.VehicleControl] = []
+         for primary_idx in range(self.ego_vehicles_num):
+             ego = ego_states[primary_idx]
+             planner = self.planners[primary_idx]
++            slot_planner_kind = (
++                "cpx"
++                if self._planner_kind == "cpx"
++                and primary_idx < self._cpx_controlled_ego_count
++                else (
++                    self._cpx_secondary_planner
++                    if self._planner_kind == "cpx"
++                    else self._planner_kind
++                )
++            )
+ 
+             if self._use_gt_perception:
++                # Exclude only this primary ego. Peer hero vehicles are real
++                # traffic participants and must reach tracker/prediction/MPC.
++                #
++                # Cooperative sharing: when enabled, union this ego's local
++                # 100 m GT box with every other controlled CAV's, so a car
++                # only one CAV can currently "see" still reaches everyone's
++                # tracker/prediction/MPC (V2V perception-sharing range
++                # extension, GT-exact since there's no detector in this mode).
++                extra_vp = None
++                if (
++                    self._cooperative
++                    and self._planner_kind == "cpx"
++                    and self._cpx_controlled_ego_count > 1
++                ):
++                    extra_vp = [
++                        ego_poses_world[j]
++                        for j in range(
++                            min(self._cpx_controlled_ego_count, self.ego_vehicles_num)
++                        )
++                        if j != primary_idx
++                    ]
++                _t_phase0 = time.monotonic()
+                 det = self._gt_perception_pass(
+-                    ego_poses_world[primary_idx], self._ego_actor_ids
++                    ego_poses_world[primary_idx],
++                    _primary_ego_exclusion_ids(hero_actors, primary_idx),
++                    extra_viewpoints_world=extra_vp,
++                    world_snapshot=gt_world_snapshot,
+                 )
++                self._accum_phase_ms("gt_perception_pass", time.monotonic() - _t_phase0)
+             elif self._cooperative and len(ego_lidars) > 1:
+                 # len(ego_lidars) includes any appended infra-LiDAR streams,
+                 # so single-ego v2xpnp scenes still go through cooperative
+@@ -2848,15 +3261,31 @@ class PerceptionSwapAgent(AutonomousAgent):
+             # ego's view of *this* ego into the host's output, producing a
+             # vehicle-sized box at origin). Same radius the AP collector uses.
+             _self_r2 = self._self_filter_radius_m ** 2
+-            det_list = [
+-                Detection(
++            gt_actor_states = list(getattr(det, "actor_states", []) or [])
++            det_list = []
++            for i in range(det.P):
++                if (
++                    float(det.centers_xy[i][0]) ** 2
++                    + float(det.centers_xy[i][1]) ** 2
++                ) <= _self_r2:
++                    continue
++                actor_state = gt_actor_states[i] if i < len(gt_actor_states) else {}
++                det_list.append(Detection(
+                     xy_ego=det.centers_xy[i].astype(np.float64),
+                     radius=self._detection_radius,
+                     score=float(det.scores[i]),
+-                )
+-                for i in range(det.P)
+-                if (float(det.centers_xy[i][0]) ** 2 + float(det.centers_xy[i][1]) ** 2) > _self_r2
+-            ]
++                    actor_id=actor_state.get("actor_id"),
++                    actor_type=str(actor_state.get("actor_type", "")),
++                    role_name=str(actor_state.get("role_name", "")),
++                    world_xy=actor_state.get("world_xy"),
++                    velocity_world=actor_state.get("velocity_world"),
++                    acceleration_world=actor_state.get("acceleration_world"),
++                    angular_velocity_world=actor_state.get("angular_velocity_world"),
++                    yaw=actor_state.get("yaw"),
++                    length_m=actor_state.get("length_m"),
++                    width_m=actor_state.get("width_m"),
++                    is_controlled_ego=bool(actor_state.get("is_controlled_ego", False)),
++                ))
+ 
+             # Optionally hide all detections from the planner so it never brakes.
+             # AP collector still sees the real predictions below.
+@@ -2876,28 +3305,62 @@ class PerceptionSwapAgent(AutonomousAgent):
+                 }
+             else:
+                 planner.set_detections(planner_dets)
+-                ctrl_carla = planner.run_step()
++                if slot_planner_kind == "cpx":
++                    _t0 = time.monotonic()
++                    print(f"[cpx_timing] ego {primary_idx} run_step START "
++                          f"n_dets={len(planner_dets)}", flush=True)
++                    ctrl_carla = planner.run_step(sim_time_s=float(timestamp))
++                    _dt = time.monotonic() - _t0
++                    self._accum_phase_ms("cpx_run_step", _dt)
++                    if _dt > 0.5:
++                        print(f"[cpx_timing] ego {primary_idx} run_step SLOW "
++                              f"took={_dt:.2f}s", flush=True)
++                else:
++                    _t_phase1 = time.monotonic()
++                    ctrl_carla = planner.run_step()
++                    self._accum_phase_ms("secondary_run_step", time.monotonic() - _t_phase1)
++                    publisher = self._secondary_intent_publishers[primary_idx]
++                    if publisher is not None:
++                        publisher.publish_intent(sim_time_s=float(timestamp))
+                 steer    = float(ctrl_carla.steer)
+                 throttle = float(ctrl_carla.throttle)
+                 brake    = float(ctrl_carla.brake)
+                 traj     = planner.predict_trajectory(horizon_s=3.0, dt=0.1)
++                cpx_debug = (
++                    dict(planner.last_debug)
++                    if slot_planner_kind == "cpx"
++                    else {}
++                )
+                 plan_extras = {
+                     "intent_speed": planner.target_speed_mps,
+                     # BasicAgent's add_emergency_stop writes brake=max_brake (0.5).
+                     # >= catches that exactly.
+                     "brake_now":    brake >= 0.5,
+-                    "min_ttc":      float("inf"),
++                    "min_ttc":      float(
++                        cpx_debug.get("nearest_ttc_s", float("inf"))
++                        or float("inf")
++                    ),
+                     "cursor":       -1,
++                    "behavior_decision": str(
++                        cpx_debug.get("behavior_decision", "")
++                    ),
++                    "mpc_status": str(cpx_debug.get("mpc_status", "")),
++                    "reference_source": str(
++                        cpx_debug.get("reference_source", "")
++                    ),
+                 }
+             self.last_planned_waypoints_world = traj  # (T, 2) world-frame xy
+ 
+             # Optional per-tick prediction-file output for the openloop prototype's
+             # metric reader (off unless PERCEPTION_SWAP_WRITE_PRED_FILES=1).
++            _t_phase2 = time.monotonic()
+             self._save_per_step_pred_files(
+                 primary_idx, ego, det, traj, ego_poses_world[primary_idx]
+             )
++            self._accum_phase_ms("save_per_step_pred_files", time.monotonic() - _t_phase2)
+ 
+             # Optional viz dump: front camera (raw) + combined BEV+cam every N ticks.
++            _t_phase3 = time.monotonic()
+             if self._viz_dir:
+                 cam_img = _read_sensor(input_data, "rgb_front", primary_idx,
+                                        default=None)
+@@ -2923,6 +3386,7 @@ class PerceptionSwapAgent(AutonomousAgent):
+                     top_img=top_img,
+                     ego_pose_world=ego_poses_world[primary_idx],
+                 )
++            self._accum_phase_ms("viz_dump", time.monotonic() - _t_phase3)
+ 
+             self.last_step_info[primary_idx] = {
+                 "route_xy":      self.last_step_info.get(primary_idx, {}).get("route_xy"),
+@@ -2940,6 +3404,9 @@ class PerceptionSwapAgent(AutonomousAgent):
+                 "traj_first":    traj[0].tolist(),
+                 "traj_last":     traj[-1].tolist(),
+                 "horizon_s":     3.0,
++                "behavior_decision": plan_extras.get("behavior_decision", ""),
++                "mpc_status": plan_extras.get("mpc_status", ""),
++                "reference_source": plan_extras.get("reference_source", ""),
+             }
+ 
+             ctrl = carla.VehicleControl()
+@@ -2956,9 +3423,12 @@ class PerceptionSwapAgent(AutonomousAgent):
+                     # Corridor stats only meaningful for the rule planner (it
+                     # exposes look_ahead / corridor_half_width). For BasicAgent
+                     # we use a reasonable proxy (BasicAgent.base_vehicle_threshold).
+-                    if self._planner_kind == "rule":
++                    if slot_planner_kind == "rule":
+                         in_corridor_x_max = float(planner.look_ahead)
+                         corridor_half_w   = float(planner.corridor_half_width)
++                    elif slot_planner_kind == "cpx":
++                        in_corridor_x_max = float(planner.obstacle_lookahead_m)
++                        corridor_half_w = float(planner.corridor_half_width)
+                     else:
+                         in_corridor_x_max = float(planner._agent._base_vehicle_threshold) + float(ego.speed)
+                         corridor_half_w   = float(planner._corridor_half_width)
+@@ -2971,7 +3441,7 @@ class PerceptionSwapAgent(AutonomousAgent):
+                     self._diag_fp.write(json.dumps({
+                         "tick":         self._tick_count,
+                         "ego":          int(primary_idx),
+-                        "planner_kind": self._planner_kind,
++                        "planner_kind": slot_planner_kind,
+                         "use_gt":       self._use_gt_perception,
+                         "ego_xy":       [float(ego.xy[0]), float(ego.xy[1])],
+                         "ego_yaw":      float(ego.yaw),
+@@ -3001,7 +3471,50 @@ class PerceptionSwapAgent(AutonomousAgent):
+                 except Exception:
+                     pass
+ 
++        if (
++            self._planner_kind == "cpx"
++            and self._cpx_controlled_ego_count < self.ego_vehicles_num
++            and _env_flag("CPX_MDRIVE_WORLD_HUD", default=True)
++        ):
++            try:
++                _draw_planner_ownership_hud(hero_actors, self.planners)
++            except Exception as exc:
++                print(
++                    f"[MDrive CP-X] World HUD skipped after render error: {exc}",
++                    flush=True,
++                )
++        if (
++            self._planner_kind == "cpx"
++            and self._cpx_controlled_ego_count < self.ego_vehicles_num
++            and _env_flag("OPENCDA_DEBUG_VIEW", default=False)
++            and not self._planner_hud_failed
++        ):
++            try:
++                if self._planner_hud is None:
++                    self._planner_hud = _MDrivePlannerHud()
++                    print(
++                        "[MDrive CP-X] Non-blocking Planning Module HUD attached "
++                        "to primary ego using existing MDrive cameras.",
++                        flush=True,
++                    )
++                self._planner_hud.render(
++                    top_image=_read_sensor(input_data, "rgb_top", 0, default=None),
++                    front_image=_read_sensor(input_data, "rgb_front", 0, default=None),
++                    actor=hero_actors[0],
++                    debug=dict(getattr(self.planners[0], "last_debug", {}) or {}),
++                )
++            except Exception as exc:
++                print(f"[MDrive CP-X] HUD disabled after render error: {exc}")
++                if self._planner_hud is not None:
++                    self._planner_hud.destroy()
++                self._planner_hud = None
++                self._planner_hud_failed = True
++
++        if self._planner_kind == "cpx" and hasattr(self, "_cpx_cav_registry"):
++            self._cpx_cav_registry.commit_tick()
+         self._tick_count += 1
++        if self._tick_count % 50 == 0:
++            self._print_and_reset_phase_ms()
+         return ctrls
+ 
+ 
+@@ -3010,6 +3523,198 @@ class PerceptionSwapAgent(AutonomousAgent):
+ # ──────────────────────────────────────────────────────────────────────────
+ 
+ 
++def _draw_planner_ownership_hud(hero_actors, planners) -> None:
++    """Mark planner ownership directly in the live CARLA world."""
++    if not hero_actors:
++        return
++    try:
++        world = hero_actors[0].get_world()
++    except (IndexError, RuntimeError, AttributeError):
++        return
++
++    for slot, actor in enumerate(hero_actors):
++        if actor is None or not getattr(actor, "is_alive", False):
++            continue
++        is_primary = slot == 0
++        color = carla.Color(40, 255, 80) if is_primary else carla.Color(80, 170, 255)
++        try:
++            transform = actor.get_transform()
++            velocity = actor.get_velocity()
++            speed_mps = math.sqrt(
++                float(velocity.x) ** 2
++                + float(velocity.y) ** 2
++                + float(velocity.z) ** 2
++            )
++            label_location = transform.location + carla.Location(z=3.0)
++            if is_primary:
++                debug = dict(getattr(planners[slot], "last_debug", {}) or {})
++                behavior = str(debug.get("behavior_decision", "initializing") or "initializing")
++                mpc_status = str(debug.get("mpc_status", "initializing") or "initializing")
++                label = (
++                    f"CP-X PRIMARY EGO | {behavior} | MPC {mpc_status} | "
++                    f"{speed_mps:.1f} m/s"
++                )
++                local_center = actor.bounding_box.location
++                world_center = carla.Location(
++                    x=float(local_center.x),
++                    y=float(local_center.y),
++                    z=float(local_center.z),
++                )
++                transform.transform(world_center)
++                world.debug.draw_box(
++                    carla.BoundingBox(world_center, actor.bounding_box.extent),
++                    transform.rotation,
++                    thickness=0.12,
++                    color=color,
++                    life_time=0.12,
++                )
++            else:
++                label = f"MDRIVE TRAFFIC EGO {slot} | BehaviorAgent"
++            world.debug.draw_string(
++                label_location,
++                label,
++                draw_shadow=True,
++                color=color,
++                life_time=0.12,
++                persistent_lines=False,
++            )
++        except (RuntimeError, AttributeError, TypeError):
++            continue
++
++
++class _MDrivePlannerHud:
++    """Planning HUD that consumes existing MDrive camera frames only."""
++
++    def __init__(self) -> None:
++        import cv2
++
++        self.cv2 = cv2
++        self.width = 640
++        self.height = 360
++        self.hud_height = 250
++        self.window_name = "MDrive + CP-X PRIMARY EGO - Topdown | Chase"
++        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
++        cv2.resizeWindow(
++            self.window_name, self.width * 2, self.height + self.hud_height
++        )
++        self.enabled = True
++
++    def _frame(self, image):
++        if image is None or not hasattr(image, "shape"):
++            return None
++        array = np.asarray(image)
++        if array.ndim != 3 or array.shape[2] < 3:
++            return None
++        return self.cv2.resize(
++            np.ascontiguousarray(array[:, :, :3]),
++            (self.width, self.height),
++            interpolation=self.cv2.INTER_AREA,
++        )
++
++    def _project(self, point, actor):
++        if point is None or len(point) < 2:
++            return None
++        try:
++            point_x = float(point[0])
++            point_y = float(point[1])
++        except (TypeError, ValueError):
++            return None
++        transform = actor.get_transform()
++        yaw = math.radians(float(transform.rotation.yaw))
++        dx = point_x - float(transform.location.x)
++        dy = point_y - float(transform.location.y)
++        forward = dx * math.cos(yaw) + dy * math.sin(yaw)
++        right = dx * math.sin(yaw) - dy * math.cos(yaw)
++        px = int(round(0.5 * self.width + right * self.width / 120.0))
++        py = int(round(0.5 * self.height - forward * self.height / 120.0))
++        if 0 <= px < self.width and 0 <= py < self.height:
++            return px, py
++        return None
++
++    def _draw_path(self, canvas, points, actor, color, width=2) -> None:
++        projected = [
++            self._project(point, actor)
++            for point in list(points or [])
++            if hasattr(point, "__len__") and len(point) >= 2
++        ]
++        projected = [point for point in projected if point is not None]
++        if len(projected) >= 2:
++            self.cv2.polylines(
++                canvas,
++                [np.asarray(projected, dtype=np.int32)],
++                False,
++                color,
++                width,
++                lineType=self.cv2.LINE_AA,
++            )
++
++    def render(self, *, top_image, front_image, actor, debug) -> None:
++        if not self.enabled:
++            return
++        canvas = np.full(
++            (self.height + self.hud_height, self.width * 2, 3),
++            18,
++            dtype=np.uint8,
++        )
++        top_frame = self._frame(top_image)
++        front_frame = self._frame(front_image)
++        if top_frame is not None:
++            canvas[: self.height, : self.width] = top_frame
++        if front_frame is not None:
++            canvas[: self.height, self.width :] = front_frame
++        self._draw_path(
++            canvas, debug.get("global_route_points", []), actor, (60, 205, 235), 2
++        )
++        self._draw_path(
++            canvas, debug.get("mpc_trajectory_points", []), actor, (85, 220, 45), 3
++        )
++        destination = self._project(
++            [debug.get("destination_x"), debug.get("destination_y")], actor
++        )
++        if destination is not None:
++            self.cv2.circle(
++                canvas, destination, 6, (245, 145, 45), -1, lineType=self.cv2.LINE_AA
++            )
++
++        panel_y = self.height
++        velocity = actor.get_velocity()
++        speed = math.sqrt(velocity.x ** 2 + velocity.y ** 2 + velocity.z ** 2)
++        lines = [
++            "CP-X PRIMARY EGO | MDrive scenario | CARLA GT perception",
++            f"vehicle={actor.id} speed={speed:.2f} m/s behavior={debug.get('behavior_decision', '')} fsm={debug.get('behavior_fsm_state', '')}",
++            f"scenario={debug.get('scenario_fsm_state', '')} traffic={debug.get('traffic_signal_state', '')} stop={debug.get('stop_goal_active', '')}",
++            f"candidate={debug.get('candidate_pipeline_selected', '')} status={debug.get('candidate_pipeline_selected_status', '')}",
++            f"reference={debug.get('reference_source', '')} stage={debug.get('reference_pipeline_stage', '')}",
++            f"MPC={debug.get('mpc_status', '')} solve={debug.get('mpc_solve_time_ms', '')} ms fallback={debug.get('mpc_fallback_reason', '')}",
++            f"control={debug.get('decision_final_action', '')} source={debug.get('decision_control_source', '')} veto={debug.get('decision_veto_count', '')}",
++            f"route_remaining={debug.get('route_remaining_distance_m', '')} m objects={debug.get('object_count', '')} predictions={debug.get('candidate_prediction_trajectory_count', '')}",
++        ]
++        for index, line in enumerate(lines):
++            column = index // 4
++            row = index % 4
++            self.cv2.putText(
++                canvas,
++                str(line),
++                (12 + column * self.width, panel_y + 28 + row * 42),
++                self.cv2.FONT_HERSHEY_SIMPLEX,
++                0.43,
++                (235, 235, 235),
++                1,
++                lineType=self.cv2.LINE_AA,
++            )
++        self.cv2.imshow(self.window_name, canvas)
++        key = int(self.cv2.waitKey(1)) & 0xFF
++        if key in (27, ord("q")):
++            self.enabled = False
++
++    def destroy(self) -> None:
++        self.enabled = False
++        try:
++            self.cv2.destroyWindow(self.window_name)
++        except Exception:
++            pass
++
++
+ def _load_conf(path: str) -> Dict[str, Any]:
+     """Read a tiny YAML conf file. Empty/missing path → defaults."""
+     if not path:
+diff --git a/simulation/leaderboard/team_code/rule_planner.py b/simulation/leaderboard/team_code/rule_planner.py
+index b3aba891..9d5cefb8 100644
+--- a/simulation/leaderboard/team_code/rule_planner.py
++++ b/simulation/leaderboard/team_code/rule_planner.py
+@@ -25,7 +25,7 @@ defensible rule-based baseline that's identical across detector swaps.
+ from __future__ import annotations
+ 
+ from dataclasses import dataclass, field
+-from typing import List, Optional, Tuple
++from typing import Any, List, Optional, Tuple
+ 
+ import numpy as np
+ 
+@@ -52,6 +52,21 @@ class Detection:
+     xy_ego:    np.ndarray   # (2,) center xy in ego frame, +x forward
+     radius:    float        # m, half-diagonal of footprint — coarse
+     score:     float
++    # Optional oracle metadata. Detector-backed callers leave these unset;
++    # CARLA-GT callers preserve stable actor identity and exact kinematics so
++    # downstream planners do not have to re-track perfect simulator data.
++    actor_id: Optional[int] = None
++    actor_type: str = ""
++    role_name: str = ""
++    world_xy: Optional[np.ndarray] = None
++    velocity_world: Optional[np.ndarray] = None
++    acceleration_world: Optional[np.ndarray] = None
++    angular_velocity_world: Optional[np.ndarray] = None
++    yaw: Optional[float] = None
++    length_m: Optional[float] = None
++    width_m: Optional[float] = None
++    is_controlled_ego: bool = False
++    metadata: Any = None
+ 
+ 
+ @dataclass
+diff --git a/tools/perception_runner.py b/tools/perception_runner.py
+index 5d302eea..063c94a0 100644
+--- a/tools/perception_runner.py
++++ b/tools/perception_runner.py
+@@ -119,7 +119,7 @@ class PerceptionRunner:
+         self._missing    = load_result.missing_keys
+         self._unexpected = load_result.unexpected_keys
+ 
+-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
++        self.device = self._select_device(device)
+         self.model = self.model.to(self.device).eval()
+ 
+         # Voxelizer params live under heter.modality_setting.m1.preprocess —
+@@ -170,6 +170,55 @@ class PerceptionRunner:
+         if self._has_m2 and hasattr(self.model, "depth_supervision_m2"):
+             self.model.depth_supervision_m2 = False
+ 
++    @staticmethod
++    def _select_device(requested: Optional[str]) -> str:
++        """Select CUDA only when this PyTorch build can execute on the GPU.
++
++        ``torch.cuda.is_available()`` only proves that the driver is visible.
++        It remains true when an old PyTorch build cannot generate kernels for
++        a newer GPU, in which case ``Module.to("cuda")`` may hang indefinitely.
++        """
++        requested = requested or os.environ.get("PERCEPTION_DEVICE", "auto")
++        requested = str(requested).strip().lower()
++        if requested == "cpu":
++            print("[perception_runner] device=cpu (explicit)", flush=True)
++            return "cpu"
++        if requested not in ("auto", "cuda"):
++            raise ValueError(
++                "PERCEPTION_DEVICE/device must be one of auto, cuda, cpu; "
++                f"got {requested!r}"
++            )
++        if not torch.cuda.is_available():
++            print("[perception_runner] device=cpu (CUDA unavailable)", flush=True)
++            return "cpu"
++
++        try:
++            major, minor = torch.cuda.get_device_capability()
++            required_arch = f"sm_{major}{minor}"
++            compiled_arches = set(torch.cuda.get_arch_list())
++        except Exception as exc:
++            print(
++                "[perception_runner] device=cpu (CUDA compatibility probe "
++                f"failed: {exc})",
++                flush=True,
++            )
++            return "cpu"
++
++        if required_arch not in compiled_arches:
++            print(
++                "[perception_runner] device=cpu: GPU requires "
++                f"{required_arch}, but PyTorch supports "
++                f"{','.join(sorted(compiled_arches)) or 'no compiled CUDA arches'}",
++                flush=True,
++            )
++            return "cpu"
++
++        print(
++            f"[perception_runner] device=cuda ({required_arch})",
++            flush=True,
++        )
++        return "cuda"
++
+     @torch.no_grad()
+     def detect_multimodal(self, pcd_np: np.ndarray, m2_inputs: dict) -> "Detections":
+         """Run a `lidarcamera` HeterBaseline checkpoint with both modalities
+diff --git a/tools/run_custom_eval.py b/tools/run_custom_eval.py
+index 417d691c..4d884cd0 100755
+--- a/tools/run_custom_eval.py
++++ b/tools/run_custom_eval.py
+@@ -595,7 +595,7 @@ ROUTE_COMPLETION_RE = re.compile(
+ PLANNER_SPECS: dict[str, PlannerSpec] = {
+     "autopilot": PlannerSpec(
+         agent="simulation/leaderboard/team_code/auto_pilot.py",
+-        agent_config="simulation/leaderboard/team_code/agent_config/colmdriver_config.yaml",
++        agent_config="simulation/leaderboard/team_code/agent_config/autopilot_config.yaml",
+     ),
+     "colmdriver": PlannerSpec(
+         agent="simulation/leaderboard/team_code/colmdriver_agent.py",
+@@ -706,6 +706,18 @@ PLANNER_SPECS: dict[str, PlannerSpec] = {
+         agent="simulation/leaderboard/team_code/perception_swap_agent.py",
+         agent_config="simulation/leaderboard/team_code/agent_config/perception_swap_attfuse_behavior.yaml",
+     ),
++    "perception_swap_attfuse_cpx": PlannerSpec(
++        agent="simulation/leaderboard/team_code/perception_swap_agent.py",
++        agent_config="simulation/leaderboard/team_code/agent_config/perception_swap_attfuse_cpx.yaml",
++    ),
++    "cpx_gt": PlannerSpec(
++        agent="simulation/leaderboard/team_code/perception_swap_agent.py",
++        agent_config="simulation/leaderboard/team_code/agent_config/cpx_gt.yaml",
++    ),
++    "cpx_gt_primary_only": PlannerSpec(
++        agent="simulation/leaderboard/team_code/perception_swap_agent.py",
++        agent_config="simulation/leaderboard/team_code/agent_config/cpx_gt_primary_only.yaml",
++    ),
+     "perception_swap_fcooper_behavior": PlannerSpec(
+         agent="simulation/leaderboard/team_code/perception_swap_agent.py",
+         agent_config="simulation/leaderboard/team_code/agent_config/perception_swap_fcooper_behavior.yaml",
+@@ -5608,9 +5620,10 @@ class CarlaProcessManager:
+             self._server_log_handle.flush()
+             popen_kwargs["stdout"] = self._server_log_handle
+             popen_kwargs["stderr"] = subprocess.STDOUT
+-        elif self.quiet:
+-            # Pool/dashboard mode wants one high-level status line per CARLA,
+-            # not the wrapper's full startup chatter on stdout/stderr.
++        else:
++            # Native CARLA can emit millions of repeated sensor-session errors
++            # during teardown. Keep server output out of planner logs unless
++            # the caller explicitly requested a dedicated forensic log.
+             popen_kwargs["stdout"] = subprocess.DEVNULL
+             popen_kwargs["stderr"] = subprocess.STDOUT
+ 
+@@ -15877,6 +15890,26 @@ def main() -> None:
+     env_template["SCENARIO_RUNNER_ROOT"] = str(scenario_runner_root)
+     env_template["DATA_ROOT"] = str(data_root)
+     env_template.setdefault("COLMDRIVER_OFFLINE", "0")
++    # leaderboard_evaluator_parameter.py's own top-level `import carla` (its
++    # first line that touches the CARLA client, before it ever loads any
++    # agent module) resolves libstdc++.so.6 to whatever conda env this
++    # subprocess runs under -- too early for any preload an agent module
++    # does later (e.g. perception_swap_agent.py's own
++    # _preload_newer_libstdcxx_before_carla_import) to matter: once that
++    # SONAME is resident, a later ctypes.CDLL for the same SONAME is a
++    # no-op. convert_to_ros's AD-map global planner needs GLIBCXX_3.4.29+,
++    # which tcp_codriving_clean's own libstdc++ doesn't have. Set LD_PRELOAD
++    # only in this dict -- used solely to launch the evaluator subprocess
++    # below, never CarlaUE4 (CarlaProcessManager's Popen call doesn't read
++    # this dict, it inherits this launcher's own os.environ directly) -- so
++    # this can't reach the CarlaUE4 process this same run may separately
++    # start. A shell-exported LD_PRELOAD was tried first and confirmed to
++    # break CARLA's own startup by forcing a foreign libstdc++ into the
++    # Unreal Engine binary. Harmless no-op for every planner that never
++    # touches libad_physics.so.
++    env_template.setdefault(
++        "LD_PRELOAD", "/usr/lib/x86_64-linux-gnu/libstdc++.so.6"
++    )
+ 
+     append_pythonpath(env_template, repo_root)
+     append_pythonpath(env_template, scenario_runner_root)
+diff --git a/simulation/leaderboard/team_code/cpx_planner_adapter.py b/simulation/leaderboard/team_code/cpx_planner_adapter.py
+new file mode 100644
+index 00000000..dda27f86
+--- /dev/null
++++ b/simulation/leaderboard/team_code/cpx_planner_adapter.py
+@@ -0,0 +1,729 @@
++"""MDrive adapter for the CP-X behavior/reference/MPC planning pipeline."""
++
++from __future__ import annotations
++
++import math
++import os
++from pathlib import Path
++import sys
++from types import SimpleNamespace
++from typing import Any, Dict, List, Mapping, Optional, Sequence
++
++import carla
++import numpy as np
++
++from team_code.rule_planner import Detection
++
++
++def _planning_repo_root() -> Path:
++    configured = str(os.environ.get("CPX_PLANNING_REPO", "") or "").strip()
++    if configured:
++        candidate = Path(configured).expanduser().resolve()
++    else:
++        mdrive_root = Path(__file__).resolve().parents[3]
++        candidate = mdrive_root.parent / "Planning module"
++    if not (candidate / "opencda" / "planning_module").is_dir():
++        raise RuntimeError(
++            "CP-X planning repository not found. Set CPX_PLANNING_REPO to the "
++            "directory containing opencda/planning_module; resolved "
++            f"{candidate}"
++        )
++    return candidate
++
++
++def _preload_newer_libstdcxx() -> None:
++    """dlopen a newer libstdc++ into this process only, not its children.
++
++    convert_to_ros's AD-map global planner links libad_physics.so, which
++    needs GLIBCXX_3.4.29+; tcp_codriving_clean's own libstdc++ only goes to
++    3.4.28. The previous fix for this was an LD_PRELOAD environment
++    variable set by the launching shell script -- but LD_PRELOAD is
++    inherited by every child process, including the CarlaUE4 game server
++    that run_custom_eval.py's --start-carla spawns from this same process
++    tree. Forcing a foreign libstdc++ into the Unreal Engine binary that
++    way made CARLA itself fail to start (confirmed: CARLA opened its RPC
++    port in 20s launched standalone with a clean environment, then failed
++    to open it within run_custom_eval.py's 180s timeout three times in a
++    row with LD_PRELOAD set, on ports that worked standalone). A same-
++    process ctypes.CDLL(..., RTLD_GLOBAL) call, done here right before the
++    only import that needs it, resolves the same symbol requirement for
++    this Python process's own dynamic linker without setting anything in
++    the environment a spawned child could inherit.
++    """
++
++    import ctypes
++
++    for candidate in (
++        "/usr/lib/x86_64-linux-gnu/libstdc++.so.6",
++        "libstdc++.so.6",
++    ):
++        try:
++            ctypes.CDLL(candidate, mode=ctypes.RTLD_GLOBAL)
++            return
++        except OSError:
++            continue
++
++
++def _load_bridge_class():
++    repo_root = _planning_repo_root()
++    planning_root = repo_root / "opencda" / "planning_module"
++    for path in (str(repo_root), str(planning_root)):
++        if path not in sys.path:
++            sys.path.insert(0, path)
++    _preload_newer_libstdcxx()
++    from opencda.planning_module.opencda_bridge.cpx_mpc_planner import (
++        CPXMPCPlannerBridge,
++    )
++
++    return CPXMPCPlannerBridge
++
++
++class _ActorLocalizer:
++    def __init__(self, actor: carla.Vehicle):
++        self.actor = actor
++
++    def get_ego_pos(self):
++        return self.actor.get_transform()
++
++    def get_ego_spd(self):
++        velocity = self.actor.get_velocity()
++        return 3.6 * math.sqrt(
++            float(velocity.x) ** 2
++            + float(velocity.y) ** 2
++            + float(velocity.z) ** 2
++        )
++
++
++class _TrafficLightView:
++    """Expose a real CARLA light with its trigger-volume stop location."""
++
++    def __init__(self, actor: Any):
++        self.actor = actor
++
++    def get_state(self):
++        return self.actor.get_state()
++
++    def get_location(self):
++        try:
++            trigger_location = carla.Location(
++                x=float(self.actor.trigger_volume.location.x),
++                y=float(self.actor.trigger_volume.location.y),
++                z=float(self.actor.trigger_volume.location.z),
++            )
++            return self.actor.get_transform().transform(trigger_location)
++        except Exception:
++            return self.actor.get_location()
++
++
++def _default_opencda_pid_controller_args(dt_s: float) -> Dict[str, object]:
++    """OpenCDA's stock PID gains (opencda/scenario_testing/config_yaml/
++    default.yaml's ``controller.args``).
++
++    The convert_to_ros CP-X branch moved actuation off of its own
++    ``CarlaActuatorMapper`` and onto ``OpenCDAVelocitySteeringAdapter``, which
++    hard-requires a real OpenCDA ``Controller`` (``lon_run_step()``) and
++    raises at construction time if none is supplied. MDrive only supplies the
++    scenario/perception/route; the CP-X pipeline owns planning *and*
++    actuation end-to-end on this branch, so this is a genuine OpenCDA
++    controller instance -- not a re-tuned stand-in -- using the same defaults
++    OpenCDA scenarios ship with. Only the longitudinal (``lon``) gains and
++    ``max_brake``/``max_throttle`` are exercised: MPC still supplies steering
++    directly, so the lateral PID here is constructed but never stepped.
++    """
++    return {
++        "lat": {"k_p": 0.75, "k_d": 0.02, "k_i": 0.4},
++        "lon": {"k_p": 0.37, "k_d": 0.024, "k_i": 0.032},
++        "dynamic": False,
++        "dt": float(dt_s),
++        "max_brake": 1.0,
++        "max_throttle": 1.0,
++        "max_steering": 0.3,
++    }
++
++
++class _MDriveVehicleManager:
++    """Minimum OpenCDA runtime surface consumed by CPXMPCPlannerBridge."""
++
++    def __init__(self, actor: carla.Vehicle):
++        self.vehicle = actor
++        self.carla_map = actor.get_world().get_map()
++        self.localizer = _ActorLocalizer(actor)
++        self.perception_manager = SimpleNamespace(
++            objects={"vehicles": [], "traffic_lights": []}
++        )
++        self.v2x_manager = SimpleNamespace(cav_nearby={}, cav_intents={})
++        self.safety_manager = None
++        self.map_manager = None
++        self.agent = None
++        from opencda.core.actuation.pid_controller import Controller
++
++        dt_s = actor.get_world().get_settings().fixed_delta_seconds or 0.05
++        self.controller = Controller(_default_opencda_pid_controller_args(dt_s))
++
++
++class MDriveCAVRegistry:
++    """Tick-consistent registry shared by all CP-X egos in one agent.
++
++    Planners read only the last committed tick. New messages are staged while
++    the per-ego loop runs and become visible together at ``commit_tick``. This
++    prevents ego ordering from changing who can observe a fresh intent.
++    """
++
++    def __init__(self) -> None:
++        self._members: Dict[int, _MDriveVehicleManager] = {}
++        self._committed: Dict[int, Dict[str, object]] = {}
++        self._read_snapshot: Dict[int, Dict[str, object]] = {}
++        self._staged: Dict[int, Dict[str, object]] = {}
++        self._tick_time_s: Optional[float] = None
++
++    def register(self, actor: carla.Vehicle, manager: _MDriveVehicleManager) -> None:
++        self._members[int(actor.id)] = manager
++
++    def begin_tick(self, timestamp_s: float) -> None:
++        self._tick_time_s = float(timestamp_s)
++        self._read_snapshot = {
++            int(actor_id): dict(message)
++            for actor_id, message in self._committed.items()
++        }
++        self._staged = {}
++        for actor_id, manager in self._members.items():
++            manager.v2x_manager.cav_nearby = {
++                str(peer_id): peer_manager
++                for peer_id, peer_manager in self._members.items()
++                if int(peer_id) != int(actor_id)
++            }
++            manager.v2x_manager.cav_intents = self.peer_messages(actor_id)
++
++    def peer_messages(self, actor_id: int) -> Dict[str, Dict[str, object]]:
++        return {
++            str(peer_id): dict(message)
++            for peer_id, message in self._read_snapshot.items()
++            if int(peer_id) != int(actor_id)
++        }
++
++    def stage_message(self, actor_id: int, message: Mapping[str, object]) -> None:
++        payload = dict(message)
++        payload["actor_id"] = int(actor_id)
++        if self._tick_time_s is not None:
++            payload["timestamp_s"] = float(self._tick_time_s)
++        self._staged[int(actor_id)] = payload
++
++    def commit_tick(self) -> None:
++        self._committed = {
++            int(actor_id): dict(message)
++            for actor_id, message in self._staged.items()
++        }
++
++    @property
++    def committed_messages(self) -> Dict[int, Dict[str, object]]:
++        return {
++            int(actor_id): dict(message)
++            for actor_id, message in self._committed.items()
++        }
++
++
++class MDriveSecondaryIntentPublisher:
++    """Broadcast a non-CP-X (secondary-planner) ego's own plan as a CavIntent.
++
++    Registers into MDriveCAVRegistry exactly like a real MDriveCPXPlanner's
++    vehicle manager, so a CP-X ego's ``_collect_cav_intents()`` can read this
++    car's actual trajectory via ``peer.cpx_planner.last_cav_intent_payload``
++    -- but this never runs MPC or any candidate/corridor pipeline itself.
++    The underlying planner (BasicAgentPlanner/BehaviorAgentPlanner) always
++    just executes its own plan unmodified; only the CP-X ego(s) read these
++    intents and react. Negotiation is one-directional by design: these cars
++    have no concept of yielding to a broadcast intent, which is exactly what
++    ``cooperative=False`` on the CavIntent means (see its docstring in
++    cooperative_arbitration.py) -- the CP-X side's conflict classification
++    still sees this car's position/trajectory, but Stage B's role assignment
++    (yield/make_gap) is never applied to it.
++    """
++
++    def __init__(
++        self,
++        *,
++        actor: carla.Vehicle,
++        planner: Any,
++        cav_registry: Optional["MDriveCAVRegistry"],
++        ego_index: Optional[int] = None,
++    ) -> None:
++        self._actor = actor
++        self._planner = planner
++        self._cav_registry = cav_registry
++        self._ego_index = ego_index
++        self.v2x_manager = SimpleNamespace(cav_nearby={}, cav_intents={})
++        self.cpx_planner = self
++        self.last_cav_intent_payload: Optional[Dict[str, object]] = None
++        self._sequence = 0
++        if cav_registry is not None:
++            cav_registry.register(actor, self)
++
++    def publish_intent(self, *, sim_time_s: float) -> None:
++        del sim_time_s  # see world_time_s below for why this is unused
++        if self._cav_registry is None:
++            return
++        from opencda.planning_module.pipeline.cav_intent_codec import (
++            build_ego_cav_intent,
++            cav_intent_to_payload,
++        )
++        from opencda.planning_module.pipeline.cooperative_arbitration import (
++            ResourceClaim,
++        )
++
++        # CPXMPCPlannerBridge._collect_cav_intents() checks freshness against
++        # its own bridge._sim_time_s() (raw carla.WorldSnapshot.timestamp.
++        # elapsed_seconds), not against whatever clock the caller passes to
++        # run_step()/publish_intent(). The leaderboard's own `timestamp`
++        # argument (what perception_swap_agent.py's tick loop passes as
++        # sim_time_s) is a *different* clock -- roughly zeroed per route --
++        # so stamping generated_at_s with it made every payload's
++        # valid_until_s fall far behind the bridge's elapsed_seconds-based
++        # now_s, and cav_transport showed accepted_count=0/rejected.expired
++        # equal to nearby_count on every tick (confirmed via debug jsonl).
++        # Match the bridge's own clock instead.
++        world_time_s = float(
++            self._actor.get_world().get_snapshot().timestamp.elapsed_seconds
++        )
++
++        transform = self._actor.get_transform()
++        velocity = self._actor.get_velocity()
++        speed_mps = math.sqrt(float(velocity.x) ** 2 + float(velocity.y) ** 2)
++        heading_rad = math.radians(float(transform.rotation.yaw))
++
++        try:
++            points = self._planner.predict_trajectory(horizon_s=3.0, dt=0.1)
++        except Exception:
++            points = None
++        planned_states: List[List[float]] = []
++        if points is not None and len(points) >= 2:
++            dt_s = 0.1
++            for idx in range(len(points)):
++                x_m, y_m = float(points[idx][0]), float(points[idx][1])
++                if idx + 1 < len(points):
++                    dx_m = float(points[idx + 1][0]) - x_m
++                    dy_m = float(points[idx + 1][1]) - y_m
++                    speed_sample_mps = min(45.0, math.hypot(dx_m, dy_m) / dt_s)
++                else:
++                    speed_sample_mps = (
++                        planned_states[-1][2] if planned_states else speed_mps
++                    )
++                planned_states.append([x_m, y_m, speed_sample_mps])
++
++        # No lane-change resource claim: these cars never negotiate for one,
++        # so this is always the "released" shape claim managers elsewhere in
++        # the pipeline already use for "not contending for anything".
++        claim = ResourceClaim(
++            kind="lane_change", resource_id="lane_change",
++            committed_at_s=world_time_s, active=False,
++            require_ahead=False, phase="released",
++        )
++        try:
++            extent = self._actor.bounding_box.extent
++            length_m = 2.0 * float(extent.x)
++            width_m = 2.0 * float(extent.y)
++        except Exception:
++            length_m = 0.0
++            width_m = 0.0
++
++        intent = build_ego_cav_intent(
++            actor_id=int(self._actor.id),
++            position_xy=(float(transform.location.x), float(transform.location.y)),
++            heading_rad=float(heading_rad),
++            speed_mps=float(speed_mps),
++            claim=claim,
++            planned_states=planned_states,
++            dt_s=0.1,
++            t0_s=0.0,
++            cooperative=False,
++            generated_at_s=world_time_s,
++            valid_for_s=0.5,
++            sequence=self._sequence,
++            length_m=length_m,
++            width_m=width_m,
++        )
++        self._sequence += 1
++        self.last_cav_intent_payload = cav_intent_to_payload(intent)
++
++
++class MDriveCPXPlanner:
++    """Use MDrive perception and route inputs with the complete CP-X pipeline."""
++
++    def __init__(
++        self,
++        *,
++        actor: carla.Vehicle,
++        target_speed_kmh: float,
++        config: Optional[Mapping[str, object]] = None,
++        debug_output_dir: Optional[str] = None,
++        cav_registry: Optional[MDriveCAVRegistry] = None,
++        ego_index: Optional[int] = None,
++    ) -> None:
++        if actor is None:
++            raise ValueError("MDriveCPXPlanner requires a spawned hero actor")
++        self._actor = actor
++        self._ego_index = ego_index
++        self._cav_registry = cav_registry
++        self._target_speed_mps = max(0.0, float(target_speed_kmh) / 3.6)
++        self._detections: List[Detection] = []
++        self._world_plan: List[Any] = []
++        self._traffic_lights: Optional[List[_TrafficLightView]] = None
++        self._tracks: Dict[int, Dict[str, float]] = {}
++        self._next_track_id = 1
++        self._last_track_time_s: Optional[float] = None
++        self._last_debug: Dict[str, object] = {}
++
++        output_dir = Path(
++            debug_output_dir
++            or os.environ.get("CPX_MDRIVE_DEBUG_DIR", "")
++            or "/tmp/cpx_mdrive_debug"
++        )
++        output_dir.mkdir(parents=True, exist_ok=True)
++        bridge_config = {
++            "enabled": True,
++            "mode": "full_cpx_mpc",
++            "fallback_policy": "emergency_stop",
++            # convert_to_ros dropped the plain-CARLA "legacy" global-planner
++            # mode entirely -- only its own AD-map/Dijkstra backend
++            # (opencda.planning_module.utility.global_planner_factory
++            # .CUSTOM_GLOBAL_PLANNER_MODES) remains, and "dij" is its
++            # default. The backend auto-resolves its .xodr from
++            # map_planner.name (our CARLA carla_map), so this works for any
++            # town with a bundled map under Global_Planner/maps/.
++            "global_planner_mode": "dij",
++            "use_opencda_global_route": True,
++            "opencda_global_route_reference_allowed": True,
++            "publish_cp_message": True,
++            "require_native_opencda_cp": True,
++            "target_speed_mps": float(self._target_speed_mps),
++            "full_allow_opportunistic_lane_change": False,
++            "record_debug": True,
++            "debug": bool(int(os.environ.get("CPX_MDRIVE_VERBOSE", "0"))),
++            "debug_output_dir": str(output_dir),
++            "cp_message_path": str(output_dir / "cp_message.json"),
++            "record_evaluation_metrics": False,
++            "record_collision_sensor": False,
++            "scenario_name": "mdrive_perception_swap",
++        }
++        bridge_config.update(dict(config or {}))
++        bridge_config["target_speed_mps"] = float(
++            bridge_config.get("target_speed_mps", self._target_speed_mps)
++        )
++        bridge_config["debug_output_dir"] = str(output_dir)
++        bridge_config["cp_message_path"] = str(output_dir / "cp_message.json")
++
++        bridge_class = _load_bridge_class()
++        self._vehicle_manager = _MDriveVehicleManager(actor)
++        if self._cav_registry is not None:
++            self._cav_registry.register(actor, self._vehicle_manager)
++        self._bridge = bridge_class(
++            self._vehicle_manager,
++            bridge_config,
++            map_planner=self._vehicle_manager.carla_map,
++        )
++        # CPXMPCPlannerBridge._collect_cav_intents() reads each nearby peer's
++        # intent off ``peer_vehicle_manager.cpx_planner.last_cav_intent_payload``
++        # (cpx_mpc_planner.py), not off the registry payload dict directly.
++        # Without this back-reference every peer lookup silently misses
++        # (``cpx_planner is None`` -> skipped), so cav_conflict_enabled's
++        # cooperative arbitration (Stage B/C/D corridor yield) would see zero
++        # peer intents even with multiple CP-X-controlled CAVs.
++        self._vehicle_manager.cpx_planner = self._bridge
++
++    def set_global_plan(self, world_plan: Sequence[Any]) -> None:
++        self._world_plan = list(world_plan or [])
++        if len(self._world_plan) < 2:
++            raise ValueError("MDriveCPXPlanner received a route shorter than two points")
++        self._bridge.set_external_global_plan(self._world_plan)
++
++    def set_detections(self, detections: Sequence[Detection]) -> None:
++        self._detections = list(detections or [])
++
++    def run_step(self, sim_time_s: Optional[float] = None) -> carla.VehicleControl:
++        if len(self._world_plan) < 2:
++            raise RuntimeError("MDriveCPXPlanner global plan has not been installed")
++        transform = self._actor.get_transform()
++        velocity = self._actor.get_velocity()
++        speed_mps = math.sqrt(
++            float(velocity.x) ** 2
++            + float(velocity.y) ** 2
++            + float(velocity.z) ** 2
++        )
++        timestamp_s = (
++            float(sim_time_s)
++            if sim_time_s is not None
++            else float(
++                self._actor.get_world().get_snapshot().timestamp.elapsed_seconds
++            )
++        )
++        snapshots = self._detection_snapshots(
++            transform=transform,
++            timestamp_s=float(timestamp_s),
++        )
++        perception_objects = {
++            "vehicles": snapshots,
++            "traffic_lights": self._traffic_light_views(),
++        }
++        self._vehicle_manager.perception_manager.objects = perception_objects
++        self._bridge.update_information(
++            ego_transform=transform,
++            ego_speed_kmh=float(speed_mps) * 3.6,
++            detected_objects=perception_objects,
++            v2x_manager=self._vehicle_manager.v2x_manager,
++            safety_manager=None,
++            map_manager=None,
++        )
++        control = self._bridge.run_step()
++        self._last_debug = dict(self._bridge.last_debug or {})
++        self._stage_cooperative_intent(timestamp_s=float(timestamp_s))
++        return control
++
++    def _stage_cooperative_intent(self, *, timestamp_s: float) -> None:
++        if self._cav_registry is None:
++            return
++        raw_points = list(self._last_debug.get("mpc_trajectory_points", []) or [])
++        trajectory = []
++        for point in raw_points:
++            try:
++                if len(point) >= 2:
++                    trajectory.append([float(point[0]), float(point[1])])
++            except Exception:
++                continue
++        if not trajectory:
++            trajectory = self.predict_trajectory(horizon_s=3.0, dt=0.1).tolist()
++        self._cav_registry.stage_message(int(self._actor.id), {
++            "ego_index": self._ego_index,
++            "behavior": str(self._last_debug.get("behavior_decision", "")),
++            "maneuver": str(
++                self._last_debug.get(
++                    "reference_pipeline_intent",
++                    self._last_debug.get("behavior_decision", ""),
++                )
++            ),
++            "target_speed_mps": float(
++                self._last_debug.get("target_speed_mps", self._target_speed_mps)
++                or self._target_speed_mps
++            ),
++            "predicted_trajectory": trajectory,
++            "planner_timestamp_s": float(timestamp_s),
++            # Lane-change commitment, broadcast as-is so peer CAVs can decide
++            # to yield (hold in lane) while this vehicle is mid-lane-change;
++            # see CPXMPCPlannerBridge._cooperative_lane_change_yield_reason.
++            "maneuver_commitment_active": bool(
++                self._last_debug.get("maneuver_commitment_active", False)
++            ),
++            "maneuver_commitment_decision": str(
++                self._last_debug.get("maneuver_commitment_decision", "")
++            ),
++            "maneuver_commitment_source_lane_id": self._last_debug.get(
++                "maneuver_commitment_source_lane_id", ""
++            ),
++            "maneuver_commitment_target_lane_id": self._last_debug.get(
++                "maneuver_commitment_target_lane_id", ""
++            ),
++            "maneuver_commitment_committed_at_s": float(
++                self._last_debug.get("maneuver_commitment_committed_at_s", 0.0)
++                or 0.0
++            ),
++            # Static-obstacle local-avoidance claim, broadcast for the same
++            # reason as the lane-change commitment above; see
++            # CPXMPCPlannerBridge._cooperative_avoidance_lane_yield_reason.
++            "static_obstacle_local_avoidance_active": bool(
++                self._last_debug.get("static_obstacle_local_avoidance_active", False)
++            ),
++            "static_obstacle_local_target_lane_id": self._last_debug.get(
++                "static_obstacle_local_target_lane_id", ""
++            ),
++            "static_obstacle_candidate_since_s": float(
++                self._last_debug.get("static_obstacle_candidate_since_s", 0.0) or 0.0
++            ),
++        })
++
++    def predict_trajectory(
++        self,
++        horizon_s: float = 3.0,
++        dt: float = 0.1,
++    ) -> np.ndarray:
++        raw_points = list(self._last_debug.get("mpc_trajectory_points", []) or [])
++        points = np.asarray(
++            [
++                [float(point[0]), float(point[1])]
++                for point in raw_points
++                if len(point) >= 2
++            ],
++            dtype=np.float64,
++        )
++        sample_count = max(1, int(round(float(horizon_s) / max(1.0e-3, float(dt)))))
++        if len(points) == 0:
++            location = self._actor.get_location()
++            return np.tile(
++                np.array([[float(location.x), float(location.y)]], dtype=np.float64),
++                (sample_count, 1),
++            )
++        if len(points) >= sample_count:
++            return points[:sample_count]
++        return np.vstack([points, np.tile(points[-1], (sample_count - len(points), 1))])
++
++    def done(self) -> bool:
++        try:
++            return bool(self._bridge.route_manager.last_status.reached_destination)
++        except Exception:
++            return False
++
++    @property
++    def target_speed_mps(self) -> float:
++        return float(self._target_speed_mps)
++
++    @property
++    def last_debug(self) -> Dict[str, object]:
++        return dict(self._last_debug)
++
++    @property
++    def corridor_half_width(self) -> float:
++        return 0.5 * float(self._bridge.config.get("lane_width_m", 3.5))
++
++    @property
++    def obstacle_lookahead_m(self) -> float:
++        return float(self._bridge.lookahead_m)
++
++    def destroy(self) -> None:
++        self._bridge.destroy()
++
++    def _traffic_light_views(self) -> List[_TrafficLightView]:
++        if self._traffic_lights is None:
++            actors = self._actor.get_world().get_actors()
++            try:
++                lights = list(actors.filter("traffic.traffic_light*"))
++            except Exception:
++                lights = [
++                    actor
++                    for actor in list(actors)
++                    if "traffic_light" in str(getattr(actor, "type_id", ""))
++                ]
++            self._traffic_lights = [_TrafficLightView(actor) for actor in lights]
++        return list(self._traffic_lights)
++
++    def _detection_snapshots(
++        self,
++        *,
++        transform: carla.Transform,
++        timestamp_s: float,
++    ) -> List[Dict[str, object]]:
++        yaw_rad = math.radians(float(transform.rotation.yaw))
++        cos_yaw = math.cos(yaw_rad)
++        sin_yaw = math.sin(yaw_rad)
++        detections_world: List[tuple[float, float, Detection]] = []
++        for detection in self._detections:
++            forward_m = float(detection.xy_ego[0])
++            right_m = float(detection.xy_ego[1])
++            world_x = (
++                float(transform.location.x)
++                + cos_yaw * forward_m
++                - sin_yaw * right_m
++            )
++            world_y = (
++                float(transform.location.y)
++                + sin_yaw * forward_m
++                + cos_yaw * right_m
++            )
++            detections_world.append((float(world_x), float(world_y), detection))
++
++        dt_s = (
++            0.05
++            if self._last_track_time_s is None
++            else max(1.0e-3, float(timestamp_s) - float(self._last_track_time_s))
++        )
++        previous = dict(self._tracks)
++        unmatched_ids = set(previous)
++        next_tracks: Dict[int, Dict[str, float]] = {}
++        snapshots: List[Dict[str, object]] = []
++        for world_x, world_y, detection in detections_world:
++            exact_actor_id = getattr(detection, "actor_id", None)
++            exact_world_xy = getattr(detection, "world_xy", None)
++            exact_velocity = getattr(detection, "velocity_world", None)
++            exact_acceleration = getattr(detection, "acceleration_world", None)
++            exact_angular_velocity = getattr(detection, "angular_velocity_world", None)
++            if exact_actor_id is not None and exact_world_xy is not None:
++                world_x = float(exact_world_xy[0])
++                world_y = float(exact_world_xy[1])
++                velocity_x = float(exact_velocity[0]) if exact_velocity is not None else 0.0
++                velocity_y = float(exact_velocity[1]) if exact_velocity is not None else 0.0
++                speed_mps = math.hypot(velocity_x, velocity_y)
++                heading_rad = (
++                    float(getattr(detection, "yaw", yaw_rad))
++                    if getattr(detection, "yaw", None) is not None
++                    else (math.atan2(velocity_y, velocity_x) if speed_mps > 0.05 else yaw_rad)
++                )
++                best_id = int(exact_actor_id)
++                unmatched_ids.discard(best_id)
++            else:
++                best_id = None
++                best_distance_m = 3.0
++                for track_id in list(unmatched_ids):
++                    track = previous[track_id]
++                    distance_m = math.hypot(
++                        float(world_x) - float(track["x"]),
++                        float(world_y) - float(track["y"]),
++                    )
++                    if distance_m < best_distance_m:
++                        best_id = int(track_id)
++                        best_distance_m = float(distance_m)
++                if best_id is None:
++                    best_id = int(self._next_track_id)
++                    self._next_track_id += 1
++                    speed_mps = 0.0
++                    heading_rad = float(yaw_rad)
++                else:
++                    unmatched_ids.discard(best_id)
++                    previous_track = previous[best_id]
++                    dx_m = float(world_x) - float(previous_track["x"])
++                    dy_m = float(world_y) - float(previous_track["y"])
++                    speed_mps = min(45.0, math.hypot(dx_m, dy_m) / float(dt_s))
++                    heading_rad = (
++                        math.atan2(dy_m, dx_m)
++                        if math.hypot(dx_m, dy_m) > 0.05
++                        else float(previous_track.get("psi", yaw_rad))
++                    )
++            next_tracks[best_id] = {
++                "x": float(world_x),
++                "y": float(world_y),
++                "v": float(speed_mps),
++                "psi": float(heading_rad),
++            }
++            radius_m = max(0.5, float(detection.radius))
++            peer_intent = {}
++            if self._cav_registry is not None and exact_actor_id is not None:
++                peer_intent = self._cav_registry.peer_messages(int(self._actor.id)).get(
++                    str(int(exact_actor_id)), {}
++                )
++            snapshots.append(
++                {
++                    "vehicle_id": f"carla_actor:{best_id}" if exact_actor_id is not None else f"mdrive_detection:{best_id}",
++                    "id": f"carla_actor:{best_id}" if exact_actor_id is not None else f"mdrive_detection:{best_id}",
++                    "carla_actor_id": int(exact_actor_id) if exact_actor_id is not None else None,
++                    "actor_type": str(getattr(detection, "actor_type", "")),
++                    "role_name": str(getattr(detection, "role_name", "")),
++                    "is_controlled_ego": bool(getattr(detection, "is_controlled_ego", False)),
++                    "x": float(world_x),
++                    "y": float(world_y),
++                    "v": float(speed_mps),
++                    "psi": float(heading_rad),
++                    "velocity_x_mps": float(exact_velocity[0]) if exact_velocity is not None else None,
++                    "velocity_y_mps": float(exact_velocity[1]) if exact_velocity is not None else None,
++                    "acceleration_x_mps2": float(exact_acceleration[0]) if exact_acceleration is not None else None,
++                    "acceleration_y_mps2": float(exact_acceleration[1]) if exact_acceleration is not None else None,
++                    "angular_velocity": (
++                        [float(value) for value in exact_angular_velocity]
++                        if exact_angular_velocity is not None else None
++                    ),
++                    "length_m": float(getattr(detection, "length_m", None) or max(2.0, 2.0 * radius_m)),
++                    "width_m": float(getattr(detection, "width_m", None) or max(1.0, 1.2 * radius_m)),
++                    "confidence": float(detection.score),
++                    "source": "mdrive_cooperative_perception",
++                    "provider_source": "perception_swap",
++                    "timestamp_s": float(timestamp_s),
++                    "cooperative_intent": dict(peer_intent),
++                }
++            )
++        self._tracks = next_tracks
++        self._last_track_time_s = float(timestamp_s)
++        return snapshots
+diff --git a/simulation/leaderboard/team_code/test_cpx_multi_ego_data.py b/simulation/leaderboard/team_code/test_cpx_multi_ego_data.py
+new file mode 100644
+index 00000000..07f3e824
+--- /dev/null
++++ b/simulation/leaderboard/team_code/test_cpx_multi_ego_data.py
+@@ -0,0 +1,82 @@
++"""Focused tests for MDrive's exact-GT and multi-CAV CP-X data contract."""
++
++from types import SimpleNamespace
++import unittest
++
++import carla
++import numpy as np
++
++from team_code.cpx_planner_adapter import MDriveCAVRegistry, MDriveCPXPlanner
++from team_code.rule_planner import Detection
++
++
++class CAVRegistryTest(unittest.TestCase):
++    def test_messages_become_visible_only_after_tick_commit(self):
++        registry = MDriveCAVRegistry()
++        actor_a = SimpleNamespace(id=11)
++        actor_b = SimpleNamespace(id=22)
++        manager_a = SimpleNamespace(
++            v2x_manager=SimpleNamespace(cav_nearby={}, cav_intents={})
++        )
++        manager_b = SimpleNamespace(
++            v2x_manager=SimpleNamespace(cav_nearby={}, cav_intents={})
++        )
++        registry.register(actor_a, manager_a)
++        registry.register(actor_b, manager_b)
++
++        registry.begin_tick(1.0)
++        registry.stage_message(22, {"behavior": "yield"})
++        self.assertEqual(registry.peer_messages(11), {})
++
++        registry.commit_tick()
++        registry.begin_tick(1.05)
++        self.assertEqual(
++            registry.peer_messages(11)["22"]["behavior"], "yield"
++        )
++        self.assertIs(manager_a.v2x_manager.cav_nearby["22"], manager_b)
++
++
++class ExactGTStateTest(unittest.TestCase):
++    def test_exact_actor_state_bypasses_nearest_neighbor_tracking(self):
++        planner = MDriveCPXPlanner.__new__(MDriveCPXPlanner)
++        planner._detections = [Detection(
++            xy_ego=np.asarray([99.0, 99.0]),
++            radius=2.0,
++            score=1.0,
++            actor_id=22,
++            actor_type="vehicle.tesla.model3",
++            role_name="hero_1",
++            world_xy=np.asarray([10.0, 20.0]),
++            velocity_world=np.asarray([3.0, 4.0]),
++            acceleration_world=np.asarray([0.1, 0.2]),
++            angular_velocity_world=np.asarray([0.0, 0.0, 1.5]),
++            yaw=0.25,
++            length_m=4.7,
++            width_m=1.9,
++            is_controlled_ego=True,
++        )]
++        planner._last_track_time_s = None
++        planner._tracks = {}
++        planner._next_track_id = 1
++        planner._cav_registry = None
++
++        snapshots = planner._detection_snapshots(
++            transform=carla.Transform(), timestamp_s=1.05
++        )
++        self.assertEqual(len(snapshots), 1)
++        snapshot = snapshots[0]
++        self.assertEqual(snapshot["carla_actor_id"], 22)
++        self.assertEqual((snapshot["x"], snapshot["y"]), (10.0, 20.0))
++        self.assertEqual(snapshot["v"], 5.0)
++        self.assertEqual(snapshot["psi"], 0.25)
++        self.assertEqual(snapshot["length_m"], 4.7)
++        self.assertEqual(snapshot["width_m"], 1.9)
++        self.assertEqual(snapshot["angular_velocity"], [0.0, 0.0, 1.5])
++
++    def test_legacy_detection_constructor_stays_compatible(self):
++        detection = Detection(np.asarray([1.0, 2.0]), 2.0, 0.9)
++        self.assertIsNone(detection.actor_id)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/simulation/leaderboard/team_code/agent_config/autopilot_config.yaml b/simulation/leaderboard/team_code/agent_config/autopilot_config.yaml
+new file mode 100644
+index 00000000..db968d57
+--- /dev/null
++++ b/simulation/leaderboard/team_code/agent_config/autopilot_config.yaml
+@@ -0,0 +1,25 @@
++# Lightweight rule-based AutoPilot configuration for benchmark evaluation.
++# Keep scenario actors intact: they are part of the evaluated interaction.
++destroy_hazard_actors: false
++
++# The basic planner does not need a roadside sensor/data-collection process.
++use_rsu: false
++rgb_only: true
++save_skip_frames: 10
++
++max_speed: 6.5
++slow_speed: 4.0
++
++control:
++  turn_KP: 1.0
++  turn_KI: 0.2
++  turn_KD: 0.1
++  turn_n: 5
++  speed_KP: 5.0
++  speed_KI: 1.0
++  speed_KD: 0.1
++  speed_n: 20
++  max_throttle: 0.75
++  brake_speed: 0.1
++  brake_ratio: 1.1
++  clip_delta: 0.35
+diff --git a/simulation/leaderboard/team_code/agent_config/cpx_gt.yaml b/simulation/leaderboard/team_code/agent_config/cpx_gt.yaml
+new file mode 100644
+index 00000000..54a804b2
+--- /dev/null
++++ b/simulation/leaderboard/team_code/agent_config/cpx_gt.yaml
+@@ -0,0 +1,145 @@
++# CP-X planning with CARLA ground-truth actor perception.
++# No HEAL/AttFuse model or checkpoint is loaded in this mode.
++detector: gt
++planner: cpx
++use_gt_perception: true
++log_tag: cpx_gt
++
++# Ground-truth actors are range-gated in each ego's local frame.
++gt_lidar_range: [-102.4, -102.4, -3.0, 102.4, 102.4, 1.0]
++# Merge/share each controlled CAV's local 360deg/100m GT box across the
++# fleet (union of ranges), since there's no detector in this mode to do
++# cooperative fusion the normal way.
++cooperative: true
++collect_ap_metrics: false
++disable_brake: false
++detection_radius: 1.5
++cruise_speed: 11.18
++target_speed_kmh: 40.2
++
++cpx:
++  # All egos CPX-controlled and cooperative for multi-CAV testing on
++  # scenarios that already pass single-ego (999 clamps to however many
++  # egos the route actually spawns).
++  controlled_ego_count: 999
++  # Re-plan the leaderboard-supplied route through our own GlobalRoutePlanner
++  # (route_manager.replan_from) instead of just consuming the leaderboard's
++  # pre-traced path as-is -- exercises our own routing/search code for the
++  # everyday case, not just the (normally disabled) obstacle-reroute path.
++  use_own_global_planner: true
++  secondary_planner: basicagent
++  mode: full_cpx_mpc
++  fallback_policy: emergency_stop
++  target_speed_mps: 11.18
++  max_mpc_obstacles: 8
++  tracker_max_stale_s: 0.5
++  prediction_min_ttc_s: 2.0
++  full_candidate_pipeline_enabled: true
++  full_candidate_reference_min_object_distance_m: 3.5
++  static_obstacle_local_avoidance_min_object_distance_m: 0.8
++  full_allow_opportunistic_lane_change: true
++  full_dense_traffic_lane_change_lock_enabled: true
++  full_traffic_hold_stop_unknown_until_green: false
++  full_stop_hold_speed_mps: 0.10
++  full_stop_hold_brake: 0.60
++  control_buffer_enabled: false
++  control_buffer_max_reuse_s: 0.35
++  full_control_buffer_min_speed_mps: 1.5
++  full_low_speed_straight_steer_guard_enabled: true
++  full_low_speed_straight_steer_guard_max_speed_mps: 3.5
++  full_intersection_turn_speed_cap_mps: 1.2
++  scenario_turn_prepare_speed_cap_mps: 1.6
++  safety_supervisor_enabled: true
++  record_evaluation_metrics: false
++  record_collision_sensor: false
++
++  # Off by default upstream, and left off here for every earlier run in
++  # this test pass -- confirmed via cav_arbitration/cav_conflict_tags
++  # staying empty ({}) on every tick, including through an actual
++  # collision in Intersection_Deadlock_Resolution/3 (a left-turning ego
++  # crossed a straight-through ego's path with no yield/crossing
++  # arbitration at all). This is the only switch that turns on
++  # classify_conflicts' CROSSING/ONCOMING detection and the Stage-D
++  # corridor that encodes its yield decision as an MPC constraint; see
++  # cpx_mpc_planner.py's _load_mpc_config, which now also flips mpc.yaml's
++  # cost.corridor.enabled to match (that second half was previously never
++  # wired to this flag at all, so setting only this would have been a
++  # silent no-op).
++  cav_conflict_enabled: true
++
++  # The linear throttle feedforward (accel/max_accel + cruise_feedforward)
++  # settles into a false equilibrium well below target_speed_mps once
++  # aerodynamic drag at that speed exactly cancels the feedforward's fixed
++  # throttle guess -- confirmed via telemetry: throttle plateaus at ~0.49,
++  # measured accel nets to ~0, actual speed sticks at ~9.87 m/s even
++  # though target_speed_mps is 11.18 and commanded accel stays positive.
++  # This closed-loop term was previously disabled (gain 0.0), so nothing
++  # ever pushed extra throttle in to correct that persistent error. Raise
++  # the ceiling alongside it so the added boost isn't immediately clipped
++  # back down by cruise_max_throttle. gain=0.15 confirmed the mechanism
++  # (raised the plateau from ~9.87 to ~10.3 m/s) but a proportional-only
++  # term always leaves residual steady-state error at its new equilibrium
++  # too -- telemetry with Interactive_Lane_Change's two CAVs converged to
++  # a common cruise speed still showed actual speed stuck at ~10.3 m/s
++  # while IDM kept commanding +0.56 m/s^2 the whole time (never
++  # satisfied), applied_throttle frozen flat at ~0.505, and measured
++  # accel ~0 despite a steady positive accel_cmd -- the same false-
++  # equilibrium signature, just at a higher speed. Raising the gain
++  # further pushes that equilibrium closer to the 11.18 target.
++  actuator_speed_error_throttle_gain: 0.25
++  actuator_cruise_max_throttle: 0.75
++  # An integral term (actuator_mapper.py's _integrate_speed_error) exists
++  # to close the proportional term's residual steady-state error.
++  # gain=0.05 against IDM's constantly-recomputed (not fixed) target
++  # produced a sustained ~10.4<->11.3 m/s oscillation -- confirmed via
++  # telemetry: ego_0 hunted with a ~2-2.5s period and the Interactive_
++  # Lane_Change gap grew from ~28m to ~42m and kept climbing, worse than
++  # with the integral term off. Retrying at 1/5th the gain so it still
++  # closes the residual error but accumulates -- and therefore corrects
++  # -- much more slowly relative to IDM's own retargeting rate.
++  actuator_speed_error_integral_gain: 0.01
++  actuator_max_speed_error_integral_boost: 0.15
++
++  # IDM (speed_planner.py's build_speed_plan) recomputes its reachable
++  # target every tick as ego_speed_mps + idm_acceleration*horizon_s, using
++  # the vehicle's actual measured speed as the base each time rather than
++  # an integrated running target. With the 0.20s default horizon, even a
++  # near-max IDM acceleration command (~1.95 m/s^2, confirmed via
++  # telemetry after Interactive_Lane_Change's lane change completes) only
++  # asks for +0.39 m/s above wherever the car already is -- so the target
++  # is always "barely ahead of right now" and the car never builds real
++  # cumulative acceleration back toward cruise (measured: <1 m/s gained
++  # over 22s despite IDM pegged near its ceiling the whole time). Widening
++  # the horizon gives the same single IDM controller a real target to
++  # chase instead of one that moves at nearly the same rate as the car.
++  #
++  # 1.0s fixed the "stuck below cruise" case, but once both CAVs converge
++  # near a shared plateau, IDM settles on a small residual accel (~0.56
++  # m/s^2 with a ~9-10m gap over its own desired spacing) and the target
++  # (ego_speed + accel*horizon) still only asks for ~0.5-0.6 m/s above
++  # current speed -- nowhere near the following_max_catchup_delta_mps
++  # headroom (2.0 m/s above nominal cruise) already available for closing
++  # a gap. Raising the actuator's proportional gain instead (0.15->0.25)
++  # barely moved the gap (30.4m->29.7m) because it lifts both CAVs'
++  # plateau equally, leaving their relative speeds -- and therefore the
++  # gap -- unchanged. Widening the horizon further lets the same IDM
++  # acceleration reach further into that unused catch-up headroom.
++  following_idm_target_horizon_s: 2.0
++
++  # IDM's own desired following spacing is standstill_gap_m + speed_mps *
++  # time_headway_s. At the default time_headway_s=1.5s and ~11 m/s
++  # cruise, that is ~21.7m -- IDM will actively brake to keep the gap
++  # near that value, so no following-cap/horizon/actuator tuning above
++  # can ever settle the gap near the ~10m the user wants without also
++  # shrinking IDM's own idea of "close enough". time_headway_s=0.6
++  # (confirmed via telemetry: converged to ~20m, no oscillation, with the
++  # trailing CAV visibly exceeding the leader's speed briefly to close
++  # in before matching it) was a good, safe intermediate step -- but a
++  # steady 3m gap was also asked about. Rejected: 3m sits exactly on top
++  # of following_emergency_gap_m's 3.0m hard stop-or-brake floor, so
++  # IDM's own comfort target and the emergency threshold would
++  # constantly fight, likely flapping between normal follow and
++  # emergency braking rather than holding a stable gap. 0.2 keeps a
++  # real margin above that floor (~5 + 11*0.2 = ~7.2m at cruise) while
++  # still much tighter than the 0.6 step.
++  following_time_headway_s: 0.2
+diff --git a/simulation/leaderboard/team_code/agent_config/cpx_gt_primary_only.yaml b/simulation/leaderboard/team_code/agent_config/cpx_gt_primary_only.yaml
+new file mode 100644
+index 00000000..aa829b39
+--- /dev/null
++++ b/simulation/leaderboard/team_code/agent_config/cpx_gt_primary_only.yaml
+@@ -0,0 +1,61 @@
++# CP-X planning with CARLA ground-truth actor perception, primary-ego-only
++# variant: only ego 0 runs the full CP-X pipeline (MPC + candidate pipeline +
++# cooperative corridor arbitration); every other ego uses MDrive's own cheap
++# rule-based planner instead of its own MPC/arbitration instance -- see
++# mdrive-multi-cav-cpx-performance in memory for why an all-CP-X multi-ego
++# run is disproportionately slow (single-process, serialized per-ego loop in
++# perception_swap_agent.py). Non-primary egos still publish their own
++# already-decided plan as a CavIntent (see
++# MDriveSecondaryIntentPublisher/secondary_intent_broadcast_enabled below) so
++# the CP-X ego can react to where they're actually going, not just where
++# they are right now -- negotiation stays one-directional: only ego 0
++# adjusts its plan; the others never read anyone else's intent.
++detector: gt
++planner: cpx
++use_gt_perception: true
++log_tag: cpx_gt_primary_only
++
++gt_lidar_range: [-102.4, -102.4, -3.0, 102.4, 102.4, 1.0]
++cooperative: true
++collect_ap_metrics: false
++disable_brake: false
++detection_radius: 1.5
++cruise_speed: 11.18
++target_speed_kmh: 40.2
++
++cpx:
++  controlled_ego_count: 1
++  secondary_planner: behavior
++  secondary_intent_broadcast_enabled: true
++  use_own_global_planner: true
++  mode: full_cpx_mpc
++  fallback_policy: emergency_stop
++  target_speed_mps: 11.18
++  max_mpc_obstacles: 8
++  tracker_max_stale_s: 0.5
++  prediction_min_ttc_s: 2.0
++  full_candidate_pipeline_enabled: true
++  full_candidate_reference_min_object_distance_m: 3.5
++  static_obstacle_local_avoidance_min_object_distance_m: 0.8
++  full_allow_opportunistic_lane_change: true
++  full_dense_traffic_lane_change_lock_enabled: true
++  full_traffic_hold_stop_unknown_until_green: false
++  full_stop_hold_speed_mps: 0.10
++  full_stop_hold_brake: 0.60
++  control_buffer_enabled: false
++  control_buffer_max_reuse_s: 0.35
++  full_control_buffer_min_speed_mps: 1.5
++  full_low_speed_straight_steer_guard_enabled: true
++  full_low_speed_straight_steer_guard_max_speed_mps: 3.5
++  full_intersection_turn_speed_cap_mps: 1.2
++  scenario_turn_prepare_speed_cap_mps: 1.6
++  safety_supervisor_enabled: true
++  record_evaluation_metrics: false
++  record_collision_sensor: false
++  cav_conflict_enabled: true
++  actuator_speed_error_throttle_gain: 0.25
++  actuator_cruise_max_throttle: 0.75
++  actuator_speed_error_integral_gain: 0.01
++  actuator_max_speed_error_integral_boost: 0.15
++  following_idm_target_horizon_s: 2.0
++  following_time_headway_s: 0.2
+diff --git a/simulation/leaderboard/team_code/agent_config/perception_swap_attfuse_cpx.yaml b/simulation/leaderboard/team_code/agent_config/perception_swap_attfuse_cpx.yaml
+new file mode 100644
+index 00000000..6212bedc
+--- /dev/null
++++ b/simulation/leaderboard/team_code/agent_config/perception_swap_attfuse_cpx.yaml
+@@ -0,0 +1,40 @@
++# PerceptionSwapAgent - AttFuse cooperative perception + CP-X planning pipeline.
++detector: attfuse
++planner: cpx
++cooperative: true
++comm_range_m: 200
++max_cooperators: 4
++cruise_speed: 3.0
++score_threshold: 0.20
++detection_radius: 1.5
++collect_ap_metrics: true
++disable_brake: false
++
++cpx:
++  # Evaluate CP-X on the primary ego. Other scenario egos retain MDrive's
++  # original OpenCDA-derived BehaviorAgent control.
++  primary_ego_only: true
++  secondary_planner: behavior
++  mode: full_cpx_mpc
++  fallback_policy: emergency_stop
++  target_speed_mps: 3.0
++  max_mpc_obstacles: 8
++  tracker_max_stale_s: 0.5
++  prediction_min_ttc_s: 2.0
++  full_candidate_pipeline_enabled: true
++  full_candidate_reference_min_object_distance_m: 3.5
++  full_allow_opportunistic_lane_change: false
++  full_dense_traffic_lane_change_lock_enabled: true
++  full_traffic_hold_stop_unknown_until_green: false
++  full_stop_hold_speed_mps: 0.10
++  full_stop_hold_brake: 0.60
++  control_buffer_enabled: false
++  control_buffer_max_reuse_s: 0.35
++  full_control_buffer_min_speed_mps: 1.5
++  full_low_speed_straight_steer_guard_enabled: true
++  full_low_speed_straight_steer_guard_max_speed_mps: 3.5
++  full_intersection_turn_speed_cap_mps: 1.2
++  scenario_turn_prepare_speed_cap_mps: 1.6
++  safety_supervisor_enabled: true
++  record_evaluation_metrics: false
++  record_collision_sensor: false
