@@ -9,13 +9,12 @@ from pipeline.behavior_reference_finalization_stage import (
     MPCCostProfileRequest,
 )
 from pipeline.execution_pipeline import (
-    BehaviorContextRequest,
     CooperativePlanningFrame,
     ExecutableBehaviorRequest,
     NominalPlanningRequest,
     PlanningPipeline,
-    ScenarioPlanningFrameRequest,
 )
+from pipeline.planning_context_stage import PlanningContextRequest
 from pipeline.cav_interaction_stage import CAVInteractionStage
 from pipeline.perception_stage import PerceptionStage
 from pipeline.runtime_input_stage import RuntimeInputStage
@@ -239,57 +238,6 @@ def test_pipeline_owns_selected_candidate_finalization_order():
     ]
 
 
-def test_pipeline_observes_scenario_from_frozen_adapter_frame():
-    captured = {}
-
-    class Behavior:
-        def prepare_turn_scenario_context(self, **kwargs):
-            captured["turn"] = kwargs
-            return "turn-context"
-
-    class Scenario:
-        def observe_planning_context(self, **kwargs):
-            captured["scenario"] = kwargs
-            assert kwargs["prepare_turn_context"]() == "turn-context"
-            return "scenario-observation"
-
-    pipeline = PlanningPipeline(
-        runtime_input=RuntimeInputStage(_Mapper()), perception=PerceptionStage(),
-        behavior=Behavior(), scenario=Scenario(), static_obstacle=object(),
-        control_safety=object(), speed=object(), destination_speed=object(),
-        reference_publication=object(), mpc_entry=object(),
-    )
-    stop_target = SimpleNamespace(active=False)
-    route = SimpleNamespace(
-        current_road_option="LANEFOLLOW", next_macro_maneuver="turn_right",
-        next_macro_distance_m=20.0,
-    )
-    adapter = SimpleNamespace(
-        signal_context={"source": "test"},
-        frame=SimpleNamespace(
-            planning=SimpleNamespace(route=route, traffic_control=SimpleNamespace(
-                signal_state="green", stop_target=stop_target,
-            )),
-            map_lane=SimpleNamespace(in_junction=False),
-        ),
-    )
-    ego = SimpleNamespace(x=1.0, y=2.0)
-    result = pipeline.observe_planning_frame(
-        ScenarioPlanningFrameRequest(
-            adapter_output=adapter, traffic_memory=object(),
-            route_manager=object(), ego_location=ego, ego_yaw_rad=0.0,
-            ego_speed_mps=5.0, current_lane_id=10, cruise_speed_mps=8.0,
-            sim_time_s=3.0, config={},
-        ),
-        resolve_actor_state=lambda **_kwargs: ("green", ""),
-        project_stop_target=lambda **_kwargs: (float("inf"), False),
-    )
-
-    assert result == "scenario-observation"
-    assert captured["scenario"]["raw_traffic_state"] == "green"
-    assert captured["turn"]["next_macro_maneuver"] == "turn_right"
-
-
 def test_pipeline_owns_route_scenario_conflict_context_sequence():
     calls = []
     authorization = SimpleNamespace(required_by_route=True)
@@ -340,10 +288,16 @@ def test_pipeline_owns_route_scenario_conflict_context_sequence():
         def snapshot(self, _mode):
             return SimpleNamespace(active=False)
 
+        def stop_target_forward(self, **_kwargs):
+            return float("inf"), False
+
     stop_target = SimpleNamespace(active=False)
     adapter = SimpleNamespace(
         signal_context={},
+        current_lane_id=7,
         frame=SimpleNamespace(
+            perception=SimpleNamespace(planning_objects=({"id": "tracked"},)),
+            prediction=SimpleNamespace(lane_prediction_risks={}),
             map_lane=SimpleNamespace(
                 allowed_lane_ids=(7, 8), in_junction=False
             ),
@@ -359,29 +313,40 @@ def test_pipeline_owns_route_scenario_conflict_context_sequence():
             ),
         ),
     )
+
+    class InputAdapter:
+        def build(self, **kwargs):
+            calls.append(("adapter", kwargs))
+            return adapter
+
     pipeline = PlanningPipeline(
         runtime_input=RuntimeInputStage(_Mapper()),
         perception=PerceptionStage(), behavior=Behavior(), scenario=Scenario(),
         static_obstacle=object(), control_safety=object(), speed=object(),
         destination_speed=object(), reference_publication=object(),
         mpc_entry=object(),
+        planner_input_adapter=InputAdapter(),
     )
     reset_reasons = []
     stage_names = []
-    result = pipeline.resolve_behavior_context(
-        BehaviorContextRequest(
-            adapter_output=adapter,
-            local_map_snapshot="local-map",
+    result = pipeline.prepare_planning_context(
+        PlanningContextRequest(
+            ego_location=SimpleNamespace(x=1.0, y=2.0),
+            ego_yaw_rad=0.0,
+            ego_speed_mps=4.0,
+            object_snapshots=({"id": "raw"},),
+            cp_payload={},
+            local_map_snapshot=SimpleNamespace(frame_id=1, ego_lane_id=7),
             route_manager="route-manager",
             maneuver_manager="maneuver-manager",
             reference_provider=ReferenceProvider(),
             traffic_memory="traffic-memory",
-            opportunistic_request="opportunistic-request",
-            ego_location=SimpleNamespace(x=1.0, y=2.0),
-            ego_yaw_rad=0.0,
-            ego_speed_mps=4.0,
+            opportunistic_lane_change_enabled=False,
+            lane_change_start_lock_until_s=0.0,
+            dense_traffic_lock_enabled=False,
+            dense_object_count=8,
+            dense_risky_lane_count=2,
             planning_speed_mps=6.0,
-            current_lane_id=7,
             sim_time_s=5.0,
             cruise_speed_mps=8.0,
             mpc_dt_s=0.1,
@@ -389,7 +354,6 @@ def test_pipeline_owns_route_scenario_conflict_context_sequence():
             config={},
         ),
         resolve_actor_state=lambda **_kwargs: ("green", ""),
-        project_stop_target=lambda **_kwargs: (float("inf"), False),
         attempt_turn_replan=lambda reason: (
             True, True, "replanned:" + reason
         ),
@@ -397,19 +361,23 @@ def test_pipeline_owns_route_scenario_conflict_context_sequence():
         observe_stage_duration=lambda name, _seconds: stage_names.append(name),
     )
 
-    assert result.route_behavior is route_behavior
-    assert result.scenario_observation is scenario_observation
-    assert result.conflict_resolution is conflict
-    assert result.route_replan_attempted
-    assert result.route_replan_succeeded
-    assert result.route_replan_reason == "replanned:route_discontinuity"
+    context = result.behavior_context
+    assert result.current_lane_id == 7
+    assert result.mutable_object_snapshots() == [{"id": "tracked"}]
+    assert context.route_behavior is route_behavior
+    assert context.scenario_observation is scenario_observation
+    assert context.conflict_resolution is conflict
+    assert context.route_replan_attempted
+    assert context.route_replan_succeeded
+    assert context.route_replan_reason == "replanned:route_discontinuity"
     assert stage_names == [
+        "sub_input_adapter_build",
         "sub_resolve_route_context",
         "sub_observe_planning_frame",
         "sub_resolve_conflicts",
     ]
     assert [entry[0] for entry in calls] == [
-        "route", "scenario", "turn", "conflict", "release"
+        "adapter", "route", "scenario", "turn", "conflict", "release"
     ]
     assert reset_reasons == [{"reason": "maneuver_complete"}]
 

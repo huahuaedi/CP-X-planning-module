@@ -50,9 +50,11 @@ from opencda.planning_module.pipeline.mpc_cost_profile_stage import (
     select_profile_with_hysteresis as _select_mpc_cost_profile_with_hysteresis,
 )
 from opencda.planning_module.pipeline.execution_pipeline import (
-    BehaviorContextRequest,
     ExecutableBehaviorRequest,
     NominalPlanningRequest,
+)
+from opencda.planning_module.pipeline.planning_context_stage import (
+    PlanningContextRequest,
 )
 from opencda.planning_module.pipeline.behavior_reference_finalization_stage import (
     BehaviorFrameFinalizationRequest,
@@ -70,7 +72,6 @@ from opencda.planning_module.pipeline.candidate_selection_stage import (
 )
 from opencda.planning_module.pipeline.behavior_stage import (
     BehaviorCommandFrameRequest,
-    OpportunisticLaneChangeRequest,
 )
 
 
@@ -1232,75 +1233,38 @@ class CPXMPCPlannerBridge:
         route_replan_succeeded = route_update.route_replan_succeeded
         route_replan_reason = route_update.route_replan_reason
         stop_goal_active = route_update.stop_goal_active
-        _ts_sub = time.monotonic()
-        adapter_output = self.input_adapter.build(
-            ego_location=ego_location,
-            ego_yaw_rad=float(ego_yaw_rad),
-            ego_speed_mps=float(ego_speed_mps),
-            object_snapshots=object_snapshots,
-            cp_payload=cp_payload,
-        )
-        self._accum_stage_ms("sub_input_adapter_build", time.monotonic() - _ts_sub)
-        planner_input_frame = adapter_output.frame
-        # The adapter's tracker is the sole temporal obstacle-state owner.
-        # Downstream behavior, speed and interaction stages must consume the
-        # same recovered kinematics as prediction.  Reusing the raw CARLA
-        # detections here made kinematically scripted (and some real sensor)
-        # actors appear to move in prediction while SpeedPlanner saw v=0.
-        object_snapshots = [
-            dict(snapshot)
-            for snapshot in planner_input_frame.perception.planning_objects
-        ]
         local_map_snapshot = getattr(
             self, "_local_map_snapshot", LocalMapSnapshot()
         )
-        ego_pose = adapter_output.ego_pose
-        current_state = adapter_output.current_state
-        current_lane_id = int(
-            local_map_snapshot.ego_lane_id
-            if local_map_snapshot.frame_id > 0 and local_map_snapshot.ego_lane_id != 0
-            else adapter_output.current_lane_id
-        )
-        ego_waypoint = adapter_output.ego_waypoint
-        lane_safety_scores = dict(adapter_output.lane_safety_scores)
-        front_dist_by_lane = dict(adapter_output.front_distance_by_lane)
-        route_points = list(adapter_output.route_points)
-        route_context = planner_input_frame.planning.route
-        route_optimal_lane_id = int(adapter_output.route_optimal_lane_id)
-        route_reference_allowed = bool(adapter_output.route_reference_allowed)
-        route_reference_gate_reason = str(adapter_output.route_reference_gate_reason)
         reset_lane_change = getattr(
             self.behavior_planner, "_reset_lane_change_state", None
         )
-        behavior_context = self.pipeline.resolve_behavior_context(
-            BehaviorContextRequest(
-                adapter_output=adapter_output,
+        planning_context = self.pipeline.prepare_planning_context(
+            PlanningContextRequest(
+                ego_location=ego_location,
+                ego_yaw_rad=float(ego_yaw_rad),
+                ego_speed_mps=float(ego_speed_mps),
+                object_snapshots=object_snapshots,
+                cp_payload=cp_payload,
                 local_map_snapshot=local_map_snapshot,
                 route_manager=self.route_manager,
                 maneuver_manager=self.maneuver_manager,
                 reference_provider=self._stable_reference_line_provider,
                 traffic_memory=self._full_traffic_memory,
-                opportunistic_request=OpportunisticLaneChangeRequest(
-                    enabled=bool(self.full_allow_opportunistic_lane_change),
-                    sim_time_s=float(sim_time_s),
-                    start_lock_until_s=float(self.full_lane_change_start_lock_s),
-                    dense_traffic_lock_enabled=bool(
-                        self.full_dense_traffic_lane_change_lock_enabled
-                    ),
-                    object_count=len(list(object_snapshots or [])),
-                    dense_object_count=int(self.full_dense_traffic_object_count),
-                    lane_prediction_risks=dict(
-                        planner_input_frame.prediction.lane_prediction_risks
-                    ),
-                    dense_risky_lane_count=int(
-                        self.full_dense_traffic_risky_lane_count
-                    ),
+                opportunistic_lane_change_enabled=bool(
+                    self.full_allow_opportunistic_lane_change
                 ),
-                ego_location=ego_location,
-                ego_yaw_rad=float(ego_yaw_rad),
-                ego_speed_mps=float(ego_speed_mps),
+                lane_change_start_lock_until_s=float(
+                    self.full_lane_change_start_lock_s
+                ),
+                dense_traffic_lock_enabled=bool(
+                    self.full_dense_traffic_lane_change_lock_enabled
+                ),
+                dense_object_count=int(self.full_dense_traffic_object_count),
+                dense_risky_lane_count=int(
+                    self.full_dense_traffic_risky_lane_count
+                ),
                 planning_speed_mps=float(speed_ref_mps),
-                current_lane_id=int(current_lane_id),
                 sim_time_s=float(sim_time_s),
                 cruise_speed_mps=float(self.target_speed_mps),
                 mpc_dt_s=float(self.mpc.dt_s),
@@ -1313,16 +1277,6 @@ class CPXMPCPlannerBridge:
                 ),
             ),
             resolve_actor_state=self._resolve_full_traffic_state_from_carla_actor,
-            project_stop_target=lambda *, stop_target: self._stable_reference_line_provider.stop_target_forward(
-                ego_location=ego_location,
-                ego_yaw_rad=float(ego_yaw_rad),
-                stop_target=(
-                    dict(stop_target)
-                    if isinstance(stop_target, Mapping)
-                    else None
-                ),
-                fallback_destination_state=[],
-            ),
             attempt_turn_replan=lambda trigger_reason: self._attempt_turn_route_replan(
                 ego_location=ego_location,
                 trigger_reason=str(trigger_reason),
@@ -1330,6 +1284,21 @@ class CPXMPCPlannerBridge:
             reset_lane_change=reset_lane_change,
             observe_stage_duration=self._accum_stage_ms,
         )
+        adapter_output = planning_context.adapter_output
+        planner_input_frame = planning_context.planner_input_frame
+        object_snapshots = planning_context.mutable_object_snapshots()
+        local_map_snapshot = planning_context.local_map_snapshot
+        ego_pose = adapter_output.ego_pose
+        current_state = adapter_output.current_state
+        current_lane_id = int(planning_context.current_lane_id)
+        lane_safety_scores = dict(adapter_output.lane_safety_scores)
+        front_dist_by_lane = dict(adapter_output.front_distance_by_lane)
+        route_points = list(adapter_output.route_points)
+        route_context = planner_input_frame.planning.route
+        route_optimal_lane_id = int(adapter_output.route_optimal_lane_id)
+        route_reference_allowed = bool(adapter_output.route_reference_allowed)
+        route_reference_gate_reason = str(adapter_output.route_reference_gate_reason)
+        behavior_context = planning_context.behavior_context
         route_behavior = behavior_context.route_behavior
         lane_change_context = route_behavior.context
         route_lane_change_allowed = bool(

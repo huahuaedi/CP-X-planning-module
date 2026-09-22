@@ -715,6 +715,7 @@ def _pipeline_route_and_finalization(bridge, parts: SimpleNamespace) -> None:
         behavior_reference_execution=parts.behavior_reference_execution_stage,
         reference_planning=reference_planning_stage,
         mpc_cost_profile=mpc_cost_profile_stage,
+        planner_input_adapter=bridge.input_adapter,
     )
     # Construction-only scratch state threaded from the earlier
     # _init_* phases; nothing outside __init__ may depend on it.
