@@ -143,7 +143,7 @@ def test_pipeline_wires_all_stage_owners(bridge):
         "_runtime_input", "_perception", "behavior", "scenario",
         "static_obstacle", "control_safety", "speed", "destination_speed",
             "reference_publication", "mpc_entry", "mpc_cost_profile", "fallback",
-        "behavior_reference_execution", "reference_planning",
+        "behavior_reference_execution", "reference_planning", "cooperative",
         "control_finalization", "mpc_execution",
     ):
         assert getattr(pipeline, attr, None) is not None, (
@@ -165,12 +165,13 @@ def test_candidate_selection_stage_receives_lane_change_lifecycle(bridge):
 
 
 def test_cooperative_stage_depends_on_explicit_ports_not_full_pipeline(bridge):
-    assert not hasattr(bridge._cooperative, "_pipeline")
-    assert callable(bridge._cooperative._build_conflict_reference)
-    assert callable(bridge._cooperative._resolve_interaction)
-    assert (
-        bridge._cooperative._resolve_interaction
-        is bridge.cav_interaction_stage.resolve
+    cooperative = bridge.pipeline.cooperative
+    assert not hasattr(bridge, "_cooperative")
+    assert not hasattr(cooperative, "_pipeline")
+    assert callable(cooperative._build_conflict_reference)
+    assert callable(cooperative._resolve_interaction)
+    assert cooperative._resolve_interaction.__module__.endswith(
+        "cav_interaction_stage"
     )
 
 
@@ -185,6 +186,6 @@ def test_cp_provider_disabled_by_config(bridge):
 
 
 def test_cav_conflict_governor_starts_at_the_configured_ceiling(bridge):
-    governor = bridge._cooperative.governor
+    governor = bridge.pipeline.cooperative.governor
     assert governor.current_max_relevant_agents == 6
     assert governor.current_max_modes_per_agent == 3

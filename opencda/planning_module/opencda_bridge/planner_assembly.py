@@ -699,6 +699,7 @@ def _pipeline_route_and_finalization(bridge, parts: SimpleNamespace) -> None:
         config=bridge.config,
         behavior_runtime_config=bridge.behavior_runtime_cfg,
     )
+    cav_interaction_stage = CAVInteractionStage()
     bridge.pipeline = PlanningPipeline(
         runtime_input=parts.runtime_input_stage,
         perception=parts.perception_stage,
@@ -838,6 +839,18 @@ def _pipeline_route_and_finalization(bridge, parts: SimpleNamespace) -> None:
             bridge.config.get("turn_replan_max_added_length_m", 100.0)
         ),
     )
+    bridge.pipeline.attach_cooperative(CooperativeArbitrationStage(
+        config=bridge.config,
+        enabled=bridge._cav_conflict_enabled,
+        build_conflict_reference=(
+            reference_planning_stage.cooperative_conflict_reference
+        ),
+        resolve_interaction=cav_interaction_stage.resolve,
+        mpc=bridge.mpc,
+        route_manager=bridge.route_manager,
+        maneuver_manager=bridge.maneuver_manager,
+        record_stage_ms=bridge._accum_stage_ms,
+    ))
     bridge._active_route_summary = None
     bridge.mpc_feedback = BehaviorMPCFeedback(
         enabled=bool(bridge.config.get("mpc_feedback_enabled", True)),
@@ -981,16 +994,3 @@ def _pipeline_route_and_finalization(bridge, parts: SimpleNamespace) -> None:
     )
     bridge._prediction_lane_step_resolved_count = 0
     bridge._prediction_lane_step_none_count = 0
-    bridge.cav_interaction_stage = CAVInteractionStage()
-    bridge._cooperative = CooperativeArbitrationStage(
-        config=bridge.config,
-        enabled=bridge._cav_conflict_enabled,
-        build_conflict_reference=(
-            reference_planning_stage.cooperative_conflict_reference
-        ),
-        resolve_interaction=bridge.cav_interaction_stage.resolve,
-        mpc=bridge.mpc,
-        route_manager=bridge.route_manager,
-        maneuver_manager=bridge.maneuver_manager,
-        record_stage_ms=bridge._accum_stage_ms,
-    )

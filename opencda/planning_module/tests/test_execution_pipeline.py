@@ -89,6 +89,38 @@ def test_pipeline_cycle_owns_initial_emergency_speed_intent():
     assert cycle.perception.front_actor_id == "front"
 
 
+def test_pipeline_owns_cooperative_resolution_and_speed_handoff():
+    resolution = SimpleNamespace(speed_constraint="cav-cap")
+
+    class Cooperative:
+        def run(self, request):
+            assert request == "cooperative-request"
+            return resolution, True
+
+    class Speed:
+        def constrain_plan(self, speed_plan, constraint):
+            assert speed_plan == "candidate-speed-plan"
+            assert constraint == "cav-cap"
+            return "constrained-speed-plan"
+
+    pipeline = PlanningPipeline(
+        runtime_input=RuntimeInputStage(_Mapper()), perception=PerceptionStage(),
+        behavior=object(), scenario=object(), static_obstacle=object(),
+        control_safety=object(), speed=Speed(), destination_speed=object(),
+        reference_publication=object(), mpc_entry=object(),
+        cooperative=Cooperative(),
+    )
+
+    frame = pipeline.resolve_cooperative("cooperative-request")
+    speed_plan = pipeline.constrain_speed_from_cooperative(
+        "candidate-speed-plan", frame
+    )
+
+    assert frame.cav_resolution is resolution
+    assert frame.lane_change_deferred
+    assert speed_plan == "constrained-speed-plan"
+
+
 def test_pipeline_observes_scenario_from_frozen_adapter_frame():
     captured = {}
 

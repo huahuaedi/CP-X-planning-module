@@ -595,11 +595,11 @@ class CPXMPCPlannerBridge:
         if cav_result is not None:
             cav_constraint_rows = tuple(cav_result.mpc_rows or ())
             cav_diagnostics = dict(cav_result.diagnostics or {})
-            cav_constraint_revision = self._cooperative.schedule.constraint_revision(
+            cav_constraint_revision = self.pipeline.cooperative.schedule.constraint_revision(
                 cav_diagnostics
             )
         corridor_infeasible_escalate = bool(
-            self._cooperative.schedule.corridor_emergency_stop_required
+            self.pipeline.cooperative.schedule.corridor_emergency_stop_required
         )
         self._maybe_capture_execute_mpc_frame(
             sim_time_s=float(sim_time_s),
@@ -1694,8 +1694,8 @@ class CPXMPCPlannerBridge:
         # exchange the same proposed claims before either installs a locked
         # lane-change reference.  This is also the sole CAV resolution call
         # for the tick; its corridor rows are reused by MPC below.
-        cav_result, cooperative_lane_change_deferred = (
-            self._resolve_cooperative_arbitration(
+        cooperative_frame = self.pipeline.resolve_cooperative(
+            self._build_cooperative_request(
                 cooperative_proposal=cooperative_proposal,
                 current_state=current_state,
                 ego_location=ego_location,
@@ -1708,6 +1708,10 @@ class CPXMPCPlannerBridge:
                 planner_input_frame=planner_input_frame,
                 sim_time_s=sim_time_s,
             )
+        )
+        cav_result = cooperative_frame.cav_resolution
+        cooperative_lane_change_deferred = bool(
+            cooperative_frame.lane_change_deferred
         )
         if bool(self.full_candidate_pipeline_enabled):
             candidate_result = self.pipeline.arbitrate_candidates(
@@ -1790,6 +1794,11 @@ class CPXMPCPlannerBridge:
         else:
             reference_debug["candidate_pipeline_enabled"] = False
 
+        speed_plan = self.pipeline.constrain_speed_from_cooperative(
+            speed_plan, cooperative_frame
+        )
+        planned_speed_mps = float(speed_plan.target_speed_mps)
+
         # Geometry and longitudinal policy meet at one typed boundary.  The
         # provider measures the persistent (route-revision-stable) TURN
         # master, and SpeedTargetPlanner is the sole owner that turns it into
@@ -1818,17 +1827,6 @@ class CPXMPCPlannerBridge:
                 "turn_curvature_speed_source": "persistent_turn_master",
                 "turn_longitudinal_authority": "SpeedPlanner",
             })
-
-        # Stage C owns the time-indexed safety corridor; SpeedTargetPlanner
-        # owns nominal longitudinal intent.  Feed the corridor's approach
-        # envelope into that single speed owner, while retaining the original
-        # Stage-D half spaces as the final safety constraint.
-        if cav_result is not None:
-            speed_plan = self.pipeline.constrain_speed_plan(
-                speed_plan,
-                cav_result.speed_constraint,
-            )
-            planned_speed_mps = float(speed_plan.target_speed_mps)
 
         boundary_recovery_active = bool(
             self.config.get("boundary_recovery_enabled", False)
@@ -1923,16 +1921,16 @@ class CPXMPCPlannerBridge:
             cav_resolution=cav_result,
         )
 
-    def _resolve_cooperative_arbitration(
+    def _build_cooperative_request(
         self, *, cooperative_proposal, current_state, ego_location,
         ego_yaw_rad, ego_speed_mps, local_lane_center_reference,
         local_map_snapshot, object_snapshots, planned_speed_mps,
         planner_input_frame, sim_time_s,
     ):
-        """Feed the cooperative stage its inputs; the decisions live there."""
+        """Adapt OpenCDA/V2X inputs into the cooperative stage contract."""
 
         cav_intents = self._collect_cav_intents()
-        return self._cooperative.run(CooperativeArbitrationRequest(
+        return CooperativeArbitrationRequest(
             proposal=cooperative_proposal,
             current_state=current_state,
             ego_location=ego_location,
@@ -1949,7 +1947,7 @@ class CPXMPCPlannerBridge:
             cav_intents=cav_intents,
             transport_diagnostics=self._cav_transport_diagnostics,
             last_accel_mps2=self._last_accel_mps2,
-        ))
+        )
 
     def _publish_cav_intent(
         self, *, ego_location: Any, ego_yaw_rad: float,
@@ -2050,7 +2048,7 @@ class CPXMPCPlannerBridge:
         del sim_time_s
         if not self._cav_conflict_enabled:
             return None
-        return self._cooperative.claims.current_claim
+        return self.pipeline.cooperative.claims.current_claim
 
     def _attempt_turn_route_replan(
         self,

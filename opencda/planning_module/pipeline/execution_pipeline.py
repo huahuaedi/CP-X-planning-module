@@ -204,6 +204,14 @@ class ExecutableBehaviorFrame:
         return bool(self.override.stop_goal_active)
 
 
+@dataclass(frozen=True)
+class CooperativePlanningFrame:
+    """CAV resolution and its single longitudinal handoff."""
+
+    cav_resolution: Any
+    lane_change_deferred: bool
+
+
 class PlanningPipeline:
     """Own and sequence planning stages without owning OpenCDA runtime I/O."""
 
@@ -225,6 +233,7 @@ class PlanningPipeline:
         behavior_reference_execution: Any = None,
         reference_planning: Any = None,
         mpc_cost_profile: Any = None,
+        cooperative: Any = None,
         control_finalization: Any = None,
     ) -> None:
         self._runtime_input = runtime_input
@@ -242,7 +251,15 @@ class PlanningPipeline:
         self.behavior_reference_execution = behavior_reference_execution
         self.reference_planning = reference_planning
         self.mpc_cost_profile = mpc_cost_profile
+        self.cooperative = cooperative
         self.control_finalization = control_finalization
+
+    def attach_cooperative(self, cooperative: Any) -> None:
+        """Complete late assembly after the route owner exists."""
+
+        if self.cooperative is not None:
+            raise RuntimeError("cooperative stage is already configured")
+        self.cooperative = cooperative
 
     def begin_tick(
         self, *, timestamp_s: float, ego_transform: Any, ego_speed_kmh: float
@@ -873,6 +890,22 @@ class PlanningPipeline:
         if self.mpc_cost_profile is None:
             raise RuntimeError("MPC cost-profile stage is not configured")
         return self.mpc_cost_profile.apply(**kwargs)
+
+    def resolve_cooperative(self, request) -> CooperativePlanningFrame:
+        if self.cooperative is None:
+            raise RuntimeError("cooperative arbitration stage is not configured")
+        cav_resolution, deferred = self.cooperative.run(request)
+        return CooperativePlanningFrame(
+            cav_resolution=cav_resolution,
+            lane_change_deferred=bool(deferred),
+        )
+
+    def constrain_speed_from_cooperative(self, speed_plan, frame):
+        if frame.cav_resolution is None:
+            return speed_plan
+        return self.speed.constrain_plan(
+            speed_plan, frame.cav_resolution.speed_constraint
+        )
 
     def cooperative_conflict_reference(self, **kwargs):
         if self.reference_planning is None:

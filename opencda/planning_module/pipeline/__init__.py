@@ -49,7 +49,11 @@ from .destination_speed_stage import (
     DestinationSpeedStage,
     DestinationSpeedStageResult,
 )
-from .execution_pipeline import PlanningPipeline, ScenarioPlanningFrameRequest
+from .execution_pipeline import (
+    CooperativePlanningFrame,
+    PlanningPipeline,
+    ScenarioPlanningFrameRequest,
+)
 from .mpc_feedback import BehaviorMPCFeedback
 from .mpc_command_extractor import MPCCommandExtractor, MPCTrackingCommand
 from .mpc_entry_stage import MPCEntryStage, MPCEntryStageResult
@@ -175,6 +179,7 @@ __all__ = [
     "DestinationSpeedStage",
     "DestinationSpeedStageResult",
     "PlanningPipeline",
+    "CooperativePlanningFrame",
     "ReferencePlanningStage",
     "BehaviorReferenceRequest",
     "BehaviorReferenceFrame",

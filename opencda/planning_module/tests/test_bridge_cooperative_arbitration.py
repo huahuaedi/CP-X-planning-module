@@ -1,6 +1,6 @@
 """Cooperative arbitration with a real peer, through the real bridge.
 
-CPXMPCPlannerBridge._resolve_cooperative_arbitration turns one tick's proposal,
+PlanningPipeline.resolve_cooperative turns one tick's proposal,
 the peers' broadcast intents and the ego reference into (cav_resolution,
 defer-the-lane-change).  Peers reach it only as serialized intent payloads on
 ``v2x_manager.cav_nearby[id].cpx_planner.last_cav_intent_payload`` -- the same
@@ -208,9 +208,11 @@ def _peer_lane_change_claim(bridge, *, committed_at_s, phase="committed"):
 
 
 def _arbitrate(bridge, frame, *, sim_time_s, proposal):
-    return bridge._resolve_cooperative_arbitration(
-        cooperative_proposal=proposal, sim_time_s=sim_time_s, **frame,
+    request = bridge._build_cooperative_request(
+        cooperative_proposal=proposal, sim_time_s=sim_time_s, **frame
     )
+    result = bridge.pipeline.resolve_cooperative(request)
+    return result.cav_resolution, result.lane_change_deferred
 
 
 def _roles(resolution):
@@ -227,7 +229,7 @@ def test_disabled_arbitration_returns_nothing_and_touches_no_claim_state(cache_r
 
     assert resolution is None
     assert deferred is False
-    assert bridge._cooperative.claims.current_claim is None
+    assert bridge.pipeline.cooperative.claims.current_claim is None
 
 
 def test_same_lane_peer_ahead_is_followed_and_seen_over_the_transport(cache_root):
@@ -257,7 +259,7 @@ def test_first_proposal_tick_is_deferred_so_both_peers_see_the_same_claims(cache
 
     assert resolution is not None
     assert deferred is True
-    assert bridge._cooperative.claims.current_claim.phase == "proposed"
+    assert bridge.pipeline.cooperative.claims.current_claim.phase == "proposed"
 
 
 def test_proposal_is_released_after_the_dwell_when_no_peer_conflicts(cache_root):
@@ -364,13 +366,13 @@ def test_config_knobs_and_planner_limits_reach_the_interaction_resolver(cache_ro
     bridge, _ = _make_bridge(cache_root, **knobs)
     _, frame = _frame(bridge)
     captured = []
-    real = bridge._cooperative._resolve_interaction
+    real = bridge.pipeline.cooperative._resolve_interaction
 
     def spy(**kwargs):
         captured.append(kwargs)
         return real(**kwargs)
 
-    bridge._cooperative._resolve_interaction = spy
+    bridge.pipeline.cooperative._resolve_interaction = spy
 
     _arbitrate(bridge, frame, sim_time_s=0.0, proposal=_proposal(bridge))
 
@@ -392,7 +394,7 @@ def test_config_knobs_and_planner_limits_reach_the_interaction_resolver(cache_ro
         bridge._last_accel_mps2
     )
     assert seen["max_relevant_agents"] == (
-        bridge._cooperative.governor.current_max_relevant_agents
+        bridge.pipeline.cooperative.governor.current_max_relevant_agents
     )
 
 
@@ -402,13 +404,13 @@ def test_unconfigured_resolver_knobs_keep_their_documented_defaults(cache_root):
     bridge, _ = _make_bridge(cache_root)
     _, frame = _frame(bridge)
     captured = []
-    real = bridge._cooperative._resolve_interaction
+    real = bridge.pipeline.cooperative._resolve_interaction
 
     def spy(**kwargs):
         captured.append(kwargs)
         return real(**kwargs)
 
-    bridge._cooperative._resolve_interaction = spy
+    bridge.pipeline.cooperative._resolve_interaction = spy
 
     _arbitrate(bridge, frame, sim_time_s=0.0, proposal=_proposal(bridge))
 
