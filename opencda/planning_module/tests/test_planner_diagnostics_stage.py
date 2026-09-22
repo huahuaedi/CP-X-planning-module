@@ -1,14 +1,18 @@
 import math
+import sys
+from pathlib import Path
 
 import pytest
 
-from pipeline.planner_diagnostics_stage import (
-    _executed_reference_tracking,
-    _route_points_for_display,
-)
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from opencda_bridge.cpx_mpc_planner import CPXMPCPlannerBridge  # noqa: E402
+from pipeline.planner_diagnostics_stage import _executed_reference_tracking  # noqa: E402
 
 
-class _FakeOwner:
+class _FakeBridge:
+    """Stand-in exercising the real bound method, no other bridge state."""
+
     def __init__(self, points):
         self._points = list(points)
         self.display_calls = 0
@@ -17,29 +21,31 @@ class _FakeOwner:
         self.display_calls += 1
         return list(self._points)
 
+    _route_points_for_display = CPXMPCPlannerBridge._route_points_for_display
+
 
 def test_route_points_for_display_emits_full_route_on_first_call():
-    owner = _FakeOwner([[0.0, 0.0], [10.0, 0.0]])
-    result = _route_points_for_display(owner, "route-1")
+    bridge = _FakeBridge([[0.0, 0.0], [10.0, 0.0]])
+    result = bridge._route_points_for_display("route-1")
     assert result == [[0.0, 0.0], [10.0, 0.0]]
-    assert owner.display_calls == 1
+    assert bridge.display_calls == 1
 
 
 def test_route_points_for_display_omits_unchanged_route_on_later_ticks():
-    owner = _FakeOwner([[0.0, 0.0], [10.0, 0.0]])
-    _route_points_for_display(owner, "route-1")
-    result = _route_points_for_display(owner, "route-1")
+    bridge = _FakeBridge([[0.0, 0.0], [10.0, 0.0]])
+    bridge._route_points_for_display("route-1")
+    result = bridge._route_points_for_display("route-1")
     assert result == []
-    assert owner.display_calls == 1
+    assert bridge.display_calls == 1
 
 
 def test_route_points_for_display_re_emits_on_route_change():
-    owner = _FakeOwner([[0.0, 0.0], [10.0, 0.0]])
-    _route_points_for_display(owner, "route-1")
-    owner._points = [[0.0, 0.0], [20.0, 0.0], [30.0, 0.0]]
-    result = _route_points_for_display(owner, "route-2")
+    bridge = _FakeBridge([[0.0, 0.0], [10.0, 0.0]])
+    bridge._route_points_for_display("route-1")
+    bridge._points = [[0.0, 0.0], [20.0, 0.0], [30.0, 0.0]]
+    result = bridge._route_points_for_display("route-2")
     assert result == [[0.0, 0.0], [20.0, 0.0], [30.0, 0.0]]
-    assert owner.display_calls == 2
+    assert bridge.display_calls == 2
 
 
 def test_executed_reference_tracking_uses_published_reference_tangent():

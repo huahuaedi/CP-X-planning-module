@@ -75,9 +75,21 @@ class PlanningTickAdapters:
     maneuver_manager: Any
     config: Mapping[str, Any]
     waypoint_backend: str
-    local_map_snapshot: Callable[[], Any]
+    route_context: Any
     ego_vehicle: Any
+    v2x_manager: Any
     safety_manager: Any
+    control_buffer: Any
+    safety_supervisor: Any
+    cp_provider: Any
+    architecture_profile: Any
+    vehicle_dynamics: Any
+    reference_line_provider: Any
+    prediction_mode: str
+    fallback_policy: str
+    fallback_policy_warning: str
+    global_planner_backend: str
+    global_planner_backend_warning: str
     last_accel_mps2: float
     last_steer_rad: float
     reset_control_buffer: Optional[Callable[..., Any]]
@@ -105,6 +117,13 @@ class PlanningTickAdapters:
     mark_mission_finished: Callable[[], None]
     last_mpc_trajectory_points: Callable[[], Any]
     draw_world_debug_primitives: Callable[..., None]
+    static_obstacle_blocked_lane_id: Callable[[], Any]
+    route_replan_attempt_count: Callable[[], int]
+    display_global_route_points: Callable[[], list]
+    route_points_for_display: Callable[[str], list]
+    perception_diagnostics: Callable[[], dict]
+    cooperative_actor_evidence: Callable[..., dict]
+    update_evaluation_metrics: Callable[..., dict]
     diagnostics_owner: Any
 
 
@@ -487,7 +506,7 @@ class PlanningPipeline:
                 ego_speed_mps=float(ego_speed_mps),
                 current_state=current_state,
                 fallback_lane_id=int(getattr(
-                    adapters.local_map_snapshot(), "ego_lane_id", 0
+                    adapters.route_context.local_map_snapshot, "ego_lane_id", 0
                 )),
             ),
             planner=adapters.planner,
@@ -554,7 +573,7 @@ class PlanningPipeline:
                 "behavior": behavior_decision,
                 "stop_goal_active": bool(mpc_stop_goal_active),
                 "route_points": adapters.active_global_route_points(),
-                "local_map": adapters.local_map_snapshot(),
+                "local_map": adapters.route_context.local_map_snapshot,
                 "route_cursor": adapters.route_manager.route_cursor,
                 "route_revision": str(adapters.route_manager.route_revision),
                 "map_epoch": str(adapters.waypoint_backend),
@@ -773,8 +792,10 @@ class PlanningPipeline:
         platform_adapter_debug = dict(finalized_control.platform_debug)
         mpc_feedback_record_reason = str(finalized_control.feedback_reason)
         diagnostics = PlannerDiagnosticsStage.build(
-            adapters.diagnostics_owner,
+            adapters,
+            self,
             {
+                "sim_time_s": float(sim_time_s),
                 "accel_mps2": accel_mps2,
                 "behavior_debug": behavior_debug,
                 "behavior_decision": behavior_decision,

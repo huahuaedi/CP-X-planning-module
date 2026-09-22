@@ -7,7 +7,6 @@ import math
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from .local_map_snapshot import LocalMapSnapshot
 from .reference_geometry import pose_at_arc, project_to_polyline
 from .reference_line_provider import LANE_FOLLOW
 
@@ -44,28 +43,6 @@ def _cav_conflict_summary(diag: Mapping[str, Any]) -> str:
     if feasible is not None:
         parts.append("corridor_feasible" if feasible else "corridor_infeasible")
     return ";".join(parts) if parts else "no_conflict"
-
-
-def _route_points_for_display(owner: Any, route_revision: str) -> list:
-    """Emit the full route polyline only on the tick it actually changes.
-
-    global_route_points is the whole planned route -- hundreds to
-    thousands of (x, y) pairs -- yet it was serialized into every single
-    debug row regardless of whether the route had moved since the last
-    tick. On a multi-thousand-frame run that alone was the overwhelming
-    majority of the debug JSONL's size (189MB of a lane-change scenario's
-    log measured at ~73% attributable to this one repeated field), for
-    data that a sequential reader can just as well carry forward from the
-    last tick it changed. Route replans are rare relative to planning
-    ticks, so this trades a rarely-needed "what was the route on this
-    exact tick" convenience for a large, unconditional size cost.
-    """
-
-    revision = str(route_revision)
-    if revision == str(getattr(owner, "_debug_last_route_revision", None)):
-        return []
-    owner._debug_last_route_revision = revision
-    return owner._display_global_route_points()
 
 
 def _wrap_angle_rad(angle_rad: float) -> float:
@@ -360,8 +337,18 @@ class PlannerDiagnosticsStage:
         return debug
 
     @staticmethod
-    def build(owner: Any, context: Mapping[str, Any]) -> dict[str, Any]:
-        self = owner
+    def build(
+        adapters: Any, pipeline: Any, context: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Assemble the full per-tick diagnostic row.
+
+        ``adapters`` (PlanningTickAdapters) supplies every bridge-owned
+        collaborator/value this needs; ``pipeline`` is the PlanningPipeline
+        instance itself, for the few fields that live on its stages
+        (static_obstacle, mpc_cost_profile, destination_speed). Neither is
+        held past this call.
+        """
+
         accel_mps2 = context["accel_mps2"]
         behavior_debug = context["behavior_debug"]
         behavior_decision = context["behavior_decision"]
@@ -405,7 +392,7 @@ class PlannerDiagnosticsStage:
         stationary_traffic_stop_hold = context["stationary_traffic_stop_hold"]
         steer_rad = context["steer_rad"]
         stop_target_forward_m_debug = context["stop_target_forward_m_debug"]
-        cp_summary = dict(getattr(self.cp_provider, "last_publish_summary", {}) or {})
+        cp_summary = dict(getattr(adapters.cp_provider, "last_publish_summary", {}) or {})
         cav_resolution = context.get("cav_resolution")
         cav_diag = dict(getattr(cav_resolution, "diagnostics", {}) or {})
         executed_reference_tracking = _executed_reference_tracking(
@@ -415,8 +402,8 @@ class PlannerDiagnosticsStage:
             ego_yaw_rad=float(ego_yaw_rad),
         )
         diagnostics = {
-            "sim_time_s": float(self._sim_time_s()),
-            "vehicle_id": int(getattr(self.vehicle_manager.vehicle, "id", -1)),
+            "sim_time_s": float(context["sim_time_s"]),
+            "vehicle_id": int(getattr(adapters.ego_vehicle, "id", -1)),
             "x_m": float(ego_location.x),
             "y_m": float(ego_location.y),
             "yaw_deg": float(ego_transform.rotation.yaw),
@@ -429,7 +416,7 @@ class PlannerDiagnosticsStage:
             "object_count": len(object_snapshots),
             "mpc_object_count": len(mpc_object_snapshots),
             "local_object_count": len(local_object_snapshots),
-            "prediction_mode": str(self._prediction_mode),
+            "prediction_mode": str(adapters.prediction_mode),
             "cav_conflict_summary": _cav_conflict_summary(cav_diag),
             # Structured JSONL evidence.  The compact summary remains only
             # for legacy CSV readers; new evaluators must not parse prose.
@@ -527,8 +514,8 @@ class PlannerDiagnosticsStage:
             "cav_shared_planned_paths": dict(
                 cav_diag.get("shared_planned_paths", {}) or {}
             ),
-            **self._perception_diagnostics(),
-            "v2x_nearby_count": len(getattr(self.vehicle_manager.v2x_manager, "cav_nearby", {}) or {}),
+            **adapters.perception_diagnostics(),
+            "v2x_nearby_count": len(getattr(adapters.v2x_manager, "cav_nearby", {}) or {}),
             "cp_provider_summary": dict(cp_summary),
             "cp_provider_source": str(cp_summary.get("provider_source", "")),
             "native_opencda_required": bool(cp_summary.get("native_opencda_required", False)),
@@ -554,7 +541,7 @@ class PlannerDiagnosticsStage:
                     cp_summary.get("blind_spot_shared_actor_ids", []) or []
                 )
             ),
-            **self._cooperative_actor_evidence(
+            **adapters.cooperative_actor_evidence(
                 cp_summary=cp_summary,
                 prediction_trajectories=dict(
                     reference_debug.get("prediction_trajectories", {}) or {}
@@ -580,26 +567,24 @@ class PlannerDiagnosticsStage:
             ),
             "normal_stop_mpc_suspended": bool(stationary_traffic_stop_hold),
             "normal_stop_mpc_suspend_speed_mps": float(
-                self.config.get("normal_stop_mpc_suspend_speed_mps", 0.30)
+                adapters.config.get("normal_stop_mpc_suspend_speed_mps", 0.30)
             ),
             "behavior_decision": str(behavior_decision.maneuver),
             "static_obstacle_stop_active_input": bool(
-                self.pipeline.static_obstacle.stop_active
+                pipeline.static_obstacle.stop_active
             ),
             "static_obstacle_replan_status": str(
-                self.pipeline.static_obstacle.status
+                pipeline.static_obstacle.status
             ),
             "static_obstacle_replan_reason": str(
-                self.pipeline.static_obstacle.reason
+                pipeline.static_obstacle.reason
             ),
             "static_obstacle_candidate_id": str(
-                self.pipeline.static_obstacle.candidate_id
+                pipeline.static_obstacle.candidate_id
             ),
-            "static_obstacle_blocked_lane_id": getattr(
-                self, "_static_obstacle_blocked_lane_id", ""
-            ),
+            "static_obstacle_blocked_lane_id": adapters.static_obstacle_blocked_lane_id(),
             "static_obstacle_route_transition_pending": bool(
-                self.pipeline.static_obstacle.route_transition_pending
+                pipeline.static_obstacle.route_transition_pending
             ),
             "behavior_fsm_state": str(behavior_decision.phase),
             "current_lane_id": int(behavior_decision.source_lane_id),
@@ -646,89 +631,89 @@ class PlannerDiagnosticsStage:
             "preturn_raw_first_lateral_m": reference_debug.get(
                 "preturn_raw_first_lateral_m", ""
             ),
-            "mpc_trajectory_point_count": len(self._last_mpc_trajectory_points()),
-            "global_route_point_count": len(self._display_global_route_points()),
-            "global_route_topology_point_count": len(self._active_global_route_points()),
+            "mpc_trajectory_point_count": len(adapters.last_mpc_trajectory_points()),
+            "global_route_point_count": len(adapters.display_global_route_points()),
+            "global_route_topology_point_count": len(adapters.active_global_route_points()),
             "map_match_valid": bool(
-                self._route_context.map_matching.get("valid", False)
+                adapters.route_context.map_matching.get("valid", False)
             ),
-            "map_match_ad_lane_id": self._route_context.map_matching.get(
+            "map_match_ad_lane_id": adapters.route_context.map_matching.get(
                 "ad_lane_id", ""
             ),
-            "map_match_road_id": self._route_context.map_matching.get("road_id", ""),
-            "map_match_section_id": self._route_context.map_matching.get(
+            "map_match_road_id": adapters.route_context.map_matching.get("road_id", ""),
+            "map_match_section_id": adapters.route_context.map_matching.get(
                 "section_id", ""
             ),
-            "map_match_raw_lane_id": self._route_context.map_matching.get(
+            "map_match_raw_lane_id": adapters.route_context.map_matching.get(
                 "raw_lane_id", ""
             ),
-            "map_match_center_x_m": self._route_context.map_matching.get(
+            "map_match_center_x_m": adapters.route_context.map_matching.get(
                 "center_x_m", ""
             ),
-            "map_match_center_y_m": self._route_context.map_matching.get(
+            "map_match_center_y_m": adapters.route_context.map_matching.get(
                 "center_y_m", ""
             ),
-            "map_match_lane_width_m": self._route_context.map_matching.get(
+            "map_match_lane_width_m": adapters.route_context.map_matching.get(
                 "lane_width_m", ""
             ),
-            "map_match_lateral_offset_m": self._route_context.map_matching.get(
+            "map_match_lateral_offset_m": adapters.route_context.map_matching.get(
                 "lateral_offset_m", ""
             ),
-            "map_match_heading_error_rad": self._route_context.map_matching.get(
+            "map_match_heading_error_rad": adapters.route_context.map_matching.get(
                 "heading_error_rad", ""
             ),
-            "map_match_score": self._route_context.map_matching.get("score", ""),
-            "map_match_confidence": self._route_context.map_matching.get(
+            "map_match_score": adapters.route_context.map_matching.get("score", ""),
+            "map_match_confidence": adapters.route_context.map_matching.get(
                 "confidence", ""
             ),
-            "map_match_reason": self._route_context.map_matching.get(
+            "map_match_reason": adapters.route_context.map_matching.get(
                 "match_reason", ""
             ),
-            "map_match_candidate_count": self._route_context.map_matching.get(
+            "map_match_candidate_count": adapters.route_context.map_matching.get(
                 "candidate_count", ""
             ),
             # Read the typed snapshot directly -- local_lane_frame is a
             # write-side compatibility mirror (see RouteContextStage.build's
             # comment), not a diagnostics source of truth.
             "local_lane_frame_cache_reused": bool(
-                self._route_context.local_map_snapshot.cache_reused
+                adapters.route_context.local_map_snapshot.cache_reused
             ),
             "local_lane_frame_generation_reason": str(
-                self._route_context.local_map_snapshot.generation_reason
+                adapters.route_context.local_map_snapshot.generation_reason
             ),
             "local_lane_frame_ego_ad_lane_id": int(
-                self._route_context.local_map_snapshot.ego_lane_id
+                adapters.route_context.local_map_snapshot.ego_lane_id
             ),
             "local_lane_frame_forward_distance_m": float(
-                self._route_context.local_map_snapshot.forward_distance_m
+                adapters.route_context.local_map_snapshot.forward_distance_m
             ),
             "local_lane_frame_backward_distance_m": float(
-                self._route_context.local_map_snapshot.backward_distance_m
+                adapters.route_context.local_map_snapshot.backward_distance_m
             ),
             "local_lane_frame_corridors": json.dumps(
                 {
                     int(corridor.offset): list(corridor.lane_ids)
-                    for corridor in self._route_context.local_map_snapshot.corridors
+                    for corridor in adapters.route_context.local_map_snapshot.corridors
                 },
                 sort_keys=True,
             ),
             "local_lane_frame_lane_to_offset": json.dumps(
-                dict(self._route_context.local_map_snapshot.lane_to_offset),
+                dict(adapters.route_context.local_map_snapshot.lane_to_offset),
                 sort_keys=True,
             ),
             "local_lane_frame_route_target_ad_lane_id": int(
-                self._route_context.local_map_snapshot.route_target_lane_id
+                adapters.route_context.local_map_snapshot.route_target_lane_id
             ),
             "local_lane_frame_target_in_frame": bool(
-                self._route_context.local_map_snapshot.route_target_in_frame
+                adapters.route_context.local_map_snapshot.route_target_in_frame
             ),
             "local_lane_frame_target_offset": int(
-                self._route_context.local_map_snapshot.route_target_offset
+                adapters.route_context.local_map_snapshot.route_target_offset
             ),
             "local_lane_frame_invariant_violations": ";".join(
                 str(value)
                 for value in list(
-                    self._route_context.local_map_snapshot.invariant_violations
+                    adapters.route_context.local_map_snapshot.invariant_violations
                     or []
                 )
             ),
@@ -888,7 +873,7 @@ class PlannerDiagnosticsStage:
                 "maneuver_commitment_active", ""
             ),
             "maneuver_commitment_committed_at_s": float(
-                self.maneuver_manager.lane_change.committed_at_s
+                adapters.maneuver_manager.lane_change.committed_at_s
             ),
             "route_tracking_recovery_active": reference_debug.get(
                 "route_tracking_recovery_active", ""
@@ -900,11 +885,11 @@ class PlannerDiagnosticsStage:
             "mpc_feedback_record_reason": str(mpc_feedback_record_reason),
             "mpc_feedback_blocked_lane_ids": reference_debug.get("mpc_feedback_blocked_lane_ids", ""),
             "mode_transition_guard_reason": str(mode_transition_guard_reason),
-            "control_buffer_reason": str(self.control_buffer.last_reason),
-            "control_buffered_step_count": int(self.control_buffer.buffered_step_count),
+            "control_buffer_reason": str(adapters.control_buffer.last_reason),
+            "control_buffered_step_count": int(adapters.control_buffer.buffered_step_count),
             "mpc_replan_executed": bool(mpc_replan_executed),
             "route_manager_status": json.dumps(
-                self.route_manager.last_status.as_dict(),
+                adapters.route_manager.last_status.as_dict(),
                 default=str,
             ),
             "route_replan_attempted": reference_debug.get(
@@ -914,20 +899,20 @@ class PlannerDiagnosticsStage:
                 "route_replan_succeeded", False
             ),
             "route_replan_attempt_count": int(
-                self._route_replan_attempt_count
+                adapters.route_replan_attempt_count()
             ),
             "route_replan_reason": str(reference_debug.get(
                 "route_replan_reason", "route_replan_not_requested"
             )),
             "route_remaining_distance_m": float(
-                self.route_manager.last_status.remaining_distance_m
+                adapters.route_manager.last_status.remaining_distance_m
             ),
-            "route_reached_destination": bool(self.route_manager.last_status.reached_destination),
+            "route_reached_destination": bool(adapters.route_manager.last_status.reached_destination),
             "mission_complete": bool(
-                self.pipeline.destination_mission_complete
+                pipeline.destination_mission_complete
             ),
             "destination_stop_latched": bool(
-                self.pipeline.destination_stop_latched
+                pipeline.destination_stop_latched
             ),
             "destination_stop_reason": reference_debug.get(
                 "destination_stop_reason", ""
@@ -938,8 +923,8 @@ class PlannerDiagnosticsStage:
             "destination_stop_required_distance_m": reference_debug.get(
                 "destination_stop_required_distance_m", ""
             ),
-            "global_planner_backend": str(self.global_planner_backend),
-            "global_planner_backend_warning": str(self.global_planner_backend_warning),
+            "global_planner_backend": str(adapters.global_planner_backend),
+            "global_planner_backend_warning": str(adapters.global_planner_backend_warning),
             "tracker_active_count": reference_debug.get("tracker_active_count", ""),
             "tracker_stale_count": reference_debug.get("tracker_stale_count", ""),
             "prediction_validity_reason": reference_debug.get("prediction_validity_reason", ""),
@@ -1073,15 +1058,15 @@ class PlannerDiagnosticsStage:
             "route_turn_raw_first_lateral_m": reference_debug.get(
                 "route_turn_raw_first_lateral_m", ""
             ),
-            "route_debug_reason": str(self.route_manager.route_debug_reason),
-            "route_sync_reason": str(self.route_manager.route_sync_reason),
-            "route_progress_index": int(self.route_manager.route_progress_index),
-            "route_progress_s_m": float(self.route_manager.route_progress_s_m),
+            "route_debug_reason": str(adapters.route_manager.route_debug_reason),
+            "route_sync_reason": str(adapters.route_manager.route_sync_reason),
+            "route_progress_index": int(adapters.route_manager.route_progress_index),
+            "route_progress_s_m": float(adapters.route_manager.route_progress_s_m),
             "route_cursor_stalled_motion_m": float(
-                self.route_manager.route_cursor.stalled_motion_m
+                adapters.route_manager.route_cursor.stalled_motion_m
             ),
             "route_cursor_missed_maneuver": bool(
-                self.route_manager.route_cursor.missed_maneuver
+                adapters.route_manager.route_cursor.missed_maneuver
             ),
             "route_topology_valid": reference_debug.get("route_topology_valid", ""),
             "route_topology_signature": reference_debug.get(
@@ -1106,7 +1091,7 @@ class PlannerDiagnosticsStage:
             "route_topology_target_lane_id": reference_debug.get(
                 "route_topology_target_lane_id", ""
             ),
-            "waypoint_backend": str(self.waypoint_backend),
+            "waypoint_backend": str(adapters.waypoint_backend),
             "route_upcoming_turn_direction": str(
                 reference_debug.get("route_upcoming_turn_direction", "")
             ),
@@ -1166,9 +1151,9 @@ class PlannerDiagnosticsStage:
                 )
             ),
             "stop_target_forward_m": stop_target_forward_m_debug,
-            "mpc_trajectory_points": self._last_mpc_trajectory_points(),
-            "global_route_points": _route_points_for_display(
-                self, str(getattr(self.route_manager, "route_revision", ""))
+            "mpc_trajectory_points": adapters.last_mpc_trajectory_points(),
+            "global_route_points": adapters.route_points_for_display(
+                str(getattr(adapters.route_manager, "route_revision", ""))
             ),
             "lane_reference_points": [
                 [
@@ -1199,33 +1184,33 @@ class PlannerDiagnosticsStage:
             # this stays empty on every normally-solved tick. See mpc.py's
             # _last_qp_diagnostic / _last_infeasibility_diagnostic.
             "mpc_infeasibility_diagnostic": dict(
-                getattr(self.mpc, "_last_infeasibility_diagnostic", {}) or {}
+                getattr(adapters.mpc, "_last_infeasibility_diagnostic", {}) or {}
             ),
-            "mpc_solve_time_ms": float(getattr(self.mpc, "_last_solve_time_ms", 0.0)),
+            "mpc_solve_time_ms": float(getattr(adapters.mpc, "_last_solve_time_ms", 0.0)),
             "mpc_nominal_steering_first_rad": (
-                float(self.mpc._last_nominal_steering_profile[1])
-                if len(getattr(self.mpc, "_last_nominal_steering_profile", ())) > 1
+                float(adapters.mpc._last_nominal_steering_profile[1])
+                if len(getattr(adapters.mpc, "_last_nominal_steering_profile", ())) > 1
                 else ""
             ),
             "mpc_nominal_steering_max_abs_rad": (
-                max(abs(float(value)) for value in self.mpc._last_nominal_steering_profile)
-                if getattr(self.mpc, "_last_nominal_steering_profile", ())
+                max(abs(float(value)) for value in adapters.mpc._last_nominal_steering_profile)
+                if getattr(adapters.mpc, "_last_nominal_steering_profile", ())
                 else ""
             ),
             "mpc_steering_reference_weight": float(
-                getattr(self.mpc, "_last_steering_reference_weight", 0.0)
+                getattr(adapters.mpc, "_last_steering_reference_weight", 0.0)
             ),
-            **self.pipeline.mpc_cost_profile.state.trace_fields(),
+            **pipeline.mpc_cost_profile.state.trace_fields(),
             "mpc_minimum_progress_enabled": bool(
-                getattr(self.mpc, "minimum_progress_enabled", False)
+                getattr(adapters.mpc, "minimum_progress_enabled", False)
             ),
             "mpc_minimum_progress_target_mps": float(
-                getattr(self.mpc, "turn_minimum_progress_speed_mps", 0.0)
+                getattr(adapters.mpc, "turn_minimum_progress_speed_mps", 0.0)
             ),
             "mpc_minimum_progress_active": bool(
-                str(getattr(self.mpc, "active_cost_profile_name", ""))
+                str(getattr(adapters.mpc, "active_cost_profile_name", ""))
                 == "intersection_turn"
-                and bool(getattr(self.mpc, "minimum_progress_enabled", False))
+                and bool(getattr(adapters.mpc, "minimum_progress_enabled", False))
             ),
             "reference_source": str(reference_debug.get(
                 "reference_source",
@@ -1252,34 +1237,34 @@ class PlannerDiagnosticsStage:
             "platform_applied_steer_rad": float(
                 getattr(control, "steer", 0.0)
             ) * float(getattr(
-                getattr(self, "vehicle_dynamics", None),
+                adapters.vehicle_dynamics,
                 "actuator_max_steer_rad",
-                self.mpc.constraints.max_steer_rad,
+                adapters.mpc.constraints.max_steer_rad,
             )),
             "planner_requested": True,
             "planner_executed": True,
             "fallback_active": bool(fallback_reason),
-            "fallback_policy": str(self.fallback_policy),
-            "fallback_policy_warning": str(self.fallback_policy_warning),
+            "fallback_policy": str(adapters.fallback_policy),
+            "fallback_policy_warning": str(adapters.fallback_policy_warning),
             "safety_supervisor_reason": str(safety_supervisor_reason),
             "turn_boundary_recovery_active": bool(
-                self.safety_supervisor.turn_boundary_recovery_active
+                adapters.safety_supervisor.turn_boundary_recovery_active
             ),
             "turn_boundary_recovery_phase": str(
-                self.safety_supervisor.turn_boundary_recovery_phase
+                adapters.safety_supervisor.turn_boundary_recovery_phase
             ),
         }
-        diagnostics.update(self.architecture_profile.as_debug_fields())
+        diagnostics.update(adapters.architecture_profile.as_debug_fields())
         diagnostics.update(
-            getattr(self, "_local_map_snapshot", LocalMapSnapshot()).trace_fields()
+            adapters.route_context.local_map_snapshot.trace_fields()
         )
         diagnostics.update(
-            self._stable_reference_line_provider.snapshot(
+            adapters.reference_line_provider.snapshot(
                 LANE_FOLLOW
             ).trace_fields()
         )
         diagnostics.update(
-            self._update_evaluation_metrics(
+            adapters.update_evaluation_metrics(
                 ego_location=ego_location,
                 ego_speed_mps=float(ego_speed_mps),
                 ego_yaw_rad=float(ego_yaw_rad),

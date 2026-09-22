@@ -440,9 +440,21 @@ class CPXMPCPlannerBridge:
             maneuver_manager=self.maneuver_manager,
             config=self.config,
             waypoint_backend=str(getattr(self, "waypoint_backend", "admap") or "admap"),
-            local_map_snapshot=(lambda: self._local_map_snapshot),
+            route_context=self._route_context,
             ego_vehicle=getattr(self.vehicle_manager, "vehicle", None),
+            v2x_manager=getattr(self.vehicle_manager, "v2x_manager", None),
             safety_manager=safety_manager,
+            control_buffer=self.control_buffer,
+            safety_supervisor=self.safety_supervisor,
+            cp_provider=self.cp_provider,
+            architecture_profile=self.architecture_profile,
+            vehicle_dynamics=getattr(self, "vehicle_dynamics", None),
+            reference_line_provider=self._stable_reference_line_provider,
+            prediction_mode=str(self._prediction_mode),
+            fallback_policy=str(self.fallback_policy),
+            fallback_policy_warning=str(self.fallback_policy_warning),
+            global_planner_backend=str(self.global_planner_backend),
+            global_planner_backend_warning=str(self.global_planner_backend_warning),
             last_accel_mps2=float(self._last_accel_mps2),
             last_steer_rad=float(self._last_steer_rad),
             reset_control_buffer=getattr(self.control_buffer, "reset", None),
@@ -470,6 +482,17 @@ class CPXMPCPlannerBridge:
             mark_mission_finished=self._mark_mission_finished,
             last_mpc_trajectory_points=self._last_mpc_trajectory_points,
             draw_world_debug_primitives=self._draw_world_debug_primitives,
+            static_obstacle_blocked_lane_id=(
+                lambda: getattr(self, "_static_obstacle_blocked_lane_id", "")
+            ),
+            route_replan_attempt_count=(
+                lambda: int(self._route_replan_attempt_count)
+            ),
+            display_global_route_points=self._display_global_route_points,
+            route_points_for_display=self._route_points_for_display,
+            perception_diagnostics=self._perception_diagnostics,
+            cooperative_actor_evidence=self._cooperative_actor_evidence,
+            update_evaluation_metrics=self._update_evaluation_metrics,
             diagnostics_owner=self,
         )
 
@@ -2338,6 +2361,28 @@ class CPXMPCPlannerBridge:
         """Return the diagnostics-only smoothed route polyline."""
 
         return self._world_debug().display_route_points()
+
+    def _route_points_for_display(self, route_revision: str) -> list:
+        """Emit the full route polyline only on the tick it actually changes.
+
+        global_route_points is the whole planned route -- hundreds to
+        thousands of (x, y) pairs -- yet it was serialized into every single
+        debug row regardless of whether the route had moved since the last
+        tick. On a multi-thousand-frame run that alone was the overwhelming
+        majority of the debug JSONL's size (189MB of a lane-change scenario's
+        log measured at ~73% attributable to this one repeated field), for
+        data that a sequential reader can just as well carry forward from the
+        last tick it changed. Route replans are rare relative to planning
+        ticks, so this trades a rarely-needed "what was the route on this
+        exact tick" convenience for a large, unconditional size cost.
+        """
+
+        revision = str(route_revision)
+        if revision == str(getattr(self, "_debug_last_route_revision", None)):
+            return []
+        self._debug_last_route_revision = revision
+        return self._display_global_route_points()
+
     def _map_waypoint_from_location(self, location: carla.Location):
         from opencda.planning_module.opencda_bridge.platform_ports import MapLookupPort
         port = getattr(self, "map_lookup_port", None) or MapLookupPort.from_owner(self)
