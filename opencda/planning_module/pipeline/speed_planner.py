@@ -333,6 +333,7 @@ class SpeedTargetPlanner:
         self._destination_route_revision = ""
         self._destination_approach_active = False
         self._destination_approach_cap_mps = float("inf")
+        self._previous_idm_acceleration_mps2: Optional[float] = None
 
     @staticmethod
     def turn_curvature_constraint(
@@ -493,11 +494,21 @@ class SpeedTargetPlanner:
             reason="route_destination_approach_speed_profile",
         ), True, float(required_distance_m)
 
-    @staticmethod
-    def propose(**kwargs) -> SpeedPlan:
-        """Build the typed longitudinal policy proposal for one frame."""
+    def propose(self, **kwargs) -> SpeedPlan:
+        """Build one proposal and retain IDM continuity inside its owner."""
 
-        return build_speed_plan(**kwargs)
+        proposal_args = dict(kwargs)
+        proposal_args.setdefault(
+            "previous_idm_acceleration_mps2",
+            self._previous_idm_acceleration_mps2,
+        )
+        plan = build_speed_plan(**proposal_args)
+        self._previous_idm_acceleration_mps2 = (
+            None
+            if plan.idm_acceleration_mps2 is None
+            else float(plan.idm_acceleration_mps2)
+        )
+        return plan
 
     def resolve(
         self,

@@ -3,6 +3,7 @@ import math
 import pathlib
 import sys
 import unittest
+from unittest import mock
 from types import SimpleNamespace
 
 
@@ -27,6 +28,37 @@ cooperative_gap_speed_constraint = speed_planner.cooperative_gap_speed_constrain
 
 
 class SpeedPlannerTest(unittest.TestCase):
+    def test_speed_planner_owns_idm_continuity_between_proposals(self):
+        planner = SpeedTargetPlanner()
+        first_plan = SpeedPlan(
+            target_speed_mps=7.0,
+            speed_cap_mps=7.0,
+            stop_goal_active=False,
+            idm_acceleration_mps2=-1.25,
+        )
+        clear_plan = SpeedPlan(
+            target_speed_mps=8.0,
+            speed_cap_mps=8.0,
+            stop_goal_active=False,
+            idm_acceleration_mps2=None,
+        )
+        with mock.patch.object(
+            speed_planner,
+            "build_speed_plan",
+            side_effect=(first_plan, clear_plan),
+        ) as build:
+            planner.propose(frame=1)
+            planner.propose(frame=2)
+
+        self.assertIsNone(
+            build.call_args_list[0][1]["previous_idm_acceleration_mps2"]
+        )
+        self.assertEqual(
+            build.call_args_list[1][1]["previous_idm_acceleration_mps2"],
+            -1.25,
+        )
+        self.assertIsNone(planner._previous_idm_acceleration_mps2)
+
     def test_turn_curvature_constraint_uses_lateral_acceleration_relation(self):
         constraint = SpeedTargetPlanner.turn_curvature_constraint(
             0.1,

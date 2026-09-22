@@ -1617,15 +1617,7 @@ class CPXMPCPlannerBridge:
             front_obstacle_is_source_lane=bool(
                 front_obstacle_is_source_lane
             ),
-            previous_idm_acceleration_mps2=getattr(
-                self, "_previous_following_idm_acceleration_mps2", None
-            ),
             additional_constraints=(),
-        )
-        self._previous_following_idm_acceleration_mps2 = (
-            None
-            if speed_plan.idm_acceleration_mps2 is None
-            else float(speed_plan.idm_acceleration_mps2)
         )
         planned_speed_mps = float(speed_plan.target_speed_mps)
         stop_goal_active = bool(stop_goal_active or speed_plan.stop_goal_active)
