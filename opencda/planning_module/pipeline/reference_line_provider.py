@@ -1656,6 +1656,23 @@ class ReferenceLineProvider(StableReferenceLineProvider):
         target_speed_mps = float(
             getattr(intent, "target_speed_mps", context.baseline_speed_mps)
         )
+        lane_change_direct = bool(
+            decision in {"lane_change_left", "lane_change_right"}
+            and keep_lane_reference
+        )
+        direct_target = None
+        if lane_change_direct:
+            direct_target = self.route_lane_change_target_candidate(
+                local_map=context.local_map,
+                target_lane_id=target_lane_id,
+                target_speed_mps=target_speed_mps,
+                ego_x_m=float(context.ego_location.x),
+                ego_y_m=float(context.ego_location.y),
+                spacing_m=float(geometry_plan.step_m),
+                geometry_length_m=float(geometry_plan.geometry_length_m),
+                horizon_steps=int(context.horizon_steps),
+                destination_state=context.baseline_destination_state,
+            )
         same_as_baseline = bool(
             decision == str(context.baseline_decision)
             and target_lane_id == int(context.baseline_target_lane_id)
@@ -1663,7 +1680,12 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             and decision not in {"lane_change_left", "lane_change_right"}
             and context.baseline_destination_state is not None
         )
-        if same_as_baseline:
+        if direct_target is not None and direct_target.samples:
+            destination = list(context.baseline_destination_state or [])
+            reference = direct_target.mutable_samples()
+            diagnostics = dict(context.baseline_debug)
+            diagnostics.update(dict(direct_target.diagnostics))
+        elif same_as_baseline:
             destination = list(context.baseline_destination_state or [])
             reference = [dict(x) for x in context.baseline_reference]
             diagnostics = dict(context.baseline_debug)
@@ -1717,7 +1739,9 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             and target_lane_id == int(required_lane_change_target_lane_id)
             and len(context.route_points) >= 2
         )
-        if route_required:
+        if route_required and not (
+            direct_target is not None and direct_target.samples
+        ):
             override = self.route_lane_change_target_candidate(
                 local_map=context.local_map,
                 target_lane_id=target_lane_id,

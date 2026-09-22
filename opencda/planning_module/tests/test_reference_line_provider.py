@@ -9,6 +9,7 @@ from pipeline.maneuver_manager import ManeuverManager
 
 from pipeline.reference_line_provider import (
     CONNECTOR,
+    CandidateReferenceOverrideResult,
     LANE_CHANGE,
     LANE_FOLLOW,
     POST_TURN,
@@ -599,6 +600,68 @@ def test_candidate_intent_propagates_preturn_connector_destination():
     )
 
     assert result.destination_state == pytest.approx((8.0, -1.0, 5.0, -0.4, 20))
+
+
+def test_lane_change_candidate_skips_discarded_legacy_reference_build():
+    provider = ReferenceLineProvider()
+    provider.build_behavior_reference = lambda **_kwargs: pytest.fail(
+        "lane-change target is already available from LocalMapSnapshot"
+    )
+    target = tuple({
+        "x_ref_m": float(index), "y_ref_m": 3.5,
+        "heading_rad": 0.0, "lane_id": 11,
+    } for index in range(1, 21))
+    provider.route_lane_change_target_candidate = lambda **_kwargs: (
+        CandidateReferenceOverrideResult(
+            samples=target,
+            destination_state=(10.0, 0.0, 6.0, 0.0, 10),
+            diagnostics={"reference_source": "local_map_target_corridor_center"},
+        )
+    )
+    observed = {}
+
+    def lane_change_candidate(**kwargs):
+        observed.update(kwargs)
+        return CandidateReferenceOverrideResult(
+            samples=tuple(_line(1.0)[:8]),
+            destination_state=(8.0, 1.0, 6.0, 0.0, 11),
+            diagnostics={},
+        )
+
+    provider.lane_change_candidate = lane_change_candidate
+    context = SimpleNamespace(
+        baseline_decision="lane_follow", baseline_target_lane_id=10,
+        baseline_speed_mps=6.0, current_lane_id=10,
+        baseline_destination_state=(10.0, 0.0, 6.0, 0.0, 10),
+        baseline_reference=tuple(_line()[:8]), baseline_debug={},
+        local_map=SimpleNamespace(valid=True),
+        ego_location=SimpleNamespace(x=0.0, y=0.0),
+        current_state=(0.0, 0.0, 6.0, 0.0), ego_yaw_rad=0.0,
+        planner_config={}, horizon_steps=8, dt_s=0.1,
+        upcoming_turn_direction="", upcoming_turn_distance_m=float("inf"),
+        route_revision="route-1", map_epoch="admap", route_points=(),
+        lane_width_m=3.5, lane_change_duration_s=4.0,
+        lane_change_duration_reason="comfort",
+    )
+    geometry = SimpleNamespace(
+        step_m=0.5, geometry_length_m=20.0, geometry_speed_mps=6.0,
+        operational_curvature_limit_1pm=0.2,
+    )
+
+    result = provider.candidate_intent_reference(
+        intent=SimpleNamespace(
+            decision="lane_change_left", target_lane_id=11,
+            target_speed_mps=6.0, lane_change_duration_s=4.0,
+            trajectory_variant="normal", reason="opportunistic_pass",
+        ),
+        context=context,
+        lane_change_state="EXECUTE_LANE_CHANGE_LEFT",
+        geometry_plan=geometry,
+        keep_lane_reference=_line()[:8],
+    )
+
+    assert observed["target_reference"] == list(target)
+    assert result.destination_state[-1] == 11
 
 
 def test_modes_do_not_overwrite_each_other():
