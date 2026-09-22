@@ -25,6 +25,12 @@ from .speed_planning_stage import (
 )
 from .route_update_stage import RouteUpdateRequest, RouteUpdateStage
 from .planning_context_stage import PlanningContextRequest, PlanningContextStage
+from .behavior_reference_execution_stage import BehaviorReferenceRequest
+from .control_finalization_stage import ControlFinalizationRequest
+from .mpc_execution_stage import MPCExecutionRequest
+from .turn_road_envelope import rolling_turn_envelope_payload_world
+from .planner_diagnostics_stage import PlannerDiagnosticsStage
+from .output import BehaviorCommand, PlannerDiagnostics, PlannerOutput
 
 
 @dataclass(frozen=True)
@@ -48,6 +54,58 @@ class PlanningCycle:
     @property
     def local_object_snapshots(self):
         return self.perception.local_objects
+
+
+@dataclass(frozen=True)
+class PlanningTickAdapters:
+    """Everything ``PlanningPipeline.plan()`` needs that is not planning logic.
+
+    Three kinds of thing live here, all owned and supplied by
+    CPXMPCPlannerBridge per call (never held): stable collaborators (mpc,
+    route_manager, maneuver_manager, config, ...), coordinate/actuator/
+    message-format conversions (body_frame_xy, safe_stop_control,
+    apply_velocity_steering, ...), and OpenCDA/CARLA side effects (CP/V2X
+    publish, debug draw, the mission-finished flag).  None of it decides
+    anything; see cpx_mpc_planner.py's execute_planning_pipeline() for how
+    each field is built.
+    """
+
+    mpc: Any
+    route_manager: Any
+    maneuver_manager: Any
+    config: Mapping[str, Any]
+    waypoint_backend: str
+    local_map_snapshot: Callable[[], Any]
+    ego_vehicle: Any
+    safety_manager: Any
+    last_accel_mps2: float
+    last_steer_rad: float
+    reset_control_buffer: Optional[Callable[..., Any]]
+    planner: Callable[..., Any]
+    accum_stage_ms: Callable[[str, float], None]
+    body_frame_xy: Callable[..., Tuple[float, float]]
+    active_global_route_points: Callable[[], Any]
+    maybe_capture_execute_mpc_frame: Callable[..., None]
+    mpc_object_snapshots_with_prediction: Callable[..., Any]
+    safe_stop_control: Callable[..., Any]
+    pedal_control: Callable[..., Any]
+    set_actuator_context: Callable[..., None]
+    acceleration_from_control: Callable[..., float]
+    steering_from_control: Callable[..., float]
+    apply_velocity_steering: Callable[..., tuple]
+    control_factory: Callable[..., Any]
+    road_boundary_measure: Callable[..., Any]
+    update_boundary_recovery: Callable[..., Any]
+    reset_boundary_recovery: Callable[..., Any]
+    warn_fallback: Callable[[str], None]
+    log_behavior_reference_failure: Callable[[str], None]
+    cav_conflict_enabled: bool
+    cav_intent_broadcast_enabled: bool
+    publish_cav_intent: Callable[..., None]
+    mark_mission_finished: Callable[[], None]
+    last_mpc_trajectory_points: Callable[[], Any]
+    draw_world_debug_primitives: Callable[..., None]
+    diagnostics_owner: Any
 
 
 @dataclass(frozen=True)
@@ -376,6 +434,413 @@ class PlanningPipeline:
             requested_speed_mps=(
                 0.0 if stop_required else max(0.0, float(cruise_speed_mps))
             ),
+        )
+
+    def plan(self, cycle: PlanningCycle, adapters: "PlanningTickAdapters") -> "PlannerOutput":
+        """Run one planning tick: PlanningCycle -> stage sequence -> PlannerOutput.
+
+        ``cycle`` is this tick's normalized OpenCDA/CARLA input (see
+        begin_cycle).  ``adapters`` bundles everything here that is not
+        planning logic -- stable collaborators (mpc, route_manager,
+        maneuver_manager, config), coordinate/actuator/message conversions,
+        and OpenCDA/CARLA side effects (CP/V2X publish, debug draw, the
+        mission-finished flag) -- all owned and supplied by the bridge.  This
+        method sequences the same stage calls CPXMPCPlannerBridge used to
+        make directly; see CPXMPCPlannerBridge.run_step's docstring for the
+        full control-writing precedence this tick's result feeds into.
+        """
+
+        tick = cycle.tick
+        perception = cycle.perception
+        sim_time_s = float(tick.timestamp_s)
+        ego_transform = tick.ego_transform
+        ego_location = tick.ego_location
+        ego_speed_mps = float(tick.ego_speed_mps)
+        ego_yaw_rad = float(tick.ego_yaw_rad)
+        measured_accel_mps2 = float(tick.measured_accel_mps2)
+        cp_payload = dict(perception.cp_payload)
+        object_snapshots = [dict(item) for item in cycle.object_snapshots]
+        mpc_object_snapshots = [dict(item) for item in cycle.mpc_object_snapshots]
+        local_object_snapshots = [dict(item) for item in cycle.local_object_snapshots]
+        front_gap_m = perception.front_gap_m
+        emergency_front_gap_m = float(cycle.emergency_gap_m)
+        stop_goal_active = bool(cycle.emergency_stop_required)
+        requested_speed_mps = float(cycle.requested_speed_mps)
+        current_state = list(tick.current_state)
+
+        nominal_frame = self.resolve_nominal_plan(
+            NominalPlanningRequest(
+                behavior_request=BehaviorReferenceRequest(
+                    ego_location=ego_location,
+                    ego_yaw_rad=float(ego_yaw_rad),
+                    ego_speed_mps=float(ego_speed_mps),
+                    requested_speed_mps=float(requested_speed_mps),
+                    object_snapshots=object_snapshots,
+                    stop_goal_active=bool(stop_goal_active),
+                    cp_payload=cp_payload,
+                    current_state=current_state,
+                    sim_time_s=float(tick.timestamp_s),
+                    route_revision=str(adapters.route_manager.route_revision),
+                ),
+                route_status=getattr(adapters.route_manager, "last_status", None),
+                route_revision=str(adapters.route_manager.route_revision),
+                ego_speed_mps=float(ego_speed_mps),
+                current_state=current_state,
+                fallback_lane_id=int(getattr(
+                    adapters.local_map_snapshot(), "ego_lane_id", 0
+                )),
+            ),
+            planner=adapters.planner,
+            observe_stage_duration=adapters.accum_stage_ms,
+        )
+        destination_state = nominal_frame.mutable_destination_state()
+        lane_center_reference = nominal_frame.mutable_reference()
+        behavior_stage_result = nominal_frame.behavior_stage_result
+        behavior_decision = nominal_frame.behavior
+        behavior_debug = nominal_frame.mutable_behavior_debug()
+        reference_debug = nominal_frame.mutable_reference_debug()
+        speed_target = nominal_frame.speed_target
+        speed_ref_mps = float(speed_target.target_mps)
+        cav_resolution = nominal_frame.cav_resolution
+        if nominal_frame.mission_finished:
+            adapters.mark_mission_finished()
+        if nominal_frame.failure_reason:
+            adapters.log_behavior_reference_failure(str(nominal_frame.failure_reason))
+        # The typed behavior decision owns the final stop state. The raw
+        # front-gap threshold is only an input proposal and must not re-latch
+        # stop after candidate evaluation has selected a safe route maneuver.
+        mpc_stop_goal_active = bool(behavior_decision.stop_required)
+        behavior_decision_normalized = str(behavior_decision.maneuver).strip().lower()
+        normal_stop_requested = behavior_decision_normalized in {
+            "stop_at_intersection",
+            "stop_sign",
+        }
+        emergency_brake_requested = (
+            behavior_decision_normalized == "emergency_brake"
+        )
+        stop_target_forward_m_debug = ""
+        stop_target_debug = behavior_decision.stop_target
+        if bool(mpc_stop_goal_active) and isinstance(stop_target_debug, Mapping):
+            try:
+                stop_target_forward_m_debug, _ = adapters.body_frame_xy(
+                    origin_x_m=float(ego_location.x),
+                    origin_y_m=float(ego_location.y),
+                    heading_rad=float(ego_yaw_rad),
+                    target_x_m=float(stop_target_debug.get("x_m", stop_target_debug.get("x", ego_location.x))),
+                    target_y_m=float(stop_target_debug.get("y_m", stop_target_debug.get("y", ego_location.y))),
+                )
+            except Exception:
+                stop_target_forward_m_debug = ""
+
+        candidate_status = str(reference_debug.get(
+            "candidate_pipeline_selected_status", ""
+        ))
+        candidate_name = str(reference_debug.get(
+            "candidate_pipeline_selected", ""
+        ))
+        candidate_reason = str(reference_debug.get(
+            "candidate_pipeline_selected_reason", ""
+        ))
+        _ts_stage = time.monotonic()
+        admission = self.prepare_trajectory_execution(
+            publication_kwargs={
+                "destination_state": destination_state,
+                "reference_samples": lane_center_reference,
+                "current_state": current_state,
+                "ego_location": ego_location,
+                "ego_yaw_rad": float(ego_yaw_rad),
+                "ego_speed_mps": float(ego_speed_mps),
+                "target_speed_mps": float(speed_ref_mps),
+                "behavior": behavior_decision,
+                "stop_goal_active": bool(mpc_stop_goal_active),
+                "route_points": adapters.active_global_route_points(),
+                "local_map": adapters.local_map_snapshot(),
+                "route_cursor": adapters.route_manager.route_cursor,
+                "route_revision": str(adapters.route_manager.route_revision),
+                "map_epoch": str(adapters.waypoint_backend),
+                "reference_source": str(reference_debug.get(
+                    "reference_source", "planning_reference"
+                )),
+                "candidate_status": candidate_status,
+                "candidate_reason": candidate_reason,
+                "heading_error_rad": (
+                    math.radians(float(reference_debug["behavior_lane_heading_error_deg"]))
+                    if reference_debug.get("behavior_lane_heading_error_deg", "") != ""
+                    else float("nan")
+                ),
+                "committed_lane_change_tracking_active": bool(
+                    str(adapters.maneuver_manager.lane_change.phase) == "executing"
+                ),
+            },
+            behavior=behavior_decision,
+            stop_goal_active=bool(mpc_stop_goal_active),
+            ego_speed_mps=float(ego_speed_mps),
+            ego_x_m=float(ego_location.x),
+            ego_y_m=float(ego_location.y),
+            ego_yaw_rad=float(ego_yaw_rad),
+            front_gap_actor_id=str(reference_debug.get("front_gap_actor_id", "")),
+            candidate_status=candidate_status,
+            candidate_name=candidate_name,
+            candidate_reason=candidate_reason,
+            reset_control_buffer=adapters.reset_control_buffer,
+        )
+        adapters.accum_stage_ms("prepare_trajectory_execution", time.monotonic() - _ts_stage)
+        mode_transition_guard_reason = str(admission.mode_transition_reason)
+        _ts_stage = time.monotonic()
+        publication_result = admission.publication
+        destination_state = publication_result.mutable_destination()
+        lane_center_reference = publication_result.mutable_samples()
+        final_reference_gate = publication_result.gate
+        mpc_reference_stabilizer_reason = str(publication_result.stabilizer_reason)
+        reference_debug.update(admission.trace_fields())
+        mpc_entry = admission.entry
+        candidate_hard_gate_reason = str(mpc_entry.hard_gate_reason)
+        stationary_traffic_stop_hold = bool(mpc_entry.stationary_stop_hold)
+        mpc_control_context = admission.control_context
+        destination_forward_m, destination_lateral_m = adapters.body_frame_xy(
+            origin_x_m=float(ego_location.x), origin_y_m=float(ego_location.y),
+            heading_rad=float(ego_yaw_rad), target_x_m=float(destination_state[0]),
+            target_y_m=float(destination_state[1]),
+        )
+        reference_first_forward_m = ""
+        reference_first_lateral_m = ""
+        if lane_center_reference:
+            first_reference = lane_center_reference[0]
+            reference_first_forward_m, reference_first_lateral_m = adapters.body_frame_xy(
+                origin_x_m=float(ego_location.x), origin_y_m=float(ego_location.y),
+                heading_rad=float(ego_yaw_rad),
+                target_x_m=float(first_reference.get("x_ref_m", first_reference.get("x", ego_location.x))),
+                target_y_m=float(first_reference.get("y_ref_m", first_reference.get("y", ego_location.y))),
+            )
+        mpc_status = str(getattr(adapters.mpc, "_last_status", ""))
+        # MPC constrains jerk between the previous control input and the new
+        # acceleration sequence. Seed that constraint with the acceleration
+        # command actually sent last tick, not the measured vehicle response.
+        # The latter contains actuator lag and can stay strongly negative
+        # after the speed target has recovered, otherwise forcing every new
+        # solve to continue braking until the vehicle is almost stationary.
+        mpc_jerk_seed_accel_mps2 = float(adapters.last_accel_mps2)
+        road_envelope_payload_world = rolling_turn_envelope_payload_world(
+            config=adapters.config,
+            mpc=adapters.mpc,
+            vehicle=adapters.ego_vehicle,
+            behavior_decision=str(behavior_decision.maneuver),
+            reference_samples=lane_center_reference,
+            ego_x_m=float(ego_location.x),
+            ego_y_m=float(ego_location.y),
+        )
+        cav_result = cav_resolution
+        cav_constraint_rows = ()
+        cav_constraint_revision = ""
+        cav_diagnostics = {}
+        if cav_result is not None:
+            cav_constraint_rows = tuple(cav_result.mpc_rows or ())
+            cav_diagnostics = dict(cav_result.diagnostics or {})
+            cav_constraint_revision = self.cooperative.schedule.constraint_revision(
+                cav_diagnostics
+            )
+        corridor_infeasible_escalate = bool(
+            self.cooperative.schedule.corridor_emergency_stop_required
+        )
+        adapters.maybe_capture_execute_mpc_frame(
+            sim_time_s=float(sim_time_s),
+            current_state=current_state,
+            ego_location=ego_location,
+            ego_yaw_rad=float(ego_yaw_rad),
+            ego_speed_mps=float(ego_speed_mps),
+            current_acceleration_mps2=float(mpc_jerk_seed_accel_mps2),
+            current_steering_rad=float(adapters.last_steer_rad),
+            destination_state=destination_state,
+            target_speed_mps=float(speed_ref_mps),
+            stop_goal_active=bool(mpc_stop_goal_active),
+            behavior_decision=behavior_decision,
+            published_reference=lane_center_reference,
+            mpc_object_snapshots=mpc_object_snapshots,
+            cav_constraint_rows=cav_constraint_rows,
+            cav_diagnostics=cav_diagnostics,
+            cav_corridor=(
+                None if cav_result is None
+                else cav_result.constraint_corridor
+            ),
+        )
+        adapters.accum_stage_ms("between_admission_and_mpc", time.monotonic() - _ts_stage)
+        _ts_stage = time.monotonic()
+        execution_result = self.execute_mpc(
+            MPCExecutionRequest(
+                sim_time_s=float(sim_time_s),
+                current_state=current_state,
+                destination_state=destination_state,
+                reference_samples=lane_center_reference,
+                object_snapshots=adapters.mpc_object_snapshots_with_prediction(
+                    mpc_object_snapshots,
+                    prediction_trajectories=reference_debug.get(
+                        "prediction_trajectories", {}
+                    ),
+                ),
+                current_acceleration_mps2=float(mpc_jerk_seed_accel_mps2),
+                current_steering_rad=float(adapters.last_steer_rad),
+                ego_speed_mps=float(ego_speed_mps),
+                target_speed_mps=float(speed_ref_mps),
+                stop_goal_active=bool(mpc_stop_goal_active),
+                behavior_maneuver=str(behavior_decision.maneuver),
+                behavior_phase=str(behavior_decision.phase),
+                hard_gate_reason=str(candidate_hard_gate_reason),
+                stationary_stop_hold=bool(stationary_traffic_stop_hold),
+                control_context=mpc_control_context,
+                road_envelope_payload_world=road_envelope_payload_world,
+                speed_crossing_deadband_mps=float(adapters.config.get(
+                    "control_buffer_speed_crossing_deadband_mps", 0.15,
+                )),
+                corridor_rows=cav_constraint_rows,
+                constraint_revision=str(cav_constraint_revision),
+            ),
+            safe_stop_control=adapters.safe_stop_control,
+        )
+        adapters.accum_stage_ms("execute_mpc", time.monotonic() - _ts_stage)
+        mpc_jerk_seed_accel_mps2 = float(
+            execution_result.jerk_seed_acceleration_mps2
+        )
+        _ts_stage = time.monotonic()
+        finalized_control = self.finalize_control(
+            ControlFinalizationRequest(
+                execution=execution_result,
+                behavior=behavior_decision,
+                ego_transform=ego_transform,
+                ego_speed_mps=float(ego_speed_mps),
+                target_speed_mps=float(speed_ref_mps),
+                destination_state=destination_state,
+                reference_samples=lane_center_reference,
+                stop_goal_active=bool(mpc_stop_goal_active),
+                stop_target_forward_m=stop_target_forward_m_debug,
+                final_reference_accepted=bool(final_reference_gate.accepted),
+                candidate_status=str(reference_debug.get(
+                    "candidate_pipeline_selected_status", ""
+                )),
+                safety_manager=adapters.safety_manager,
+                make_pedal_control=adapters.pedal_control,
+                sim_time_s=float(sim_time_s),
+                mpc_velocity_safety_cap_active=any(
+                    str(getattr(row, "slack_group", "")) == "corridor"
+                    for row in cav_constraint_rows
+                ),
+                corridor_infeasible_escalate=bool(corridor_infeasible_escalate),
+            ),
+            set_actuator_context=adapters.set_actuator_context,
+            acceleration_from_control=adapters.acceleration_from_control,
+            steering_from_control=adapters.steering_from_control,
+            apply_velocity_steering=adapters.apply_velocity_steering,
+            control_factory=adapters.control_factory,
+            boundary_metrics=adapters.road_boundary_measure,
+            update_boundary_recovery=adapters.update_boundary_recovery,
+            reset_boundary_recovery=adapters.reset_boundary_recovery,
+        )
+        adapters.accum_stage_ms("finalize_control", time.monotonic() - _ts_stage)
+        _ts_stage = time.monotonic()
+        mpc_jerk_seed_accel_mps2 = float(
+            execution_result.jerk_seed_acceleration_mps2
+        )
+        mpc_status = str(execution_result.status)
+        fallback_reason = str(execution_result.fallback_reason)
+        hard_gate_active = fallback_reason.startswith("candidate_hard_gate:")
+        mpc_replan_executed = bool(execution_result.replan_executed)
+        failed_replan_buffer_reused = bool(
+            execution_result.failed_replan_buffer_reused
+        )
+        if fallback_reason:
+            adapters.warn_fallback(fallback_reason)
+        if adapters.cav_conflict_enabled and adapters.cav_intent_broadcast_enabled:
+            adapters.publish_cav_intent(
+                ego_location=ego_location,
+                ego_yaw_rad=float(ego_yaw_rad),
+                ego_speed_mps=float(ego_speed_mps),
+                sim_time_s=float(sim_time_s),
+            )
+        control = finalized_control.control
+        accel_mps2 = float(finalized_control.acceleration_mps2)
+        steer_rad = float(finalized_control.steering_rad)
+        pre_supervisor_accel_mps2 = float(
+            finalized_control.pre_filter_acceleration_mps2
+        )
+        pre_supervisor_steer_rad = float(
+            finalized_control.pre_filter_steering_rad
+        )
+        post_supervisor_accel_mps2 = accel_mps2
+        post_supervisor_steer_rad = steer_rad
+        control_guard_reason = str(finalized_control.control_guard_reason)
+        boundary_guard_reason = str(finalized_control.boundary_guard_reason)
+        boundary_snapshot = finalized_control.boundary_snapshot
+        safety_supervisor_reason = str(finalized_control.supervisor_reason)
+        platform_adapter_debug = dict(finalized_control.platform_debug)
+        mpc_feedback_record_reason = str(finalized_control.feedback_reason)
+        diagnostics = PlannerDiagnosticsStage.build(
+            adapters.diagnostics_owner,
+            {
+                "accel_mps2": accel_mps2,
+                "behavior_debug": behavior_debug,
+                "behavior_decision": behavior_decision,
+                "boundary_snapshot": boundary_snapshot,
+                "cav_resolution": cav_resolution,
+                "control": control,
+                "control_guard_reason": control_guard_reason,
+                "destination_forward_m": destination_forward_m,
+                "destination_lateral_m": destination_lateral_m,
+                "destination_state": destination_state,
+                "ego_location": ego_location,
+                "ego_speed_mps": ego_speed_mps,
+                "ego_transform": ego_transform,
+                "ego_yaw_rad": ego_yaw_rad,
+                "emergency_brake_requested": emergency_brake_requested,
+                "fallback_reason": fallback_reason,
+                "front_gap_m": front_gap_m,
+                "hard_gate_active": hard_gate_active,
+                "lane_center_reference": lane_center_reference,
+                "local_object_snapshots": local_object_snapshots,
+                "measured_accel_mps2": measured_accel_mps2,
+                "mode_transition_guard_reason": mode_transition_guard_reason,
+                "mpc_feedback_record_reason": mpc_feedback_record_reason,
+                "mpc_jerk_seed_accel_mps2": mpc_jerk_seed_accel_mps2,
+                "mpc_object_snapshots": mpc_object_snapshots,
+                "mpc_replan_executed": mpc_replan_executed,
+                "mpc_status": mpc_status,
+                "mpc_stop_goal_active": mpc_stop_goal_active,
+                "normal_stop_requested": normal_stop_requested,
+                "object_snapshots": object_snapshots,
+                "platform_adapter_debug": platform_adapter_debug,
+                "post_supervisor_accel_mps2": post_supervisor_accel_mps2,
+                "post_supervisor_steer_rad": post_supervisor_steer_rad,
+                "pre_supervisor_accel_mps2": pre_supervisor_accel_mps2,
+                "pre_supervisor_steer_rad": pre_supervisor_steer_rad,
+                "reference_debug": reference_debug,
+                "reference_first_forward_m": reference_first_forward_m,
+                "reference_first_lateral_m": reference_first_lateral_m,
+                "safety_supervisor_reason": safety_supervisor_reason,
+                "speed_ref_mps": speed_ref_mps,
+                "speed_target": speed_target,
+                "stationary_traffic_stop_hold": stationary_traffic_stop_hold,
+                "steer_rad": steer_rad,
+                "stop_target_forward_m_debug": stop_target_forward_m_debug,
+            },
+        )
+        decision_record = self.explain_decision(diagnostics)
+        diagnostics.update(decision_record.as_debug_fields())
+        adapters.draw_world_debug_primitives(
+            destination_state=destination_state,
+            lane_center_reference=lane_center_reference,
+        )
+        adapters.accum_stage_ms("post_finalize_control", time.monotonic() - _ts_stage)
+        return PlannerOutput(
+            control=control,
+            behavior_command=BehaviorCommand.from_decision(
+                behavior_decision,
+                target_speed_mps=float(speed_ref_mps),
+                debug_reason=str(nominal_frame.failure_reason or ""),
+            ),
+            reference_trajectory=[dict(sample) for sample in list(lane_center_reference or [])],
+            planned_trajectory=adapters.last_mpc_trajectory_points(),
+            predictions=dict(reference_debug.get("prediction_trajectories", {}) or {}),
+            acceleration_mps2=float(post_supervisor_accel_mps2),
+            steering_rad=float(post_supervisor_steer_rad),
+            diagnostics=PlannerDiagnostics(diagnostics),
         )
 
     def evaluate_destination(self, **kwargs):

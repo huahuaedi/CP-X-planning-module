@@ -53,6 +53,50 @@ class BehaviorCommand:
             ),
         )
 
+    @classmethod
+    def from_decision(
+        cls,
+        decision: Any,
+        *,
+        target_speed_mps: float,
+        debug_reason: str = "",
+    ) -> "BehaviorCommand":
+        """Build directly from the typed BehaviorDecision -- no dict detour.
+
+        ``from_debug`` reads ``stop_target``/``reroute_requested`` back out of
+        a diagnostics dict that never actually carries them (nothing ever
+        writes those keys there), so those two fields were always their
+        defaults regardless of the real decision.  This constructor reads
+        ``stop_target`` off the decision itself, where it is real.
+        ``reroute_requested`` still has no source anywhere in the pipeline and
+        stays False.  ``debug_reason`` is diagnostic-only text (e.g. the
+        pipeline exception that produced a fallback decision) that doesn't
+        live on BehaviorDecision; callers with nothing to report pass "".
+        """
+
+        maneuver = str(decision.maneuver)
+        normal_stop = maneuver in {"stop_at_intersection", "stop_sign"}
+        static_obstacle_stop = maneuver == "static_obstacle_stop"
+        emergency_brake = maneuver == "emergency_brake"
+        return cls(
+            decision=maneuver,
+            target_lane_id=int(decision.target_lane_id),
+            target_speed_mps=float(target_speed_mps),
+            stop_target=(
+                decision.stop_target
+                if isinstance(decision.stop_target, Mapping)
+                else None
+            ),
+            reroute_requested=False,
+            normal_stop=bool(normal_stop),
+            stop_requested=bool(
+                normal_stop or static_obstacle_stop or emergency_brake
+            ),
+            emergency_brake=bool(emergency_brake),
+            fsm_state=str(decision.phase),
+            debug_reason=str(debug_reason),
+        )
+
     def as_dict(self) -> Dict[str, object]:
         return {
             "decision": str(self.decision),

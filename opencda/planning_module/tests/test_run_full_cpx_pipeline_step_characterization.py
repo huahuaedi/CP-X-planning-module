@@ -197,6 +197,21 @@ def test_consecutive_ticks_both_succeed(bridge):
     assert isinstance(second.diagnostics_dict(), dict)
 
 
+def test_reference_uses_the_freshly_built_local_map_not_a_stale_one(bridge):
+    # Regression: PlanningTickAdapters.local_map_snapshot must be re-read
+    # after this tick's route-context build runs, not captured once before
+    # it. A stale/default snapshot degrades the published reference into a
+    # near-empty placeholder (no lane_width_m/boundary_source/curvature --
+    # see ReferenceLineProvider.lane_fallback_reference / straight_samples),
+    # which still "does not raise" but silently feeds MPC geometry that
+    # isn't the real candidate-selected lane.
+    output = bridge.execute_planning_pipeline()
+    assert output.reference_trajectory, "expected a published reference"
+    first = output.reference_trajectory[0]
+    assert float(first.get("lane_width_m", 0.0)) > 0.0
+    assert str(first.get("boundary_source", "")) != ""
+
+
 if __name__ == "__main__":
     import unittest
 

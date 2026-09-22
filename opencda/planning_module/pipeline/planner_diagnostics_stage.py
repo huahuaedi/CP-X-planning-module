@@ -687,44 +687,48 @@ class PlannerDiagnosticsStage:
             "map_match_candidate_count": self._route_context.map_matching.get(
                 "candidate_count", ""
             ),
+            # Read the typed snapshot directly -- local_lane_frame is a
+            # write-side compatibility mirror (see RouteContextStage.build's
+            # comment), not a diagnostics source of truth.
             "local_lane_frame_cache_reused": bool(
-                self._route_context.local_lane_frame.get("cache_reused", False)
+                self._route_context.local_map_snapshot.cache_reused
             ),
-            "local_lane_frame_generation_reason": self._route_context.local_lane_frame.get(
-                "generation_reason", ""
+            "local_lane_frame_generation_reason": str(
+                self._route_context.local_map_snapshot.generation_reason
             ),
-            "local_lane_frame_ego_ad_lane_id": self._route_context.local_lane_frame.get(
-                "ego_ad_lane_id", ""
+            "local_lane_frame_ego_ad_lane_id": int(
+                self._route_context.local_map_snapshot.ego_lane_id
             ),
-            "local_lane_frame_forward_distance_m": self._route_context.local_lane_frame.get(
-                "forward_distance_m", ""
+            "local_lane_frame_forward_distance_m": float(
+                self._route_context.local_map_snapshot.forward_distance_m
             ),
-            "local_lane_frame_backward_distance_m": self._route_context.local_lane_frame.get(
-                "backward_distance_m", ""
+            "local_lane_frame_backward_distance_m": float(
+                self._route_context.local_map_snapshot.backward_distance_m
             ),
             "local_lane_frame_corridors": json.dumps(
-                self._route_context.local_lane_frame.get("corridors", {}),
+                {
+                    int(corridor.offset): list(corridor.lane_ids)
+                    for corridor in self._route_context.local_map_snapshot.corridors
+                },
                 sort_keys=True,
             ),
             "local_lane_frame_lane_to_offset": json.dumps(
-                self._route_context.local_lane_frame.get("lane_to_offset", {}),
+                dict(self._route_context.local_map_snapshot.lane_to_offset),
                 sort_keys=True,
             ),
-            "local_lane_frame_route_target_ad_lane_id": self._route_context.local_lane_frame.get(
-                "route_target_ad_lane_id", ""
+            "local_lane_frame_route_target_ad_lane_id": int(
+                self._route_context.local_map_snapshot.route_target_lane_id
             ),
-            "local_lane_frame_target_in_frame": self._route_context.local_lane_frame.get(
-                "route_target_in_frame", ""
+            "local_lane_frame_target_in_frame": bool(
+                self._route_context.local_map_snapshot.route_target_in_frame
             ),
-            "local_lane_frame_target_offset": self._route_context.local_lane_frame.get(
-                "route_target_offset", ""
+            "local_lane_frame_target_offset": int(
+                self._route_context.local_map_snapshot.route_target_offset
             ),
             "local_lane_frame_invariant_violations": ";".join(
                 str(value)
                 for value in list(
-                    self._route_context.local_lane_frame.get(
-                        "invariant_violations", []
-                    )
+                    self._route_context.local_map_snapshot.invariant_violations
                     or []
                 )
             ),
