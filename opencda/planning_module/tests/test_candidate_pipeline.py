@@ -8,6 +8,16 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PIPELINE_ROOT = ROOT / "pipeline"
+_MISSING = object()
+_SAVED_MODULES = {}
+for _name in (
+    "opencda",
+    "opencda.planning_module",
+    "opencda.planning_module.pipeline",
+    "opencda.planning_module.pipeline.reference_contract",
+    "opencda.planning_module.pipeline.candidate_pipeline",
+):
+    _SAVED_MODULES[_name] = sys.modules.get(_name, _MISSING)
 for package_name in ("opencda", "opencda.planning_module", "opencda.planning_module.pipeline"):
     if package_name not in sys.modules:
         module = types.ModuleType(package_name)
@@ -29,6 +39,14 @@ CANDIDATE_SPEC = importlib.util.spec_from_file_location(
 candidate_pipeline = importlib.util.module_from_spec(CANDIDATE_SPEC)
 sys.modules[CANDIDATE_SPEC.name] = candidate_pipeline
 CANDIDATE_SPEC.loader.exec_module(candidate_pipeline)
+
+# Loaded by path so this file is self-contained; put sys.modules back so the
+# stub packages and file-loaded copies do not leak into other test modules.
+for _name, _saved in _SAVED_MODULES.items():
+    if _saved is _MISSING:
+        sys.modules.pop(_name, None)
+    else:
+        sys.modules[_name] = _saved
 
 
 class _Location:
