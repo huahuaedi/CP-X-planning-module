@@ -51,6 +51,7 @@ class TrajectoryAdmission:
     publication: Any
     entry: Any
     control_context: Any
+    mode_transition_reason: str = ""
 
     def trace_fields(self) -> dict[str, object]:
         fields = dict(self.publication.debug_fields)
@@ -688,13 +689,18 @@ class PlanningPipeline:
         ego_x_m,
         ego_y_m,
         ego_yaw_rad,
-        mode_transition_reason,
         front_gap_actor_id,
         candidate_status,
         candidate_name,
         candidate_reason,
+        reset_control_buffer=None,
     ) -> TrajectoryAdmission:
         publication = self.reference_publication.run(**publication_kwargs)
+        mode_transition_reason = self.mpc_entry.apply_behavior_mode_transition(
+            behavior=behavior,
+            stop_goal_active=bool(stop_goal_active),
+            reset_control_buffer=reset_control_buffer,
+        )
         entry = self.mpc_entry.evaluate(
             candidate_status=candidate_status,
             candidate_name=candidate_name,
@@ -722,6 +728,7 @@ class PlanningPipeline:
             publication=publication,
             entry=entry,
             control_context=control_context,
+            mode_transition_reason=str(mode_transition_reason),
         )
 
     def evaluate_mpc_entry(self, **kwargs):

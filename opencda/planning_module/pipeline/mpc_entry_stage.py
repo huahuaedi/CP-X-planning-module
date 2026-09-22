@@ -33,6 +33,63 @@ class MPCEntryStage:
         self._suspend_speed_mps = max(
             0.0, float(config.get("normal_stop_mpc_suspend_speed_mps", 0.30))
         )
+        self._last_behavior_mode_key = ""
+
+    def apply_behavior_mode_transition(
+        self,
+        *,
+        behavior: Any,
+        stop_goal_active: bool,
+        reset_control_buffer: Any,
+    ) -> str:
+        """Reset cached controls exactly once when the executable mode changes.
+
+        MPCEntryStage owns this lifecycle because the mode key is an MPC
+        cache/admission concern.  Behavior and the OpenCDA bridge do not keep
+        a parallel copy of the previous mode.
+        """
+
+        mode_key = self.behavior_mode_key(
+            decision=str(behavior.maneuver),
+            phase=str(behavior.phase),
+            target_lane_id=int(behavior.target_lane_id),
+            stop_goal_active=bool(stop_goal_active),
+        )
+        previous_key = str(self._last_behavior_mode_key or "")
+        self._last_behavior_mode_key = str(mode_key)
+        if not previous_key or previous_key == mode_key:
+            return ""
+        if callable(reset_control_buffer):
+            reset_control_buffer(reason="control_buffer_reset_mode_transition")
+        return "mode_transition:%s->%s:reset_control_buffer" % (
+            previous_key,
+            mode_key,
+        )
+
+    @staticmethod
+    def behavior_mode_key(
+        *, decision: str, phase: str, target_lane_id: int,
+        stop_goal_active: bool,
+    ) -> str:
+        normalized_decision = str(decision or "").strip().lower()
+        normalized_phase = str(phase or "").strip().upper()
+        if bool(stop_goal_active) or normalized_decision in {
+            "stop_at_intersection", "stop_sign", "emergency_brake",
+        }:
+            return "stop"
+        if normalized_decision in {
+            "intersection_turn_left", "intersection_turn_right",
+        }:
+            return normalized_decision
+        if normalized_decision == "route_recovery":
+            return "route_recovery"
+        if normalized_decision in {"lane_change_left", "lane_change_right"}:
+            return "%s:%d" % (normalized_decision, int(target_lane_id))
+        if normalized_phase.startswith("EXECUTE_LANE_CHANGE"):
+            return "%s:%d" % (
+                normalized_phase.lower(), int(target_lane_id)
+            )
+        return "lane_follow:%d" % int(target_lane_id)
 
     def evaluate(
         self,

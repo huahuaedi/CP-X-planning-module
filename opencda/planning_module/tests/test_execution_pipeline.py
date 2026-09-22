@@ -326,6 +326,10 @@ def test_pipeline_owns_reference_publication_and_mpc_admission_sequence():
             return publication
 
     class Entry:
+        def apply_behavior_mode_transition(self, **kwargs):
+            calls.append(("mode", kwargs))
+            return "mode-transition"
+
         def evaluate(self, **kwargs):
             calls.append(("entry", kwargs))
             return SimpleNamespace(trace_fields=lambda: {"mpc_entry_allowed": True})
@@ -350,16 +354,19 @@ def test_pipeline_owns_reference_publication_and_mpc_admission_sequence():
         ego_x_m=0.0,
         ego_y_m=0.0,
         ego_yaw_rad=0.0,
-        mode_transition_reason="",
         front_gap_actor_id="",
         candidate_status="feasible",
         candidate_name="lane_follow",
         candidate_reason="",
+        reset_control_buffer=lambda **_kwargs: None,
     )
     assert result.publication is publication
     assert result.control_context == "control-context"
+    assert result.mode_transition_reason == "mode-transition"
     assert result.trace_fields()["mpc_entry_allowed"] is True
-    assert [call[0] for call in calls] == ["publish", "entry", "context"]
+    assert [call[0] for call in calls] == [
+        "publish", "mode", "entry", "context"
+    ]
 
 
 def test_resolve_cav_interaction_builds_corridor_rows_on_the_constraint_reference():

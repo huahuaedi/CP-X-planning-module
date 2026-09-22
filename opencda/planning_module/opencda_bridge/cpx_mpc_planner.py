@@ -488,12 +488,6 @@ class CPXMPCPlannerBridge:
             except Exception:
                 stop_target_forward_m_debug = ""
 
-        mode_transition_guard_reason = self._apply_behavior_mode_transition_guard(
-            decision=str(behavior_decision.maneuver),
-            lc_state=str(behavior_decision.phase),
-            target_lane_id=int(behavior_decision.target_lane_id),
-            stop_goal_active=bool(mpc_stop_goal_active),
-        )
         candidate_status = str(reference_debug.get(
             "candidate_pipeline_selected_status", ""
         ))
@@ -540,13 +534,14 @@ class CPXMPCPlannerBridge:
             ego_x_m=float(ego_location.x),
             ego_y_m=float(ego_location.y),
             ego_yaw_rad=float(ego_yaw_rad),
-            mode_transition_reason=str(mode_transition_guard_reason),
             front_gap_actor_id=str(reference_debug.get("front_gap_actor_id", "")),
             candidate_status=candidate_status,
             candidate_name=candidate_name,
             candidate_reason=candidate_reason,
+            reset_control_buffer=getattr(self.control_buffer, "reset", None),
         )
         self._accum_stage_ms("prepare_trajectory_execution", time.monotonic() - _ts_stage)
+        mode_transition_guard_reason = str(admission.mode_transition_reason)
         _ts_stage = time.monotonic()
         publication_result = admission.publication
         destination_state = publication_result.mutable_destination()
@@ -2352,55 +2347,6 @@ class CPXMPCPlannerBridge:
         if route_option == "RIGHT" or {"right", "turn"}.issubset(macro_tokens):
             return "intersection_turn_right"
         return ""
-
-    def _apply_behavior_mode_transition_guard(
-        self,
-        *,
-        decision: str,
-        lc_state: str,
-        target_lane_id: int,
-        stop_goal_active: bool,
-    ) -> str:
-        mode_key = self._behavior_mode_key(
-            decision=str(decision),
-            lc_state=str(lc_state),
-            target_lane_id=int(target_lane_id),
-            stop_goal_active=bool(stop_goal_active),
-        )
-        previous_key = str(getattr(self, "_full_last_behavior_mode_key", "") or "")
-        self._full_last_behavior_mode_key = str(mode_key)
-        if not previous_key or previous_key == str(mode_key):
-            return ""
-        reset_control_buffer = getattr(self.control_buffer, "reset", None)
-        if callable(reset_control_buffer):
-            reset_control_buffer(reason="control_buffer_reset_mode_transition")
-        return f"mode_transition:{previous_key}->{mode_key}:reset_control_buffer"
-
-    @staticmethod
-    def _behavior_mode_key(
-        *,
-        decision: str,
-        lc_state: str,
-        target_lane_id: int,
-        stop_goal_active: bool,
-    ) -> str:
-        normalized_decision = str(decision or "").strip().lower()
-        normalized_fsm = str(lc_state or "").strip().upper()
-        if bool(stop_goal_active) or normalized_decision in {
-            "stop_at_intersection",
-            "stop_sign",
-            "emergency_brake",
-        }:
-            return "stop"
-        if normalized_decision in {"intersection_turn_left", "intersection_turn_right"}:
-            return str(normalized_decision)
-        if normalized_decision == "route_recovery":
-            return "route_recovery"
-        if normalized_decision in {"lane_change_left", "lane_change_right"}:
-            return f"{normalized_decision}:{int(target_lane_id)}"
-        if normalized_fsm.startswith("EXECUTE_LANE_CHANGE"):
-            return f"{normalized_fsm.lower()}:{int(target_lane_id)}"
-        return f"lane_follow:{int(target_lane_id)}"
 
     def _validate_candidate_reference_contract(
         self,

@@ -285,7 +285,6 @@ def _core_config_and_behavior_stages(
 
     scenario_manager = CPXScenarioManager(bridge.config)
     bridge._boundary_recovery = BoundaryRecoveryTracker(bridge.config)
-    bridge._full_last_behavior_mode_key = ""
     fallback_manager = TrajectoryFallbackManager(
         max_hold_age_s=float(bridge.config.get("fallback_hold_last_valid_s", 0.35)),
         min_hold_arc_m=float(bridge.config.get("fallback_min_valid_arc_m", 2.0)),
