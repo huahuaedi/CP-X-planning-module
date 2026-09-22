@@ -43,6 +43,7 @@ from opencda.planning_module.pipeline.mpc_execution_stage import (
 )
 from opencda.planning_module.pipeline.execution_pipeline import (
     BehaviorContextRequest,
+    ExecutableBehaviorRequest,
     NominalPlanningRequest,
 )
 from opencda.planning_module.pipeline.candidate_evaluation import (
@@ -54,7 +55,6 @@ from opencda.planning_module.pipeline.candidate_selection_stage import (
 )
 from opencda.planning_module.pipeline.behavior_stage import (
     BehaviorCommandFrameRequest,
-    BehaviorOverrideRequest,
     OpportunisticLaneChangeRequest,
 )
 
@@ -1412,9 +1412,14 @@ class CPXMPCPlannerBridge:
         mpc_feedback = self.mpc_feedback.candidate_feedback(
             current_time_s=float(sim_time_s)
         )
-        _ts_sub = time.monotonic()
-        command_frame = self.pipeline.produce_behavior_command(
-            BehaviorCommandFrameRequest(
+        lane_change_commitment_pending_stabilization = bool(
+            self._stable_reference_line_provider.snapshot(
+                LANE_CHANGE
+            ).mutable_samples()
+        )
+        executable_behavior = self.pipeline.resolve_executable_behavior(
+            ExecutableBehaviorRequest(
+                command_request=BehaviorCommandFrameRequest(
                 adapter_output=adapter_output, ego_pose=ego_pose,
                 ego_location=ego_location, ego_yaw_rad=float(ego_yaw_rad),
                 ego_speed_mps=float(ego_speed_mps),
@@ -1453,28 +1458,50 @@ class CPXMPCPlannerBridge:
                 static_obstacle_mpc_stall_failure_count=int(
                     self._static_obstacle_mpc_stall_failure_count()
                 ),
+                ),
+                scenario_decision=scenario_decision,
+                lane_change_authorized=bool(lane_change_authorized),
+                lane_change_gate_reason=str(lane_change_gate_reason),
+                lane_change_authorization_reason=str(
+                    lane_change_authorization.reason
+                ),
+                prepare_reference_lock=bool(
+                    self.full_prepare_lane_change_reference_lock
+                ),
+                lane_change_commitment_active=bool(
+                    lane_change_commitment_pending_stabilization
+                ),
+                route_advanced_to_lane_change=bool(
+                    route_advanced_to_lane_change
+                ),
+                route_current_road_option=str(
+                    route_context.current_road_option
+                ),
+                ego_in_junction=bool(planner_input_frame.map_lane.in_junction),
+                stop_goal_active=bool(stop_goal_active),
+                cruise_speed_mps=float(self.target_speed_mps),
+                scenario_reason=str(traffic_stop_approach_reason),
             ),
             behavior_planner=self.behavior_planner,
-            static_obstacle_stage=self.pipeline.static_obstacle,
             reference_map=self.reference_map,
             nearest_front_obstacles=self._nearest_front_obstacle_by_lane,
             attempt_replan=lambda obstacle: self._attempt_static_obstacle_route_replan(
                 ego_location=ego_location, obstacle=obstacle,
             ),
             object_track_id=self._object_track_id,
+            reset_lane_change=getattr(
+                self.behavior_planner, "_reset_lane_change_state", None
+            ),
+            observe_stage_duration=self._accum_stage_ms,
         )
-        self._accum_stage_ms("sub_produce_behavior_command", time.monotonic() - _ts_sub)
+        command_frame = executable_behavior.command_frame
         command_result = command_frame.command
         candidate_frame = command_frame.candidate_frame
         cooperative_proposal = command_frame.cooperative_proposal
-        nearest_front_obstacles_by_lane = dict(
-            command_frame.nearest_front_obstacles_by_lane
-        )
         candidate_lane_ids = list(command_frame.candidate_lane_ids)
         behavior_lane_alignment_valid = bool(command_result.lane_alignment_valid)
         behavior_lane_lateral_error_m = float(command_result.lane_lateral_error_m)
         behavior_lane_heading_error_rad = float(command_result.lane_heading_error_rad)
-        traffic_control_stop_active = bool(command_result.traffic_control_stop_active)
         static_obstacle_result = command_result.static_obstacle_result
         static_obstacle_local_avoidance_active = bool(
             static_obstacle_result.local_avoidance_active
@@ -1482,74 +1509,18 @@ class CPXMPCPlannerBridge:
         static_obstacle_local_target_lane_id = (
             static_obstacle_result.target_lane_id
         )
-        static_obstacle_stop_active = bool(static_obstacle_result.stop_active)
         semantic_response = command_result.semantic_response
         opportunistic_lane_change_allowed = bool(
             command_result.opportunistic_lane_change_allowed
         )
-        preferred_target_lane_id = int(command_result.preferred_target_lane_id)
-        decision = str(command_result.decision)
-        target_lane_id = int(command_result.target_lane_id)
-        lc_state = str(command_result.phase)
-        lane_change_commitment_pending_stabilization = bool(
-            self._stable_reference_line_provider.snapshot(LANE_CHANGE).mutable_samples()
-        )
+        decision = executable_behavior.decision
+        target_lane_id = executable_behavior.target_lane_id
+        lc_state = executable_behavior.phase
+        stop_goal_active = executable_behavior.stop_goal_active
+        behavior_override_reason = str(executable_behavior.override.reason)
         turn_prepare_speed_suppressed_by_lane_change = bool(
-            lane_change_commitment_pending_stabilization
-            and str(scenario_decision.state).strip().upper() == "PREPARE_TURN"
-            and not bool(scenario_decision.stop_goal_active)
+            executable_behavior.turn_prepare_speed_suppressed
         )
-        scenario_speed_cap_active = (
-            scenario_decision.speed_cap_mps is not None
-            and float(scenario_decision.speed_cap_mps) < float(self.target_speed_mps)
-            and not bool(turn_prepare_speed_suppressed_by_lane_change)
-        )
-        route_turn_decision = self._route_option_turn_decision(
-            current_road_option=str(route_context.current_road_option),
-            next_macro_maneuver="",
-        )
-        if bool(route_advanced_to_lane_change):
-            # Suppress a stale turn proposal once topology reports a later
-            # lane change. ManeuverManager owns turn commitment and
-            # ReferenceLineProvider owns TURN geometry lifetime; this routing
-            # hint must not clear either owner (it can also be observed before
-            # an upcoming turn while a prerequisite lane change is pending).
-            route_turn_decision = ""
-        route_turn_prepare_decision = ""
-        scenario_behavior_override = str(scenario_decision.behavior_override_decision or "")
-        override_result = self.pipeline.apply_behavior_overrides(
-            BehaviorOverrideRequest(
-                decision=str(decision), target_lane_id=int(target_lane_id),
-                phase=str(lc_state), current_lane_id=int(current_lane_id),
-                lane_change_authorized=bool(lane_change_authorized),
-                opportunistic_lane_change_allowed=bool(opportunistic_lane_change_allowed),
-                lane_change_gate_reason=str(lane_change_gate_reason),
-                lane_change_authorization_reason=str(lane_change_authorization.reason),
-                prepare_reference_lock=bool(self.full_prepare_lane_change_reference_lock),
-                scenario_speed_cap_active=bool(scenario_speed_cap_active),
-                scenario_reason=str(traffic_stop_approach_reason),
-                scenario_override_decision=str(scenario_behavior_override),
-                scenario_override_phase=str(scenario_decision.behavior_override_lc_state),
-                scenario_stop_required=bool(scenario_decision.stop_goal_active),
-                local_avoidance_active=bool(static_obstacle_local_avoidance_active),
-                ego_in_junction=bool(planner_input_frame.map_lane.in_junction),
-                lane_change_commitment_active=bool(lane_change_commitment_pending_stabilization),
-                route_turn_decision=str(route_turn_decision or route_turn_prepare_decision),
-                route_current_road_option=str(route_context.current_road_option),
-                stop_goal_active=bool(stop_goal_active),
-            )
-        )
-        decision = str(override_result.decision)
-        target_lane_id = int(override_result.target_lane_id)
-        lc_state = str(override_result.phase)
-        stop_goal_active = bool(override_result.stop_goal_active)
-        behavior_override_reason = str(override_result.reason)
-        if str(override_result.reset_lane_change_reason):
-            reset_lane_change = getattr(
-                self.behavior_planner, "_reset_lane_change_state", None
-            )
-            if callable(reset_lane_change):
-                reset_lane_change(reason=str(override_result.reset_lane_change_reason))
         front_gap_m, front_gap_actor_id = self.pipeline.front_gap(
             ego_location=ego_location,
             ego_yaw_rad=float(ego_yaw_rad),
@@ -2285,23 +2256,6 @@ class CPXMPCPlannerBridge:
         return CandidateSelectionStage.normalized_lane_change_state(
             decision=str(decision), lane_change_phase=str(lane_change_phase),
         )
-
-    @staticmethod
-    def _route_option_turn_decision(*, current_road_option: str, next_macro_maneuver: str) -> str:
-        route_option = str(current_road_option or "").strip().upper()
-        macro = (
-            str(next_macro_maneuver or "")
-            .strip()
-            .lower()
-            .replace("_", " ")
-            .replace("-", " ")
-        )
-        macro_tokens = set(macro.split())
-        if route_option == "LEFT" or {"left", "turn"}.issubset(macro_tokens):
-            return "intersection_turn_left"
-        if route_option == "RIGHT" or {"right", "turn"}.issubset(macro_tokens):
-            return "intersection_turn_right"
-        return ""
 
     def _validate_candidate_reference_contract(
         self,

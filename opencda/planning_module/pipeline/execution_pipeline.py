@@ -19,7 +19,7 @@ from .conflict_classifier import ClassifierParams, _agent_id
 from .spatiotemporal_corridor import CorridorParams, make_gap_gate_margin_m
 from .mpc_obstacle_relevance import _polyline_xy
 from .rss import RSSParams, longitudinal_safe_distance
-from .behavior_stage import ConflictResolutionRequest
+from .behavior_stage import ConflictResolutionRequest, BehaviorOverrideRequest
 
 
 @dataclass(frozen=True)
@@ -160,6 +160,55 @@ class BehaviorContextFrame:
     route_replan_attempted: bool = False
     route_replan_succeeded: bool = False
     route_replan_reason: str = ""
+
+
+@dataclass(frozen=True)
+class ExecutableBehaviorRequest:
+    """Inputs needed to freeze a behavior command for reference generation."""
+
+    command_request: Any
+    scenario_decision: Any
+    lane_change_authorized: bool
+    lane_change_gate_reason: str
+    lane_change_authorization_reason: str
+    prepare_reference_lock: bool
+    lane_change_commitment_active: bool
+    route_advanced_to_lane_change: bool
+    route_current_road_option: str
+    ego_in_junction: bool
+    stop_goal_active: bool
+    cruise_speed_mps: float
+    scenario_reason: str
+
+
+@dataclass(frozen=True)
+class ExecutableBehaviorFrame:
+    """Typed, override-complete behavior consumed by geometry and speed."""
+
+    command_frame: Any
+    override: Any
+    turn_prepare_speed_suppressed: bool
+    scenario_speed_cap_active: bool
+
+    @property
+    def command(self):
+        return self.command_frame.command
+
+    @property
+    def decision(self) -> str:
+        return str(self.override.decision)
+
+    @property
+    def target_lane_id(self) -> int:
+        return int(self.override.target_lane_id)
+
+    @property
+    def phase(self) -> str:
+        return str(self.override.phase)
+
+    @property
+    def stop_goal_active(self) -> bool:
+        return bool(self.override.stop_goal_active)
 
 
 class PlanningPipeline:
@@ -714,6 +763,101 @@ class PlanningPipeline:
 
     def apply_behavior_overrides(self, request):
         return self.behavior.apply_overrides(request)
+
+    def resolve_executable_behavior(
+        self,
+        request: ExecutableBehaviorRequest,
+        *,
+        behavior_planner: Any,
+        reference_map: Any,
+        nearest_front_obstacles: Callable[..., Any],
+        attempt_replan: Callable[..., Any],
+        object_track_id: Callable[..., Any],
+        reset_lane_change: Optional[Callable[..., Any]] = None,
+        observe_stage_duration: Optional[Callable[[str, float], None]] = None,
+    ) -> ExecutableBehaviorFrame:
+        """Produce and override behavior once before geometry generation."""
+
+        started_s = time.monotonic()
+        command_frame = self.produce_behavior_command(
+            request.command_request,
+            behavior_planner=behavior_planner,
+            static_obstacle_stage=self.static_obstacle,
+            reference_map=reference_map,
+            nearest_front_obstacles=nearest_front_obstacles,
+            attempt_replan=attempt_replan,
+            object_track_id=object_track_id,
+        )
+        if observe_stage_duration is not None:
+            observe_stage_duration(
+                "sub_produce_behavior_command", time.monotonic() - started_s
+            )
+
+        command = command_frame.command
+        scenario = request.scenario_decision
+        commitment_active = bool(request.lane_change_commitment_active)
+        turn_prepare_suppressed = bool(
+            commitment_active
+            and str(scenario.state).strip().upper() == "PREPARE_TURN"
+            and not bool(scenario.stop_goal_active)
+        )
+        scenario_speed_cap_active = bool(
+            scenario.speed_cap_mps is not None
+            and float(scenario.speed_cap_mps) < float(request.cruise_speed_mps)
+            and not turn_prepare_suppressed
+        )
+        route_turn_decision = self._route_option_turn_decision(
+            current_road_option=str(request.route_current_road_option)
+        )
+        if bool(request.route_advanced_to_lane_change):
+            route_turn_decision = ""
+
+        static_obstacle = command.static_obstacle_result
+        override = self.apply_behavior_overrides(BehaviorOverrideRequest(
+            decision=str(command.decision),
+            target_lane_id=int(command.target_lane_id),
+            phase=str(command.phase),
+            current_lane_id=int(request.command_request.current_lane_id),
+            lane_change_authorized=bool(request.lane_change_authorized),
+            opportunistic_lane_change_allowed=bool(
+                command.opportunistic_lane_change_allowed
+            ),
+            lane_change_gate_reason=str(request.lane_change_gate_reason),
+            lane_change_authorization_reason=str(
+                request.lane_change_authorization_reason
+            ),
+            prepare_reference_lock=bool(request.prepare_reference_lock),
+            scenario_speed_cap_active=bool(scenario_speed_cap_active),
+            scenario_reason=str(request.scenario_reason),
+            scenario_override_decision=str(
+                scenario.behavior_override_decision or ""
+            ),
+            scenario_override_phase=str(scenario.behavior_override_lc_state),
+            scenario_stop_required=bool(scenario.stop_goal_active),
+            local_avoidance_active=bool(static_obstacle.local_avoidance_active),
+            ego_in_junction=bool(request.ego_in_junction),
+            lane_change_commitment_active=commitment_active,
+            route_turn_decision=str(route_turn_decision),
+            route_current_road_option=str(request.route_current_road_option),
+            stop_goal_active=bool(request.stop_goal_active),
+        ))
+        if str(override.reset_lane_change_reason) and callable(reset_lane_change):
+            reset_lane_change(reason=str(override.reset_lane_change_reason))
+        return ExecutableBehaviorFrame(
+            command_frame=command_frame,
+            override=override,
+            turn_prepare_speed_suppressed=bool(turn_prepare_suppressed),
+            scenario_speed_cap_active=bool(scenario_speed_cap_active),
+        )
+
+    @staticmethod
+    def _route_option_turn_decision(*, current_road_option: str) -> str:
+        route_option = str(current_road_option or "").strip().upper()
+        if route_option == "LEFT":
+            return "intersection_turn_left"
+        if route_option == "RIGHT":
+            return "intersection_turn_right"
+        return ""
 
     def resolve_nominal_plan(
         self,

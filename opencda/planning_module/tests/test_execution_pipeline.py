@@ -5,6 +5,7 @@ import pytest
 from pipeline.cooperative_arbitration import CavIntent, ResourceClaim
 from pipeline.execution_pipeline import (
     BehaviorContextRequest,
+    ExecutableBehaviorRequest,
     NominalPlanningRequest,
     PlanningPipeline,
     ScenarioPlanningFrameRequest,
@@ -260,6 +261,89 @@ def test_pipeline_owns_route_scenario_conflict_context_sequence():
         "route", "scenario", "turn", "conflict", "release"
     ]
     assert reset_reasons == [{"reason": "maneuver_complete"}]
+
+
+def test_pipeline_freezes_command_and_override_into_executable_behavior():
+    calls = []
+    command = SimpleNamespace(
+        decision="lane_change_left",
+        target_lane_id=8,
+        phase="PREPARE_LANE_CHANGE_LEFT",
+        opportunistic_lane_change_allowed=False,
+        static_obstacle_result=SimpleNamespace(local_avoidance_active=False),
+    )
+    command_frame = SimpleNamespace(command=command)
+    override = SimpleNamespace(
+        decision="lane_follow",
+        target_lane_id=7,
+        phase="LANE_KEEP",
+        stop_goal_active=False,
+        reason="route turn suppressed by later lane change",
+        reset_lane_change_reason="authorization_lost",
+    )
+
+    class Behavior:
+        def produce_command_from_frame(self, request, **kwargs):
+            calls.append(("command", request, kwargs))
+            return command_frame
+
+        def apply_overrides(self, request):
+            calls.append(("override", request))
+            assert request.route_turn_decision == ""
+            assert request.scenario_speed_cap_active is False
+            return override
+
+    pipeline = PlanningPipeline(
+        runtime_input=RuntimeInputStage(_Mapper()),
+        perception=PerceptionStage(), behavior=Behavior(), scenario=object(),
+        static_obstacle="static-stage", control_safety=object(), speed=object(),
+        destination_speed=object(), reference_publication=object(),
+        mpc_entry=object(),
+    )
+    command_request = SimpleNamespace(current_lane_id=7)
+    reset_reasons = []
+    stage_names = []
+    result = pipeline.resolve_executable_behavior(
+        ExecutableBehaviorRequest(
+            command_request=command_request,
+            scenario_decision=SimpleNamespace(
+                state="PREPARE_TURN",
+                stop_goal_active=False,
+                speed_cap_mps=3.0,
+                behavior_override_decision="",
+                behavior_override_lc_state="",
+            ),
+            lane_change_authorized=False,
+            lane_change_gate_reason="not_authorized",
+            lane_change_authorization_reason="route_not_required",
+            prepare_reference_lock=True,
+            lane_change_commitment_active=True,
+            route_advanced_to_lane_change=True,
+            route_current_road_option="LEFT",
+            ego_in_junction=False,
+            stop_goal_active=False,
+            cruise_speed_mps=8.0,
+            scenario_reason="prepare_turn",
+        ),
+        behavior_planner="behavior-planner",
+        reference_map="reference-map",
+        nearest_front_obstacles=lambda **_kwargs: {},
+        attempt_replan=lambda _obstacle: None,
+        object_track_id=lambda item: item.get("id"),
+        reset_lane_change=lambda **kwargs: reset_reasons.append(kwargs),
+        observe_stage_duration=lambda name, _seconds: stage_names.append(name),
+    )
+
+    assert result.command_frame is command_frame
+    assert result.decision == "lane_follow"
+    assert result.target_lane_id == 7
+    assert result.phase == "LANE_KEEP"
+    assert result.turn_prepare_speed_suppressed
+    assert not result.scenario_speed_cap_active
+    assert [entry[0] for entry in calls] == ["command", "override"]
+    assert calls[0][2]["static_obstacle_stage"] == "static-stage"
+    assert stage_names == ["sub_produce_behavior_command"]
+    assert reset_reasons == [{"reason": "authorization_lost"}]
 
 
 def test_pipeline_owns_speed_resolution_sequence():
