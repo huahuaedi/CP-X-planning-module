@@ -1453,30 +1453,10 @@ class CPXMPCPlannerBridge:
             ),
             observe_stage_duration=self._accum_stage_ms,
         )
-        command_frame = executable_behavior.command_frame
-        command_result = command_frame.command
-        candidate_frame = command_frame.candidate_frame
-        cooperative_proposal = command_frame.cooperative_proposal
-        candidate_lane_ids = list(command_frame.candidate_lane_ids)
-        behavior_lane_alignment_valid = bool(command_result.lane_alignment_valid)
-        behavior_lane_lateral_error_m = float(command_result.lane_lateral_error_m)
-        behavior_lane_heading_error_rad = float(command_result.lane_heading_error_rad)
-        static_obstacle_result = command_result.static_obstacle_result
-        static_obstacle_local_avoidance_active = bool(
-            static_obstacle_result.local_avoidance_active
-        )
-        static_obstacle_local_target_lane_id = (
-            static_obstacle_result.target_lane_id
-        )
-        semantic_response = command_result.semantic_response
-        opportunistic_lane_change_allowed = bool(
-            command_result.opportunistic_lane_change_allowed
-        )
         decision = executable_behavior.decision
         target_lane_id = executable_behavior.target_lane_id
         lc_state = executable_behavior.phase
         stop_goal_active = executable_behavior.stop_goal_active
-        behavior_override_reason = str(executable_behavior.override.reason)
         turn_prepare_speed_suppressed_by_lane_change = bool(
             executable_behavior.turn_prepare_speed_suppressed
         )
@@ -1572,23 +1552,29 @@ class CPXMPCPlannerBridge:
             "route_reference_allowed": route_reference_allowed,
             "route_reference_gate_reason": route_reference_gate_reason,
             "route_lane_change_allowed": route_lane_change_allowed,
-            "opportunistic_lane_change_allowed": opportunistic_lane_change_allowed,
+            "opportunistic_lane_change_allowed": (
+                executable_behavior.opportunistic_lane_change_allowed
+            ),
             "lane_change_gate_reason": lane_change_gate_reason,
-            "static_obstacle_local_avoidance_active": static_obstacle_local_avoidance_active,
-            "static_obstacle_local_target_lane_id": static_obstacle_local_target_lane_id,
-            "static_obstacle_result": static_obstacle_result,
-            "semantic_response": semantic_response,
+            "static_obstacle_local_avoidance_active": bool(
+                executable_behavior.static_obstacle_result.local_avoidance_active
+            ),
+            "static_obstacle_local_target_lane_id": (
+                executable_behavior.static_obstacle_result.target_lane_id
+            ),
+            "static_obstacle_result": executable_behavior.static_obstacle_result,
+            "semantic_response": executable_behavior.semantic_response,
             "route_lane_change_required": route_lane_change_required,
             "route_geometry_lane_change_direction": route_geometry_lane_change_direction,
             "route_geometry_lane_change_distance_m": route_geometry_lane_change_distance_m,
             "route_geometry_lane_change_reason": route_geometry_lane_change_reason,
             "physical_route_target_lane_id": physical_route_target_lane_id,
             "topology_route_target_lane_id": topology_route_target_lane_id,
-            "behavior_lane_lateral_error_m": behavior_lane_lateral_error_m,
-            "behavior_lane_heading_error_rad": behavior_lane_heading_error_rad,
-            "behavior_lane_alignment_valid": behavior_lane_alignment_valid,
+            "behavior_lane_lateral_error_m": executable_behavior.lane_lateral_error_m,
+            "behavior_lane_heading_error_rad": executable_behavior.lane_heading_error_rad,
+            "behavior_lane_alignment_valid": executable_behavior.lane_alignment_valid,
             "lane_change_authorization": lane_change_authorization,
-            "behavior_override_reason": behavior_override_reason,
+            "behavior_override_reason": executable_behavior.override_reason,
             "scenario_decision": scenario_decision,
             "route_context": route_context,
             "full_traffic_memory_reason": full_traffic_memory_reason,
@@ -1599,7 +1585,7 @@ class CPXMPCPlannerBridge:
             "traffic_stop_commit_distance_m": traffic_stop_commit_distance_m,
             "traffic_stop_approach_reason": traffic_stop_approach_reason,
             "speed_plan": speed_plan,
-            "candidate_frame": candidate_frame,
+            "candidate_frame": executable_behavior.candidate_frame,
             "mpc_feedback": mpc_feedback,
             "upcoming_turn_direction": upcoming_turn_direction,
             "upcoming_turn_distance_m": upcoming_turn_distance_m,
@@ -1616,7 +1602,7 @@ class CPXMPCPlannerBridge:
         # for the tick; its corridor rows are reused by MPC below.
         cooperative_frame = self.pipeline.resolve_cooperative(
             self._build_cooperative_request(
-                cooperative_proposal=cooperative_proposal,
+                cooperative_proposal=executable_behavior.cooperative_proposal,
                 current_state=current_state,
                 ego_location=ego_location,
                 ego_yaw_rad=ego_yaw_rad,
@@ -1645,7 +1631,7 @@ class CPXMPCPlannerBridge:
                     selected_target_lane_id=int(target_lane_id),
                     current_lane_id=int(current_lane_id),
                     target_speed_mps=float(planned_speed_mps),
-                    candidate_lane_ids=list(candidate_lane_ids),
+                    candidate_lane_ids=list(executable_behavior.candidate_lane_ids),
                     lane_safety_scores=lane_safety_scores,
                     lane_prediction_risks=dict(
                         planner_input_frame.prediction.lane_prediction_risks
@@ -1654,11 +1640,11 @@ class CPXMPCPlannerBridge:
                     traffic_stop_active=bool(scenario_decision.stop_goal_active),
                     lane_change_authorization=lane_change_authorization,
                     opportunistic_lane_change_allowed=bool(
-                        opportunistic_lane_change_allowed
+                        executable_behavior.opportunistic_lane_change_allowed
                     ),
                     stop_target=behavior_stop_target,
                     local_obstacle_avoidance_active=bool(
-                        static_obstacle_local_avoidance_active
+                        executable_behavior.static_obstacle_result.local_avoidance_active
                     ),
                     lane_width_m=float(getattr(self.mpc, "lane_width_m", 3.5)),
                     current_state=current_state,
@@ -1746,9 +1732,9 @@ class CPXMPCPlannerBridge:
                     maneuver_manager=self.maneuver_manager,
                     decision=str(decision),
                     scenario_state=str(getattr(scenario_decision, "state", "")),
-                    exit_alignment_valid=bool(behavior_lane_alignment_valid),
-                    exit_lateral_error_m=float(behavior_lane_lateral_error_m),
-                    exit_heading_error_rad=float(behavior_lane_heading_error_rad),
+                    exit_alignment_valid=executable_behavior.lane_alignment_valid,
+                    exit_lateral_error_m=executable_behavior.lane_lateral_error_m,
+                    exit_heading_error_rad=executable_behavior.lane_heading_error_rad,
                     local_map=self._local_map_snapshot,
                     ego_x_m=float(ego_location.x),
                     ego_y_m=float(ego_location.y),
@@ -1779,7 +1765,7 @@ class CPXMPCPlannerBridge:
                     if isinstance(behavior_stop_target, Mapping)
                     else None
                     ),
-                    reason=str(behavior_override_reason),
+                    reason=executable_behavior.override_reason,
                     lane_safety_scores=lane_safety_scores,
                     raw_signal_state=str(
                         planner_input_frame.planning.traffic_control.signal_state

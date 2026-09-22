@@ -157,6 +157,46 @@ class ExecutableBehaviorFrame:
     def stop_goal_active(self) -> bool:
         return bool(self.override.stop_goal_active)
 
+    @property
+    def candidate_frame(self):
+        return self.command_frame.candidate_frame
+
+    @property
+    def cooperative_proposal(self):
+        return self.command_frame.cooperative_proposal
+
+    @property
+    def candidate_lane_ids(self) -> Tuple[int, ...]:
+        return tuple(int(value) for value in self.command_frame.candidate_lane_ids)
+
+    @property
+    def lane_alignment_valid(self) -> bool:
+        return bool(self.command.lane_alignment_valid)
+
+    @property
+    def lane_lateral_error_m(self) -> float:
+        return float(self.command.lane_lateral_error_m)
+
+    @property
+    def lane_heading_error_rad(self) -> float:
+        return float(self.command.lane_heading_error_rad)
+
+    @property
+    def static_obstacle_result(self):
+        return self.command.static_obstacle_result
+
+    @property
+    def semantic_response(self):
+        return self.command.semantic_response
+
+    @property
+    def opportunistic_lane_change_allowed(self) -> bool:
+        return bool(self.command.opportunistic_lane_change_allowed)
+
+    @property
+    def override_reason(self) -> str:
+        return str(self.override.reason)
+
 
 @dataclass(frozen=True)
 class CooperativePlanningFrame:

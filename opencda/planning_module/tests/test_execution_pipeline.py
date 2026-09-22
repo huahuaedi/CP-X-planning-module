@@ -390,8 +390,17 @@ def test_pipeline_freezes_command_and_override_into_executable_behavior():
         phase="PREPARE_LANE_CHANGE_LEFT",
         opportunistic_lane_change_allowed=False,
         static_obstacle_result=SimpleNamespace(local_avoidance_active=False),
+        lane_alignment_valid=True,
+        lane_lateral_error_m=0.2,
+        lane_heading_error_rad=0.1,
+        semantic_response="semantic",
     )
-    command_frame = SimpleNamespace(command=command)
+    command_frame = SimpleNamespace(
+        command=command,
+        candidate_frame="candidates",
+        cooperative_proposal="proposal",
+        candidate_lane_ids=(7, 8),
+    )
     override = SimpleNamespace(
         decision="lane_follow",
         target_lane_id=7,
@@ -459,6 +468,13 @@ def test_pipeline_freezes_command_and_override_into_executable_behavior():
     assert result.phase == "LANE_KEEP"
     assert result.turn_prepare_speed_suppressed
     assert not result.scenario_speed_cap_active
+    assert result.candidate_frame == "candidates"
+    assert result.cooperative_proposal == "proposal"
+    assert result.candidate_lane_ids == (7, 8)
+    assert result.lane_alignment_valid
+    assert result.lane_lateral_error_m == pytest.approx(0.2)
+    assert result.semantic_response == "semantic"
+    assert result.override_reason == override.reason
     assert [entry[0] for entry in calls] == ["command", "override"]
     assert calls[0][2]["static_obstacle_stage"] == "static-stage"
     assert stage_names == ["sub_produce_behavior_command"]
