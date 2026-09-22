@@ -17,6 +17,7 @@ from .behavior_reference_finalization_stage import (
     BehaviorReferenceFinalizationRequest,
     BehaviorReferenceFinalizationStage,
 )
+from .speed_planning_stage import SpeedPlanningRequest, SpeedPlanningStage
 
 
 @dataclass(frozen=True)
@@ -265,6 +266,10 @@ class PlanningPipeline:
                 behavior=behavior,
             )
         )
+        self.speed_planning = SpeedPlanningStage(
+            perception=perception,
+            speed=speed,
+        )
 
     def attach_cooperative(self, cooperative: Any) -> None:
         """Complete late assembly after the route owner exists."""
@@ -346,9 +351,6 @@ class PlanningPipeline:
                 0.0 if stop_required else max(0.0, float(cruise_speed_mps))
             ),
         )
-
-    def front_gap(self, **kwargs):
-        return self._perception.front_gap(**kwargs)
 
     def evaluate_destination(self, **kwargs):
         return self.destination_speed.evaluate(**kwargs)
@@ -767,8 +769,8 @@ class PlanningPipeline:
         )
         return self.speed.constrain_plan(speed_plan, constraint), constraint
 
-    def propose_speed(self, **kwargs):
-        return self.speed.propose(**kwargs)
+    def plan_speed(self, request: SpeedPlanningRequest):
+        return self.speed_planning.run(request)
 
     @property
     def destination_stop_latched(self) -> bool:

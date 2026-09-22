@@ -59,6 +59,9 @@ from opencda.planning_module.pipeline.behavior_reference_finalization_stage impo
     BehaviorReferenceFinalizationRequest,
     MPCCostProfileRequest,
 )
+from opencda.planning_module.pipeline.speed_planning_stage import (
+    SpeedPlanningRequest,
+)
 from opencda.planning_module.pipeline.candidate_selection_stage import (
     CandidateSelectionStage,
 )
@@ -1530,77 +1533,42 @@ class CPXMPCPlannerBridge:
         turn_prepare_speed_suppressed_by_lane_change = bool(
             executable_behavior.turn_prepare_speed_suppressed
         )
-        front_gap_m, front_gap_actor_id = self.pipeline.front_gap(
-            ego_location=ego_location,
-            ego_yaw_rad=float(ego_yaw_rad),
-            object_snapshots=object_snapshots,
-            current_lane_id=int(current_lane_id),
-            lane_assignments=dict(adapter_output.lane_assignments),
-            lane_change_direction=(
-                "left" if str(decision) == "lane_change_left"
-                else "right" if str(decision) == "lane_change_right"
-                else ""
-            ),
-            lane_change_progress=float(self.maneuver_manager.lane_change.progress),
-            return_actor_id=True,
-        )
-        front_gap_obstacle_speed_mps = None
-        if front_gap_actor_id:
-            for _snapshot in object_snapshots:
-                if str(self._object_track_id(_snapshot)) == str(front_gap_actor_id):
-                    front_gap_obstacle_speed_mps = max(
-                        0.0,
-                        float(
-                            _snapshot.get(
-                                "v", _snapshot.get("speed_mps", 0.0)
-                            )
-                            or 0.0
-                        ),
-                    )
-                    break
-        front_obstacle_lane_id = int(
-            adapter_output.lane_assignments.get(
-                str(front_gap_actor_id), 0
-            ) or 0
-        ) if front_gap_actor_id else 0
-        lane_change_source_lane_id = int(
-            self.maneuver_manager.lane_change.source_lane_id
-            if lane_change_commitment_pending_stabilization
-            else current_lane_id
-        )
-        front_obstacle_is_source_lane = bool(
-            front_gap_actor_id
-            and int(front_obstacle_lane_id) != 0
-            and int(front_obstacle_lane_id) == int(lane_change_source_lane_id)
-            and (
-                int(target_lane_id) != int(lane_change_source_lane_id)
-                or lane_change_commitment_pending_stabilization
+        speed_frame = self.pipeline.plan_speed(
+            SpeedPlanningRequest(
+                ego_location=ego_location,
+                ego_yaw_rad=float(ego_yaw_rad),
+                ego_speed_mps=float(ego_speed_mps),
+                requested_speed_mps=float(speed_ref_mps),
+                object_snapshots=object_snapshots,
+                current_lane_id=int(current_lane_id),
+                target_lane_id=int(target_lane_id),
+                lane_assignments=dict(adapter_output.lane_assignments),
+                lane_change_progress=float(
+                    self.maneuver_manager.lane_change.progress
+                ),
+                lane_change_commitment_active=bool(
+                    lane_change_commitment_pending_stabilization
+                ),
+                committed_source_lane_id=int(
+                    self.maneuver_manager.lane_change.source_lane_id
+                ),
+                scenario_decision=scenario_decision,
+                behavior_decision=str(decision),
+                upcoming_turn_direction=str(upcoming_turn_direction),
+                upcoming_turn_distance_m=float(upcoming_turn_distance_m),
+                config=self.config,
             )
         )
-        speed_plan = self.pipeline.propose_speed(
-            scenario_decision=scenario_decision,
-            behavior_decision=str(decision),
-            requested_speed_mps=float(speed_ref_mps),
-            ego_speed_mps=float(ego_speed_mps),
-            config=dict(self.config),
-            front_gap_m=front_gap_m,
-            front_obstacle_speed_mps=front_gap_obstacle_speed_mps,
-            upcoming_turn_direction=str(upcoming_turn_direction),
-            upcoming_turn_distance_m=(
-                None
-                if not math.isfinite(float(upcoming_turn_distance_m))
-                else float(upcoming_turn_distance_m)
-            ),
-            lane_change_commitment_active=bool(
-                lane_change_commitment_pending_stabilization
-            ),
-            front_obstacle_is_source_lane=bool(
-                front_obstacle_is_source_lane
-            ),
-            additional_constraints=(),
+        speed_plan = speed_frame.speed_plan
+        front_gap_m = speed_frame.front_gap_m
+        front_gap_actor_id = speed_frame.front_actor_id
+        front_gap_obstacle_speed_mps = speed_frame.front_obstacle_speed_mps
+        front_obstacle_lane_id = speed_frame.front_obstacle_lane_id
+        front_obstacle_is_source_lane = (
+            speed_frame.front_obstacle_is_source_lane
         )
-        planned_speed_mps = float(speed_plan.target_speed_mps)
-        stop_goal_active = bool(stop_goal_active or speed_plan.stop_goal_active)
+        planned_speed_mps = speed_frame.target_speed_mps
+        stop_goal_active = bool(stop_goal_active or speed_frame.stop_goal_active)
         planner_mode = "INTERSECTION" if bool(planner_input_frame.map_lane.in_junction) else "NORMAL"
 
         baseline_reference_frame_request = BehaviorReferenceRequest(
