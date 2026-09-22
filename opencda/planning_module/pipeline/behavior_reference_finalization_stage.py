@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, replace
 from typing import Any, Mapping, Optional
 
 from .behavior_reference_execution_stage import BehaviorReferenceResult
+from .reference_planning_stage import PostTurnReferenceRequest
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,29 @@ class BehaviorReferenceFinalizationRequest:
     mpc_profile: MPCCostProfileRequest
     post_turn: Any
     behavior: BehaviorFrameFinalizationRequest
+
+
+@dataclass(frozen=True)
+class BehaviorReferenceFinalizationPreparationRequest:
+    """Typed upstream outputs for the final behavior/reference handoff."""
+
+    selected_reference: Any
+    cooperative_frame: Any
+    planning_context: Any
+    executable_behavior: Any
+    reference_provider: Any
+    maneuver_manager: Any
+    config: Mapping[str, object]
+    planner_mode: str
+    sim_time_s: float
+    ego_location: Any
+    ego_speed_mps: float
+    front_gap_m: Optional[float]
+    horizon_steps: int
+    dt_s: float
+    route_revision: str
+    map_epoch: str
+    reference_freeze_count: int
 
 
 class BehaviorReferenceFinalizationStage:
@@ -155,3 +180,100 @@ class BehaviorReferenceFinalizationStage:
             speed_plan=speed_plan,
             cav_resolution=cav_resolution,
         )
+
+    def prepare_and_run(
+        self, request: BehaviorReferenceFinalizationPreparationRequest
+    ) -> BehaviorReferenceResult:
+        """Build owner-specific finalization requests from typed stage data."""
+
+        selected = request.selected_reference
+        planning = request.planning_context
+        adapter = planning.adapter_output
+        frame = planning.planner_input_frame
+        behavior_context = planning.behavior_context
+        scenario_observation = behavior_context.scenario_observation
+        scenario = scenario_observation.scenario
+        scenario_decision = scenario.decision
+        executable = request.executable_behavior
+        diagnostics = dict(selected.diagnostics)
+        nearest_obstacle_distance_m = None
+        if request.front_gap_m is not None:
+            distance_m = float(request.front_gap_m)
+            if math.isfinite(distance_m):
+                nearest_obstacle_distance_m = distance_m
+        route_required = bool(
+            behavior_context.route_behavior.authorization.required_by_route
+        )
+        boundary_recovery_active = bool(
+            request.config.get("boundary_recovery_enabled", False)
+            and scenario_decision.boundary_recovery_active
+        )
+        return self.run(BehaviorReferenceFinalizationRequest(
+            speed_plan=selected.speed_plan,
+            cooperative_frame=request.cooperative_frame,
+            reference_provider=request.reference_provider,
+            config=request.config,
+            mpc_profile=MPCCostProfileRequest(
+                behavior=str(selected.decision),
+                planner_lc_state=str(selected.lane_change_state),
+                planner_mode=str(request.planner_mode),
+                reference_tracking_mode=str(
+                    diagnostics.get("reference_tracking_mode", "")
+                ),
+                next_macro_maneuver=str(
+                    frame.planning.route.next_macro_maneuver
+                ),
+                sim_time_s=float(request.sim_time_s),
+                nearest_obstacle_distance_m=nearest_obstacle_distance_m,
+                ego_speed_mps=float(request.ego_speed_mps),
+            ),
+            post_turn=PostTurnReferenceRequest(
+                maneuver_manager=request.maneuver_manager,
+                decision=str(selected.decision),
+                scenario_state=str(scenario_decision.state),
+                exit_alignment_valid=bool(executable.lane_alignment_valid),
+                exit_lateral_error_m=float(executable.lane_lateral_error_m),
+                exit_heading_error_rad=float(executable.lane_heading_error_rad),
+                local_map=planning.local_map_snapshot,
+                ego_x_m=float(request.ego_location.x),
+                ego_y_m=float(request.ego_location.y),
+                current_state=adapter.current_state,
+                current_lane_id=int(planning.current_lane_id),
+                target_speed_mps=float(selected.target_speed_mps),
+                horizon_steps=int(request.horizon_steps),
+                dt_s=float(request.dt_s),
+                route_revision=str(request.route_revision),
+                map_epoch=str(request.map_epoch),
+                config=request.config,
+                destination_state=selected.mutable_destination_state(),
+                reference_samples=selected.mutable_reference(),
+                debug_fields=diagnostics,
+                reference_freeze_count=int(request.reference_freeze_count),
+            ),
+            behavior=BehaviorFrameFinalizationRequest(
+                maneuver=str(selected.decision),
+                phase=str(selected.lane_change_state),
+                source_lane_id=int(planning.current_lane_id),
+                target_lane_id=int(selected.target_lane_id),
+                stop_required=bool(selected.stop_goal_active),
+                route_required=route_required,
+                traffic_signal_state=str(scenario.behavior_traffic_state),
+                boundary_recovery_active=boundary_recovery_active,
+                stop_target=scenario.behavior_stop_target,
+                reason=str(executable.override_reason),
+                lane_safety_scores=dict(adapter.lane_safety_scores),
+                raw_signal_state=str(
+                    frame.planning.traffic_control.signal_state
+                ),
+                resolved_signal_state=str(
+                    scenario_observation.resolved_traffic_state
+                ),
+                filtered_signal_state=str(
+                    scenario_observation.filtered_traffic_state
+                ),
+                traffic_control_from_cp=bool(
+                    frame.planning.traffic_control.from_cp
+                ),
+                scenario_state=str(scenario_decision.state),
+            ),
+        ))

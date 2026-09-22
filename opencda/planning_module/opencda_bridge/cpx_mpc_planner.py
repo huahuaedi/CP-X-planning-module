@@ -37,7 +37,6 @@ from opencda.planning_module.pipeline.reference_line_provider import (
 from opencda.planning_module.pipeline.reference_planning_stage import (
     BehaviorReferencePreparationRequest,
     CandidatePlanningPreparationRequest,
-    PostTurnReferenceRequest,
 )
 from opencda.planning_module.pipeline.planner_diagnostics_stage import (
     PlannerDiagnosticsStage,
@@ -58,9 +57,7 @@ from opencda.planning_module.pipeline.planning_context_stage import (
     PlanningContextRequest,
 )
 from opencda.planning_module.pipeline.behavior_reference_finalization_stage import (
-    BehaviorFrameFinalizationRequest,
-    BehaviorReferenceFinalizationRequest,
-    MPCCostProfileRequest,
+    BehaviorReferenceFinalizationPreparationRequest,
 )
 from opencda.planning_module.pipeline.speed_planning_stage import (
     SpeedPlanningRequest,
@@ -1581,96 +1578,25 @@ class CPXMPCPlannerBridge:
                 validate_contract=self._validate_candidate_reference_contract,
             )
         )
-        decision = str(selected_reference.decision)
-        target_lane_id = int(selected_reference.target_lane_id)
-        planned_speed_mps = float(selected_reference.target_speed_mps)
-        local_lane_center_reference = selected_reference.mutable_reference()
-        nominal_destination_state = (
-            selected_reference.mutable_destination_state()
-        )
-        lc_state = str(selected_reference.lane_change_state)
-        stop_goal_active = bool(selected_reference.stop_goal_active)
-        speed_plan = selected_reference.speed_plan
-        reference_debug = dict(selected_reference.diagnostics)
-
-        boundary_recovery_active = bool(
-            self.config.get("boundary_recovery_enabled", False)
-            and scenario_decision.boundary_recovery_active
-        )
-        return self.pipeline.finalize_behavior_reference(
-            BehaviorReferenceFinalizationRequest(
-                speed_plan=speed_plan,
+        return self.pipeline.finalize_behavior_reference_from_stages(
+            BehaviorReferenceFinalizationPreparationRequest(
+                selected_reference=selected_reference,
                 cooperative_frame=cooperative_frame,
+                planning_context=planning_context,
+                executable_behavior=executable_behavior,
                 reference_provider=self._stable_reference_line_provider,
+                maneuver_manager=self.maneuver_manager,
                 config=self.config,
-                mpc_profile=MPCCostProfileRequest(
-                    behavior=str(decision),
-                    planner_lc_state=str(lc_state),
-                    planner_mode=str(planner_mode),
-                    reference_tracking_mode=str(
-                        reference_debug.get("reference_tracking_mode", "")
-                    ),
-                    next_macro_maneuver=str(
-                        planner_input_frame.planning.route.next_macro_maneuver
-                    ),
-                    sim_time_s=float(sim_time_s),
-                    nearest_obstacle_distance_m=(
-                        float(front_gap_m)
-                        if front_gap_m is not None
-                        and math.isfinite(float(front_gap_m))
-                        else None
-                    ),
-                    ego_speed_mps=float(ego_speed_mps),
-                ),
-                post_turn=PostTurnReferenceRequest(
-                    maneuver_manager=self.maneuver_manager,
-                    decision=str(decision),
-                    scenario_state=str(getattr(scenario_decision, "state", "")),
-                    exit_alignment_valid=executable_behavior.lane_alignment_valid,
-                    exit_lateral_error_m=executable_behavior.lane_lateral_error_m,
-                    exit_heading_error_rad=executable_behavior.lane_heading_error_rad,
-                    local_map=self._local_map_snapshot,
-                    ego_x_m=float(ego_location.x),
-                    ego_y_m=float(ego_location.y),
-                    current_state=current_state,
-                    current_lane_id=int(current_lane_id),
-                    target_speed_mps=float(planned_speed_mps),
-                    horizon_steps=int(self.mpc.horizon_steps),
-                    dt_s=float(self.mpc.dt_s),
-                    route_revision=str(self.route_manager.route_revision),
-                    map_epoch=str(self.waypoint_backend or "admap"),
-                    config=self.config,
-                    destination_state=nominal_destination_state,
-                    reference_samples=local_lane_center_reference,
-                    debug_fields=reference_debug,
-                    reference_freeze_count=int(nominal_freeze_count),
-                ),
-                behavior=BehaviorFrameFinalizationRequest(
-                    maneuver=str(decision),
-                    phase=str(lc_state),
-                    source_lane_id=int(current_lane_id),
-                    target_lane_id=int(target_lane_id),
-                    stop_required=bool(stop_goal_active),
-                    route_required=bool(route_lane_change_required),
-                    traffic_signal_state=str(behavior_traffic_state),
-                    boundary_recovery_active=bool(boundary_recovery_active),
-                    stop_target=(
-                    dict(behavior_stop_target)
-                    if isinstance(behavior_stop_target, Mapping)
-                    else None
-                    ),
-                    reason=executable_behavior.override_reason,
-                    lane_safety_scores=lane_safety_scores,
-                    raw_signal_state=str(
-                        planner_input_frame.planning.traffic_control.signal_state
-                    ),
-                    resolved_signal_state=str(resolved_traffic_state),
-                    filtered_signal_state=str(filtered_traffic_state),
-                    traffic_control_from_cp=bool(
-                        planner_input_frame.planning.traffic_control.from_cp
-                    ),
-                    scenario_state=str(scenario_decision.state),
-                ),
+                planner_mode=str(planner_mode),
+                sim_time_s=float(sim_time_s),
+                ego_location=ego_location,
+                ego_speed_mps=float(ego_speed_mps),
+                front_gap_m=front_gap_m,
+                horizon_steps=int(self.mpc.horizon_steps),
+                dt_s=float(self.mpc.dt_s),
+                route_revision=str(self.route_manager.route_revision),
+                map_epoch=str(self.waypoint_backend or "admap"),
+                reference_freeze_count=int(nominal_freeze_count),
             )
         )
 

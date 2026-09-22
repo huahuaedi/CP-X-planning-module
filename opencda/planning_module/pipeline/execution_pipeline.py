@@ -14,6 +14,7 @@ from .speed_planner import (
 )
 from .behavior_stage import BehaviorOverrideRequest
 from .behavior_reference_finalization_stage import (
+    BehaviorReferenceFinalizationPreparationRequest,
     BehaviorReferenceFinalizationRequest,
     BehaviorReferenceFinalizationStage,
 )
@@ -755,6 +756,11 @@ class PlanningPipeline:
         self, request: BehaviorReferenceFinalizationRequest
     ):
         return self.behavior_reference_finalization.run(request)
+
+    def finalize_behavior_reference_from_stages(
+        self, request: BehaviorReferenceFinalizationPreparationRequest
+    ):
+        return self.behavior_reference_finalization.prepare_and_run(request)
 
     def cooperative_conflict_reference(self, **kwargs):
         if self.reference_planning is None:
