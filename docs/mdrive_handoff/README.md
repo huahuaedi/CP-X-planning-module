@@ -7,8 +7,8 @@ debugging the slow multi-agent runs.
 - `mdrive_cpx_integration.patch` — the MDrive-side changes (15 files).
 - This README — how to apply it, the exact commands, measured results, and what is known.
 
-All results below were measured on 2026-09-21 with CP-X commit `78ada3a`. The only
-later commit (`20a2ec1`) changes a test file, so the runtime code is the same.
+All results below were measured on 2026-09-21 on the `convert_to_ros` branch (the runtime
+code has not changed since).
 Hardware: 1 GPU (24 GB), 24 CPU cores, CARLA 0.9.12.
 
 ## 1. Setup
@@ -65,9 +65,6 @@ run Overtaking_on_Two-Lane_Road/1       repro_overtaking
 run Roundabout_Navigation/1             repro_roundabout
 run Pedestrian_Crosswalk/1              repro_pedestrian
 run Blocked_Lane_Obstacle/1             repro_blocked
-run Construction_Zone/1                 repro_construction
-run Major_Minor_Unsignalized_Entry/1    repro_majorminor
-run Interactive_Lane_Change/3           repro_ilc3        # route 3, not the default /1
 
 # The two slow scenarios (see section 4). Expect these to take a very long time.
 run Unprotected_Left_Turn/1             repro_unprotectedleft
@@ -99,12 +96,9 @@ broadcast their intent.
 | Roundabout_Navigation/1 | 2 | Stopped 2.6 m short of the goal, no collision | 94.6% | 44.6 s | 162.4 s | 3.6x |
 | Pedestrian_Crosswalk/1 | 2 | Stopped 2.7 m short; run ends by route timeout, no collision | 96.8% (HUGSIM) | 75.1 s | 296.1 s | 3.9x |
 | Blocked_Lane_Obstacle/1 | 3 | Stopped, no collision (see note) | 12.7% | 36.4 s | 146.3 s | 4.0x |
-| Construction_Zone/1 | 4 | Collision at 4.2 s | 2.3% | 17.3 s | 119.0 s | 6.9x |
-| Major_Minor_Unsignalized_Entry/1 | 3 | Collision at 3.2 s | 3.2% | 12.8 s | 39.8 s | 3.1x |
-| Interactive_Lane_Change/3 | 5 | Collision at 13.9 s | 95.1% | 14.0 s | 58.1 s | 4.2x |
 
 Blocked and Pedestrian were each run twice with identical results. Every run finishes without a
-startup crash. All eight are 2-7x slower than real time but complete in under 5 minutes.
+startup crash. All five are 2-4x slower than real time and complete in under 5 minutes.
 
 ## 4. The slow-run problem
 
@@ -113,7 +107,7 @@ These were last observed on 2026-09-15 and were **not re-run** in the batch abov
 observation, more than 25 minutes of wall time produced only about 15 s of simulated time.
 The process was not deadlocked: it alternated R/D state at ~111% CPU and the tick count in the
 debug jsonl kept climbing (121 -> 225 ticks over several minutes). In the debug trace,
-`cav_conflict_agent_count` was 10 there (4 in the 5-ego `Interactive_Lane_Change/3`).
+`cav_conflict_agent_count` was 10 there.
 
 **What is known**
 
@@ -122,8 +116,8 @@ debug jsonl kept climbing (121 -> 225 ticks over several minutes). In the debug 
    loop in one Python process, so per-tick work serializes on one core (24 cores were idle).
    Parallelizing it has to respect the `begin_tick` / `commit_tick` staged-message contract in
    `MDriveCAVRegistry` (`cpx_planner_adapter.py`), which assumes sequential execution within a tick.
-2. `controlled_ego_count: 1` limits how many egos run the full pipeline (5-ego ILC3 finished in
-   about 1 minute), but it does **not** remove the growth of a single ego's per-tick cost with
+2. `controlled_ego_count: 1` limits how many egos run the full pipeline (a 5-ego scenario finished
+   in about 1 minute), but it does **not** remove the growth of a single ego's per-tick cost with
    the number of nearby perceived vehicles.
 3. In a 3-ego run (Highway), QP trajectory planning averaged about 15 ms per replan and route
    summary about 14 ms per call, so the QP is not obviously the dominant cost there. This is one
@@ -142,8 +136,8 @@ need to wait 25 minutes):
 2. Without privileges: wrap `MDriveCPXPlanner.run_step` in `cProfile` for the first ~200 ticks and
    sort by cumulative time.
 3. Compare `[cpx_stage_timing]` output (printed roughly every 50 ticks from
-   `opencda/planning_module/opencda_bridge/cpx_mpc_planner.py`) between `Interactive_Lane_Change/3`
-   (fast) and `Unprotected_Left_Turn/1` (slow).
+   `opencda/planning_module/opencda_bridge/cpx_mpc_planner.py`) between a fast scenario from the
+   table above (for example Highway) and `Unprotected_Left_Turn/1` (slow).
 4. Check whether cost tracks `cav_conflict_agent_count` by distance-filtering the perceived agents
    (for example to 50 m) and re-timing.
 
@@ -156,7 +150,6 @@ need to wait 25 minutes):
 | Highway | MPC reports infeasible during plain lane-follow, enters `bounded_safe_stop`, and never recovers. Diagnosed, not fixed. | CP-X |
 | Roundabout, Pedestrian | Planner declares `route_reached_destination` and stops about 2.6 m before the end of the route, in both scenarios (2.63 and 2.60 m). Cause of the offset not located yet. | CP-X (probable) |
 | Pedestrian (timeout) | Same stop position as an earlier run that ended by Tier-2 `soft_complete`; this time `soft_complete` never fired (needs rc >= 95% and speed < 0.1 m/s for 5 s, in `scenario_manager.py`). Cause not determined. | Unknown / MDrive side |
-| Construction, Major_Minor, ILC3 | Collisions. Not root-caused. For ILC3 an earlier analysis suggested a faster following vehicle rear-ending the ego during destination braking, but that was not concluded. | Not diagnosed |
 | Unprotected_Left_Turn, Intersection_Deadlock | Slow-run problem above. | Both |
 
 ## 6. Unit tests
