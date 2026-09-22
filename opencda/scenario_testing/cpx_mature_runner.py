@@ -228,6 +228,34 @@ def _destinations_reached(vehicle_managers, vehicle_configs, tolerance_m):
     )
 
 
+def _enable_mature_evaluation_metrics(scenario_params):
+    """Make simulator-ground-truth evaluation part of the mature-run contract.
+
+    VehicleManager intentionally defaults the recorder off for ordinary
+    runtime use.  Mature regression scenarios are evaluators, so collision,
+    boundary and MPC counters must be enabled before managers and collision
+    sensors are constructed.  A scenario may explicitly opt out when it is
+    used only for visualization.
+    """
+
+    enabled = bool(
+        scenario_params.get("cpx_mature", {}).get(
+            "record_evaluation_metrics", True
+        )
+    )
+    vehicle_base = scenario_params.setdefault("vehicle_base", {})
+    vehicle_base.setdefault("planner", {})[
+        "record_evaluation_metrics"
+    ] = bool(enabled)
+    for config in scenario_params.get("scenario", {}).get(
+        "single_cav_list", []
+    ) or []:
+        config.setdefault("planner", {})[
+            "record_evaluation_metrics"
+        ] = bool(enabled)
+    return bool(enabled)
+
+
 class _TargetBrakeStimulus(object):
     """Deterministic, state-triggered brake stimulus for prediction A/B runs.
 
@@ -556,6 +584,7 @@ def run_mature_scenario(opt, scenario_params, *, script_name):
     vehicle_configs = []
     try:
         scenario_params = add_current_time(scenario_params)
+        _enable_mature_evaluation_metrics(scenario_params)
         _reset_cooperative_payloads(scenario_params)
         owned_actor_roles = _assign_scenario_actor_roles(
             scenario_params, script_name

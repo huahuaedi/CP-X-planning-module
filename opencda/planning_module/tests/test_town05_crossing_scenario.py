@@ -4,6 +4,7 @@ from omegaconf import OmegaConf
 
 from opencda.scenario_testing.cpx_mature_runner import (
     _configure_synthetic_multimodal_prediction,
+    _enable_mature_evaluation_metrics,
     _manager_reached_destination,
 )
 from opencda.scenario_testing.scripted_actor import ScriptedActor
@@ -238,6 +239,26 @@ def test_runner_keeps_euclidean_completion_for_non_cpx_manager():
     manager.cpx_planner = None
 
     assert _manager_reached_destination(manager, [0.0, 0.0], 3.0)
+
+
+def test_mature_runner_enables_metrics_for_base_and_per_cav_planners():
+    params = OmegaConf.create({
+        "vehicle_base": {"planner": {}},
+        "scenario": {
+            "single_cav_list": [
+                {"planner": {}},
+                {"planner": {"record_evaluation_metrics": False}},
+            ],
+        },
+        "cpx_mature": {},
+    })
+
+    assert _enable_mature_evaluation_metrics(params) is True
+    assert params.vehicle_base.planner.record_evaluation_metrics is True
+    assert all(
+        config.planner.record_evaluation_metrics is True
+        for config in params.scenario.single_cav_list
+    )
 
 
 def test_late_crossing_off_arm_changes_only_conflict_pipeline_and_output():
