@@ -664,6 +664,95 @@ def test_lane_change_candidate_skips_discarded_legacy_reference_build():
     assert result.destination_state[-1] == 11
 
 
+def test_lane_change_variants_reuse_one_tick_local_behavior_base():
+    provider = ReferenceLineProvider()
+    provider.route_lane_change_target_candidate = lambda **_kwargs: (
+        CandidateReferenceOverrideResult(
+            samples=(), destination_state=(), diagnostics={}
+        )
+    )
+    calls = []
+
+    def build_behavior_reference(**kwargs):
+        calls.append(dict(kwargs))
+        return SimpleNamespace(
+            mutable_destination_state=lambda: [8.0, 3.5, 6.0, 0.0, 11],
+            mutable_samples=lambda: _line(3.5)[:8],
+            diagnostics={"reference_source": "route_candidate_base"},
+            fallback_reason="",
+        )
+
+    provider.build_behavior_reference = build_behavior_reference
+    provider.lane_change_candidate = lambda **kwargs: (
+        CandidateReferenceOverrideResult(
+            samples=tuple(kwargs["target_reference"]),
+            destination_state=tuple(kwargs["destination_state"]),
+            diagnostics={
+                "trajectory_variant": str(kwargs["trajectory_variant"]),
+            },
+        )
+    )
+    context = SimpleNamespace(
+        map_planner=None, local_map=SimpleNamespace(valid=True), ego_pose={},
+        planner_config={},
+        current_state=(0.0, 0.0, 6.0, 0.0),
+        ego_location=SimpleNamespace(x=0.0, y=0.0), ego_yaw_rad=0.0,
+        ego_speed_mps=6.0, route_points=(), previous_reference=(),
+        previous_target_state=(), behavior_runtime_config={},
+        baseline_decision="lane_follow", baseline_target_lane_id=10,
+        baseline_speed_mps=6.0,
+        baseline_destination_state=(8.0, 0.0, 6.0, 0.0, 10),
+        baseline_reference=tuple(_line()[:8]), baseline_debug={},
+        current_lane_id=10, route_optimal_lane_id=11,
+        route_reference_allowed=True, route_reference_gate_reason="",
+        in_junction=False, next_macro_maneuver="straight",
+        planner_mode="NORMAL", lookahead_m=20.0, horizon_steps=8,
+        dt_s=0.1, reference_freeze_count=0, sim_time_s=1.0,
+        stop_release_smooth_until_s=0.0, authoritative_ego_waypoint=None,
+        route_revision="route-1", map_epoch="admap",
+        upcoming_turn_direction="", upcoming_turn_distance_m=float("inf"),
+        lane_change_duration_s=4.0, lane_change_duration_reason="comfort",
+        lane_width_m=3.5,
+    )
+    geometry = SimpleNamespace(
+        step_m=0.5, geometry_length_m=20.0, geometry_speed_mps=6.0,
+        operational_curvature_limit_1pm=0.2,
+    )
+
+    results = []
+    for variant in ("assertive", "normal", "conservative"):
+        results.append(provider.candidate_intent_reference(
+            intent=SimpleNamespace(
+                decision="lane_change_left", target_lane_id=11,
+                target_speed_mps=6.0, lane_change_duration_s=4.0,
+                trajectory_variant=variant, reason="route_authorized",
+            ),
+            context=context,
+            lane_change_state="EXECUTE_LANE_CHANGE_LEFT",
+            geometry_plan=geometry,
+            keep_lane_reference=_line()[:8],
+        ))
+
+    assert len(calls) == 1
+    assert results[0].diagnostics["candidate_base_reference_cache_reused"] is False
+    assert results[1].diagnostics["candidate_base_reference_cache_reused"] is True
+    assert results[2].diagnostics["candidate_base_reference_cache_reused"] is True
+
+    context.sim_time_s = 1.1
+    provider.candidate_intent_reference(
+        intent=SimpleNamespace(
+            decision="lane_change_left", target_lane_id=11,
+            target_speed_mps=6.0, lane_change_duration_s=4.0,
+            trajectory_variant="normal", reason="route_authorized",
+        ),
+        context=context,
+        lane_change_state="EXECUTE_LANE_CHANGE_LEFT",
+        geometry_plan=geometry,
+        keep_lane_reference=_line()[:8],
+    )
+    assert len(calls) == 2
+
+
 def test_modes_do_not_overwrite_each_other():
     provider = ReferenceLineProvider()
     provider.install(

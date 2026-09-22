@@ -254,6 +254,12 @@ class ReferenceLineProvider(StableReferenceLineProvider):
         self._snapshots = {
             mode: ReferenceLineSnapshot(mode=mode) for mode in _MODES
         }
+        # Candidate variants share one target corridor within a planning
+        # tick.  Keep this cache deliberately tick-local: it removes repeated
+        # route/reference construction without becoming another persistent
+        # reference-line owner.
+        self._candidate_base_cache_time_s = None
+        self._candidate_base_cache = {}
 
     def attach_builder(self, builder: Any) -> None:
         self._builder = builder
@@ -1635,6 +1641,93 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             diagnostics=MappingProxyType(diagnostics),
         )
 
+    def _candidate_behavior_base_reference(
+        self, *, decision, target_lane_id, target_speed_mps,
+        lane_change_state, geometry_plan, context,
+    ) -> CandidateReferenceOverrideResult:
+        """Build one candidate base, reusing it only across this tick's variants.
+
+        Lane-change trajectory variants differ in their Frenet transition,
+        not in the route/target-corridor lookup that precedes it.  Caching the
+        latter here keeps reference ownership in this provider and leaves
+        every variant's geometry and feasibility evaluation independent.
+        """
+
+        cache_time_s = float(context.sim_time_s)
+        if self._candidate_base_cache_time_s != cache_time_s:
+            self._candidate_base_cache_time_s = cache_time_s
+            self._candidate_base_cache.clear()
+        cache_key = (
+            str(decision), int(target_lane_id),
+            round(float(target_speed_mps), 6), str(lane_change_state),
+            round(max(0.05, float(geometry_plan.step_m)), 6),
+            str(context.route_revision), str(context.map_epoch),
+        )
+        cacheable = str(decision) in {"lane_change_left", "lane_change_right"}
+        cached = self._candidate_base_cache.get(cache_key) if cacheable else None
+        if cached is not None:
+            destination_rows, reference_rows, diagnostic_fields = cached
+            diagnostics = dict(diagnostic_fields)
+            diagnostics["candidate_base_reference_cache_reused"] = True
+            return CandidateReferenceOverrideResult(
+                samples=tuple(reference_rows),
+                destination_state=tuple(destination_rows),
+                diagnostics=MappingProxyType(diagnostics),
+            )
+
+        built = self.build_behavior_reference(
+            map_planner=context.map_planner,
+            local_map=context.local_map,
+            ego_pose=context.ego_pose,
+            ego_state=context.current_state,
+            route_points=context.route_points,
+            previous_reference=context.previous_reference,
+            previous_target_state=context.previous_target_state,
+            behavior_runtime_config=context.behavior_runtime_config,
+            decision=decision,
+            lane_change_state=str(lane_change_state),
+            target_lane_id=target_lane_id,
+            current_lane_id=int(context.current_lane_id),
+            route_optimal_lane_id=int(context.route_optimal_lane_id),
+            route_reference_allowed=bool(context.route_reference_allowed),
+            route_reference_gate_reason=str(context.route_reference_gate_reason),
+            in_junction=bool(context.in_junction),
+            next_macro_maneuver=str(context.next_macro_maneuver),
+            planner_mode=str(context.planner_mode),
+            lookahead_m=float(context.lookahead_m),
+            target_speed_mps=target_speed_mps,
+            ego_speed_mps=float(context.ego_speed_mps),
+            horizon_steps=int(context.horizon_steps),
+            dt_s=float(context.dt_s),
+            reference_freeze_count=int(context.reference_freeze_count),
+            sim_time_s=float(context.sim_time_s),
+            stop_release_smooth_until_s=float(
+                context.stop_release_smooth_until_s
+            ),
+            authoritative_ego_waypoint=context.authoritative_ego_waypoint,
+            lane_reference_step_distance_m=max(
+                0.05, float(geometry_plan.step_m)
+            ),
+            route_revision=str(context.route_revision),
+            map_epoch=str(context.map_epoch),
+        )
+        destination = tuple(built.mutable_destination_state())
+        reference = tuple(
+            MappingProxyType(dict(row)) for row in built.mutable_samples()
+        )
+        diagnostics = dict(built.diagnostics)
+        diagnostics["fallback_reason"] = str(built.fallback_reason)
+        if cacheable:
+            self._candidate_base_cache[cache_key] = (
+                destination, reference, MappingProxyType(dict(diagnostics))
+            )
+        diagnostics["candidate_base_reference_cache_reused"] = False
+        return CandidateReferenceOverrideResult(
+            samples=reference,
+            destination_state=destination,
+            diagnostics=MappingProxyType(diagnostics),
+        )
+
     def candidate_intent_reference(
         self,
         *,
@@ -1690,48 +1783,17 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             reference = [dict(x) for x in context.baseline_reference]
             diagnostics = dict(context.baseline_debug)
         else:
-            built = self.build_behavior_reference(
-                map_planner=context.map_planner,
-                local_map=context.local_map,
-                ego_pose=context.ego_pose,
-                ego_state=context.current_state,
-                route_points=context.route_points,
-                previous_reference=context.previous_reference,
-                previous_target_state=context.previous_target_state,
-                behavior_runtime_config=context.behavior_runtime_config,
+            built = self._candidate_behavior_base_reference(
                 decision=decision,
-                lane_change_state=str(lane_change_state),
                 target_lane_id=target_lane_id,
-                current_lane_id=int(context.current_lane_id),
-                route_optimal_lane_id=int(context.route_optimal_lane_id),
-                route_reference_allowed=bool(context.route_reference_allowed),
-                route_reference_gate_reason=str(
-                    context.route_reference_gate_reason
-                ),
-                in_junction=bool(context.in_junction),
-                next_macro_maneuver=str(context.next_macro_maneuver),
-                planner_mode=str(context.planner_mode),
-                lookahead_m=float(context.lookahead_m),
                 target_speed_mps=target_speed_mps,
-                ego_speed_mps=float(context.ego_speed_mps),
-                horizon_steps=int(context.horizon_steps),
-                dt_s=float(context.dt_s),
-                reference_freeze_count=int(context.reference_freeze_count),
-                sim_time_s=float(context.sim_time_s),
-                stop_release_smooth_until_s=float(
-                    context.stop_release_smooth_until_s
-                ),
-                authoritative_ego_waypoint=context.authoritative_ego_waypoint,
-                lane_reference_step_distance_m=max(
-                    0.05, float(geometry_plan.step_m)
-                ),
-                route_revision=str(context.route_revision),
-                map_epoch=str(context.map_epoch),
+                lane_change_state=lane_change_state,
+                geometry_plan=geometry_plan,
+                context=context,
             )
             destination = built.mutable_destination_state()
             reference = built.mutable_samples()
             diagnostics = dict(built.diagnostics)
-            diagnostics["fallback_reason"] = str(built.fallback_reason)
 
         route_required = bool(
             str(required_lane_change_decision)
