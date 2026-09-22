@@ -4,6 +4,7 @@ import pytest
 
 from pipeline.cooperative_arbitration import CavIntent, ResourceClaim
 from pipeline.execution_pipeline import (
+    BehaviorContextRequest,
     NominalPlanningRequest,
     PlanningPipeline,
     ScenarioPlanningFrameRequest,
@@ -135,6 +136,130 @@ def test_pipeline_observes_scenario_from_frozen_adapter_frame():
     assert result == "scenario-observation"
     assert captured["scenario"]["raw_traffic_state"] == "green"
     assert captured["turn"]["next_macro_maneuver"] == "turn_right"
+
+
+def test_pipeline_owns_route_scenario_conflict_context_sequence():
+    calls = []
+    authorization = SimpleNamespace(required_by_route=True)
+    route_behavior = SimpleNamespace(
+        authorization=authorization,
+        replan_reason="route_discontinuity",
+    )
+    handoff = SimpleNamespace(action="release", reason="maneuver_complete")
+    conflict = SimpleNamespace(
+        authorization=authorization,
+        lateral_ownership=SimpleNamespace(
+            handoff=handoff,
+            reference_release_event="phase_transition",
+        ),
+    )
+
+    class Behavior:
+        def resolve_route_context(self, **kwargs):
+            calls.append(("route", kwargs))
+            return route_behavior
+
+        def prepare_turn_scenario_context(self, **kwargs):
+            calls.append(("turn", kwargs))
+            return SimpleNamespace(distance_m=18.0)
+
+        def resolve_conflicts(self, request, **kwargs):
+            calls.append(("conflict", request, kwargs))
+            assert request.route_authorization is authorization
+            assert request.distance_to_turn_m == pytest.approx(18.0)
+            return conflict
+
+    scenario_observation = SimpleNamespace(
+        turn_context=SimpleNamespace(distance_m=18.0),
+        scenario=SimpleNamespace(decision=SimpleNamespace(state="LANE_KEEP")),
+    )
+
+    class Scenario:
+        def observe_planning_context(self, **kwargs):
+            calls.append(("scenario", kwargs))
+            assert kwargs["prepare_turn_context"]().distance_m == 18.0
+            return scenario_observation
+
+    class ReferenceProvider:
+        def release(self, mode, *, event):
+            calls.append(("release", mode, event))
+            return True, "released"
+
+        def snapshot(self, _mode):
+            return SimpleNamespace(active=False)
+
+    stop_target = SimpleNamespace(active=False)
+    adapter = SimpleNamespace(
+        signal_context={},
+        frame=SimpleNamespace(
+            map_lane=SimpleNamespace(
+                allowed_lane_ids=(7, 8), in_junction=False
+            ),
+            planning=SimpleNamespace(
+                route=SimpleNamespace(
+                    current_road_option="LANEFOLLOW",
+                    next_macro_maneuver="turn_right",
+                    next_macro_distance_m=18.0,
+                ),
+                traffic_control=SimpleNamespace(
+                    signal_state="green", stop_target=stop_target,
+                ),
+            ),
+        ),
+    )
+    pipeline = PlanningPipeline(
+        runtime_input=RuntimeInputStage(_Mapper()),
+        perception=PerceptionStage(), behavior=Behavior(), scenario=Scenario(),
+        static_obstacle=object(), control_safety=object(), speed=object(),
+        destination_speed=object(), reference_publication=object(),
+        mpc_entry=object(),
+    )
+    reset_reasons = []
+    stage_names = []
+    result = pipeline.resolve_behavior_context(
+        BehaviorContextRequest(
+            adapter_output=adapter,
+            local_map_snapshot="local-map",
+            route_manager="route-manager",
+            maneuver_manager="maneuver-manager",
+            reference_provider=ReferenceProvider(),
+            traffic_memory="traffic-memory",
+            opportunistic_request="opportunistic-request",
+            ego_location=SimpleNamespace(x=1.0, y=2.0),
+            ego_yaw_rad=0.0,
+            ego_speed_mps=4.0,
+            planning_speed_mps=6.0,
+            current_lane_id=7,
+            sim_time_s=5.0,
+            cruise_speed_mps=8.0,
+            mpc_dt_s=0.1,
+            lane_width_m=3.5,
+            config={},
+        ),
+        resolve_actor_state=lambda **_kwargs: ("green", ""),
+        project_stop_target=lambda **_kwargs: (float("inf"), False),
+        attempt_turn_replan=lambda reason: (
+            True, True, "replanned:" + reason
+        ),
+        reset_lane_change=lambda **kwargs: reset_reasons.append(kwargs),
+        observe_stage_duration=lambda name, _seconds: stage_names.append(name),
+    )
+
+    assert result.route_behavior is route_behavior
+    assert result.scenario_observation is scenario_observation
+    assert result.conflict_resolution is conflict
+    assert result.route_replan_attempted
+    assert result.route_replan_succeeded
+    assert result.route_replan_reason == "replanned:route_discontinuity"
+    assert stage_names == [
+        "sub_resolve_route_context",
+        "sub_observe_planning_frame",
+        "sub_resolve_conflicts",
+    ]
+    assert [entry[0] for entry in calls] == [
+        "route", "scenario", "turn", "conflict", "release"
+    ]
+    assert reset_reasons == [{"reason": "maneuver_complete"}]
 
 
 def test_pipeline_owns_speed_resolution_sequence():

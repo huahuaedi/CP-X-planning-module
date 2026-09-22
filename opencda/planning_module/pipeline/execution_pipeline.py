@@ -19,6 +19,7 @@ from .conflict_classifier import ClassifierParams, _agent_id
 from .spatiotemporal_corridor import CorridorParams, make_gap_gate_margin_m
 from .mpc_obstacle_relevance import _polyline_xy
 from .rss import RSSParams, longitudinal_safe_distance
+from .behavior_stage import ConflictResolutionRequest
 
 
 @dataclass(frozen=True)
@@ -123,6 +124,42 @@ class ScenarioPlanningFrameRequest:
     sim_time_s: float
     config: Mapping[str, object]
     boundary_recovery_request: Any = None
+
+
+@dataclass(frozen=True)
+class BehaviorContextRequest:
+    """Frozen inputs for route, scenario and lateral-conflict resolution."""
+
+    adapter_output: Any
+    local_map_snapshot: Any
+    route_manager: Any
+    maneuver_manager: Any
+    reference_provider: Any
+    traffic_memory: Any
+    opportunistic_request: Any
+    ego_location: Any
+    ego_yaw_rad: float
+    ego_speed_mps: float
+    planning_speed_mps: float
+    current_lane_id: int
+    sim_time_s: float
+    cruise_speed_mps: float
+    mpc_dt_s: float
+    lane_width_m: float
+    config: Mapping[str, object]
+    boundary_recovery_request: Any = None
+
+
+@dataclass(frozen=True)
+class BehaviorContextFrame:
+    """One authoritative route/scenario/conflict view for a planning tick."""
+
+    route_behavior: Any
+    scenario_observation: Any
+    conflict_resolution: Any
+    route_replan_attempted: bool = False
+    route_replan_succeeded: bool = False
+    route_replan_reason: str = ""
 
 
 class PlanningPipeline:
@@ -541,6 +578,129 @@ class PlanningPipeline:
                 "full_latched_virtual_stop_distance_m", 12.0
             )),
             boundary_recovery_request=request.boundary_recovery_request,
+        )
+
+    def resolve_behavior_context(
+        self,
+        request: BehaviorContextRequest,
+        *,
+        resolve_actor_state: Callable[..., Any],
+        project_stop_target: Callable[..., Any],
+        attempt_turn_replan: Callable[[str], tuple],
+        reset_lane_change: Optional[Callable[..., Any]] = None,
+        observe_stage_duration: Optional[Callable[[str, float], None]] = None,
+    ) -> BehaviorContextFrame:
+        """Resolve route, scenario and lateral ownership in one order.
+
+        These stages consume the same frozen adapter frame.  Keeping their
+        ordering here prevents the bridge from rebuilding route or scenario
+        facts between calls, while callbacks isolate the few state-changing
+        ports (reroute and behavior-planner reset).
+        """
+
+        def run_stage(name, operation):
+            started_s = time.monotonic()
+            result = operation()
+            if observe_stage_duration is not None:
+                observe_stage_duration(name, time.monotonic() - started_s)
+            return result
+
+        frame = request.adapter_output.frame
+        route_behavior = run_stage(
+            "sub_resolve_route_context",
+            lambda: self.resolve_route_context(
+                adapter_output=request.adapter_output,
+                local_map_snapshot=request.local_map_snapshot,
+                route_manager=request.route_manager,
+                maneuver_manager=request.maneuver_manager,
+                reference_provider=request.reference_provider,
+                current_lane_id=int(request.current_lane_id),
+                available_lane_ids=tuple(frame.map_lane.allowed_lane_ids),
+                ego_x_m=float(request.ego_location.x),
+                ego_y_m=float(request.ego_location.y),
+                ego_heading_rad=float(request.ego_yaw_rad),
+                ego_speed_mps=float(request.ego_speed_mps),
+                config=request.config,
+            ),
+        )
+
+        replan_attempted = False
+        replan_succeeded = False
+        replan_reason = ""
+        if str(route_behavior.replan_reason):
+            replan_attempted, replan_succeeded, replan_reason = (
+                attempt_turn_replan(str(route_behavior.replan_reason))
+            )
+
+        scenario_observation = run_stage(
+            "sub_observe_planning_frame",
+            lambda: self.observe_planning_frame(
+                ScenarioPlanningFrameRequest(
+                    adapter_output=request.adapter_output,
+                    traffic_memory=request.traffic_memory,
+                    route_manager=request.route_manager,
+                    ego_location=request.ego_location,
+                    ego_yaw_rad=float(request.ego_yaw_rad),
+                    ego_speed_mps=float(request.ego_speed_mps),
+                    current_lane_id=int(request.current_lane_id),
+                    cruise_speed_mps=float(request.cruise_speed_mps),
+                    sim_time_s=float(request.sim_time_s),
+                    config=request.config,
+                    boundary_recovery_request=request.boundary_recovery_request,
+                ),
+                resolve_actor_state=resolve_actor_state,
+                project_stop_target=project_stop_target,
+            ),
+        )
+        turn_context = scenario_observation.turn_context
+        conflict_resolution = run_stage(
+            "sub_resolve_conflicts",
+            lambda: self.resolve_conflicts(
+                ConflictResolutionRequest(
+                    route_authorization=route_behavior.authorization,
+                    opportunistic_request=request.opportunistic_request,
+                    owner_state=str(scenario_observation.scenario.decision.state),
+                    ego_speed_mps=float(request.ego_speed_mps),
+                    planning_speed_mps=float(request.planning_speed_mps),
+                    lane_change_duration_s=max(0.1, float(request.config.get(
+                        "candidate_lane_change_normal_duration_s", 4.0
+                    ))),
+                    dt_s=float(request.mpc_dt_s),
+                    lane_width_m=float(request.lane_width_m),
+                    distance_to_turn_m=float(turn_context.distance_m),
+                    config=request.config,
+                    ego_location=request.ego_location,
+                    ego_yaw_rad=float(request.ego_yaw_rad),
+                ),
+                maneuver_manager=request.maneuver_manager,
+            ),
+        )
+
+        lateral_ownership = conflict_resolution.lateral_ownership
+        handoff = lateral_ownership.handoff
+        if handoff.action == "release":
+            released, release_result = request.reference_provider.release(
+                "lane_change",
+                event=str(lateral_ownership.reference_release_event),
+            )
+            if (
+                not released
+                and request.reference_provider.snapshot("lane_change").active
+            ):
+                raise RuntimeError(
+                    "lane-change semantic ownership was released but its "
+                    "reference remained active: " + str(release_result)
+                )
+            if callable(reset_lane_change):
+                reset_lane_change(reason=str(handoff.reason))
+
+        return BehaviorContextFrame(
+            route_behavior=route_behavior,
+            scenario_observation=scenario_observation,
+            conflict_resolution=conflict_resolution,
+            route_replan_attempted=bool(replan_attempted),
+            route_replan_succeeded=bool(replan_succeeded),
+            route_replan_reason=str(replan_reason),
         )
 
     def resolve_static_obstacle(self, **kwargs):
