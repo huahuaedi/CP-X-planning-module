@@ -1,6 +1,8 @@
 """AD-map-only tests for the planning-facing global-planner adapter."""
 
 import math
+import threading
+from collections import OrderedDict
 from types import SimpleNamespace
 
 from utility.global_planner import (
@@ -54,3 +56,69 @@ def test_lane_step_returns_none_without_admap_successor():
     assert lane_step_xy_heading(
         0.0, 0.0, 5.0, get_waypoint_fn=lambda pose: None,
     ) is None
+
+
+def _adapter_with_query_core(core):
+    adapter = object.__new__(CustomGlobalPlannerAdapter)
+    adapter.core = core
+    adapter._waypoint_query_lock = threading.Lock()
+    adapter._waypoint_query_cache = OrderedDict()
+    adapter._waypoint_candidates_cache = OrderedDict()
+    return adapter
+
+
+def test_static_waypoint_queries_are_reused_until_cache_invalidation():
+    waypoint = object()
+    core = SimpleNamespace(
+        waypoint_calls=0,
+        candidate_calls=0,
+    )
+
+    def get_waypoint(position, search_radius_m=None):
+        del position, search_radius_m
+        core.waypoint_calls += 1
+        return waypoint
+
+    def get_waypoint_candidates(position, search_radius_m=None):
+        del position, search_radius_m
+        core.candidate_calls += 1
+        return [{"waypoint": waypoint, "is_in_lane": True}]
+
+    core.get_waypoint = get_waypoint
+    core.get_waypoint_candidates = get_waypoint_candidates
+    adapter = _adapter_with_query_core(core)
+    position = {"x": 1.0, "y": 2.0, "z": 0.0}
+
+    assert adapter.get_waypoint(position) is waypoint
+    assert adapter.get_waypoint(position) is waypoint
+    first = adapter.get_waypoint_candidates(position)
+    first[0]["is_in_lane"] = False
+    second = adapter.get_waypoint_candidates(position)
+
+    assert core.waypoint_calls == 1
+    assert core.candidate_calls == 1
+    assert second[0]["is_in_lane"] is True
+
+    adapter._clear_waypoint_query_caches()
+    adapter.get_waypoint(position)
+    adapter.get_waypoint_candidates(position)
+    assert core.waypoint_calls == 2
+    assert core.candidate_calls == 2
+
+
+def test_drivable_waypoint_reuses_cached_candidate_projection():
+    waypoint = object()
+    core = SimpleNamespace(candidate_calls=0)
+
+    def get_waypoint_candidates(position, search_radius_m=None):
+        del position, search_radius_m
+        core.candidate_calls += 1
+        return [{"waypoint": waypoint, "is_in_lane": True}]
+
+    core.get_waypoint_candidates = get_waypoint_candidates
+    adapter = _adapter_with_query_core(core)
+    position = (3.0, 4.0, 0.0)
+
+    assert adapter.get_drivable_waypoint(position) is waypoint
+    assert adapter.get_drivable_waypoint(position) is waypoint
+    assert core.candidate_calls == 1

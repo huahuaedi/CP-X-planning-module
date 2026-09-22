@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass, field, replace
 import math
 import threading
@@ -25,6 +26,7 @@ except ImportError:
 
 
 INVALID_LANE_ID = 0
+_WAYPOINT_QUERY_CACHE_CAPACITY = 8192
 
 
 @dataclass(frozen=True)
@@ -353,6 +355,14 @@ class CustomGlobalPlannerAdapter:
         self._stored_route_lane_ids: List[int] = []
         self._stored_route_waypoints: List[Waypoint | None] = []
         self._lane_context_lock = threading.Lock()
+        self._waypoint_query_lock = threading.Lock()
+        self._waypoint_query_cache: OrderedDict[
+            Tuple[float, float, float, float | None], Waypoint | None
+        ] = OrderedDict()
+        self._waypoint_candidates_cache: OrderedDict[
+            Tuple[float, float, float, float | None],
+            Tuple[Dict[str, object], ...],
+        ] = OrderedDict()
         self._lane_context_cache: Tuple[float, float, float, Dict[str, object]] | None = None
         self._local_lane_graph_cache: Tuple[float, float, float, int, Dict[str, object]] | None = None
 
@@ -363,19 +373,60 @@ class CustomGlobalPlannerAdapter:
     def load(self, force_rebuild: bool = False) -> None:
         self.core.load(force_rebuild=bool(force_rebuild))
         self.core.blocked_lanes.clear()
+        self._clear_waypoint_query_caches()
 
     def close(self) -> None:
+        self._clear_waypoint_query_caches()
         self.core.close()
+
+    @staticmethod
+    def _waypoint_query_key(
+        position: Mapping[str, object] | Sequence[object],
+        search_radius_m: float | None,
+    ) -> Tuple[float, float, float, float | None]:
+        point = _point_dict(position)
+        return (
+            float(point["x"]),
+            float(point["y"]),
+            float(point.get("z", 0.0)),
+            None if search_radius_m is None else float(search_radius_m),
+        )
+
+    def _clear_waypoint_query_caches(self) -> None:
+        """Invalidate projections owned by the currently loaded static map."""
+
+        lock = getattr(self, "_waypoint_query_lock", None)
+        if lock is None:
+            return
+        with lock:
+            self._waypoint_query_cache.clear()
+            self._waypoint_candidates_cache.clear()
+
+    @staticmethod
+    def _cache_put(cache: OrderedDict, key: object, value: object) -> None:
+        cache[key] = value
+        cache.move_to_end(key)
+        if len(cache) > _WAYPOINT_QUERY_CACHE_CAPACITY:
+            cache.popitem(last=False)
 
     def get_waypoint(
         self,
         position: Mapping[str, object] | Sequence[object],
         search_radius_m: float | None = None,
     ) -> Waypoint | None:
-        return self.core.get_waypoint(
-            _point_dict(position),
+        key = self._waypoint_query_key(position, search_radius_m)
+        with self._waypoint_query_lock:
+            if key in self._waypoint_query_cache:
+                waypoint = self._waypoint_query_cache[key]
+                self._waypoint_query_cache.move_to_end(key)
+                return waypoint
+        waypoint = self.core.get_waypoint(
+            {"x": key[0], "y": key[1], "z": key[2]},
             search_radius_m=search_radius_m,
         )
+        with self._waypoint_query_lock:
+            self._cache_put(self._waypoint_query_cache, key, waypoint)
+        return waypoint
 
     def get_waypoint_candidates(
         self,
@@ -384,10 +435,22 @@ class CustomGlobalPlannerAdapter:
     ) -> List[Dict[str, object]]:
         """Expose nearby AD-map projections without selecting a lane."""
 
-        return list(self.core.get_waypoint_candidates(
-            _point_dict(position),
-            search_radius_m=search_radius_m,
-        ))
+        key = self._waypoint_query_key(position, search_radius_m)
+        with self._waypoint_query_lock:
+            cached = self._waypoint_candidates_cache.get(key)
+            if cached is not None:
+                self._waypoint_candidates_cache.move_to_end(key)
+                return [dict(candidate) for candidate in cached]
+        candidates = tuple(
+            dict(candidate)
+            for candidate in self.core.get_waypoint_candidates(
+                {"x": key[0], "y": key[1], "z": key[2]},
+                search_radius_m=search_radius_m,
+            )
+        )
+        with self._waypoint_query_lock:
+            self._cache_put(self._waypoint_candidates_cache, key, candidates)
+        return [dict(candidate) for candidate in candidates]
 
     def get_lane_centerline(self, lane_id: int) -> List[Waypoint]:
         """Expose AD-map lane-center samples to the local-map snapshot."""
