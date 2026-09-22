@@ -13,6 +13,10 @@ from .speed_planner import (
     effective_emergency_gap_m,
 )
 from .behavior_stage import ConflictResolutionRequest, BehaviorOverrideRequest
+from .behavior_reference_finalization_stage import (
+    BehaviorReferenceFinalizationRequest,
+    BehaviorReferenceFinalizationStage,
+)
 
 
 @dataclass(frozen=True)
@@ -253,6 +257,14 @@ class PlanningPipeline:
         self.mpc_cost_profile = mpc_cost_profile
         self.cooperative = cooperative
         self.control_finalization = control_finalization
+        self.behavior_reference_finalization = (
+            BehaviorReferenceFinalizationStage(
+                speed=speed,
+                mpc_cost_profile=mpc_cost_profile,
+                reference_planning=reference_planning,
+                behavior=behavior,
+            )
+        )
 
     def attach_cooperative(self, cooperative: Any) -> None:
         """Complete late assembly after the route owner exists."""
@@ -906,6 +918,11 @@ class PlanningPipeline:
         return self.speed.constrain_plan(
             speed_plan, frame.cav_resolution.speed_constraint
         )
+
+    def finalize_behavior_reference(
+        self, request: BehaviorReferenceFinalizationRequest
+    ):
+        return self.behavior_reference_finalization.run(request)
 
     def cooperative_conflict_reference(self, **kwargs):
         if self.reference_planning is None:

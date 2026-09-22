@@ -3,8 +3,14 @@ from types import SimpleNamespace
 import pytest
 
 from pipeline.cooperative_arbitration import CavIntent, ResourceClaim
+from pipeline.behavior_reference_finalization_stage import (
+    BehaviorFrameFinalizationRequest,
+    BehaviorReferenceFinalizationRequest,
+    MPCCostProfileRequest,
+)
 from pipeline.execution_pipeline import (
     BehaviorContextRequest,
+    CooperativePlanningFrame,
     ExecutableBehaviorRequest,
     NominalPlanningRequest,
     PlanningPipeline,
@@ -13,6 +19,7 @@ from pipeline.execution_pipeline import (
 from pipeline.cav_interaction_stage import CAVInteractionStage
 from pipeline.perception_stage import PerceptionStage
 from pipeline.runtime_input_stage import RuntimeInputStage
+from pipeline.reference_planning_stage import PostTurnReferenceRequest
 
 
 class _Mapper:
@@ -119,6 +126,117 @@ def test_pipeline_owns_cooperative_resolution_and_speed_handoff():
     assert frame.cav_resolution is resolution
     assert frame.lane_change_deferred
     assert speed_plan == "constrained-speed-plan"
+
+
+def test_pipeline_owns_selected_candidate_finalization_order():
+    calls = []
+
+    class Speed:
+        def constrain_plan(self, plan, constraint):
+            calls.append(("speed", constraint.owner))
+            return SimpleNamespace(
+                target_speed_mps=min(
+                    float(plan.target_speed_mps), float(constraint.maximum_mps)
+                ),
+                upcoming_turn_distance_m=plan.upcoming_turn_distance_m,
+            )
+
+        def turn_curvature_constraint(self, curvature, _config, **kwargs):
+            calls.append(("turn_constraint", curvature, kwargs))
+            return SimpleNamespace(owner="turn", maximum_mps=4.0)
+
+    class CostProfile:
+        def apply(self, **kwargs):
+            calls.append(("profile", kwargs["behavior"]))
+
+    class ReferencePlanning:
+        def finalize_post_turn(self, request):
+            calls.append(("post_turn", request.target_speed_mps))
+            assert request.debug_fields["turn_longitudinal_authority"] == (
+                "SpeedPlanner"
+            )
+            return SimpleNamespace(
+                destination_state=(1.0, 2.0, request.target_speed_mps, 0.0, 7),
+                reference_samples=({"x_ref_m": 1.0, "y_ref_m": 2.0},),
+                debug_fields=request.debug_fields,
+                mutable_destination_state=lambda: [
+                    1.0, 2.0, request.target_speed_mps, 0.0, 7
+                ],
+                mutable_samples=lambda: [
+                    {"x_ref_m": 1.0, "y_ref_m": 2.0}
+                ],
+            )
+
+    class Behavior:
+        def finalize_planning_frame(self, **kwargs):
+            calls.append(("behavior", kwargs["requested_speed_mps"]))
+            return SimpleNamespace(decision="final-behavior")
+
+    provider = SimpleNamespace(turn_master_curvature_1pm=lambda: 0.2)
+    cooperative = CooperativePlanningFrame(
+        cav_resolution=SimpleNamespace(
+            speed_constraint=SimpleNamespace(owner="cav", maximum_mps=7.0)
+        ),
+        lane_change_deferred=False,
+    )
+    pipeline = PlanningPipeline(
+        runtime_input=RuntimeInputStage(_Mapper()), perception=PerceptionStage(),
+        behavior=Behavior(), scenario=object(), static_obstacle=object(),
+        control_safety=object(), speed=Speed(), destination_speed=object(),
+        reference_publication=object(), mpc_entry=object(),
+        reference_planning=ReferencePlanning(),
+        mpc_cost_profile=CostProfile(),
+    )
+    post_turn = PostTurnReferenceRequest(
+        maneuver_manager=object(), decision="turn_left", scenario_state="TURN",
+        exit_alignment_valid=False, exit_lateral_error_m=0.0,
+        exit_heading_error_rad=0.0, local_map=object(), ego_x_m=0.0,
+        ego_y_m=0.0, current_state=(0.0,) * 5, current_lane_id=3,
+        target_speed_mps=9.0, horizon_steps=10, dt_s=0.2,
+        route_revision="r1", map_epoch="admap", config={},
+        destination_state=(1.0, 2.0, 9.0, 0.0, 7),
+        reference_samples=({"x_ref_m": 1.0, "y_ref_m": 2.0},),
+        debug_fields={"reference_tracking_mode": "turn"},
+        reference_freeze_count=0,
+    )
+    result = pipeline.finalize_behavior_reference(
+        BehaviorReferenceFinalizationRequest(
+            speed_plan=SimpleNamespace(
+                target_speed_mps=9.0, upcoming_turn_distance_m=12.0
+            ),
+            cooperative_frame=cooperative,
+            reference_provider=provider,
+            config={},
+            mpc_profile=MPCCostProfileRequest(
+                behavior="turn_left", planner_lc_state="IDLE",
+                planner_mode="intersection_turn", reference_tracking_mode="turn",
+                next_macro_maneuver="turn_left", sim_time_s=1.0,
+                nearest_obstacle_distance_m=None, ego_speed_mps=3.0,
+            ),
+            post_turn=post_turn,
+            behavior=BehaviorFrameFinalizationRequest(
+                maneuver="turn_left", phase="IDLE", source_lane_id=3,
+                target_lane_id=7, stop_required=False, route_required=False,
+                traffic_signal_state="green", boundary_recovery_active=False,
+                stop_target=None, reason="route", lane_safety_scores={},
+                raw_signal_state="green", resolved_signal_state="green",
+                filtered_signal_state="green", traffic_control_from_cp=False,
+                scenario_state="TURN",
+            ),
+        )
+    )
+
+    assert result.speed_plan.target_speed_mps == pytest.approx(4.0)
+    assert result.destination_state[2] == pytest.approx(4.0)
+    assert result.cav_resolution is cooperative.cav_resolution
+    assert calls[0] == ("speed", "cav")
+    assert calls[1][0] == "turn_constraint"
+    assert calls[2] == ("speed", "turn")
+    assert calls[3:] == [
+        ("profile", "turn_left"),
+        ("post_turn", 4.0),
+        ("behavior", 4.0),
+    ]
 
 
 def test_pipeline_observes_scenario_from_frozen_adapter_frame():
