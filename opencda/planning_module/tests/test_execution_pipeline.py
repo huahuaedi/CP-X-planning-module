@@ -4,6 +4,7 @@ import pytest
 
 from pipeline.cooperative_arbitration import CavIntent, ResourceClaim
 from pipeline.execution_pipeline import (
+    NominalPlanningRequest,
     PlanningPipeline,
     ScenarioPlanningFrameRequest,
 )
@@ -159,6 +160,101 @@ def test_pipeline_owns_speed_resolution_sequence():
 
     assert result == "speed-frame"
     assert [call[0] for call in calls] == ["resolve_frame"]
+
+
+def test_pipeline_owns_nominal_behavior_destination_speed_sequence():
+    calls = []
+    decision = SimpleNamespace(
+        maneuver="lane_follow",
+        as_debug_fields=lambda: {"typed_behavior": True},
+    )
+    behavior_result = SimpleNamespace(
+        decision=decision,
+        mutable_diagnostics=lambda: {"behavior_stage": "ready"},
+    )
+    behavior_reference = SimpleNamespace(
+        destination_state=(1.0, 2.0, 4.0, 0.0, 7),
+        reference_samples=({"x_ref_m": 1.0, "y_ref_m": 2.0},),
+        behavior_stage_result=behavior_result,
+        reference_debug={"reference_source": "test"},
+        speed_plan="speed-plan",
+        cav_resolution="cav-result",
+        failure_reason="",
+    )
+
+    class BehaviorExecution:
+        def run(self, request, *, planner):
+            calls.append(("behavior", request))
+            assert planner is planner_callback
+            return behavior_reference
+
+    destination_application = SimpleNamespace(
+        stage=SimpleNamespace(constraint="destination-cap"),
+        behavior_stage_result=behavior_result,
+        finished=True,
+        mutable_destination_state=lambda: [3.0, 4.0, 2.0, 0.0, 7],
+        mutable_reference=lambda: [{"x_ref_m": 3.0, "y_ref_m": 4.0}],
+        mutable_reference_debug=lambda: {"destination_applied": True},
+    )
+
+    class Destination:
+        def apply(self, **kwargs):
+            calls.append(("destination", kwargs))
+            return destination_application
+
+    speed_frame = SimpleNamespace(
+        target=SimpleNamespace(target_mps=2.0),
+        ceiling=SimpleNamespace(
+            destination_state=(3.0, 4.0, 2.0, 0.0, 7),
+            reference_samples=({"x_ref_m": 3.0, "y_ref_m": 4.0},),
+        ),
+        trace_fields=lambda: {"speed_owner": "destination"},
+    )
+
+    class Speed:
+        def resolve_frame(self, **kwargs):
+            calls.append(("speed", kwargs))
+            return speed_frame
+
+    def planner_callback(**_kwargs):
+        raise AssertionError("the execution boundary owns this callback")
+
+    pipeline = PlanningPipeline(
+        runtime_input=RuntimeInputStage(_Mapper()),
+        perception=PerceptionStage(),
+        behavior=object(), scenario=object(), static_obstacle=object(),
+        control_safety=object(), speed=Speed(),
+        destination_speed=Destination(), reference_publication=object(),
+        mpc_entry=object(), behavior_reference_execution=BehaviorExecution(),
+    )
+    durations = []
+    result = pipeline.resolve_nominal_plan(
+        NominalPlanningRequest(
+            behavior_request="behavior-request",
+            route_status="route-status",
+            route_revision="revision-1",
+            ego_speed_mps=3.0,
+            current_state=(0.0, 0.0, 3.0, 0.0),
+            fallback_lane_id=7,
+        ),
+        planner=planner_callback,
+        observe_stage_duration=lambda name, seconds: durations.append(
+            (name, seconds)
+        ),
+    )
+
+    assert [entry[0] for entry in calls] == [
+        "behavior", "destination", "speed"
+    ]
+    assert [entry[0] for entry in durations] == [
+        "execute_behavior_reference", "apply_destination", "resolve_speed"
+    ]
+    assert result.mission_finished
+    assert result.behavior is decision
+    assert result.speed_target.target_mps == pytest.approx(2.0)
+    assert result.cav_resolution == "cav-result"
+    assert result.mutable_behavior_debug()["typed_behavior"] is True
+    assert result.mutable_reference_debug()["speed_owner"] == "destination"
 
 
 def test_pipeline_is_the_only_behavior_stage_caller():

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional, Sequence, Tuple
 
 from .perception_stage import PerceptionStage, PerceptionStageResult
 from .runtime_input_stage import RuntimeInputStage, RuntimeTickSnapshot
@@ -55,6 +56,55 @@ class TrajectoryAdmission:
         fields = dict(self.publication.debug_fields)
         fields.update(self.entry.trace_fields())
         return fields
+
+
+@dataclass(frozen=True)
+class NominalPlanningRequest:
+    """Inputs for the behavior -> destination -> speed stage chain.
+
+    Runtime/platform adaptation is deliberately absent.  The OpenCDA bridge
+    supplies an already-normalized behavior request and route state; this
+    stage owns the ordering and data hand-off between the three planning
+    owners.
+    """
+
+    behavior_request: Any
+    route_status: Any
+    route_revision: str
+    ego_speed_mps: float
+    current_state: Sequence[float]
+    fallback_lane_id: int
+
+
+@dataclass(frozen=True)
+class NominalPlanningFrame:
+    """Resolved nominal plan before reference publication/MPC admission."""
+
+    destination_state: Tuple[float, ...]
+    reference_samples: Tuple[Mapping[str, Any], ...]
+    behavior_stage_result: Any
+    behavior_debug: Mapping[str, Any]
+    reference_debug: Mapping[str, Any]
+    speed_target: Any
+    cav_resolution: Any
+    mission_finished: bool
+    failure_reason: str = ""
+
+    @property
+    def behavior(self):
+        return self.behavior_stage_result.decision
+
+    def mutable_destination_state(self):
+        return list(self.destination_state)
+
+    def mutable_reference(self):
+        return [dict(sample) for sample in self.reference_samples]
+
+    def mutable_behavior_debug(self):
+        return dict(self.behavior_debug)
+
+    def mutable_reference_debug(self):
+        return dict(self.reference_debug)
 
 
 @dataclass(frozen=True)
@@ -503,6 +553,89 @@ class PlanningPipeline:
 
     def apply_behavior_overrides(self, request):
         return self.behavior.apply_overrides(request)
+
+    def resolve_nominal_plan(
+        self,
+        request: NominalPlanningRequest,
+        *,
+        planner: Callable[..., Any],
+        observe_stage_duration: Optional[Callable[[str, float], None]] = None,
+    ) -> NominalPlanningFrame:
+        """Run the nominal stage chain with one typed output contract.
+
+        This is the only sequencing owner for behavior/reference recovery,
+        destination completion, and final nominal speed resolution.  The
+        optional observer preserves bridge-side profiling without giving the
+        bridge ownership of the stage ordering.
+        """
+
+        def run_stage(name, operation):
+            started_s = time.monotonic()
+            result = operation()
+            if observe_stage_duration is not None:
+                observe_stage_duration(name, time.monotonic() - started_s)
+            return result
+
+        behavior_reference = run_stage(
+            "execute_behavior_reference",
+            lambda: self.execute_behavior_reference(
+                request.behavior_request, planner=planner
+            ),
+        )
+        destination_application = run_stage(
+            "apply_destination",
+            lambda: self.apply_destination(
+                route_status=request.route_status,
+                route_revision=str(request.route_revision),
+                ego_speed_mps=float(request.ego_speed_mps),
+                current_state=list(request.current_state),
+                destination_state=list(behavior_reference.destination_state),
+                reference_samples=[
+                    dict(item) for item in behavior_reference.reference_samples
+                ],
+                behavior_stage_result=behavior_reference.behavior_stage_result,
+                reference_debug=dict(behavior_reference.reference_debug),
+                fallback_lane_id=int(request.fallback_lane_id),
+            ),
+        )
+
+        behavior_stage_result = destination_application.behavior_stage_result
+        behavior = behavior_stage_result.decision
+        behavior_debug = behavior_stage_result.mutable_diagnostics()
+        behavior_debug.update(behavior.as_debug_fields())
+        reference_debug = destination_application.mutable_reference_debug()
+        destination_state = destination_application.mutable_destination_state()
+        reference_samples = destination_application.mutable_reference()
+        destination_constraint = destination_application.stage.constraint
+
+        speed_frame = run_stage(
+            "resolve_speed",
+            lambda: self.resolve_speed(
+                behavior=behavior,
+                speed_plan=behavior_reference.speed_plan,
+                additional_constraints=(
+                    ()
+                    if destination_constraint is None
+                    else (destination_constraint,)
+                ),
+                destination_state=destination_state,
+                reference_samples=reference_samples,
+            ),
+        )
+        reference_debug.update(speed_frame.trace_fields())
+        return NominalPlanningFrame(
+            destination_state=tuple(speed_frame.ceiling.destination_state),
+            reference_samples=tuple(
+                dict(item) for item in speed_frame.ceiling.reference_samples
+            ),
+            behavior_stage_result=behavior_stage_result,
+            behavior_debug=dict(behavior_debug),
+            reference_debug=dict(reference_debug),
+            speed_target=speed_frame.target,
+            cav_resolution=behavior_reference.cav_resolution,
+            mission_finished=bool(destination_application.finished),
+            failure_reason=str(behavior_reference.failure_reason or ""),
+        )
 
     def resolve_speed(
         self, *, behavior, speed_plan, additional_constraints,

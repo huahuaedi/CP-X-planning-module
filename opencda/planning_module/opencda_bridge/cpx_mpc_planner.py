@@ -42,6 +42,7 @@ from opencda.planning_module.pipeline.mpc_execution_stage import (
     MPCExecutionRequest,
 )
 from opencda.planning_module.pipeline.execution_pipeline import (
+    NominalPlanningRequest,
     ScenarioPlanningFrameRequest,
 )
 from opencda.planning_module.pipeline.candidate_evaluation import (
@@ -420,88 +421,51 @@ class CPXMPCPlannerBridge:
         from opencda.planning_module.pipeline.behavior_reference_execution_stage import (
             BehaviorReferenceRequest,
         )
-        _ts_stage = time.monotonic()
-        behavior_reference = self.pipeline.execute_behavior_reference(
-            BehaviorReferenceRequest(
-                ego_location=ego_location,
-                ego_yaw_rad=float(ego_yaw_rad),
-                ego_speed_mps=float(ego_speed_mps),
-                requested_speed_mps=float(requested_speed_mps),
-                object_snapshots=object_snapshots,
-                stop_goal_active=bool(stop_goal_active),
-                cp_payload=cp_payload,
-                current_state=current_state,
-                sim_time_s=float(tick.timestamp_s),
+        nominal_frame = self.pipeline.resolve_nominal_plan(
+            NominalPlanningRequest(
+                behavior_request=BehaviorReferenceRequest(
+                    ego_location=ego_location,
+                    ego_yaw_rad=float(ego_yaw_rad),
+                    ego_speed_mps=float(ego_speed_mps),
+                    requested_speed_mps=float(requested_speed_mps),
+                    object_snapshots=object_snapshots,
+                    stop_goal_active=bool(stop_goal_active),
+                    cp_payload=cp_payload,
+                    current_state=current_state,
+                    sim_time_s=float(tick.timestamp_s),
+                    route_revision=str(self.route_manager.route_revision),
+                ),
+                route_status=getattr(self.route_manager, "last_status", None),
                 route_revision=str(self.route_manager.route_revision),
+                ego_speed_mps=float(ego_speed_mps),
+                current_state=current_state,
+                fallback_lane_id=int(getattr(
+                    self._local_map_snapshot, "ego_lane_id", 0
+                )),
             ),
             planner=self._plan_behavior_and_reference,
+            observe_stage_duration=self._accum_stage_ms,
         )
-        self._accum_stage_ms("execute_behavior_reference", time.monotonic() - _ts_stage)
-        destination_state = list(behavior_reference.destination_state)
-        lane_center_reference = [
-            dict(item) for item in behavior_reference.reference_samples
-        ]
-        behavior_stage_result = behavior_reference.behavior_stage_result
-        behavior_decision = behavior_stage_result.decision
-        behavior_debug = behavior_stage_result.mutable_diagnostics()
-        reference_debug = dict(behavior_reference.reference_debug)
-        typed_speed_plan = behavior_reference.speed_plan
-        cav_resolution = behavior_reference.cav_resolution
-        if behavior_reference.failure_reason and self.debug:
+        destination_state = nominal_frame.mutable_destination_state()
+        lane_center_reference = nominal_frame.mutable_reference()
+        behavior_stage_result = nominal_frame.behavior_stage_result
+        behavior_decision = nominal_frame.behavior
+        behavior_debug = nominal_frame.mutable_behavior_debug()
+        reference_debug = nominal_frame.mutable_reference_debug()
+        speed_target = nominal_frame.speed_target
+        speed_ref_mps = float(speed_target.target_mps)
+        cav_resolution = nominal_frame.cav_resolution
+        if nominal_frame.mission_finished:
+            setattr(self.vehicle_manager, "_opencda_agent_finished", True)
+        if nominal_frame.failure_reason and self.debug:
             print(
                 "[CP-X OpenCDA Bridge] behavior/reference pipeline failed: "
-                + str(behavior_reference.failure_reason)
+                + str(nominal_frame.failure_reason)
             )
-
-        _ts_stage = time.monotonic()
-        destination_application = self.pipeline.apply_destination(
-            route_status=getattr(self.route_manager, "last_status", None),
-            route_revision=str(self.route_manager.route_revision),
-            ego_speed_mps=float(ego_speed_mps),
-            current_state=current_state,
-            destination_state=destination_state,
-            reference_samples=lane_center_reference,
-            behavior_stage_result=behavior_stage_result,
-            reference_debug=reference_debug,
-            fallback_lane_id=int(getattr(self._local_map_snapshot, "ego_lane_id", 0)),
-        )
-        self._accum_stage_ms("apply_destination", time.monotonic() - _ts_stage)
-        destination_stage = destination_application.stage
-        destination_state = destination_application.mutable_destination_state()
-        lane_center_reference = destination_application.mutable_reference()
-        behavior_stage_result = destination_application.behavior_stage_result
-        behavior_decision = behavior_stage_result.decision
-        behavior_debug = behavior_stage_result.mutable_diagnostics()
-        reference_debug = destination_application.mutable_reference_debug()
-        destination_speed_constraint = destination_stage.constraint
-        if destination_application.finished:
-            setattr(self.vehicle_manager, "_opencda_agent_finished", True)
-        behavior_debug.update(behavior_decision.as_debug_fields())
-
         # The typed behavior decision owns the final stop state. The raw
         # front-gap threshold is only an input proposal and must not re-latch
         # stop after candidate evaluation has selected a safe route maneuver.
-        selected_stop_goal_active = bool(behavior_decision.stop_required)
-        _ts_stage = time.monotonic()
-        speed_frame = self.pipeline.resolve_speed(
-            behavior=behavior_decision,
-            speed_plan=typed_speed_plan,
-            additional_constraints=(
-                ()
-                if destination_speed_constraint is None
-                else (destination_speed_constraint,)
-            ),
-            destination_state=destination_state,
-            reference_samples=lane_center_reference,
-        )
-        self._accum_stage_ms("resolve_speed", time.monotonic() - _ts_stage)
-        speed_target = speed_frame.target
-        ceiling_result = speed_frame.ceiling
-        speed_ref_mps = float(speed_target.target_mps)
-        destination_state = list(ceiling_result.destination_state)
-        lane_center_reference = list(ceiling_result.reference_samples)
-        reference_debug.update(speed_frame.trace_fields())
-        mpc_stop_goal_active = bool(selected_stop_goal_active)
+        mpc_stop_goal_active = bool(behavior_decision.stop_required)
         behavior_decision_normalized = str(behavior_decision.maneuver).strip().lower()
         normal_stop_requested = behavior_decision_normalized in {
             "stop_at_intersection",
