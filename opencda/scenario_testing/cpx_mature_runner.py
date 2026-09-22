@@ -20,6 +20,7 @@ from opencda.planning_module.utility.cp_messages import (
 )
 from opencda.scenario_testing.evaluations.evaluate_manager import EvaluationManager
 from opencda.scenario_testing.scripted_actor import spawn_scripted_actors
+from opencda.scenario_testing.run_status import write_run_status
 from opencda.scenario_testing.utils.yaml_utils import add_current_time
 
 
@@ -548,6 +549,11 @@ def run_mature_scenario(opt, scenario_params, *, script_name):
     bg_veh_list = []
     scripted_actor_list = []
     collision_sensors = []
+    termination_reason = "initialization_failed"
+    scenario_exception = ""
+    completed_ticks = 0
+    completion_mode = "first_cav"
+    vehicle_configs = []
     try:
         scenario_params = add_current_time(scenario_params)
         _reset_cooperative_payloads(scenario_params)
@@ -627,6 +633,7 @@ def run_mature_scenario(opt, scenario_params, *, script_name):
         destination_tolerance_m = float(runtime_cfg.get("destination_tolerance_m", 8.0))
         vehicle_configs = scenario_params["scenario"]["single_cav_list"]
         completion_mode = str(runtime_cfg.get("completion_mode", "first_cav"))
+        termination_reason = "max_ticks_reached"
         scripted_brake_cfg = dict(
             runtime_cfg.get("scripted_target_brake", {}) or {}
         )
@@ -640,8 +647,10 @@ def run_mature_scenario(opt, scenario_params, *, script_name):
         )
         spectator = scenario_manager.world.get_spectator()
         completed_auxiliary_indices = set()
+        ego_finished = False
         for tick_index in range(max(1, max_ticks)):
             scenario_manager.tick()
+            completed_ticks = int(tick_index + 1)
             ego_vehicle = single_cav_list[0].vehicle
             _ego_loc = ego_vehicle.get_location()
             _ego_xy = (float(_ego_loc.x), float(_ego_loc.y))
@@ -674,6 +683,7 @@ def run_mature_scenario(opt, scenario_params, *, script_name):
                     destination_tolerance_m,
                 )
             if reached_destination:
+                termination_reason = "route_destination_stopped"
                 print("CP-X mature scenario reached the configured destination.")
                 break
             for cav_index, single_cav in enumerate(single_cav_list):
@@ -689,7 +699,11 @@ def run_mature_scenario(opt, scenario_params, *, script_name):
                     if int(getattr(exc, "code", 0) or 0) == 0:
                         if cav_index == 0:
                             print("CP-X mature scenario stopped by ego destination condition.")
-                            return
+                            single_cav._opencda_agent_finished = True
+                            termination_reason = "route_destination_stopped"
+                            ego_finished = True
+                            break
+                        single_cav._opencda_agent_finished = True
                         completed_auxiliary_indices.add(cav_index)
                         single_cav.vehicle.apply_control(carla.VehicleControl(
                             throttle=0.0, brake=1.0, steer=0.0
@@ -707,10 +721,38 @@ def run_mature_scenario(opt, scenario_params, *, script_name):
                     vehicle_managers=single_cav_list,
                 )
                 single_cav.vehicle.apply_control(control)
+            if ego_finished:
+                break
             if debug_viewer is not None:
                 debug_viewer.render(single_cav_list)
 
+    except BaseException as exc:
+        termination_reason = "scenario_exception"
+        scenario_exception = "%s: %s" % (type(exc).__name__, str(exc))
+        raise
+
     finally:
+        if single_cav_list:
+            try:
+                status_paths = write_run_status(
+                    vehicle_managers=single_cav_list,
+                    vehicle_configs=vehicle_configs,
+                    termination_reason=termination_reason,
+                    completed_ticks=completed_ticks,
+                    scenario_name=str(script_name),
+                    exception=scenario_exception,
+                    completion_mode=completion_mode,
+                    fallback_debug_output_dir=(
+                        "opencda/planning_module/opencda_bridge/debug_cpx_default"
+                    ),
+                )
+                if status_paths:
+                    print(
+                        "[CP-X scenario] run status written: %s"
+                        % ", ".join(status_paths)
+                    )
+            except Exception as status_exc:
+                print("[CP-X scenario] run status write failed: %s" % status_exc)
         if eval_manager is not None and bool(
             scenario_params.get("cpx_mature", {}).get("run_opencda_evaluation", False)
         ):
