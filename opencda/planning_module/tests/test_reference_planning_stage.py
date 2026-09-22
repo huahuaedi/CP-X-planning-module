@@ -2,6 +2,7 @@ from types import MappingProxyType, SimpleNamespace
 
 from pipeline.nominal_trajectory import NominalTrajectoryGenerator
 from pipeline.reference_planning_stage import (
+    BehaviorReferencePreparationRequest,
     BehaviorReferenceRequest,
     CandidatePlanningRequest,
     PostTurnReferenceRequest,
@@ -81,6 +82,50 @@ def test_stage_builds_from_last_accepted_nominal_trajectory():
     assert provider.behavior_kwargs["previous_target_state"][:2] == [3.0, 4.0]
     assert provider.behavior_kwargs["previous_reference"][0]["x_ref_m"] == 3.0
     assert provider.behavior_kwargs["reference_freeze_count"] == 7
+
+
+def test_stage_prepares_baseline_from_typed_upstream_frames():
+    provider = _Provider()
+    stage = ReferencePlanningStage(
+        provider=provider,
+        nominal_trajectory_generator=NominalTrajectoryGenerator(),
+        candidate_selection=_CandidateSelection(),
+    )
+    adapter = SimpleNamespace(
+        ego_pose={"x": 1.0}, current_state=[1.0, 2.0, 3.0, 0.0],
+        route_points=[(1.0, 2.0)], route_optimal_lane_id=4,
+        route_reference_allowed=True, route_reference_gate_reason="",
+    )
+    planning = SimpleNamespace(
+        adapter_output=adapter,
+        current_lane_id=4,
+        planner_input_frame=SimpleNamespace(
+            map_lane=SimpleNamespace(in_junction=False),
+            planning=SimpleNamespace(route=SimpleNamespace(
+                next_macro_maneuver="lane_follow"
+            )),
+        ),
+    )
+    executable = SimpleNamespace(
+        decision="lane_follow", phase="LANE_KEEP", target_lane_id=4,
+    )
+
+    prepared = stage.prepare_behavior_reference(
+        BehaviorReferencePreparationRequest(
+            map_planner="map", local_map="local-map",
+            planning_context=planning, executable_behavior=executable,
+            speed_frame=SimpleNamespace(target_speed_mps=8.0),
+            behavior_runtime_config={}, planner_mode="NORMAL",
+            lookahead_m=20.0, ego_speed_mps=7.0, horizon_steps=10,
+            dt_s=0.2, sim_time_s=2.0, stop_release_smooth_until_s=0.0,
+            authoritative_ego_waypoint="wp",
+        )
+    )
+
+    assert prepared.built_reference == "built-reference"
+    assert prepared.request.current_lane_id == 4
+    assert prepared.request.target_speed_mps == 8.0
+    assert provider.behavior_kwargs["route_points"] == ((1.0, 2.0),)
 
 
 def test_stage_owns_post_turn_release_and_nominal_publication():

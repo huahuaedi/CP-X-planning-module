@@ -35,7 +35,7 @@ from opencda.planning_module.pipeline.reference_line_provider import (
     ReferenceLineProvider,
 )
 from opencda.planning_module.pipeline.reference_planning_stage import (
-    BehaviorReferenceRequest,
+    BehaviorReferencePreparationRequest,
     CandidatePlanningRequest,
     PostTurnReferenceRequest,
 )
@@ -1498,41 +1498,30 @@ class CPXMPCPlannerBridge:
         stop_goal_active = bool(stop_goal_active or speed_frame.stop_goal_active)
         planner_mode = "INTERSECTION" if bool(planner_input_frame.map_lane.in_junction) else "NORMAL"
 
-        baseline_reference_frame_request = BehaviorReferenceRequest(
-            map_planner=self.reference_map,
-            local_map=getattr(self, "_local_map_snapshot", None),
-            ego_pose=ego_pose,
-            ego_state=current_state,
-            route_points=route_points,
-            behavior_runtime_config=self.behavior_runtime_cfg,
-            decision=str(decision),
-            lane_change_state=str(lc_state),
-            target_lane_id=int(target_lane_id),
-            current_lane_id=int(current_lane_id),
-            route_optimal_lane_id=int(route_optimal_lane_id),
-            route_reference_allowed=bool(route_reference_allowed),
-            route_reference_gate_reason=str(route_reference_gate_reason),
-            in_junction=bool(planner_input_frame.map_lane.in_junction),
-            next_macro_maneuver=str(
-                planner_input_frame.planning.route.next_macro_maneuver
-            ),
-            planner_mode=str(planner_mode),
-            lookahead_m=float(self.lookahead_m),
-            target_speed_mps=float(planned_speed_mps),
-            ego_speed_mps=float(ego_speed_mps),
-            horizon_steps=int(self.mpc.horizon_steps),
-            dt_s=float(self.mpc.dt_s),
-            sim_time_s=float(sim_time_s),
-            stop_release_smooth_until_s=float(
-                self._stop_release_temp_smooth_until_sim_time_s
-            ),
-            authoritative_ego_waypoint=(
-                self._route_context.authoritative_ego_waypoint
-            ),
+        prepared_reference = self.pipeline.prepare_behavior_reference(
+            BehaviorReferencePreparationRequest(
+                map_planner=self.reference_map,
+                local_map=local_map_snapshot,
+                planning_context=planning_context,
+                executable_behavior=executable_behavior,
+                speed_frame=speed_frame,
+                behavior_runtime_config=self.behavior_runtime_cfg,
+                planner_mode=str(planner_mode),
+                lookahead_m=float(self.lookahead_m),
+                ego_speed_mps=float(ego_speed_mps),
+                horizon_steps=int(self.mpc.horizon_steps),
+                dt_s=float(self.mpc.dt_s),
+                sim_time_s=float(sim_time_s),
+                stop_release_smooth_until_s=float(
+                    self._stop_release_temp_smooth_until_sim_time_s
+                ),
+                authoritative_ego_waypoint=(
+                    self._route_context.authoritative_ego_waypoint
+                ),
+            )
         )
-        baseline_reference_frame = self.pipeline.build_behavior_reference(
-            baseline_reference_frame_request
-        )
+        baseline_reference_frame_request = prepared_reference.request
+        baseline_reference_frame = prepared_reference.frame
         built_reference = baseline_reference_frame.built_reference
         local_lane_center_reference = built_reference.mutable_samples()
         # Stash the pre-publication reference (the one Stage C/D build corridor

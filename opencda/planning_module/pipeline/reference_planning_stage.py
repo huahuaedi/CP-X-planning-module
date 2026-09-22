@@ -59,6 +59,36 @@ class BehaviorReferenceFrame:
 
 
 @dataclass(frozen=True)
+class BehaviorReferencePreparationRequest:
+    """Typed stage outputs needed to build the baseline reference request."""
+
+    map_planner: Any
+    local_map: Any
+    planning_context: Any
+    executable_behavior: Any
+    speed_frame: Any
+    behavior_runtime_config: Mapping[str, object]
+    planner_mode: str
+    lookahead_m: float
+    ego_speed_mps: float
+    horizon_steps: int
+    dt_s: float
+    sim_time_s: float
+    stop_release_smooth_until_s: float
+    authoritative_ego_waypoint: Any
+
+
+@dataclass(frozen=True)
+class PreparedBehaviorReference:
+    request: BehaviorReferenceRequest
+    frame: BehaviorReferenceFrame
+
+    @property
+    def built_reference(self):
+        return self.frame.built_reference
+
+
+@dataclass(frozen=True)
 class PostTurnReferenceRequest:
     maneuver_manager: Any
     decision: str
@@ -192,6 +222,53 @@ class ReferencePlanningStage:
             previous_target_state=(
                 None if previous_target is None else tuple(previous_target)
             ),
+        )
+
+    def prepare_behavior_reference(
+        self, request: BehaviorReferencePreparationRequest
+    ) -> PreparedBehaviorReference:
+        """Build a baseline from already-resolved typed planning stages."""
+
+        planning = request.planning_context
+        adapter = planning.adapter_output
+        frame = planning.planner_input_frame
+        executable = request.executable_behavior
+        speed = request.speed_frame
+        baseline_request = BehaviorReferenceRequest(
+            map_planner=request.map_planner,
+            local_map=request.local_map,
+            ego_pose=adapter.ego_pose,
+            ego_state=adapter.current_state,
+            route_points=tuple(adapter.route_points),
+            behavior_runtime_config=request.behavior_runtime_config,
+            decision=str(executable.decision),
+            lane_change_state=str(executable.phase),
+            target_lane_id=int(executable.target_lane_id),
+            current_lane_id=int(planning.current_lane_id),
+            route_optimal_lane_id=int(adapter.route_optimal_lane_id),
+            route_reference_allowed=bool(adapter.route_reference_allowed),
+            route_reference_gate_reason=str(
+                adapter.route_reference_gate_reason
+            ),
+            in_junction=bool(frame.map_lane.in_junction),
+            next_macro_maneuver=str(
+                frame.planning.route.next_macro_maneuver
+            ),
+            planner_mode=str(request.planner_mode),
+            lookahead_m=float(request.lookahead_m),
+            target_speed_mps=float(speed.target_speed_mps),
+            ego_speed_mps=float(request.ego_speed_mps),
+            horizon_steps=int(request.horizon_steps),
+            dt_s=float(request.dt_s),
+            sim_time_s=float(request.sim_time_s),
+            stop_release_smooth_until_s=float(
+                request.stop_release_smooth_until_s
+            ),
+            authoritative_ego_waypoint=request.authoritative_ego_waypoint,
+        )
+        return PreparedBehaviorReference(
+            request=baseline_request,
+            frame=self.build_behavior_reference(baseline_request),
         )
 
     def arbitrate_candidates(self, request: CandidatePlanningRequest) -> Any:

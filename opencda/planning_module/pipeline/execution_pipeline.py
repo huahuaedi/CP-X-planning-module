@@ -725,6 +725,11 @@ class PlanningPipeline:
             raise RuntimeError("reference planning stage is not configured")
         return self.reference_planning.build_behavior_reference(request)
 
+    def prepare_behavior_reference(self, request):
+        if self.reference_planning is None:
+            raise RuntimeError("reference planning stage is not configured")
+        return self.reference_planning.prepare_behavior_reference(request)
+
     def finalize_post_turn_reference(self, request):
         if self.reference_planning is None:
             raise RuntimeError("reference planning stage is not configured")
