@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import dataclass
 from typing import Any, Mapping
 
 from .local_map_snapshot import LocalMapSnapshot
@@ -110,6 +111,18 @@ def _executed_reference_tracking(
     }
 
 
+@dataclass(frozen=True)
+class ReferenceDiagnosticsRequest:
+    """Typed outputs needed for the behavior/reference diagnostic snapshot."""
+
+    built_reference: Any
+    planning_context: Any
+    executable_behavior: Any
+    speed_frame: Any
+    route_update: Any
+    mpc_feedback: Mapping[str, Any]
+
+
 class PlannerDiagnosticsStage:
     """Build diagnostics without participating in planning or control."""
 
@@ -118,6 +131,89 @@ class PlannerDiagnosticsStage:
         """Return the stable serialization order for a built trace payload."""
 
         return tuple(str(key) for key in payload.keys())
+
+    @staticmethod
+    def build_reference_debug_from_stages(
+        owner: Any, request: ReferenceDiagnosticsRequest
+    ) -> dict[str, Any]:
+        """Derive the trace context from authoritative typed stage outputs."""
+
+        planning = request.planning_context
+        adapter = planning.adapter_output
+        frame = planning.planner_input_frame
+        behavior = planning.behavior_context
+        route_behavior = behavior.route_behavior
+        lane_context = route_behavior.context
+        observation = behavior.scenario_observation
+        scenario = observation.scenario
+        scenario_decision = scenario.decision
+        conflict = behavior.conflict_resolution
+        executable = request.executable_behavior
+        speed = request.speed_frame
+        route_attempted = bool(request.route_update.route_replan_attempted)
+        route_succeeded = bool(request.route_update.route_replan_succeeded)
+        route_reason = str(request.route_update.route_replan_reason)
+        if bool(behavior.route_replan_attempted):
+            route_attempted = bool(behavior.route_replan_attempted)
+            route_succeeded = bool(behavior.route_replan_succeeded)
+            route_reason = str(behavior.route_replan_reason)
+        source_quality = dict(adapter.source_quality)
+        source_quality.update(request.route_update.trace_fields())
+        return PlannerDiagnosticsStage.build_reference_debug(owner, {
+            "built_reference": request.built_reference,
+            "planner_input_frame": frame,
+            "front_gap_actor_id": speed.front_actor_id,
+            "front_gap_obstacle_speed_mps": speed.front_obstacle_speed_mps,
+            "front_obstacle_lane_id": speed.front_obstacle_lane_id,
+            "front_obstacle_is_source_lane": speed.front_obstacle_is_source_lane,
+            "route_reference_allowed": adapter.route_reference_allowed,
+            "route_reference_gate_reason": adapter.route_reference_gate_reason,
+            "route_lane_change_allowed": route_behavior.route_lane_change_allowed,
+            "opportunistic_lane_change_allowed": (
+                executable.opportunistic_lane_change_allowed
+            ),
+            "lane_change_gate_reason": conflict.lane_change_gate_reason,
+            "static_obstacle_local_avoidance_active": (
+                executable.static_obstacle_result.local_avoidance_active
+            ),
+            "static_obstacle_local_target_lane_id": (
+                executable.static_obstacle_result.target_lane_id
+            ),
+            "static_obstacle_result": executable.static_obstacle_result,
+            "semantic_response": executable.semantic_response,
+            "route_lane_change_required": conflict.authorization.required_by_route,
+            "route_geometry_lane_change_direction": lane_context.geometry_direction,
+            "route_geometry_lane_change_distance_m": lane_context.geometry_distance_m,
+            "route_geometry_lane_change_reason": lane_context.geometry_reason,
+            "physical_route_target_lane_id": lane_context.physical_target_lane_id,
+            "topology_route_target_lane_id": lane_context.topology_target_lane_id,
+            "behavior_lane_lateral_error_m": executable.lane_lateral_error_m,
+            "behavior_lane_heading_error_rad": executable.lane_heading_error_rad,
+            "behavior_lane_alignment_valid": executable.lane_alignment_valid,
+            "lane_change_authorization": conflict.authorization,
+            "behavior_override_reason": executable.override_reason,
+            "scenario_decision": scenario_decision,
+            "route_context": frame.planning.route,
+            "full_traffic_memory_reason": scenario.traffic_memory_reason,
+            "resolved_traffic_state": observation.resolved_traffic_state,
+            "filtered_traffic_state": observation.filtered_traffic_state,
+            "behavior_traffic_state": scenario.behavior_traffic_state,
+            "traffic_stop_forward_m": observation.stop_forward_m,
+            "traffic_stop_commit_distance_m": (
+                scenario_decision.traffic_stop_commit_distance_m
+            ),
+            "traffic_stop_approach_reason": scenario_decision.reason,
+            "speed_plan": speed.speed_plan,
+            "candidate_frame": executable.candidate_frame,
+            "mpc_feedback": request.mpc_feedback,
+            "upcoming_turn_direction": observation.turn_context.direction,
+            "upcoming_turn_distance_m": observation.turn_context.distance_m,
+            "upcoming_turn_reason": observation.turn_context.reason,
+            "source_quality": source_quality,
+            "route_replan_attempted": route_attempted,
+            "route_replan_succeeded": route_succeeded,
+            "route_replan_reason": route_reason,
+        })
 
     @staticmethod
     def build_reference_debug(owner: Any, context: Mapping[str, Any]) -> dict[str, Any]:

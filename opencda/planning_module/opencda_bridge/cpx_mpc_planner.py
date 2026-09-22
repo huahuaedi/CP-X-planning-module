@@ -41,6 +41,7 @@ from opencda.planning_module.pipeline.reference_planning_stage import (
 )
 from opencda.planning_module.pipeline.planner_diagnostics_stage import (
     PlannerDiagnosticsStage,
+    ReferenceDiagnosticsRequest,
 )
 from opencda.planning_module.pipeline.mpc_execution_stage import (
     MPCExecutionRequest,
@@ -1229,9 +1230,6 @@ class CPXMPCPlannerBridge:
                 reset_for_route_revision=self._reset_pipeline_for_route_revision,
             )
         )
-        route_replan_attempted = route_update.route_replan_attempted
-        route_replan_succeeded = route_update.route_replan_succeeded
-        route_replan_reason = route_update.route_replan_reason
         stop_goal_active = route_update.stop_goal_active
         local_map_snapshot = getattr(
             self, "_local_map_snapshot", LocalMapSnapshot()
@@ -1320,29 +1318,14 @@ class CPXMPCPlannerBridge:
             lane_change_context.geometry_reason
         )
         lane_change_authorization = route_behavior.authorization
-        if bool(behavior_context.route_replan_attempted):
-            (
-                route_replan_attempted,
-                route_replan_succeeded,
-                route_replan_reason,
-            ) = (
-                bool(behavior_context.route_replan_attempted),
-                bool(behavior_context.route_replan_succeeded),
-                str(behavior_context.route_replan_reason),
-            )
         route_lane_change_required = bool(lane_change_authorization.required_by_route)
-        source_quality = dict(adapter_output.source_quality)
-        source_quality.update(route_update.trace_fields())
         scenario_observation = behavior_context.scenario_observation
         turn_context = scenario_observation.turn_context
         scenario_result = scenario_observation.scenario
         resolved_traffic_state = str(scenario_observation.resolved_traffic_state)
         filtered_traffic_state = str(scenario_observation.filtered_traffic_state)
-        full_traffic_memory_reason = str(scenario_result.traffic_memory_reason)
-        traffic_stop_forward_m = float(scenario_observation.stop_forward_m)
         upcoming_turn_direction = str(turn_context.direction)
         upcoming_turn_distance_m = float(turn_context.distance_m)
-        upcoming_turn_reason = str(turn_context.reason)
         route_advanced_to_lane_change = bool(
             turn_context.route_advanced_to_lane_change
         )
@@ -1358,9 +1341,6 @@ class CPXMPCPlannerBridge:
         lane_change_authorized = bool(lane_change_authorization.allowed)
         behavior_traffic_state = str(scenario_result.behavior_traffic_state)
         behavior_stop_target = scenario_result.behavior_stop_target
-        traffic_stop_commit_distance_m = float(
-            scenario_decision.traffic_stop_commit_distance_m
-        )
         traffic_stop_approach_speed_cap_mps = float(
             scenario_decision.speed_cap_mps
             if scenario_decision.speed_cap_mps is not None
@@ -1529,59 +1509,17 @@ class CPXMPCPlannerBridge:
             self._frame_capture_pre_reference = list(local_lane_center_reference)
         nominal_destination_state = built_reference.mutable_destination_state()
         nominal_freeze_count = int(built_reference.reference_freeze_count)
-        reference_debug = PlannerDiagnosticsStage.build_reference_debug(self, {
-            "built_reference": built_reference,
-            "planner_input_frame": planner_input_frame,
-            "front_gap_actor_id": front_gap_actor_id,
-            "front_gap_obstacle_speed_mps": front_gap_obstacle_speed_mps,
-            "front_obstacle_lane_id": front_obstacle_lane_id,
-            "front_obstacle_is_source_lane": front_obstacle_is_source_lane,
-            "route_reference_allowed": route_reference_allowed,
-            "route_reference_gate_reason": route_reference_gate_reason,
-            "route_lane_change_allowed": route_lane_change_allowed,
-            "opportunistic_lane_change_allowed": (
-                executable_behavior.opportunistic_lane_change_allowed
+        reference_debug = PlannerDiagnosticsStage.build_reference_debug_from_stages(
+            self,
+            ReferenceDiagnosticsRequest(
+                built_reference=built_reference,
+                planning_context=planning_context,
+                executable_behavior=executable_behavior,
+                speed_frame=speed_frame,
+                route_update=route_update,
+                mpc_feedback=mpc_feedback,
             ),
-            "lane_change_gate_reason": lane_change_gate_reason,
-            "static_obstacle_local_avoidance_active": bool(
-                executable_behavior.static_obstacle_result.local_avoidance_active
-            ),
-            "static_obstacle_local_target_lane_id": (
-                executable_behavior.static_obstacle_result.target_lane_id
-            ),
-            "static_obstacle_result": executable_behavior.static_obstacle_result,
-            "semantic_response": executable_behavior.semantic_response,
-            "route_lane_change_required": route_lane_change_required,
-            "route_geometry_lane_change_direction": route_geometry_lane_change_direction,
-            "route_geometry_lane_change_distance_m": route_geometry_lane_change_distance_m,
-            "route_geometry_lane_change_reason": route_geometry_lane_change_reason,
-            "physical_route_target_lane_id": physical_route_target_lane_id,
-            "topology_route_target_lane_id": topology_route_target_lane_id,
-            "behavior_lane_lateral_error_m": executable_behavior.lane_lateral_error_m,
-            "behavior_lane_heading_error_rad": executable_behavior.lane_heading_error_rad,
-            "behavior_lane_alignment_valid": executable_behavior.lane_alignment_valid,
-            "lane_change_authorization": lane_change_authorization,
-            "behavior_override_reason": executable_behavior.override_reason,
-            "scenario_decision": scenario_decision,
-            "route_context": route_context,
-            "full_traffic_memory_reason": full_traffic_memory_reason,
-            "resolved_traffic_state": resolved_traffic_state,
-            "filtered_traffic_state": filtered_traffic_state,
-            "behavior_traffic_state": behavior_traffic_state,
-            "traffic_stop_forward_m": traffic_stop_forward_m,
-            "traffic_stop_commit_distance_m": traffic_stop_commit_distance_m,
-            "traffic_stop_approach_reason": traffic_stop_approach_reason,
-            "speed_plan": speed_plan,
-            "candidate_frame": executable_behavior.candidate_frame,
-            "mpc_feedback": mpc_feedback,
-            "upcoming_turn_direction": upcoming_turn_direction,
-            "upcoming_turn_distance_m": upcoming_turn_distance_m,
-            "upcoming_turn_reason": upcoming_turn_reason,
-            "source_quality": source_quality,
-            "route_replan_attempted": bool(route_replan_attempted),
-            "route_replan_succeeded": bool(route_replan_succeeded),
-            "route_replan_reason": str(route_replan_reason),
-        })
+        )
         # Cooperative arbitration precedes physical maneuver commitment.
         # The first proposal tick is deliberately deferred so both peers can
         # exchange the same proposed claims before either installs a locked
