@@ -35,6 +35,10 @@ from opencda.planning_module.pipeline.reference_line_provider import (
     CandidateReferenceBuildContext,
     ReferenceLineProvider,
 )
+from opencda.planning_module.pipeline.reference_planning_stage import (
+    BehaviorReferenceRequest,
+    PostTurnReferenceRequest,
+)
 from opencda.planning_module.pipeline.planner_diagnostics_stage import (
     PlannerDiagnosticsStage,
 )
@@ -1594,40 +1598,44 @@ class CPXMPCPlannerBridge:
         stop_goal_active = bool(stop_goal_active or speed_plan.stop_goal_active)
         planner_mode = "INTERSECTION" if bool(planner_input_frame.map_lane.in_junction) else "NORMAL"
 
-        nominal_state = self.nominal_trajectory_generator.current
-        base_temporary_destination_state = nominal_state.target_state()
-        built_reference = self._stable_reference_line_provider.build_behavior_reference(
-            map_planner=self.reference_map,
-            local_map=getattr(self, "_local_map_snapshot", None),
-            ego_pose=ego_pose,
-            ego_state=current_state,
-            route_points=route_points,
-            previous_reference=nominal_state.mutable_samples(),
-            previous_target_state=base_temporary_destination_state,
-            behavior_runtime_config=self.behavior_runtime_cfg,
-            decision=str(decision),
-            lane_change_state=str(lc_state),
-            target_lane_id=int(target_lane_id),
-            current_lane_id=int(current_lane_id),
-            route_optimal_lane_id=int(route_optimal_lane_id),
-            route_reference_allowed=bool(route_reference_allowed),
-            route_reference_gate_reason=str(route_reference_gate_reason),
-            in_junction=bool(planner_input_frame.map_lane.in_junction),
-            next_macro_maneuver=str(
-                planner_input_frame.planning.route.next_macro_maneuver
-            ),
-            planner_mode=str(planner_mode),
-            lookahead_m=float(self.lookahead_m),
-            target_speed_mps=float(planned_speed_mps),
-            ego_speed_mps=float(ego_speed_mps),
-            horizon_steps=int(self.mpc.horizon_steps),
-            dt_s=float(self.mpc.dt_s),
-            reference_freeze_count=int(nominal_state.reference_freeze_count),
-            sim_time_s=float(sim_time_s),
-            stop_release_smooth_until_s=float(
-                self._stop_release_temp_smooth_until_sim_time_s
-            ),
-            authoritative_ego_waypoint=self._route_context.authoritative_ego_waypoint,
+        baseline_reference_frame = self.pipeline.build_behavior_reference(
+            BehaviorReferenceRequest(
+                map_planner=self.reference_map,
+                local_map=getattr(self, "_local_map_snapshot", None),
+                ego_pose=ego_pose,
+                ego_state=current_state,
+                route_points=route_points,
+                behavior_runtime_config=self.behavior_runtime_cfg,
+                decision=str(decision),
+                lane_change_state=str(lc_state),
+                target_lane_id=int(target_lane_id),
+                current_lane_id=int(current_lane_id),
+                route_optimal_lane_id=int(route_optimal_lane_id),
+                route_reference_allowed=bool(route_reference_allowed),
+                route_reference_gate_reason=str(route_reference_gate_reason),
+                in_junction=bool(planner_input_frame.map_lane.in_junction),
+                next_macro_maneuver=str(
+                    planner_input_frame.planning.route.next_macro_maneuver
+                ),
+                planner_mode=str(planner_mode),
+                lookahead_m=float(self.lookahead_m),
+                target_speed_mps=float(planned_speed_mps),
+                ego_speed_mps=float(ego_speed_mps),
+                horizon_steps=int(self.mpc.horizon_steps),
+                dt_s=float(self.mpc.dt_s),
+                sim_time_s=float(sim_time_s),
+                stop_release_smooth_until_s=float(
+                    self._stop_release_temp_smooth_until_sim_time_s
+                ),
+                authoritative_ego_waypoint=(
+                    self._route_context.authoritative_ego_waypoint
+                ),
+            )
+        )
+        built_reference = baseline_reference_frame.built_reference
+        previous_reference = baseline_reference_frame.mutable_previous_reference()
+        base_temporary_destination_state = (
+            baseline_reference_frame.mutable_previous_target_state()
         )
         local_lane_center_reference = built_reference.mutable_samples()
         # Stash the pre-publication reference (the one Stage C/D build corridor
@@ -1715,7 +1723,7 @@ class CPXMPCPlannerBridge:
                 ego_yaw_rad=float(ego_yaw_rad),
                 ego_speed_mps=float(ego_speed_mps),
                 route_points=route_points,
-                previous_reference=nominal_state.mutable_samples(),
+                previous_reference=previous_reference,
                 previous_target_state=list(base_temporary_destination_state or []),
                 behavior_runtime_config=self.behavior_runtime_cfg,
                 baseline_decision=str(decision),
@@ -1888,38 +1896,34 @@ class CPXMPCPlannerBridge:
             ),
             ego_speed_mps=float(ego_speed_mps),
         )
-        post_turn = self._stable_reference_line_provider.resolve_post_turn_reference(
-            maneuver_manager=self.maneuver_manager,
-            decision=str(decision),
-            scenario_state=str(getattr(scenario_decision, "state", "")),
-            exit_alignment_valid=bool(behavior_lane_alignment_valid),
-            exit_lateral_error_m=float(behavior_lane_lateral_error_m),
-            exit_heading_error_rad=float(behavior_lane_heading_error_rad),
-            local_map=self._local_map_snapshot,
-            ego_x_m=float(ego_location.x), ego_y_m=float(ego_location.y),
-            current_state=current_state, current_lane_id=int(current_lane_id),
-            target_speed_mps=float(planned_speed_mps),
-            horizon_steps=int(self.mpc.horizon_steps), dt_s=float(self.mpc.dt_s),
-            route_revision=str(self.route_manager.route_revision),
-            map_epoch=str(self.waypoint_backend or "admap"), config=self.config,
-            destination_state=nominal_destination_state,
-            reference_samples=local_lane_center_reference,
-            debug_fields=reference_debug,
+        post_turn = self.pipeline.finalize_post_turn_reference(
+            PostTurnReferenceRequest(
+                maneuver_manager=self.maneuver_manager,
+                decision=str(decision),
+                scenario_state=str(getattr(scenario_decision, "state", "")),
+                exit_alignment_valid=bool(behavior_lane_alignment_valid),
+                exit_lateral_error_m=float(behavior_lane_lateral_error_m),
+                exit_heading_error_rad=float(behavior_lane_heading_error_rad),
+                local_map=self._local_map_snapshot,
+                ego_x_m=float(ego_location.x),
+                ego_y_m=float(ego_location.y),
+                current_state=current_state,
+                current_lane_id=int(current_lane_id),
+                target_speed_mps=float(planned_speed_mps),
+                horizon_steps=int(self.mpc.horizon_steps),
+                dt_s=float(self.mpc.dt_s),
+                route_revision=str(self.route_manager.route_revision),
+                map_epoch=str(self.waypoint_backend or "admap"),
+                config=self.config,
+                destination_state=nominal_destination_state,
+                reference_samples=local_lane_center_reference,
+                debug_fields=reference_debug,
+                reference_freeze_count=int(nominal_freeze_count),
+            )
         )
-        if bool(post_turn.clear_turn_reference):
-            self._clear_turn_master_reference()
         nominal_destination_state = post_turn.mutable_destination_state()
         local_lane_center_reference = post_turn.mutable_samples()
         reference_debug = dict(post_turn.debug_fields)
-
-        # ReferenceLineProvider is the sole geometry owner. ManeuverManager
-        # owns lifecycle only and cannot replace a contract-approved path.
-        self.nominal_trajectory_generator.update(
-            target_state=nominal_destination_state,
-            samples=local_lane_center_reference,
-            reference_freeze_count=int(nominal_freeze_count),
-            source=str(reference_debug.get("reference_source", "planning_tick")),
-        )
         from opencda.planning_module.pipeline.behavior_reference_execution_stage import (
             BehaviorReferenceResult,
         )

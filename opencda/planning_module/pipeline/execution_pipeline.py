@@ -231,6 +231,7 @@ class PlanningPipeline:
         fallback: Any = None,
         behavior_reference_execution: Any = None,
         candidate_selection: Any = None,
+        reference_planning: Any = None,
         control_finalization: Any = None,
     ) -> None:
         self._runtime_input = runtime_input
@@ -247,6 +248,7 @@ class PlanningPipeline:
         self.fallback = fallback
         self.behavior_reference_execution = behavior_reference_execution
         self.candidate_selection = candidate_selection
+        self.reference_planning = reference_planning
         self.control_finalization = control_finalization
 
     def begin_tick(
@@ -1089,6 +1091,16 @@ class PlanningPipeline:
         if self.candidate_selection is None:
             raise RuntimeError("candidate selection stage is not configured")
         return self.candidate_selection.arbitrate(request, **kwargs)
+
+    def build_behavior_reference(self, request):
+        if self.reference_planning is None:
+            raise RuntimeError("reference planning stage is not configured")
+        return self.reference_planning.build_behavior_reference(request)
+
+    def finalize_post_turn_reference(self, request):
+        if self.reference_planning is None:
+            raise RuntimeError("reference planning stage is not configured")
+        return self.reference_planning.finalize_post_turn(request)
 
     def cooperative_conflict_reference(self, **kwargs):
         if self.candidate_selection is None:

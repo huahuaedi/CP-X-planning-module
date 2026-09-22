@@ -78,6 +78,12 @@ from .reference_line_provider import (
     ReferenceLineRequest,
     ReferenceLineResult,
 )
+from .reference_planning_stage import (
+    BehaviorReferenceFrame,
+    BehaviorReferenceRequest,
+    PostTurnReferenceRequest,
+    ReferencePlanningStage,
+)
 from .reference_generator import (
     BoundaryRecoveryValidation,
     DrivableFootprintOccupancy,
@@ -163,6 +169,10 @@ __all__ = [
     "DestinationSpeedStage",
     "DestinationSpeedStageResult",
     "PlanningPipeline",
+    "ReferencePlanningStage",
+    "BehaviorReferenceRequest",
+    "BehaviorReferenceFrame",
+    "PostTurnReferenceRequest",
     "MPCControlBuffer",
     "BehaviorConstraint",
     "BehaviorDecision",

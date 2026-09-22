@@ -22,6 +22,7 @@ from opencda.planning_module.pipeline.road_boundary_monitor import RoadBoundaryM
 from opencda.planning_module.pipeline.cooperative_arbitration_stage import CooperativeArbitrationStage
 from opencda.planning_module.pipeline.traffic_light_memory import TrafficLightMemory
 from opencda.planning_module.pipeline.reference_line_provider import ReferenceLineProvider
+from opencda.planning_module.pipeline.reference_planning_stage import ReferencePlanningStage
 from opencda.planning_module.pipeline.maneuver_manager import ManeuverManager
 from opencda.planning_module.pipeline.nominal_trajectory import NominalTrajectoryGenerator
 from opencda.planning_module.pipeline.fallback_manager import TrajectoryFallbackManager
@@ -686,6 +687,10 @@ def _pipeline_route_and_finalization(bridge, parts: SimpleNamespace) -> None:
         strict_ownership=parts.strict_decision_ownership_enabled,
         target_speed_mps=bridge.target_speed_mps,
     )
+    reference_planning_stage = ReferencePlanningStage(
+        provider=bridge._stable_reference_line_provider,
+        nominal_trajectory_generator=bridge.nominal_trajectory_generator,
+    )
     bridge.pipeline = PlanningPipeline(
         runtime_input=parts.runtime_input_stage,
         perception=parts.perception_stage,
@@ -700,6 +705,7 @@ def _pipeline_route_and_finalization(bridge, parts: SimpleNamespace) -> None:
         fallback=parts.fallback_manager,
         behavior_reference_execution=parts.behavior_reference_execution_stage,
         candidate_selection=candidate_selection_stage,
+        reference_planning=reference_planning_stage,
     )
     # Construction-only scratch state threaded from the earlier
     # _init_* phases; nothing outside __init__ may depend on it.
