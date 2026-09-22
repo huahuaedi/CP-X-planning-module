@@ -45,13 +45,14 @@ from opencda.planning_module.pipeline.planner_diagnostics_stage import (
 from opencda.planning_module.pipeline.mpc_execution_stage import (
     MPCExecutionRequest,
 )
+from opencda.planning_module.pipeline.mpc_cost_profile_stage import (
+    adaptive_target_horizon_s as _adaptive_target_horizon_s,
+    select_profile_with_hysteresis as _select_mpc_cost_profile_with_hysteresis,
+)
 from opencda.planning_module.pipeline.execution_pipeline import (
     BehaviorContextRequest,
     ExecutableBehaviorRequest,
     NominalPlanningRequest,
-)
-from opencda.planning_module.pipeline.candidate_evaluation import (
-    mpc_cost_profile_for_behavior,
 )
 from opencda.planning_module.pipeline.candidate_selection_stage import (
     CandidateSelectionStage,
@@ -1836,7 +1837,7 @@ class CPXMPCPlannerBridge:
         # MPC is downstream of candidate selection. Its objective profile must
         # describe the maneuver that will actually execute, not the behavior
         # proposal that existed before candidate arbitration.
-        self._apply_mpc_cost_profile(
+        self.pipeline.apply_mpc_cost_profile(
             behavior=str(decision),
             planner_lc_state=str(lc_state),
             planner_mode=str(planner_mode),
@@ -2925,84 +2926,6 @@ class CPXMPCPlannerBridge:
             ego_waypoint=ego_waypoint,
         )
 
-    def _apply_mpc_cost_profile(
-        self,
-        *,
-        behavior: str,
-        planner_lc_state: str,
-        planner_mode: str,
-        next_macro_maneuver: str,
-        reference_tracking_mode: str = "",
-        sim_time_s: float,
-        nearest_obstacle_distance_m: Optional[float] = None,
-        ego_speed_mps: float = 0.0,
-    ) -> None:
-        previous_active_profile = str(self.active_mpc_cost_profile)
-        requested = mpc_cost_profile_for_behavior(
-            behavior=behavior,
-            planner_lc_state=planner_lc_state,
-            planner_mode=planner_mode,
-            next_macro_maneuver=next_macro_maneuver,
-            reference_tracking_mode=reference_tracking_mode,
-        )
-        (
-            self.active_mpc_cost_profile,
-            self.mpc_cost_profile_active_since_s,
-            self.mpc_cost_profile_switch_reason,
-        ) = _select_mpc_cost_profile_with_hysteresis(
-            requested_profile=str(requested),
-            active_profile=str(self.active_mpc_cost_profile),
-            sim_time_s=float(sim_time_s),
-            active_since_s=float(self.mpc_cost_profile_active_since_s),
-            min_hold_s=float(self.behavior_runtime_cfg.get("mpc_cost_profile_min_hold_s", 1.5)),
-        )
-        self.requested_mpc_cost_profile = str(requested)
-        if hasattr(self.mpc, "apply_mode_cost_profile"):
-            self.active_mpc_cost_profile = str(
-                self.mpc.apply_mode_cost_profile(str(self.active_mpc_cost_profile))
-            )
-        if (
-            str(self.active_mpc_cost_profile) != previous_active_profile
-            and hasattr(self.mpc, "clear_previous_solution_seed")
-        ):
-            # A shifted solution is a useful linearization seed only while it
-            # describes the same reference mode.  In particular, carrying a
-            # straight, zero-steer rollout into the first TURN solve bypasses
-            # the new connector curvature entirely and forces feedback to
-            # wait for a heading error.  Clear only the optimizer seed; the
-            # persistent reference master and executable control buffer keep
-            # their own independent lifecycles.
-            self.mpc.clear_previous_solution_seed()
-        if bool(
-            getattr(self.mpc, "adaptive_horizon_enabled", False)
-        ) and hasattr(self.mpc, "blend_toward_horizon_s"):
-            # adaptive_horizon_enabled/min_s/max_s live on the MPC instance
-            # (parsed from MPC/mpc.yaml, the same file horizon_s itself comes
-            # from) -- self.config here is the bridge/scenario config, a
-            # separate namespace that was never going to have that key.
-            profile_horizon_s = (
-                dict(self.config.get("adaptive_horizon_profile_s", {}))
-                or _DEFAULT_ADAPTIVE_HORIZON_PROFILE_S
-            )
-            self.mpc.blend_toward_horizon_s(
-                _adaptive_target_horizon_s(
-                    mpc_cost_profile=str(self.active_mpc_cost_profile),
-                    nearest_obstacle_distance_m=nearest_obstacle_distance_m,
-                    ego_speed_mps=float(ego_speed_mps),
-                    profile_horizon_s=profile_horizon_s,
-                    obstacle_reference_speed_mps=float(
-                        self.config.get(
-                            "adaptive_horizon_obstacle_reference_speed_mps", 2.0
-                        )
-                    ),
-                    obstacle_comfortable_decel_mps2=float(
-                        self.config.get(
-                            "adaptive_horizon_obstacle_comfortable_decel_mps2", 2.0
-                        )
-                    ),
-                )
-            )
-
     def _perception_diagnostics(self) -> dict[str, object]:
         manager = getattr(self.vehicle_manager, "perception_manager", None)
         activated = bool(getattr(manager, "activate", False))
@@ -3292,86 +3215,6 @@ class CPXMPCPlannerBridge:
     def _wrap_angle(angle_rad: float) -> float:
         return (float(angle_rad) + math.pi) % (2.0 * math.pi) - math.pi
 
-
-
-_DEFAULT_ADAPTIVE_HORIZON_PROFILE_S: dict[str, float] = {
-    "lane_follow": 3.0,
-    "prepare_lane_change": 4.5,
-    "execute_lane_change": 4.5,
-    "intersection_turn": 2.2,
-    "stop": 2.0,
-    "recovery": 1.5,
-}
-
-
-def _adaptive_target_horizon_s(
-    *,
-    mpc_cost_profile: str,
-    nearest_obstacle_distance_m: Optional[float],
-    ego_speed_mps: float,
-    profile_horizon_s: Mapping[str, float],
-    obstacle_reference_speed_mps: float = 2.0,
-    obstacle_comfortable_decel_mps2: float = 2.0,
-) -> float:
-    """Pick a prediction-horizon target from the active behavior mode, then
-    shorten it further if a nearby obstacle needs quicker reaction -- a
-    human driver looks less far ahead through a tight turn than down an open
-    lane, and less still when something close needs immediate attention.
-
-    The obstacle term is the MAX of two independent estimates, not a single
-    distance/current_speed ratio: that ratio blows up as ego comfortably
-    decelerates toward a stop behind a closing lead vehicle (the exact
-    "shouldn't horizon keep shrinking here?" case this was built for) --
-    dividing by ego's own shrinking speed makes the estimate grow right when
-    it should keep shrinking. distance_reaction_s (distance over a fixed
-    reference speed, not ego's live one) shrinks monotonically as the gap
-    closes regardless of ego's speed; stopping_time_s (ego's own speed over a
-    comfortable deceleration) shrinks to 0 as ego actually comes to a stop.
-    Taking the max avoids either term alone causing a premature shrink (e.g.
-    ego already slow with an unrelated, still-distant obstacle ahead).
-    """
-
-    base = float(
-        profile_horizon_s.get(
-            str(mpc_cost_profile),
-            profile_horizon_s.get("lane_follow", 3.0),
-        )
-    )
-    if nearest_obstacle_distance_m is not None and math.isfinite(
-        float(nearest_obstacle_distance_m)
-    ):
-        distance_reaction_s = float(nearest_obstacle_distance_m) / max(
-            1.0e-3, float(obstacle_reference_speed_mps)
-        )
-        stopping_time_s = float(ego_speed_mps) / max(
-            1.0e-3, float(obstacle_comfortable_decel_mps2)
-        )
-        reaction_s = max(distance_reaction_s, stopping_time_s)
-        base = min(base, max(1.0, reaction_s))
-    return float(base)
-
-
-def _select_mpc_cost_profile_with_hysteresis(
-    *,
-    requested_profile: str,
-    active_profile: str,
-    sim_time_s: float,
-    active_since_s: float,
-    min_hold_s: float,
-) -> tuple[str, float, str]:
-    requested = str(requested_profile or "lane_follow").strip() or "lane_follow"
-    active = str(active_profile or "lane_follow").strip() or "lane_follow"
-    elapsed_s = max(0.0, float(sim_time_s) - float(active_since_s))
-    min_hold_s = max(0.0, float(min_hold_s))
-    if requested == active:
-        return active, float(active_since_s), "same_profile"
-    if requested in {"stop", "recovery"}:
-        return requested, float(sim_time_s), "safety_preempt"
-    if active in {"stop", "recovery"} and elapsed_s < min_hold_s:
-        return active, float(active_since_s), "hold_safety_profile"
-    if elapsed_s < min_hold_s:
-        return active, float(active_since_s), "min_hold"
-    return requested, float(sim_time_s), "switch"
 
 
 def cpx_planner_enabled(config: Mapping[str, Any]) -> bool:

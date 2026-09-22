@@ -52,6 +52,7 @@ from .execution_pipeline import PlanningPipeline, ScenarioPlanningFrameRequest
 from .mpc_feedback import BehaviorMPCFeedback
 from .mpc_command_extractor import MPCCommandExtractor, MPCTrackingCommand
 from .mpc_entry_stage import MPCEntryStage, MPCEntryStageResult
+from .mpc_cost_profile_stage import MPCCostProfileStage, MPCCostProfileState
 from .mpc_execution_stage import (
     MPCExecutionRequest,
     MPCExecutionResult,
@@ -149,6 +150,8 @@ __all__ = [
     "MPCTrackingCommand",
     "MPCEntryStage",
     "MPCEntryStageResult",
+    "MPCCostProfileStage",
+    "MPCCostProfileState",
     "CarlaActuatorMapper",
     "BoundaryRecoveryRequest",
     "BoundaryRecoveryValidation",

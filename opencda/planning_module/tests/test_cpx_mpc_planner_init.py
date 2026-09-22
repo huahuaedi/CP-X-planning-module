@@ -142,7 +142,7 @@ def test_pipeline_wires_all_stage_owners(bridge):
     for attr in (
         "_runtime_input", "_perception", "behavior", "scenario",
         "static_obstacle", "control_safety", "speed", "destination_speed",
-        "reference_publication", "mpc_entry", "fallback",
+            "reference_publication", "mpc_entry", "mpc_cost_profile", "fallback",
         "behavior_reference_execution", "reference_planning",
         "control_finalization", "mpc_execution",
     ):

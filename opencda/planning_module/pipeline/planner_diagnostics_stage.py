@@ -1115,9 +1115,7 @@ class PlannerDiagnosticsStage:
             "mpc_steering_reference_weight": float(
                 getattr(self.mpc, "_last_steering_reference_weight", 0.0)
             ),
-            "mpc_cost_profile": str(self.active_mpc_cost_profile),
-            "requested_mpc_cost_profile": str(self.requested_mpc_cost_profile),
-            "mpc_cost_profile_switch_reason": str(self.mpc_cost_profile_switch_reason),
+            **self.pipeline.mpc_cost_profile.state.trace_fields(),
             "mpc_minimum_progress_enabled": bool(
                 getattr(self.mpc, "minimum_progress_enabled", False)
             ),

@@ -30,6 +30,7 @@ from opencda.planning_module.pipeline.speed_planner import SpeedTargetPlanner
 from opencda.planning_module.pipeline.destination_speed_stage import DestinationSpeedStage
 from opencda.planning_module.pipeline.reference_publication_stage import ReferencePublicationStage
 from opencda.planning_module.pipeline.mpc_entry_stage import MPCEntryStage
+from opencda.planning_module.pipeline.mpc_cost_profile_stage import MPCCostProfileStage
 from opencda.planning_module.pipeline.mpc_execution_stage import MPCExecutionStage
 from opencda.planning_module.pipeline.perception_stage import PerceptionStage
 from opencda.planning_module.pipeline.execution_pipeline import PlanningPipeline
@@ -692,6 +693,11 @@ def _pipeline_route_and_finalization(bridge, parts: SimpleNamespace) -> None:
         nominal_trajectory_generator=bridge.nominal_trajectory_generator,
         candidate_selection=candidate_selection_stage,
     )
+    mpc_cost_profile_stage = MPCCostProfileStage(
+        mpc=bridge.mpc,
+        config=bridge.config,
+        behavior_runtime_config=bridge.behavior_runtime_cfg,
+    )
     bridge.pipeline = PlanningPipeline(
         runtime_input=parts.runtime_input_stage,
         perception=parts.perception_stage,
@@ -706,6 +712,7 @@ def _pipeline_route_and_finalization(bridge, parts: SimpleNamespace) -> None:
         fallback=parts.fallback_manager,
         behavior_reference_execution=parts.behavior_reference_execution_stage,
         reference_planning=reference_planning_stage,
+        mpc_cost_profile=mpc_cost_profile_stage,
     )
     # Construction-only scratch state threaded from the earlier
     # _init_* phases; nothing outside __init__ may depend on it.
@@ -950,10 +957,6 @@ def _pipeline_route_and_finalization(bridge, parts: SimpleNamespace) -> None:
                 bridge.config.get("cp_visibility_target_tolerance_m", 0.75)
             ),
         )
-    bridge.active_mpc_cost_profile = "lane_follow"
-    bridge.requested_mpc_cost_profile = "lane_follow"
-    bridge.mpc_cost_profile_active_since_s = 0.0
-    bridge.mpc_cost_profile_switch_reason = "initial"
     bridge._latest_opencda_update: dict[str, Any] = {}
     bridge.last_output = None
     bridge._write_planning_metrics_artifacts = write_planning_metrics_artifacts

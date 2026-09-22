@@ -231,6 +231,7 @@ class PlanningPipeline:
         fallback: Any = None,
         behavior_reference_execution: Any = None,
         reference_planning: Any = None,
+        mpc_cost_profile: Any = None,
         control_finalization: Any = None,
     ) -> None:
         self._runtime_input = runtime_input
@@ -247,6 +248,7 @@ class PlanningPipeline:
         self.fallback = fallback
         self.behavior_reference_execution = behavior_reference_execution
         self.reference_planning = reference_planning
+        self.mpc_cost_profile = mpc_cost_profile
         self.control_finalization = control_finalization
 
     def begin_tick(
@@ -1099,6 +1101,11 @@ class PlanningPipeline:
         if self.reference_planning is None:
             raise RuntimeError("reference planning stage is not configured")
         return self.reference_planning.finalize_post_turn(request)
+
+    def apply_mpc_cost_profile(self, **kwargs):
+        if self.mpc_cost_profile is None:
+            raise RuntimeError("MPC cost-profile stage is not configured")
+        return self.mpc_cost_profile.apply(**kwargs)
 
     def cooperative_conflict_reference(self, **kwargs):
         if self.reference_planning is None:
