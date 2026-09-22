@@ -983,7 +983,10 @@ def _pipeline_route_and_finalization(bridge, parts: SimpleNamespace) -> None:
     bridge._cooperative = CooperativeArbitrationStage(
         config=bridge.config,
         enabled=bridge._cav_conflict_enabled,
-        pipeline=bridge.pipeline,
+        build_conflict_reference=(
+            reference_planning_stage.cooperative_conflict_reference
+        ),
+        resolve_interaction=bridge.pipeline.resolve_cav_interaction,
         mpc=bridge.mpc,
         route_manager=bridge.route_manager,
         maneuver_manager=bridge.maneuver_manager,

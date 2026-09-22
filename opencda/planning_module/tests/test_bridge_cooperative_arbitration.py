@@ -364,13 +364,13 @@ def test_config_knobs_and_planner_limits_reach_the_interaction_resolver(cache_ro
     bridge, _ = _make_bridge(cache_root, **knobs)
     _, frame = _frame(bridge)
     captured = []
-    real = bridge.pipeline.resolve_cav_interaction
+    real = bridge._cooperative._resolve_interaction
 
     def spy(**kwargs):
         captured.append(kwargs)
         return real(**kwargs)
 
-    bridge.pipeline.resolve_cav_interaction = spy
+    bridge._cooperative._resolve_interaction = spy
 
     _arbitrate(bridge, frame, sim_time_s=0.0, proposal=_proposal(bridge))
 
@@ -402,13 +402,13 @@ def test_unconfigured_resolver_knobs_keep_their_documented_defaults(cache_root):
     bridge, _ = _make_bridge(cache_root)
     _, frame = _frame(bridge)
     captured = []
-    real = bridge.pipeline.resolve_cav_interaction
+    real = bridge._cooperative._resolve_interaction
 
     def spy(**kwargs):
         captured.append(kwargs)
         return real(**kwargs)
 
-    bridge.pipeline.resolve_cav_interaction = spy
+    bridge._cooperative._resolve_interaction = spy
 
     _arbitrate(bridge, frame, sim_time_s=0.0, proposal=_proposal(bridge))
 
@@ -419,4 +419,3 @@ def test_unconfigured_resolver_knobs_keep_their_documented_defaults(cache_root):
     assert seen["credible_mode_probability_min"] == pytest.approx(0.15)
     assert seen["credible_mode_ttc_s"] == pytest.approx(2.0)
     assert seen["credible_mode_veto_release_ticks"] == 12
-

@@ -164,6 +164,12 @@ def test_candidate_selection_stage_receives_lane_change_lifecycle(bridge):
     )
 
 
+def test_cooperative_stage_depends_on_explicit_ports_not_full_pipeline(bridge):
+    assert not hasattr(bridge._cooperative, "_pipeline")
+    assert callable(bridge._cooperative._build_conflict_reference)
+    assert callable(bridge._cooperative._resolve_interaction)
+
+
 def test_control_finalization_shares_mpc_command_extractor_and_control_safety(bridge):
     control_finalization = bridge.pipeline.control_finalization
     assert control_finalization._extractor is bridge.mpc_command_extractor

@@ -41,13 +41,16 @@ class CooperativeArbitrationRequest:
 
 class CooperativeArbitrationStage:
     def __init__(
-        self, *, config: Mapping[str, Any], enabled: bool, pipeline: Any,
+        self, *, config: Mapping[str, Any], enabled: bool,
+        build_conflict_reference: Callable[..., Any],
+        resolve_interaction: Callable[..., Any],
         mpc: Any, route_manager: Any, maneuver_manager: Any,
         record_stage_ms: Callable[[str, float], None],
     ) -> None:
         self._config = config
         self._enabled = bool(enabled)
-        self._pipeline = pipeline
+        self._build_conflict_reference = build_conflict_reference
+        self._resolve_interaction = resolve_interaction
         self._mpc = mpc
         self._route_manager = route_manager
         self._maneuver_manager = maneuver_manager
@@ -156,7 +159,7 @@ class CooperativeArbitrationStage:
         _ts_sub = time.monotonic()
         conflict_reference = self.schedule.reference_for_tick(
             refresh=bool(schedule.refresh_roles),
-            build=lambda: self._pipeline.cooperative_conflict_reference(
+            build=lambda: self._build_conflict_reference(
                 proposal=cooperative_proposal,
                 local_map=local_map_snapshot,
                 current_state=current_state,
@@ -177,7 +180,7 @@ class CooperativeArbitrationStage:
             dt_s=float(self._mpc.dt_s),
         )
         _ts_sub = time.monotonic()
-        cav_result = self._pipeline.resolve_cav_interaction(
+        cav_result = self._resolve_interaction(
             reference_samples=conflict_reference.mutable_samples(),
             # Stage D's QP rows must linearize against the reference the
             # vehicle is actually driving, not the lane-change preview
