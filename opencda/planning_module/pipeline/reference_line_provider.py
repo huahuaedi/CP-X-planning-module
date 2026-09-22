@@ -736,6 +736,8 @@ class ReferenceLineProvider(StableReferenceLineProvider):
         stop_release_smooth_until_s,
         authoritative_ego_waypoint,
         lane_reference_step_distance_m=None,
+        route_revision="",
+        map_epoch="admap",
     ) -> BehaviorReferenceResult:
         """Build one behavior reference through the provider-owned entry.
 
@@ -752,6 +754,27 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             select_reference_intent,
         )
 
+        step_distance_m = (
+            max(0.05, float(lane_reference_step_distance_m))
+            if lane_reference_step_distance_m is not None
+            else max(0.5, float(dt_s) * max(
+                1.0, float(ego_speed_mps), abs(float(target_speed_mps))
+            ))
+        )
+        persistent = self._active_lane_follow_reference(
+            decision=str(decision),
+            route_revision=str(route_revision),
+            map_epoch=str(map_epoch),
+            current_lane_id=int(current_lane_id),
+            ego_pose=ego_pose,
+            target_speed_mps=float(target_speed_mps),
+            horizon_steps=int(horizon_steps),
+            step_distance_m=float(step_distance_m),
+            reference_freeze_count=int(reference_freeze_count),
+        )
+        if persistent is not None:
+            return persistent
+
         local_route_reference = self._local_route_lane_follow_reference(
             local_map=local_map,
             ego_pose=ego_pose,
@@ -760,13 +783,7 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             current_lane_id=int(current_lane_id),
             target_speed_mps=float(target_speed_mps),
             horizon_steps=int(horizon_steps),
-            step_distance_m=(
-                max(0.05, float(lane_reference_step_distance_m))
-                if lane_reference_step_distance_m is not None
-                else max(0.5, float(dt_s) * max(
-                    1.0, float(ego_speed_mps), abs(float(target_speed_mps))
-                ))
-            ),
+            step_distance_m=float(step_distance_m),
         )
         if local_route_reference is not None:
             return local_route_reference
@@ -820,6 +837,68 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             reference_freeze_count=int(output.lane_reference_freeze_count),
             diagnostics=diagnostics,
             fallback_reason=str(output.last_reference_fallback_reason),
+        )
+
+    def _active_lane_follow_reference(
+        self, *, decision: str, route_revision: str, map_epoch: str,
+        current_lane_id: int, ego_pose: Mapping[str, object],
+        target_speed_mps: float, horizon_steps: int, step_distance_m: float,
+        reference_freeze_count: int,
+    ) -> Optional[BehaviorReferenceResult]:
+        """Window the installed lane-follow master without rebuilding geometry."""
+
+        if str(decision).strip().lower() != LANE_FOLLOW:
+            return None
+        snapshot = self.snapshot(LANE_FOLLOW)
+        if (
+            not snapshot.active
+            or str(snapshot.route_revision) != str(route_revision)
+            or str(snapshot.map_epoch) != str(map_epoch)
+        ):
+            return None
+        owned_lane_ids = {
+            int(sample.get("lane_id", 0) or 0)
+            for sample in snapshot.samples
+        }
+        if int(current_lane_id) and int(current_lane_id) not in owned_lane_ids:
+            return None
+        ego_x_m = float(ego_pose.get("x", 0.0))
+        ego_y_m = float(ego_pose.get("y", 0.0))
+        window = self.window(
+            LANE_FOLLOW,
+            ego_x_m=ego_x_m,
+            ego_y_m=ego_y_m,
+            first_forward_m=max(0.05, float(step_distance_m)),
+            spacing_m=max(0.05, float(step_distance_m)),
+            count=max(2, int(horizon_steps)),
+        )
+        rows = [dict(sample) for sample in window.samples]
+        if len(rows) < max(2, int(horizon_steps)):
+            return None
+        speed_mps = max(0.0, float(target_speed_mps))
+        for row in rows:
+            row["speed_ref_mps"] = speed_mps
+            row["v_ref_mps"] = speed_mps
+            row["speed_mps"] = speed_mps
+        terminal = rows[-1]
+        destination = (
+            float(terminal.get("x_ref_m", terminal.get("x", ego_x_m))),
+            float(terminal.get("y_ref_m", terminal.get("y", ego_y_m))),
+            speed_mps,
+            float(terminal.get("heading_rad", 0.0)),
+            int(terminal.get("lane_id", current_lane_id) or current_lane_id),
+        )
+        reason = "persistent_lane_follow_master:" + str(window.reason)
+        return BehaviorReferenceResult(
+            samples=tuple(MappingProxyType(row) for row in rows),
+            destination_state=destination,
+            reference_freeze_count=int(reference_freeze_count),
+            diagnostics=MappingProxyType({
+                "reference_source": "persistent_lane_follow_master",
+                "final_reference_geometry_source": "persistent_lane_follow_master",
+                "persistent_lane_follow_window_reason": reason,
+            }),
+            fallback_reason="",
         )
 
     @staticmethod
@@ -1624,6 +1703,8 @@ class ReferenceLineProvider(StableReferenceLineProvider):
                 lane_reference_step_distance_m=max(
                     0.05, float(geometry_plan.step_m)
                 ),
+                route_revision=str(context.route_revision),
+                map_epoch=str(context.map_epoch),
             )
             destination = built.mutable_destination_state()
             reference = built.mutable_samples()

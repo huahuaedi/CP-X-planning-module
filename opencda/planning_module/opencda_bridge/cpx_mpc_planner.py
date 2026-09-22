@@ -1397,6 +1397,8 @@ class CPXMPCPlannerBridge:
                 authoritative_ego_waypoint=(
                     self._route_context.authoritative_ego_waypoint
                 ),
+                route_revision=str(self.route_manager.route_revision),
+                map_epoch=str(self.waypoint_backend or "admap"),
             )
         )
         built_reference = prepared_reference.built_reference

@@ -665,6 +665,58 @@ def test_lane_follow_trace_uses_existing_persistent_diagnostic_schema():
     )
 
 
+def test_lane_follow_builder_reuses_matching_persistent_master_window():
+    provider = ReferenceLineProvider()
+    master = [
+        {
+            "x_ref_m": float(index),
+            "y_ref_m": 0.0,
+            "heading_rad": 0.0,
+            "lane_id": 12,
+        }
+        for index in range(40)
+    ]
+    installed, _ = provider.install(
+        LANE_FOLLOW,
+        master,
+        route_revision="route-1",
+        map_epoch="town06",
+        event="initial_route",
+    )
+    assert installed
+
+    result = provider._active_lane_follow_reference(
+        decision="lane_follow",
+        route_revision="route-1",
+        map_epoch="town06",
+        current_lane_id=12,
+        ego_pose={"x": 5.0, "y": 0.0},
+        target_speed_mps=8.0,
+        horizon_steps=10,
+        step_distance_m=1.0,
+        reference_freeze_count=0,
+    )
+
+    assert result is not None
+    assert len(result.samples) == 10
+    assert result.samples[0]["x_ref_m"] == pytest.approx(6.0)
+    assert result.samples[-1]["speed_ref_mps"] == pytest.approx(8.0)
+    assert result.diagnostics["reference_source"] == (
+        "persistent_lane_follow_master"
+    )
+    assert provider._active_lane_follow_reference(
+        decision="lane_follow",
+        route_revision="route-2",
+        map_epoch="town06",
+        current_lane_id=12,
+        ego_pose={"x": 5.0, "y": 0.0},
+        target_speed_mps=8.0,
+        horizon_steps=10,
+        step_distance_m=1.0,
+        reference_freeze_count=0,
+    ) is None
+
+
 def test_same_route_extension_cannot_change_route_owner():
     provider = ReferenceLineProvider()
     provider.install(

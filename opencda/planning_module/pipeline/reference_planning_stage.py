@@ -44,6 +44,8 @@ class BehaviorReferenceRequest:
     sim_time_s: float
     stop_release_smooth_until_s: float
     authoritative_ego_waypoint: Any
+    route_revision: str = ""
+    map_epoch: str = "admap"
 
 
 @dataclass(frozen=True)
@@ -79,6 +81,8 @@ class BehaviorReferencePreparationRequest:
     sim_time_s: float
     stop_release_smooth_until_s: float
     authoritative_ego_waypoint: Any
+    route_revision: str = ""
+    map_epoch: str = "admap"
 
 
 @dataclass(frozen=True)
@@ -253,6 +257,8 @@ class ReferencePlanningStage:
             sim_time_s=float(request.sim_time_s),
             stop_release_smooth_until_s=float(request.stop_release_smooth_until_s),
             authoritative_ego_waypoint=request.authoritative_ego_waypoint,
+            route_revision=str(request.route_revision),
+            map_epoch=str(request.map_epoch),
         )
         return BehaviorReferenceFrame(
             built_reference=built,
@@ -303,6 +309,8 @@ class ReferencePlanningStage:
                 request.stop_release_smooth_until_s
             ),
             authoritative_ego_waypoint=request.authoritative_ego_waypoint,
+            route_revision=str(request.route_revision),
+            map_epoch=str(request.map_epoch),
         )
         return PreparedBehaviorReference(
             request=baseline_request,
