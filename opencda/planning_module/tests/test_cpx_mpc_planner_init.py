@@ -168,6 +168,10 @@ def test_cooperative_stage_depends_on_explicit_ports_not_full_pipeline(bridge):
     assert not hasattr(bridge._cooperative, "_pipeline")
     assert callable(bridge._cooperative._build_conflict_reference)
     assert callable(bridge._cooperative._resolve_interaction)
+    assert (
+        bridge._cooperative._resolve_interaction
+        is bridge.cav_interaction_stage.resolve
+    )
 
 
 def test_control_finalization_shares_mpc_command_extractor_and_control_safety(bridge):

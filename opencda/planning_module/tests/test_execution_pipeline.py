@@ -10,6 +10,7 @@ from pipeline.execution_pipeline import (
     PlanningPipeline,
     ScenarioPlanningFrameRequest,
 )
+from pipeline.cav_interaction_stage import CAVInteractionStage
 from pipeline.perception_stage import PerceptionStage
 from pipeline.runtime_input_stage import RuntimeInputStage
 
@@ -604,7 +605,7 @@ def test_resolve_cav_interaction_builds_corridor_rows_on_the_constraint_referenc
     }
     ego_location = SimpleNamespace(x=0.0, y=0.0)
 
-    result = PlanningPipeline.resolve_cav_interaction(
+    result = CAVInteractionStage.resolve(
         reference_samples=classification_reference,
         constraint_reference_samples=executed_reference,
         ego_location=ego_location, ego_yaw_rad=1.5707963267948966,
@@ -643,7 +644,7 @@ def test_resolve_cav_interaction_defaults_constraint_reference_to_reference_samp
     }
     ego_location = SimpleNamespace(x=0.0, y=0.0)
 
-    result = PlanningPipeline.resolve_cav_interaction(
+    result = CAVInteractionStage.resolve(
         reference_samples=reference,
         ego_location=ego_location, ego_yaw_rad=1.5707963267948966,
         ego_speed_mps=9.0, actor_id=1, claim=None,
@@ -680,7 +681,7 @@ def test_make_gap_gate_margin_is_non_positive_once_peer_converges_into_corridor(
     my_claim = ResourceClaim(kind="lane_change", resource_id="lane_change",
                               committed_at_s=10.0, active=True)
 
-    result = PlanningPipeline.resolve_cav_interaction(
+    result = CAVInteractionStage.resolve(
         reference_samples=reference,
         ego_location=ego_location, ego_yaw_rad=1.5707963267948966,
         ego_speed_mps=9.0, actor_id=1, claim=my_claim,
@@ -717,7 +718,7 @@ def test_make_gap_gate_margin_stays_positive_for_a_gentle_real_world_merge():
     my_claim = ResourceClaim(kind="lane_change", resource_id="lane_change",
                               committed_at_s=10.0, active=True)
 
-    result = PlanningPipeline.resolve_cav_interaction(
+    result = CAVInteractionStage.resolve(
         reference_samples=reference,
         ego_location=ego_location, ego_yaw_rad=1.5707963267948966,
         ego_speed_mps=9.0, actor_id=1, claim=my_claim,

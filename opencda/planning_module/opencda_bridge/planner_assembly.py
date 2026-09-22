@@ -20,6 +20,7 @@ from opencda.planning_module.pipeline.route_context_stage import RouteContextSta
 from opencda.planning_module.pipeline.boundary_recovery import BoundaryRecoveryTracker
 from opencda.planning_module.pipeline.road_boundary_monitor import RoadBoundaryMonitor
 from opencda.planning_module.pipeline.cooperative_arbitration_stage import CooperativeArbitrationStage
+from opencda.planning_module.pipeline.cav_interaction_stage import CAVInteractionStage
 from opencda.planning_module.pipeline.traffic_light_memory import TrafficLightMemory
 from opencda.planning_module.pipeline.reference_line_provider import ReferenceLineProvider
 from opencda.planning_module.pipeline.reference_planning_stage import ReferencePlanningStage
@@ -980,13 +981,14 @@ def _pipeline_route_and_finalization(bridge, parts: SimpleNamespace) -> None:
     )
     bridge._prediction_lane_step_resolved_count = 0
     bridge._prediction_lane_step_none_count = 0
+    bridge.cav_interaction_stage = CAVInteractionStage()
     bridge._cooperative = CooperativeArbitrationStage(
         config=bridge.config,
         enabled=bridge._cav_conflict_enabled,
         build_conflict_reference=(
             reference_planning_stage.cooperative_conflict_reference
         ),
-        resolve_interaction=bridge.pipeline.resolve_cav_interaction,
+        resolve_interaction=bridge.cav_interaction_stage.resolve,
         mpc=bridge.mpc,
         route_manager=bridge.route_manager,
         maneuver_manager=bridge.maneuver_manager,

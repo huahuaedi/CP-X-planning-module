@@ -9,6 +9,7 @@ from .candidate_evaluation import (
     CandidateEvaluationFrame,
     evaluate_behavior_candidates,
 )
+from .cav_interaction_stage import CAVInteractionStage
 from .candidate_selection_stage import (
     CandidateArbitrationRequest,
     CandidateArbitrationResult,
@@ -139,6 +140,7 @@ __all__ = [
     "CandidateArbitrationRequest",
     "CandidateArbitrationResult",
     "CandidateSelectionStage",
+    "CAVInteractionStage",
     "BehaviorMPCFeedback",
     "BehaviorCommandFrameRequest",
     "BehaviorCommandFrameResult",

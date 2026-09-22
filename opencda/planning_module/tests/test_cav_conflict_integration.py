@@ -21,7 +21,7 @@ from pipeline.cav_conflict_pipeline import resolve_conflicts
 from pipeline.conflict_classifier import ClassifierParams
 from pipeline.cooperative_arbitration import CavIntent, ResourceClaim
 from pipeline.mpc_corridor_constraints import corridor_rows
-from pipeline.execution_pipeline import PlanningPipeline
+from pipeline.cav_interaction_stage import CAVInteractionStage
 from pipeline.spatiotemporal_corridor import CorridorParams
 
 # Ego reference: straight +y, 0..60 m.
@@ -144,7 +144,7 @@ class CavConflictIntegrationTests(unittest.TestCase):
             ),
             heading_rad=np.pi / 2.0, speed_mps=9.0, planned_path=cav_path,
         )
-        result = PlanningPipeline.resolve_cav_interaction(
+        result = CAVInteractionStage.resolve(
             reference_samples=REF,
             ego_location=SimpleNamespace(x=0.0, y=0.0),
             ego_yaw_rad=np.pi / 2.0,
@@ -198,7 +198,7 @@ class CavConflictIntegrationTests(unittest.TestCase):
             kind="junction", resource_id="junction:1",
             committed_at_s=20.0, active=True, require_ahead=False,
         )
-        result = PlanningPipeline.resolve_cav_interaction(
+        result = CAVInteractionStage.resolve(
             reference_samples=REF,
             ego_location=SimpleNamespace(x=0.0, y=0.0),
             ego_yaw_rad=np.pi / 2.0,

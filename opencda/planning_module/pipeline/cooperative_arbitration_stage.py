@@ -185,7 +185,7 @@ class CooperativeArbitrationStage:
             # Stage D's QP rows must linearize against the reference the
             # vehicle is actually driving, not the lane-change preview
             # curve used only to classify a proposed maneuver -- see
-            # PlanningPipeline.resolve_cav_interaction's docstring.
+            # CAVInteractionStage.resolve's contract.
             constraint_reference_samples=local_lane_center_reference,
             ego_location=ego_location,
             ego_yaw_rad=float(ego_yaw_rad),
