@@ -47,6 +47,21 @@ class SpeedPlanningFrame:
         return bool(self.speed_plan.stop_goal_active)
 
 
+@dataclass(frozen=True)
+class SpeedPlanningPreparationRequest:
+    """Typed upstream outputs required for the longitudinal proposal."""
+
+    planning_context: Any
+    executable_behavior: Any
+    maneuver_manager: Any
+    ego_location: Any
+    ego_yaw_rad: float
+    ego_speed_mps: float
+    requested_speed_mps: float
+    lane_change_commitment_active: bool
+    config: Mapping[str, object]
+
+
 class SpeedPlanningStage:
     """Own obstacle attribution and the single SpeedPlanner proposal call."""
 
@@ -134,3 +149,35 @@ class SpeedPlanningStage:
             front_obstacle_lane_id=front_lane_id,
             front_obstacle_is_source_lane=front_is_source_lane,
         )
+
+    def prepare_and_run(
+        self, request: SpeedPlanningPreparationRequest
+    ) -> SpeedPlanningFrame:
+        """Build the speed request from frozen behavior and planning stages."""
+
+        planning = request.planning_context
+        adapter = planning.adapter_output
+        observation = planning.behavior_context.scenario_observation
+        turn = observation.turn_context
+        lane_change = request.maneuver_manager.lane_change
+        executable = request.executable_behavior
+        return self.run(SpeedPlanningRequest(
+            ego_location=request.ego_location,
+            ego_yaw_rad=float(request.ego_yaw_rad),
+            ego_speed_mps=float(request.ego_speed_mps),
+            requested_speed_mps=float(request.requested_speed_mps),
+            object_snapshots=planning.object_snapshots,
+            current_lane_id=int(planning.current_lane_id),
+            target_lane_id=int(executable.target_lane_id),
+            lane_assignments=dict(adapter.lane_assignments),
+            lane_change_progress=float(lane_change.progress),
+            lane_change_commitment_active=bool(
+                request.lane_change_commitment_active
+            ),
+            committed_source_lane_id=int(lane_change.source_lane_id),
+            scenario_decision=observation.scenario.decision,
+            behavior_decision=str(executable.decision),
+            upcoming_turn_direction=str(turn.direction),
+            upcoming_turn_distance_m=float(turn.distance_m),
+            config=request.config,
+        ))

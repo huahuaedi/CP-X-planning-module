@@ -12,13 +12,17 @@ from .runtime_input_stage import RuntimeInputStage, RuntimeTickSnapshot
 from .speed_planner import (
     effective_emergency_gap_m,
 )
-from .behavior_stage import BehaviorOverrideRequest
+from .behavior_stage import BehaviorCommandFrameRequest, BehaviorOverrideRequest
 from .behavior_reference_finalization_stage import (
     BehaviorReferenceFinalizationPreparationRequest,
     BehaviorReferenceFinalizationRequest,
     BehaviorReferenceFinalizationStage,
 )
-from .speed_planning_stage import SpeedPlanningRequest, SpeedPlanningStage
+from .speed_planning_stage import (
+    SpeedPlanningPreparationRequest,
+    SpeedPlanningRequest,
+    SpeedPlanningStage,
+)
 from .route_update_stage import RouteUpdateRequest, RouteUpdateStage
 from .planning_context_stage import PlanningContextRequest, PlanningContextStage
 
@@ -127,6 +131,28 @@ class ExecutableBehaviorRequest:
     stop_goal_active: bool
     cruise_speed_mps: float
     scenario_reason: str
+
+
+@dataclass(frozen=True)
+class ExecutableBehaviorPreparationRequest:
+    """Typed planning outputs needed to produce one executable behavior."""
+
+    planning_context: Any
+    ego_location: Any
+    ego_yaw_rad: float
+    ego_speed_mps: float
+    cruise_speed_mps: float
+    sim_time_s: float
+    mpc_feedback: Mapping[str, object]
+    lane_change_reference_active: bool
+    lane_change_commitment_active: bool
+    stop_goal_active: bool
+    max_deceleration_mps2: float
+    prepare_reference_lock: bool
+    route_recovery_requested: bool
+    static_obstacle_mpc_stall_failure_count: int
+    config: Mapping[str, object]
+    runtime_config: Mapping[str, object]
 
 
 @dataclass(frozen=True)
@@ -481,6 +507,93 @@ class PlanningPipeline:
             scenario_speed_cap_active=bool(scenario_speed_cap_active),
         )
 
+    def prepare_executable_behavior(
+        self,
+        request: ExecutableBehaviorPreparationRequest,
+        **kwargs: Any,
+    ) -> ExecutableBehaviorFrame:
+        """Build the behavior contract from the frozen planning context."""
+
+        planning = request.planning_context
+        adapter = planning.adapter_output
+        frame = planning.planner_input_frame
+        behavior = planning.behavior_context
+        route_behavior = behavior.route_behavior
+        scenario_observation = behavior.scenario_observation
+        scenario = scenario_observation.scenario
+        conflict = behavior.conflict_resolution
+        return self.resolve_executable_behavior(
+            ExecutableBehaviorRequest(
+                command_request=BehaviorCommandFrameRequest(
+                    adapter_output=adapter,
+                    ego_pose=adapter.ego_pose,
+                    ego_location=request.ego_location,
+                    ego_yaw_rad=float(request.ego_yaw_rad),
+                    ego_speed_mps=float(request.ego_speed_mps),
+                    current_lane_id=int(planning.current_lane_id),
+                    target_speed_mps=float(request.cruise_speed_mps),
+                    sim_time_s=float(request.sim_time_s),
+                    route_optimal_lane_id=int(adapter.route_optimal_lane_id),
+                    route_next_macro_maneuver=str(
+                        frame.planning.route.next_macro_maneuver
+                    ),
+                    route_points=tuple(adapter.route_points),
+                    front_distance_by_lane=dict(adapter.front_distance_by_lane),
+                    lane_safety_scores=dict(adapter.lane_safety_scores),
+                    object_snapshots=planning.object_snapshots,
+                    route_lane_change_context=route_behavior.context,
+                    lane_change_authorization=conflict.authorization,
+                    opportunistic_lane_change_allowed=bool(
+                        conflict.opportunistic_allowed
+                    ),
+                    behavior_traffic_state=str(
+                        scenario.behavior_traffic_state
+                    ),
+                    behavior_stop_target=scenario.behavior_stop_target,
+                    signal_context=dict(scenario.signal_context),
+                    scenario_stop_required=bool(
+                        scenario.decision.stop_goal_active
+                    ),
+                    lane_change_reference_active=bool(
+                        request.lane_change_reference_active
+                    ),
+                    mpc_feedback=request.mpc_feedback,
+                    max_deceleration_mps2=float(
+                        request.max_deceleration_mps2
+                    ),
+                    config=request.config,
+                    runtime_config=request.runtime_config,
+                    route_recovery_requested=bool(
+                        request.route_recovery_requested
+                    ),
+                    static_obstacle_mpc_stall_failure_count=int(
+                        request.static_obstacle_mpc_stall_failure_count
+                    ),
+                ),
+                scenario_decision=scenario.decision,
+                lane_change_authorized=bool(conflict.authorization.allowed),
+                lane_change_gate_reason=str(conflict.lane_change_gate_reason),
+                lane_change_authorization_reason=str(
+                    conflict.authorization.reason
+                ),
+                prepare_reference_lock=bool(request.prepare_reference_lock),
+                lane_change_commitment_active=bool(
+                    request.lane_change_commitment_active
+                ),
+                route_advanced_to_lane_change=bool(
+                    scenario_observation.turn_context.route_advanced_to_lane_change
+                ),
+                route_current_road_option=str(
+                    frame.planning.route.current_road_option
+                ),
+                ego_in_junction=bool(frame.map_lane.in_junction),
+                stop_goal_active=bool(request.stop_goal_active),
+                cruise_speed_mps=float(request.cruise_speed_mps),
+                scenario_reason=str(scenario.decision.reason),
+            ),
+            **kwargs,
+        )
+
     @staticmethod
     def _route_option_turn_decision(*, current_road_option: str) -> str:
         route_option = str(current_road_option or "").strip().upper()
@@ -602,6 +715,11 @@ class PlanningPipeline:
 
     def plan_speed(self, request: SpeedPlanningRequest):
         return self.speed_planning.run(request)
+
+    def plan_speed_from_stages(
+        self, request: SpeedPlanningPreparationRequest
+    ):
+        return self.speed_planning.prepare_and_run(request)
 
     @property
     def destination_stop_latched(self) -> bool:

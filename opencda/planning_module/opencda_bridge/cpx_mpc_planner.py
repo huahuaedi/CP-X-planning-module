@@ -50,7 +50,7 @@ from opencda.planning_module.pipeline.mpc_cost_profile_stage import (
     select_profile_with_hysteresis as _select_mpc_cost_profile_with_hysteresis,
 )
 from opencda.planning_module.pipeline.execution_pipeline import (
-    ExecutableBehaviorRequest,
+    ExecutableBehaviorPreparationRequest,
     NominalPlanningRequest,
 )
 from opencda.planning_module.pipeline.planning_context_stage import (
@@ -60,7 +60,7 @@ from opencda.planning_module.pipeline.behavior_reference_finalization_stage impo
     BehaviorReferenceFinalizationPreparationRequest,
 )
 from opencda.planning_module.pipeline.speed_planning_stage import (
-    SpeedPlanningRequest,
+    SpeedPlanningPreparationRequest,
 )
 from opencda.planning_module.pipeline.route_update_stage import (
     RouteUpdateRequest,
@@ -68,11 +68,6 @@ from opencda.planning_module.pipeline.route_update_stage import (
 from opencda.planning_module.pipeline.candidate_selection_stage import (
     CandidateSelectionStage,
 )
-from opencda.planning_module.pipeline.behavior_stage import (
-    BehaviorCommandFrameRequest,
-)
-
-
 class CPXMPCPlannerBridge:
     """Direct-control planner used inside ``VehicleManager.run_step``."""
 
@@ -1283,68 +1278,21 @@ class CPXMPCPlannerBridge:
         planner_input_frame = planning_context.planner_input_frame
         object_snapshots = planning_context.mutable_object_snapshots()
         local_map_snapshot = planning_context.local_map_snapshot
-        ego_pose = adapter_output.ego_pose
         current_state = adapter_output.current_state
         current_lane_id = int(planning_context.current_lane_id)
-        lane_safety_scores = dict(adapter_output.lane_safety_scores)
-        front_dist_by_lane = dict(adapter_output.front_distance_by_lane)
-        route_points = list(adapter_output.route_points)
-        route_context = planner_input_frame.planning.route
-        route_optimal_lane_id = int(adapter_output.route_optimal_lane_id)
-        route_reference_allowed = bool(adapter_output.route_reference_allowed)
-        route_reference_gate_reason = str(adapter_output.route_reference_gate_reason)
         behavior_context = planning_context.behavior_context
-        route_behavior = behavior_context.route_behavior
-        lane_change_context = route_behavior.context
-        route_lane_change_allowed = bool(
-            route_behavior.route_lane_change_allowed
+        route_lane_change_required = bool(
+            behavior_context.route_behavior.authorization.required_by_route
         )
-        topology_route_target_lane_id = int(
-            lane_change_context.topology_target_lane_id
-        )
-        physical_route_target_lane_id = int(
-            lane_change_context.physical_target_lane_id
-        )
-        route_geometry_lane_change_direction = str(
-            lane_change_context.geometry_direction
-        )
-        route_geometry_lane_change_distance_m = float(
-            lane_change_context.geometry_distance_m
-        )
-        route_geometry_lane_change_reason = str(
-            lane_change_context.geometry_reason
-        )
-        lane_change_authorization = route_behavior.authorization
-        route_lane_change_required = bool(lane_change_authorization.required_by_route)
         scenario_observation = behavior_context.scenario_observation
         turn_context = scenario_observation.turn_context
         scenario_result = scenario_observation.scenario
-        resolved_traffic_state = str(scenario_observation.resolved_traffic_state)
-        filtered_traffic_state = str(scenario_observation.filtered_traffic_state)
         upcoming_turn_direction = str(turn_context.direction)
         upcoming_turn_distance_m = float(turn_context.distance_m)
-        route_advanced_to_lane_change = bool(
-            turn_context.route_advanced_to_lane_change
-        )
         scenario_decision = scenario_result.decision
         conflict_resolution = behavior_context.conflict_resolution
         lane_change_authorization = conflict_resolution.authorization
-        opportunistic_lane_change_allowed = bool(
-            conflict_resolution.opportunistic_allowed
-        )
-        lane_change_gate_reason = str(
-            conflict_resolution.lane_change_gate_reason
-        )
-        lane_change_authorized = bool(lane_change_authorization.allowed)
-        behavior_traffic_state = str(scenario_result.behavior_traffic_state)
         behavior_stop_target = scenario_result.behavior_stop_target
-        traffic_stop_approach_speed_cap_mps = float(
-            scenario_decision.speed_cap_mps
-            if scenario_decision.speed_cap_mps is not None
-            else self.target_speed_mps
-        )
-        traffic_stop_approach_reason = str(scenario_decision.reason)
-        filtered_signal_context = dict(scenario_result.signal_context)
         mpc_feedback = self.mpc_feedback.candidate_feedback(
             current_time_s=float(sim_time_s)
         )
@@ -1353,70 +1301,38 @@ class CPXMPCPlannerBridge:
                 LANE_CHANGE
             ).mutable_samples()
         )
-        executable_behavior = self.pipeline.resolve_executable_behavior(
-            ExecutableBehaviorRequest(
-                command_request=BehaviorCommandFrameRequest(
-                adapter_output=adapter_output, ego_pose=ego_pose,
-                ego_location=ego_location, ego_yaw_rad=float(ego_yaw_rad),
+        executable_behavior = self.pipeline.prepare_executable_behavior(
+            ExecutableBehaviorPreparationRequest(
+                planning_context=planning_context,
+                ego_location=ego_location,
+                ego_yaw_rad=float(ego_yaw_rad),
                 ego_speed_mps=float(ego_speed_mps),
-                current_lane_id=int(current_lane_id),
-                target_speed_mps=float(self.target_speed_mps),
+                cruise_speed_mps=float(self.target_speed_mps),
                 sim_time_s=float(sim_time_s),
-                route_optimal_lane_id=int(route_optimal_lane_id),
-                route_next_macro_maneuver=str(route_context.next_macro_maneuver),
-                route_points=route_points,
-                front_distance_by_lane=front_dist_by_lane,
-                lane_safety_scores=lane_safety_scores,
-                object_snapshots=object_snapshots,
-                route_lane_change_context=lane_change_context,
-                lane_change_authorization=lane_change_authorization,
-                opportunistic_lane_change_allowed=bool(
-                    opportunistic_lane_change_allowed
-                ),
-                behavior_traffic_state=str(behavior_traffic_state),
-                behavior_stop_target=behavior_stop_target,
-                signal_context=filtered_signal_context,
-                scenario_stop_required=bool(scenario_decision.stop_goal_active),
+                mpc_feedback=mpc_feedback,
                 lane_change_reference_active=bool(
                     self._stable_reference_line_provider.snapshot(
                         LANE_CHANGE
                     ).active
                 ),
-                mpc_feedback=mpc_feedback,
+                lane_change_commitment_active=bool(
+                    lane_change_commitment_pending_stabilization
+                ),
+                stop_goal_active=bool(stop_goal_active),
                 max_deceleration_mps2=float(
                     self.mpc.constraints.min_acceleration_mps2
                 ),
-                config=self.config,
-                runtime_config=self.behavior_runtime_cfg,
+                prepare_reference_lock=bool(
+                    self.full_prepare_lane_change_reference_lock
+                ),
                 route_recovery_requested=bool(
                     self.maneuver_manager.route_recovery_pending
                 ),
                 static_obstacle_mpc_stall_failure_count=int(
                     self._static_obstacle_mpc_stall_failure_count()
                 ),
-                ),
-                scenario_decision=scenario_decision,
-                lane_change_authorized=bool(lane_change_authorized),
-                lane_change_gate_reason=str(lane_change_gate_reason),
-                lane_change_authorization_reason=str(
-                    lane_change_authorization.reason
-                ),
-                prepare_reference_lock=bool(
-                    self.full_prepare_lane_change_reference_lock
-                ),
-                lane_change_commitment_active=bool(
-                    lane_change_commitment_pending_stabilization
-                ),
-                route_advanced_to_lane_change=bool(
-                    route_advanced_to_lane_change
-                ),
-                route_current_road_option=str(
-                    route_context.current_road_option
-                ),
-                ego_in_junction=bool(planner_input_frame.map_lane.in_junction),
-                stop_goal_active=bool(stop_goal_active),
-                cruise_speed_mps=float(self.target_speed_mps),
-                scenario_reason=str(traffic_stop_approach_reason),
+                config=self.config,
+                runtime_config=self.behavior_runtime_cfg,
             ),
             behavior_planner=self.behavior_planner,
             reference_map=self.reference_map,
@@ -1430,36 +1346,22 @@ class CPXMPCPlannerBridge:
             ),
             observe_stage_duration=self._accum_stage_ms,
         )
-        decision = executable_behavior.decision
-        target_lane_id = executable_behavior.target_lane_id
-        lc_state = executable_behavior.phase
         stop_goal_active = executable_behavior.stop_goal_active
         turn_prepare_speed_suppressed_by_lane_change = bool(
             executable_behavior.turn_prepare_speed_suppressed
         )
-        speed_frame = self.pipeline.plan_speed(
-            SpeedPlanningRequest(
+        speed_frame = self.pipeline.plan_speed_from_stages(
+            SpeedPlanningPreparationRequest(
+                planning_context=planning_context,
+                executable_behavior=executable_behavior,
+                maneuver_manager=self.maneuver_manager,
                 ego_location=ego_location,
                 ego_yaw_rad=float(ego_yaw_rad),
                 ego_speed_mps=float(ego_speed_mps),
                 requested_speed_mps=float(speed_ref_mps),
-                object_snapshots=object_snapshots,
-                current_lane_id=int(current_lane_id),
-                target_lane_id=int(target_lane_id),
-                lane_assignments=dict(adapter_output.lane_assignments),
-                lane_change_progress=float(
-                    self.maneuver_manager.lane_change.progress
-                ),
                 lane_change_commitment_active=bool(
                     lane_change_commitment_pending_stabilization
                 ),
-                committed_source_lane_id=int(
-                    self.maneuver_manager.lane_change.source_lane_id
-                ),
-                scenario_decision=scenario_decision,
-                behavior_decision=str(decision),
-                upcoming_turn_direction=str(upcoming_turn_direction),
-                upcoming_turn_distance_m=float(upcoming_turn_distance_m),
                 config=self.config,
             )
         )
