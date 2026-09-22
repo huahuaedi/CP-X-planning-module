@@ -11,7 +11,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional, Sequence
 
-from .candidate_selection_stage import CandidateArbitrationRequest
+from .candidate_selection_stage import (
+    CandidateArbitrationRequest,
+    CandidateArbitrationResult,
+)
 from .reference_line_provider import CandidateReferenceBuildContext, TURN
 
 
@@ -153,6 +156,41 @@ class CandidatePlanningRequest:
     speed_plan: Any
     turn_prepare_speed_suppressed: bool
     cooperative_lane_change_deferred: bool
+    lane_change_mpc_stall_failure_count: int
+    route_revision: str
+    map_epoch: str
+    upcoming_turn_direction: str
+    upcoming_turn_distance_m: float
+    lane_change_duration_s: float
+    lane_change_duration_reason: str
+    lane_width_m: float
+    validate_contract: Callable[..., Any]
+
+
+@dataclass(frozen=True)
+class CandidatePlanningPreparationRequest:
+    """Typed stage outputs required to select the executable reference."""
+
+    enabled: bool
+    prepared_reference: PreparedBehaviorReference
+    planning_context: Any
+    executable_behavior: Any
+    speed_frame: Any
+    cooperative_frame: Any
+    baseline_reference: Sequence[Mapping[str, object]]
+    baseline_destination_state: Sequence[float]
+    baseline_debug: Mapping[str, object]
+    planner_config: Mapping[str, object]
+    lane_change_authorization: Any
+    stop_target: Any
+    ego_location: Any
+    ego_yaw_rad: float
+    object_snapshots: Sequence[Mapping[str, object]]
+    current_acceleration_mps2: float
+    current_steering_rad: float
+    route_required: bool
+    traffic_stop_active: bool
+    turn_prepare_speed_suppressed: bool
     lane_change_mpc_stall_failure_count: int
     route_revision: str
     map_epoch: str
@@ -371,6 +409,111 @@ class ReferencePlanningStage:
             sim_time_s=float(baseline.sim_time_s),
             route_revision=str(request.route_revision),
             validate_contract=request.validate_contract,
+        )
+
+    def select_candidate_reference(
+        self, request: CandidatePlanningPreparationRequest
+    ) -> CandidateArbitrationResult:
+        """Resolve baseline or candidate through one reference-owner entrypoint."""
+
+        prepared = request.prepared_reference
+        baseline = prepared.request
+        executable = request.executable_behavior
+        speed = request.speed_frame
+        planning = request.planning_context
+        planner_frame = planning.planner_input_frame
+        diagnostics = dict(request.baseline_debug)
+        stop_goal_active = bool(
+            executable.stop_goal_active or speed.stop_goal_active
+        )
+        if not bool(request.enabled):
+            diagnostics["candidate_pipeline_enabled"] = False
+            return CandidateArbitrationResult(
+                decision=str(executable.decision),
+                target_lane_id=int(executable.target_lane_id),
+                target_speed_mps=float(speed.target_speed_mps),
+                reference=tuple(
+                    dict(sample) for sample in request.baseline_reference
+                ),
+                destination_state=tuple(request.baseline_destination_state),
+                lane_change_state=str(executable.phase),
+                stop_goal_active=stop_goal_active,
+                speed_plan=speed.speed_plan,
+                diagnostics=diagnostics,
+            )
+
+        minimum_probability = float(
+            request.planner_config.get(
+                "prediction_mode_min_probability", 0.05
+            )
+        )
+        return self.arbitrate_candidates(
+            CandidatePlanningRequest(
+                baseline_request=baseline,
+                baseline_frame=prepared.frame,
+                baseline_destination_state=request.baseline_destination_state,
+                baseline_reference=request.baseline_reference,
+                baseline_debug=diagnostics,
+                planner_config=request.planner_config,
+                selected_decision=str(executable.decision),
+                selected_target_lane_id=int(executable.target_lane_id),
+                current_lane_id=int(planning.current_lane_id),
+                target_speed_mps=float(speed.target_speed_mps),
+                candidate_lane_ids=tuple(executable.candidate_lane_ids),
+                lane_safety_scores=dict(
+                    planning.adapter_output.lane_safety_scores
+                ),
+                lane_prediction_risks=dict(
+                    planner_frame.prediction.lane_prediction_risks
+                ),
+                stop_goal_active=stop_goal_active,
+                traffic_stop_active=bool(request.traffic_stop_active),
+                lane_change_authorization=request.lane_change_authorization,
+                opportunistic_lane_change_allowed=bool(
+                    executable.opportunistic_lane_change_allowed
+                ),
+                stop_target=request.stop_target,
+                local_obstacle_avoidance_active=bool(
+                    executable.static_obstacle_result.local_avoidance_active
+                ),
+                current_state=planning.adapter_output.current_state,
+                ego_location=request.ego_location,
+                ego_yaw_rad=float(request.ego_yaw_rad),
+                object_snapshots=request.object_snapshots,
+                prediction_trajectories=(
+                    planner_frame.prediction.hypothesis_trajectories(
+                        minimum_probability=minimum_probability
+                    )
+                ),
+                current_acceleration_mps2=float(
+                    request.current_acceleration_mps2
+                ),
+                current_steering_rad=float(request.current_steering_rad),
+                route_required=bool(request.route_required),
+                scenario_stop_required=bool(request.traffic_stop_active),
+                speed_plan=speed.speed_plan,
+                turn_prepare_speed_suppressed=bool(
+                    request.turn_prepare_speed_suppressed
+                ),
+                cooperative_lane_change_deferred=bool(
+                    request.cooperative_frame.lane_change_deferred
+                ),
+                lane_change_mpc_stall_failure_count=int(
+                    request.lane_change_mpc_stall_failure_count
+                ),
+                route_revision=str(request.route_revision),
+                map_epoch=str(request.map_epoch),
+                upcoming_turn_direction=str(request.upcoming_turn_direction),
+                upcoming_turn_distance_m=float(
+                    request.upcoming_turn_distance_m
+                ),
+                lane_change_duration_s=float(request.lane_change_duration_s),
+                lane_change_duration_reason=str(
+                    request.lane_change_duration_reason
+                ),
+                lane_width_m=float(request.lane_width_m),
+                validate_contract=request.validate_contract,
+            )
         )
 
     def cooperative_conflict_reference(self, **kwargs: Any) -> Any:

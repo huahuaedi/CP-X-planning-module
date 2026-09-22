@@ -36,7 +36,7 @@ from opencda.planning_module.pipeline.reference_line_provider import (
 )
 from opencda.planning_module.pipeline.reference_planning_stage import (
     BehaviorReferencePreparationRequest,
-    CandidatePlanningRequest,
+    CandidatePlanningPreparationRequest,
     PostTurnReferenceRequest,
 )
 from opencda.planning_module.pipeline.planner_diagnostics_stage import (
@@ -1520,9 +1520,7 @@ class CPXMPCPlannerBridge:
                 ),
             )
         )
-        baseline_reference_frame_request = prepared_reference.request
-        baseline_reference_frame = prepared_reference.frame
-        built_reference = baseline_reference_frame.built_reference
+        built_reference = prepared_reference.built_reference
         local_lane_center_reference = built_reference.mutable_samples()
         # Stash the pre-publication reference (the one Stage C/D build corridor
         # rows on) so the offline frame-replay hook can compare it against the
@@ -1604,89 +1602,58 @@ class CPXMPCPlannerBridge:
                 sim_time_s=sim_time_s,
             )
         )
-        cooperative_lane_change_deferred = bool(
-            cooperative_frame.lane_change_deferred
-        )
-        if bool(self.full_candidate_pipeline_enabled):
-            candidate_result = self.pipeline.arbitrate_candidates(
-                CandidatePlanningRequest(
-                    baseline_request=baseline_reference_frame_request,
-                    baseline_frame=baseline_reference_frame,
-                    baseline_destination_state=nominal_destination_state,
-                    baseline_reference=local_lane_center_reference,
-                    baseline_debug=reference_debug,
-                    planner_config=self.config,
-                    selected_decision=str(decision),
-                    selected_target_lane_id=int(target_lane_id),
-                    current_lane_id=int(current_lane_id),
-                    target_speed_mps=float(planned_speed_mps),
-                    candidate_lane_ids=list(executable_behavior.candidate_lane_ids),
-                    lane_safety_scores=lane_safety_scores,
-                    lane_prediction_risks=dict(
-                        planner_input_frame.prediction.lane_prediction_risks
-                    ),
-                    stop_goal_active=bool(stop_goal_active),
-                    traffic_stop_active=bool(scenario_decision.stop_goal_active),
-                    lane_change_authorization=lane_change_authorization,
-                    opportunistic_lane_change_allowed=bool(
-                        executable_behavior.opportunistic_lane_change_allowed
-                    ),
-                    stop_target=behavior_stop_target,
-                    local_obstacle_avoidance_active=bool(
-                        executable_behavior.static_obstacle_result.local_avoidance_active
-                    ),
-                    lane_width_m=float(getattr(self.mpc, "lane_width_m", 3.5)),
-                    current_state=current_state,
-                    ego_location=ego_location,
-                    ego_yaw_rad=float(ego_yaw_rad),
-                    object_snapshots=object_snapshots,
-                    prediction_trajectories=(
-                        planner_input_frame.prediction.hypothesis_trajectories(
-                            minimum_probability=float(self.config.get(
-                                "prediction_mode_min_probability", 0.05
-                            ))
-                        )
-                    ),
-                    current_acceleration_mps2=float(self._last_accel_mps2),
-                    current_steering_rad=float(self._last_steer_rad),
-                    route_required=bool(route_lane_change_required),
-                    scenario_stop_required=bool(
-                        scenario_decision.stop_goal_active
-                    ),
-                    speed_plan=speed_plan,
-                    turn_prepare_speed_suppressed=bool(
-                        turn_prepare_speed_suppressed_by_lane_change
-                    ),
-                    cooperative_lane_change_deferred=bool(
-                        cooperative_lane_change_deferred
-                    ),
-                    lane_change_mpc_stall_failure_count=int(
-                        self._lane_change_mpc_stall_failure_count()
-                    ),
-                    route_revision=str(self.route_manager.route_revision),
-                    map_epoch=str(self.waypoint_backend or "admap"),
-                    upcoming_turn_direction=str(upcoming_turn_direction),
-                    upcoming_turn_distance_m=float(upcoming_turn_distance_m),
-                    lane_change_duration_s=float(
-                        self.maneuver_manager.lane_change.resolved_duration_s
-                    ),
-                    lane_change_duration_reason=str(
-                        self.maneuver_manager.lane_change.duration_comfort_reason
-                    ),
-                    validate_contract=self._validate_candidate_reference_contract,
-                )
+        selected_reference = self.pipeline.select_candidate_reference(
+            CandidatePlanningPreparationRequest(
+                enabled=bool(self.full_candidate_pipeline_enabled),
+                prepared_reference=prepared_reference,
+                planning_context=planning_context,
+                executable_behavior=executable_behavior,
+                speed_frame=speed_frame,
+                cooperative_frame=cooperative_frame,
+                baseline_reference=local_lane_center_reference,
+                baseline_destination_state=nominal_destination_state,
+                baseline_debug=reference_debug,
+                planner_config=self.config,
+                lane_change_authorization=lane_change_authorization,
+                stop_target=behavior_stop_target,
+                ego_location=ego_location,
+                ego_yaw_rad=float(ego_yaw_rad),
+                object_snapshots=object_snapshots,
+                current_acceleration_mps2=float(self._last_accel_mps2),
+                current_steering_rad=float(self._last_steer_rad),
+                route_required=bool(route_lane_change_required),
+                traffic_stop_active=bool(scenario_decision.stop_goal_active),
+                turn_prepare_speed_suppressed=bool(
+                    turn_prepare_speed_suppressed_by_lane_change
+                ),
+                lane_change_mpc_stall_failure_count=int(
+                    self._lane_change_mpc_stall_failure_count()
+                ),
+                route_revision=str(self.route_manager.route_revision),
+                map_epoch=str(self.waypoint_backend or "admap"),
+                upcoming_turn_direction=str(upcoming_turn_direction),
+                upcoming_turn_distance_m=float(upcoming_turn_distance_m),
+                lane_change_duration_s=float(
+                    self.maneuver_manager.lane_change.resolved_duration_s
+                ),
+                lane_change_duration_reason=str(
+                    self.maneuver_manager.lane_change.duration_comfort_reason
+                ),
+                lane_width_m=float(getattr(self.mpc, "lane_width_m", 3.5)),
+                validate_contract=self._validate_candidate_reference_contract,
             )
-            decision = str(candidate_result.decision)
-            target_lane_id = int(candidate_result.target_lane_id)
-            planned_speed_mps = float(candidate_result.target_speed_mps)
-            local_lane_center_reference = candidate_result.mutable_reference()
-            nominal_destination_state = candidate_result.mutable_destination_state()
-            lc_state = str(candidate_result.lane_change_state)
-            stop_goal_active = bool(candidate_result.stop_goal_active)
-            speed_plan = candidate_result.speed_plan
-            reference_debug = dict(candidate_result.diagnostics)
-        else:
-            reference_debug["candidate_pipeline_enabled"] = False
+        )
+        decision = str(selected_reference.decision)
+        target_lane_id = int(selected_reference.target_lane_id)
+        planned_speed_mps = float(selected_reference.target_speed_mps)
+        local_lane_center_reference = selected_reference.mutable_reference()
+        nominal_destination_state = (
+            selected_reference.mutable_destination_state()
+        )
+        lc_state = str(selected_reference.lane_change_state)
+        stop_goal_active = bool(selected_reference.stop_goal_active)
+        speed_plan = selected_reference.speed_plan
+        reference_debug = dict(selected_reference.diagnostics)
 
         boundary_recovery_active = bool(
             self.config.get("boundary_recovery_enabled", False)

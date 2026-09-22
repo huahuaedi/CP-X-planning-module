@@ -4,7 +4,9 @@ from pipeline.nominal_trajectory import NominalTrajectoryGenerator
 from pipeline.reference_planning_stage import (
     BehaviorReferencePreparationRequest,
     BehaviorReferenceRequest,
+    CandidatePlanningPreparationRequest,
     CandidatePlanningRequest,
+    PreparedBehaviorReference,
     PostTurnReferenceRequest,
     ReferencePlanningStage,
 )
@@ -207,3 +209,59 @@ def test_stage_builds_candidate_context_and_delegates_arbitration():
     }
     assert candidate_selection.request.baseline_lane_change_state == "LANE_KEEP"
     assert candidate_selection.kwargs["route_revision"] == "route-1"
+
+
+def test_stage_returns_typed_baseline_when_candidate_pipeline_is_disabled():
+    candidate_selection = _CandidateSelection()
+    stage = ReferencePlanningStage(
+        provider=_Provider(),
+        nominal_trajectory_generator=NominalTrajectoryGenerator(),
+        candidate_selection=candidate_selection,
+    )
+    prepared = PreparedBehaviorReference(
+        request=_behavior_request(),
+        frame=SimpleNamespace(),
+    )
+    executable = SimpleNamespace(
+        decision="lane_follow", target_lane_id=4, phase="LANE_KEEP",
+        stop_goal_active=False,
+    )
+    speed = SimpleNamespace(
+        target_speed_mps=8.0, stop_goal_active=False,
+        speed_plan="speed-plan",
+    )
+    planning = SimpleNamespace(
+        current_lane_id=4,
+        adapter_output=SimpleNamespace(
+            current_state=[1.0, 2.0, 3.0, 0.0], lane_safety_scores={4: 1.0},
+        ),
+        planner_input_frame=SimpleNamespace(),
+    )
+
+    result = stage.select_candidate_reference(
+        CandidatePlanningPreparationRequest(
+            enabled=False, prepared_reference=prepared,
+            planning_context=planning, executable_behavior=executable,
+            speed_frame=speed,
+            cooperative_frame=SimpleNamespace(lane_change_deferred=False),
+            baseline_reference=[{"x_ref_m": 1.0, "y_ref_m": 2.0}],
+            baseline_destination_state=[8.0, 1.0, 4.0, 0.0],
+            baseline_debug={"base": True}, planner_config={},
+            lane_change_authorization=None, stop_target=None,
+            ego_location=SimpleNamespace(x=1.0, y=2.0), ego_yaw_rad=0.0,
+            object_snapshots=[], current_acceleration_mps2=0.0,
+            current_steering_rad=0.0, route_required=False,
+            traffic_stop_active=False, turn_prepare_speed_suppressed=False,
+            lane_change_mpc_stall_failure_count=0,
+            route_revision="route-1", map_epoch="admap",
+            upcoming_turn_direction="", upcoming_turn_distance_m=100.0,
+            lane_change_duration_s=4.0,
+            lane_change_duration_reason="comfort", lane_width_m=3.5,
+            validate_contract=lambda **_kwargs: True,
+        )
+    )
+
+    assert result.decision == "lane_follow"
+    assert result.mutable_reference()[0]["x_ref_m"] == 1.0
+    assert result.diagnostics["candidate_pipeline_enabled"] is False
+    assert candidate_selection.request is None
