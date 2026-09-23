@@ -159,10 +159,11 @@ def build_decision_record(
                 "reject_candidate",
             )
     probe_text = str(candidate_mpc_probe_summary or "").strip()
-    if probe_text and probe_text not in {
-        "mpc_probe_not_applicable",
-        "mpc_probe_no_feasible_top_k",
-    }:
+    if (
+        probe_text
+        and not probe_text.startswith("mpc_probe_not_applicable")
+        and probe_text != "mpc_probe_no_feasible_top_k"
+    ):
         failed_probes = [
             token
             for token in probe_text.split("|")

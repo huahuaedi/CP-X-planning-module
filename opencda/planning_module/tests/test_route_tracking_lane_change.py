@@ -371,6 +371,51 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
         self.assertEqual(probed, ["normal", "assertive"])
         self.assertEqual(rows[0].feasibility_status, "mpc_probe_skipped")
 
+    def test_committed_reference_defers_probe_to_final_mpc(self):
+        bridge = self._bridge()
+        evaluator = CandidateTrajectoryEvaluator(
+            mpc_probe_enabled=True,
+            mpc_probe_top_k=2,
+            mpc_probe_interval_s=0.05,
+        )
+        probed = []
+        bridge.mpc.probe_trajectory_feasibility = lambda **kwargs: (
+            probed.append(kwargs) or {"solved": True, "status": "solved"}
+        )
+
+        row = types.SimpleNamespace(
+            feasible=True,
+            total_cost=1.0,
+            intent=types.SimpleNamespace(
+                name="committed_lane_change_continuation",
+                decision="lane_change_right",
+                target_lane_id=2,
+                trajectory_variant="committed",
+                lane_change_duration_s=4.0,
+                stop_goal_active=False,
+            ),
+            destination_state=[1.0],
+            lane_center_reference=[],
+            reference_debug={},
+            feasibility_status="feasible",
+            feasibility_reason="",
+        )
+
+        summary = evaluator.probe_mpc(
+            candidate_results=[row],
+            mpc=bridge.mpc,
+            sim_time_s=1.0,
+            current_state=[0.0, 0.0, 0.0, 0.0],
+            object_snapshots=[],
+            current_acceleration_mps2=0.0,
+            current_steering_rad=0.0,
+            committed_reference_active=True,
+        )
+
+        self.assertEqual(summary, "mpc_probe_not_applicable:committed_reference")
+        self.assertEqual(probed, [])
+        self.assertEqual(row.feasibility_status, "mpc_probe_skipped")
+
     def test_target_lane_entry_replaces_quintic_with_stabilization_reference(self):
         bridge = self._bridge()
         bridge.maneuver_manager.lane_change.progress = 0.95

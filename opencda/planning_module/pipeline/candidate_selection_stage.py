@@ -600,6 +600,9 @@ class CandidateSelectionStage:
             current_steering_rad=float(request.current_steering_rad),
             required_decision=str(request.required_decision),
             required_target_lane_id=int(request.required_target_lane_id),
+            committed_reference_active=bool(
+                self._provider.snapshot(LANE_CHANGE).active
+            ),
         )
         commitment, outcome, selected = self._evaluator.select_with_commitment(
             candidate_results=candidates,

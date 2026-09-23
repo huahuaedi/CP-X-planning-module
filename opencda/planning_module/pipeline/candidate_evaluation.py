@@ -753,12 +753,26 @@ class CandidateTrajectoryEvaluator:
         current_steering_rad: float,
         required_decision: str = "",
         required_target_lane_id: int = 0,
+        committed_reference_active: bool = False,
     ) -> str:
-        """Probe the bounded top-k and own its refresh cache across ticks."""
+        """Probe pre-commit candidates and own the refresh cache across ticks.
+
+        A locked maneuver reference is already evaluated by the final MPC on
+        every execution update.  Probing the same committed trajectory here
+        duplicates the expensive solve and gives the candidate layer a second
+        opinion over an immutable maneuver.  Once commitment is active, keep
+        deterministic contract-valid candidates eligible and leave runtime
+        feasibility exclusively to the final MPC/fallback path.
+        """
 
         from .candidate_pipeline import apply_mpc_probe_result, mark_mpc_probe_skipped
 
         rows = list(candidate_results or [])
+        if bool(committed_reference_active):
+            for row in rows:
+                if bool(getattr(row, "feasible", False)):
+                    mark_mpc_probe_skipped(row)
+            return "mpc_probe_not_applicable:committed_reference"
         lane_changes = [
             row for row in rows
             if str(getattr(getattr(row, "intent", None), "decision", "")).startswith("lane_change")
