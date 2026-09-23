@@ -89,6 +89,23 @@ def _executed_reference_tracking(
 
 
 @dataclass(frozen=True)
+class ReferenceDebugDependencies:
+    """The handful of bridge-owned collaborators build_reference_debug reads.
+
+    Built by the caller (CPXMPCPlannerBridge._plan_behavior_and_reference) at
+    the point of the call, from the same ``self`` it already has -- not held,
+    not threaded through anything else, so there is no risk of reading a
+    collaborator that was replaced earlier in the same tick.
+    """
+
+    route_manager: Any
+    maneuver_manager: Any
+    config: Mapping[str, Any]
+    behavior_runtime_cfg: Mapping[str, Any]
+    reference_line_provider: Any
+
+
+@dataclass(frozen=True)
 class ReferenceDiagnosticsRequest:
     """Typed outputs needed for the behavior/reference diagnostic snapshot."""
 
@@ -111,7 +128,7 @@ class PlannerDiagnosticsStage:
 
     @staticmethod
     def build_reference_debug_from_stages(
-        owner: Any, request: ReferenceDiagnosticsRequest
+        deps: ReferenceDebugDependencies, request: ReferenceDiagnosticsRequest
     ) -> dict[str, Any]:
         """Derive the trace context from authoritative typed stage outputs."""
 
@@ -136,7 +153,7 @@ class PlannerDiagnosticsStage:
             route_reason = str(behavior.route_replan_reason)
         source_quality = dict(adapter.source_quality)
         source_quality.update(request.route_update.trace_fields())
-        return PlannerDiagnosticsStage.build_reference_debug(owner, {
+        return PlannerDiagnosticsStage.build_reference_debug(deps, {
             "built_reference": request.built_reference,
             "planner_input_frame": frame,
             "front_gap_actor_id": speed.front_actor_id,
@@ -193,14 +210,15 @@ class PlannerDiagnosticsStage:
         })
 
     @staticmethod
-    def build_reference_debug(owner: Any, context: Mapping[str, Any]) -> dict[str, Any]:
+    def build_reference_debug(
+        deps: ReferenceDebugDependencies, context: Mapping[str, Any]
+    ) -> dict[str, Any]:
         """Assemble the read-only behavior/reference trace for one frame."""
 
-        self = owner
         c = context
         debug = dict(c["built_reference"].diagnostics)
         debug.update(c["planner_input_frame"].trace_fields())
-        topology = self.route_manager.route_topology_validation
+        topology = deps.route_manager.route_topology_validation
         debug.update({
             "stage": debug.get("reference_pipeline_stage", ""),
             "intent_mode": debug.get("reference_pipeline_intent_mode", ""),
@@ -241,32 +259,32 @@ class PlannerDiagnosticsStage:
                 c["semantic_response"].distance_m
             ),
             "semantic_behavior_reason": str(c["semantic_response"].reason),
-            "static_obstacle_global_replan_enabled": bool(self.config.get(
+            "static_obstacle_global_replan_enabled": bool(deps.config.get(
                 "static_obstacle_global_replan_enabled",
-                self.behavior_runtime_cfg.get("static_obstacle_global_replan_enabled", False),
+                deps.behavior_runtime_cfg.get("static_obstacle_global_replan_enabled", False),
             )),
             "route_lane_change_required": bool(c["route_lane_change_required"]),
-            "route_progress_s_m": float(self.route_manager.route_progress_s_m),
-            "route_progress_lane_index": int(self.route_manager.route_progress_lane_index),
+            "route_progress_s_m": float(deps.route_manager.route_progress_s_m),
+            "route_progress_lane_index": int(deps.route_manager.route_progress_lane_index),
             "route_topology_valid": bool(topology.valid),
             "route_topology_signature": " -> ".join(topology.signature),
             "route_topology_errors": ";".join(topology.errors),
             "route_topology_warnings": ";".join(topology.warnings),
-            "route_lane_change_edge_id": str(self.maneuver_manager.route_lane_change_edge_id),
+            "route_lane_change_edge_id": str(deps.maneuver_manager.route_lane_change_edge_id),
             "completed_route_lane_change_edge_id": str(
-                self.maneuver_manager.completed_route_lane_change_edge_id
+                deps.maneuver_manager.completed_route_lane_change_edge_id
             ),
             "route_lane_change_edge_completed": bool(
-                self.maneuver_manager.route_lane_change_edge_completed
+                deps.maneuver_manager.route_lane_change_edge_completed
             ),
             "route_recovery_pending": bool(
-                self.maneuver_manager.route_recovery_pending
+                deps.maneuver_manager.route_recovery_pending
             ),
             "lane_change_authorization_source": str(
-                self.maneuver_manager.lane_change.authorization_source
+                deps.maneuver_manager.lane_change.authorization_source
             ),
             "lane_change_returns_to_route": bool(
-                self.maneuver_manager.lane_change.returns_to_route
+                deps.maneuver_manager.lane_change.returns_to_route
             ),
             "route_geometry_lane_change_direction": str(
                 c["route_geometry_lane_change_direction"] or ""
@@ -283,7 +301,7 @@ class PlannerDiagnosticsStage:
             ),
             "behavior_lane_alignment_valid": bool(c["behavior_lane_alignment_valid"]),
             "behavior_lane_change_completion_allowed": not bool(
-                self._stable_reference_line_provider.snapshot("lane_change").mutable_samples()
+                deps.reference_line_provider.snapshot("lane_change").mutable_samples()
             ),
             **dict(c["lane_change_authorization"].as_debug_fields()),
             "behavior_override_reason": str(c["behavior_override_reason"]),
@@ -467,8 +485,14 @@ class PlannerDiagnosticsStage:
             "cav_anticipatory_speed_constraint_owner": str(
                 cav_diag.get("anticipatory_speed_constraint_owner", "") or ""
             ),
+            "cav_anticipatory_speed_constraint_reason": str(
+                cav_diag.get("anticipatory_speed_constraint_reason", "") or ""
+            ),
             "cav_coordination_revision": int(
                 cav_diag.get("coordination_revision", 0) or 0
+            ),
+            "cav_corridor_prediction_revision": str(
+                cav_diag.get("corridor_prediction_revision", "") or ""
             ),
             "cav_coordination_roles_refreshed": bool(
                 cav_diag.get("coordination_roles_refreshed", False)
@@ -484,6 +508,18 @@ class PlannerDiagnosticsStage:
             ),
             "cav_multimodal_agent_count": int(
                 cav_diag.get("multimodal_agent_count", 0) or 0
+            ),
+            "cav_retained_prediction_mode_count": int(
+                cav_diag.get("retained_prediction_mode_count", 0) or 0
+            ),
+            "cav_mode_conflict_count": int(
+                cav_diag.get("mode_conflict_count", 0) or 0
+            ),
+            "cav_mode_budget_capped_agent_count": int(
+                cav_diag.get("mode_budget_capped_agent_count", 0) or 0
+            ),
+            "cav_prediction_modes": dict(
+                cav_diag.get("prediction_modes", {}) or {}
             ),
             "cav_credible_mode_veto_count": int(
                 cav_diag.get("credible_mode_veto_count", 0) or 0
@@ -609,7 +645,57 @@ class PlannerDiagnosticsStage:
             "reference_pipeline_intent": str(reference_debug.get("intent_mode", "")),
             "reference_pipeline_fallback": str(reference_debug.get("fallback_reason", "")),
             "planner_input_cp_traffic_control_count": reference_debug.get("planner_input_cp_traffic_control_count", ""),
+            # Preserve the prediction boundary provenance in the final
+            # per-tick record.  These values already belong to the typed
+            # PlannerInputFrame/source-quality contract; diagnostics should
+            # expose them rather than trying to infer the active predictor
+            # from the resulting trajectory geometry.
+            "planner_input_prediction_model": reference_debug.get(
+                "planner_input_prediction_model", ""
+            ),
+            "planner_input_prediction_assigned_object_count": reference_debug.get(
+                "planner_input_prediction_assigned_object_count", ""
+            ),
+            "planner_input_prediction_predicted_object_count": reference_debug.get(
+                "planner_input_prediction_predicted_object_count", ""
+            ),
             "planner_input_prediction_risky_lane_count": reference_debug.get("planner_input_prediction_risky_lane_count", ""),
+            "planner_input_prediction_revision": reference_debug.get(
+                "planner_input_prediction_revision", ""
+            ),
+            "prediction_bridge_model": reference_debug.get(
+                "prediction_bridge_model", ""
+            ),
+            "prediction_bridge_request_count": reference_debug.get(
+                "prediction_bridge_request_count", ""
+            ),
+            "prediction_bridge_inference_request_count": reference_debug.get(
+                "prediction_bridge_inference_request_count", ""
+            ),
+            "prediction_bridge_success_count": reference_debug.get(
+                "prediction_bridge_success_count", ""
+            ),
+            "prediction_bridge_dropped_request_count": reference_debug.get(
+                "prediction_bridge_dropped_request_count", ""
+            ),
+            "prediction_bridge_queue_depth": reference_debug.get(
+                "prediction_bridge_queue_depth", ""
+            ),
+            "prediction_bridge_attached_count": reference_debug.get(
+                "prediction_bridge_attached_count", ""
+            ),
+            "prediction_bridge_attached_mode_count": reference_debug.get(
+                "prediction_bridge_attached_mode_count", ""
+            ),
+            "prediction_bridge_map_polyline_count": reference_debug.get(
+                "prediction_bridge_map_polyline_count", ""
+            ),
+            "prediction_bridge_latency_ms": reference_debug.get(
+                "prediction_bridge_latency_ms", ""
+            ),
+            "prediction_bridge_error": reference_debug.get(
+                "prediction_bridge_error", ""
+            ),
             "planner_input_perception_planning_count": reference_debug.get("planner_input_perception_planning_count", ""),
             "planner_input_cp_obstacle_count": reference_debug.get("planner_input_cp_obstacle_count", ""),
             "planner_input_frame_timestamp_s": reference_debug.get("planner_input_frame_timestamp_s", ""),

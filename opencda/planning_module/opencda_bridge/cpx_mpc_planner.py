@@ -40,6 +40,7 @@ from opencda.planning_module.pipeline.reference_planning_stage import (
 )
 from opencda.planning_module.pipeline.planner_diagnostics_stage import (
     PlannerDiagnosticsStage,
+    ReferenceDebugDependencies,
     ReferenceDiagnosticsRequest,
 )
 from opencda.planning_module.pipeline.mpc_execution_stage import (
@@ -1111,7 +1112,13 @@ class CPXMPCPlannerBridge:
         nominal_destination_state = built_reference.mutable_destination_state()
         nominal_freeze_count = int(built_reference.reference_freeze_count)
         reference_debug = PlannerDiagnosticsStage.build_reference_debug_from_stages(
-            self,
+            ReferenceDebugDependencies(
+                route_manager=self.route_manager,
+                maneuver_manager=self.maneuver_manager,
+                config=self.config,
+                behavior_runtime_cfg=self.behavior_runtime_cfg,
+                reference_line_provider=self._stable_reference_line_provider,
+            ),
             ReferenceDiagnosticsRequest(
                 built_reference=built_reference,
                 planning_context=planning_context,
