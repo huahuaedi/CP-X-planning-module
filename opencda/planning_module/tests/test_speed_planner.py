@@ -161,6 +161,49 @@ class SpeedPlannerTest(unittest.TestCase):
         self.assertAlmostEqual(constraint.maximum_mps, 8.0)
         self.assertIn("bound_velocity_mps=8.000", constraint.reason)
 
+    def test_modes_of_same_actor_share_moving_bound_velocity(self):
+        constraint = conflict_corridor_speed_constraint(
+            corridor=SimpleNamespace(
+                s_hi=[5.0, 5.8, 6.6, 7.4],
+                binding=[
+                    "peer::mode0", "peer::mode1",
+                    "peer::mode2", "peer::mode1",
+                ],
+            ),
+            reference_samples=[
+                {"x_ref_m": 0.0, "y_ref_m": 0.0},
+                {"x_ref_m": 30.0, "y_ref_m": 0.0},
+            ],
+            ego_x_m=5.0,
+            ego_y_m=0.0,
+            comfortable_deceleration_mps2=2.0,
+            corridor_dt_s=0.1,
+        )
+
+        self.assertIsNotNone(constraint)
+        self.assertAlmostEqual(constraint.maximum_mps, 8.0)
+        self.assertIn("bound_velocity_mps=8.000", constraint.reason)
+
+    def test_different_physical_actors_do_not_share_bound_velocity(self):
+        constraint = conflict_corridor_speed_constraint(
+            corridor=SimpleNamespace(
+                s_hi=[5.0, 5.8],
+                binding=["peer-a::mode0", "peer-b::mode0"],
+            ),
+            reference_samples=[
+                {"x_ref_m": 0.0, "y_ref_m": 0.0},
+                {"x_ref_m": 30.0, "y_ref_m": 0.0},
+            ],
+            ego_x_m=5.0,
+            ego_y_m=0.0,
+            comfortable_deceleration_mps2=2.0,
+            corridor_dt_s=0.1,
+        )
+
+        self.assertIsNotNone(constraint)
+        self.assertAlmostEqual(constraint.maximum_mps, 0.0)
+        self.assertIn("bound_velocity_mps=0.000", constraint.reason)
+
     def test_proposed_make_gap_prepares_room_without_zero_speed_step(self):
         constraint = cooperative_gap_speed_constraint(
             reference_samples=[

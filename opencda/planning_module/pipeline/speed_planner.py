@@ -148,6 +148,19 @@ def conflict_corridor_speed_constraint(
     )[1]
     deceleration_mps2 = max(0.1, float(comfortable_deceleration_mps2))
     dt_s = max(1.0e-3, float(corridor_dt_s))
+    def physical_owner(binding: str) -> str:
+        """Return the actor that owns a possibly mode-expanded row.
+
+        Stage C deliberately preserves ``actor::modeN`` in each QP row so
+        diagnostics can say which hypothesis bound a stage.  Longitudinal
+        speed estimation has a different identity requirement: adjacent rows
+        from two modes of the same actor still describe one moving boundary.
+        Comparing the full mode IDs made that boundary appear discontinuous
+        and silently changed its velocity to zero.
+        """
+
+        return str(binding).split("::mode", 1)[0]
+
     by_stage = {index: (upper, binding) for index, upper, binding in active}
     candidates = []
     for index, upper, binding in active:
@@ -159,12 +172,18 @@ def conflict_corridor_speed_constraint(
         # slope and retain the original braking-distance approach.
         neighbor = by_stage.get(index + 1)
         neighbor_index = index + 1
-        if neighbor is not None and neighbor[1] != binding:
+        if (
+            neighbor is not None
+            and physical_owner(neighbor[1]) != physical_owner(binding)
+        ):
             neighbor = None
         if neighbor is None:
             neighbor = by_stage.get(index - 1)
             neighbor_index = index - 1
-            if neighbor is not None and neighbor[1] != binding:
+            if (
+                neighbor is not None
+                and physical_owner(neighbor[1]) != physical_owner(binding)
+            ):
                 neighbor = None
         bound_velocity_mps = 0.0
         if neighbor is not None:

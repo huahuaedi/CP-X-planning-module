@@ -85,6 +85,13 @@ def test_each_source_reports_its_own_reason():
     assert _reason(fallback=GATE + "collision_risk") == "hard_gate_stop_hazard"
     assert _reason(decision="emergency_brake") == "emergency_brake_maneuver"
     assert _reason(escalate=True) == "corridor_infeasible_escalation"
+    assert emergency_stop_reason(
+        fallback_reason="",
+        behavior_decision="lane_follow",
+        stop_goal_active=False,
+        corridor_infeasible_escalate=False,
+        proximity_emergency_stop_required=True,
+    ) == "proximity_emergency_gap"
 
 
 def test_the_emergency_brake_maneuver_needs_no_hard_gate():

@@ -35,7 +35,13 @@ from .output import BehaviorCommand, PlannerDiagnostics, PlannerOutput
 
 @dataclass(frozen=True)
 class PlanningCycle:
-    """Immutable normalized inputs and the initial longitudinal safety intent."""
+    """Immutable normalized inputs and longitudinal safety evidence.
+
+    ``emergency_stop_required`` records a proximity violation for the final
+    safety owner.  It is deliberately not a behavior/reference request: a raw
+    front gap must not create a second nominal stop planner ahead of the CAV
+    corridor and ``SafetySupervisor``.
+    """
 
     tick: RuntimeTickSnapshot
     perception: PerceptionStageResult
@@ -450,9 +456,7 @@ class PlanningPipeline:
             perception=perception,
             emergency_gap_m=float(emergency_gap_m),
             emergency_stop_required=stop_required,
-            requested_speed_mps=(
-                0.0 if stop_required else max(0.0, float(cruise_speed_mps))
-            ),
+            requested_speed_mps=max(0.0, float(cruise_speed_mps)),
         )
 
     def plan(self, cycle: PlanningCycle, adapters: "PlanningTickAdapters") -> "PlannerOutput":
@@ -482,8 +486,6 @@ class PlanningPipeline:
         mpc_object_snapshots = [dict(item) for item in cycle.mpc_object_snapshots]
         local_object_snapshots = [dict(item) for item in cycle.local_object_snapshots]
         front_gap_m = perception.front_gap_m
-        emergency_front_gap_m = float(cycle.emergency_gap_m)
-        stop_goal_active = bool(cycle.emergency_stop_required)
         requested_speed_mps = float(cycle.requested_speed_mps)
         current_state = list(tick.current_state)
 
@@ -495,7 +497,10 @@ class PlanningPipeline:
                     ego_speed_mps=float(ego_speed_mps),
                     requested_speed_mps=float(requested_speed_mps),
                     object_snapshots=object_snapshots,
-                    stop_goal_active=bool(stop_goal_active),
+                    # Nominal behavior owns semantic stops (signals, route
+                    # completion, obstacles).  Raw proximity is safety
+                    # evidence and is consumed only in final control.
+                    stop_goal_active=False,
                     cp_payload=cp_payload,
                     current_state=current_state,
                     sim_time_s=float(tick.timestamp_s),
@@ -743,6 +748,9 @@ class PlanningPipeline:
                     for row in cav_constraint_rows
                 ),
                 corridor_infeasible_escalate=bool(corridor_infeasible_escalate),
+                proximity_emergency_stop_required=bool(
+                    cycle.emergency_stop_required
+                ),
             ),
             set_actuator_context=adapters.set_actuator_context,
             acceleration_from_control=adapters.acceleration_from_control,

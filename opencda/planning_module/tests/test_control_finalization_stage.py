@@ -209,6 +209,72 @@ def test_no_corridor_escalation_leaves_normal_pid_tracking_untouched():
     assert result.platform_debug["corridor_infeasible_escalate"] is False
 
 
+def test_proximity_emergency_is_applied_only_at_final_control():
+    extractor = _TrackingExtractor(optimized_velocity_mps=1.5)
+    mpc = SimpleNamespace(
+        constraints=SimpleNamespace(
+            min_acceleration_mps2=-3.0, max_velocity_mps=20.0
+        ),
+        dt_s=0.1,
+        _last_x_solution=[[0.0, 0.0, 1.5, 0.0]],
+    )
+    stage = ControlFinalizationStage(
+        mpc=mpc,
+        command_extractor=extractor,
+        feedback=_Feedback(),
+        control_safety=_AcceptingSafety(),
+        config={},
+    )
+    request = ControlFinalizationRequest(
+        execution=SimpleNamespace(
+            acceleration_mps2=0.0,
+            steering_rad=0.1,
+            control=None,
+            fallback_reason="",
+            status="solved",
+            failed_replan_buffer_reused=False,
+        ),
+        behavior=SimpleNamespace(maneuver="lane_follow", target_lane_id=1),
+        ego_transform=object(),
+        ego_speed_mps=3.0,
+        target_speed_mps=8.0,
+        destination_state=(),
+        reference_samples=(),
+        stop_goal_active=False,
+        stop_target_forward_m="",
+        final_reference_accepted=True,
+        candidate_status="feasible",
+        safety_manager=None,
+        make_pedal_control=lambda **pedals: SimpleNamespace(**pedals),
+        sim_time_s=1.0,
+        proximity_emergency_stop_required=True,
+    )
+    applied = {}
+
+    def apply_velocity_steering(**kwargs):
+        applied.update(kwargs)
+        return "pid-control", -3.0, 0.0, {}
+
+    result = stage.run(
+        request,
+        set_actuator_context=lambda **_kwargs: None,
+        acceleration_from_control=lambda _control: 0.0,
+        steering_from_control=lambda _control: 0.1,
+        apply_velocity_steering=apply_velocity_steering,
+        control_factory=lambda *_args: None,
+        boundary_metrics=lambda *_args: {},
+        update_boundary_recovery=lambda *_args: None,
+        reset_boundary_recovery=lambda *_args: None,
+    )
+
+    assert request.stop_goal_active is False
+    assert applied["target_speed_mps"] == 0.0
+    assert applied["emergency_stop"] is True
+    assert result.platform_debug["emergency_stop_reason"] == (
+        "proximity_emergency_gap"
+    )
+
+
 def test_failed_mpc_control_goes_through_one_safety_exit_without_pid_remap():
     feedback_calls = []
 

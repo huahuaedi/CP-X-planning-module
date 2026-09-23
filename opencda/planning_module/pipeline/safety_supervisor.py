@@ -633,7 +633,10 @@ class SafetySupervisor:
 # gate in SafetySupervisor._filtered_hazard_reason, so the supervisor module is
 # the one home of every "is this an emergency" rule.  Three things make an MPC
 # path tick an emergency: a hard gate that names a stop hazard, the
-# ``emergency_brake`` maneuver, and a corridor-infeasibility escalation.
+# ``emergency_brake`` maneuver, a corridor-infeasibility escalation, and a
+# raw proximity violation forwarded directly from perception.  The last one
+# is intentionally handled here rather than being converted into a nominal
+# behavior/reference stop upstream.
 # Anything else that vetoes the reference (a geometry or continuity contract
 # failure) is a bounded degradation, not an emergency.  The two gates are
 # independent and run at different points: this one decides how the control is
@@ -696,6 +699,7 @@ def emergency_stop_reason(
     behavior_decision: str,
     stop_goal_active: bool,
     corridor_infeasible_escalate: bool,
+    proximity_emergency_stop_required: bool = False,
 ) -> str:
     """Why this tick is an emergency, or ``""`` when it is not."""
 
@@ -709,6 +713,8 @@ def emergency_stop_reason(
         return "emergency_brake_maneuver"
     if bool(corridor_infeasible_escalate):
         return "corridor_infeasible_escalation"
+    if bool(proximity_emergency_stop_required):
+        return "proximity_emergency_gap"
     return ""
 
 

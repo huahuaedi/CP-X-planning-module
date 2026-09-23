@@ -62,7 +62,7 @@ def test_pipeline_sequences_runtime_and_perception_without_bridge():
     assert not hasattr(pipeline, "bridge")
 
 
-def test_pipeline_cycle_owns_initial_emergency_speed_intent():
+def test_pipeline_cycle_keeps_proximity_as_safety_evidence_not_speed_intent():
     pipeline = PlanningPipeline(
         runtime_input=RuntimeInputStage(_Mapper()),
         perception=PerceptionStage(max_mpc_obstacles=4),
@@ -91,7 +91,7 @@ def test_pipeline_cycle_owns_initial_emergency_speed_intent():
 
     assert cycle.tick.ego_speed_mps == pytest.approx(5.0)
     assert cycle.emergency_stop_required
-    assert cycle.requested_speed_mps == 0.0
+    assert cycle.requested_speed_mps == 8.0
     assert cycle.perception.front_actor_id == "front"
 
 

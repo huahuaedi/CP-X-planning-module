@@ -47,6 +47,10 @@ class ControlFinalizationRequest:
     # confirmed collision-risk hard gate below, instead of continuing to
     # trust whatever the (slack-relaxed) QP solution produced.
     corridor_infeasible_escalate: bool = False
+    # Raw proximity is safety evidence, not a nominal stop goal.  Keeping it
+    # here prevents the emergency-gap check from changing BehaviorDecision,
+    # reference selection, or SpeedTarget before the final safety owner.
+    proximity_emergency_stop_required: bool = False
 
 
 @dataclass(frozen=True)
@@ -149,6 +153,9 @@ class ControlFinalizationStage:
                 corridor_infeasible_escalate=bool(
                     request.corridor_infeasible_escalate
                 ),
+                proximity_emergency_stop_required=bool(
+                    request.proximity_emergency_stop_required
+                ),
             )
             emergency = bool(emergency_reason)
             platform_target = self._extractor.platform_target_velocity(
@@ -185,6 +192,9 @@ class ControlFinalizationStage:
                 ),
                 "corridor_infeasible_escalate": bool(
                     request.corridor_infeasible_escalate
+                ),
+                "proximity_emergency_stop_required": bool(
+                    request.proximity_emergency_stop_required
                 ),
                 "emergency_stop_reason": str(emergency_reason),
                 "velocity_command_source": (
