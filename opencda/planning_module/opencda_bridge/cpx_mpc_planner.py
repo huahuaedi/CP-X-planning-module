@@ -1002,6 +1002,13 @@ class CPXMPCPlannerBridge:
                 LANE_CHANGE
             ).mutable_samples()
         )
+        # Known ahead of the full cav_intents collection below (used later
+        # for corridor/arbitration) so a cooperative peer that is briefly
+        # stopped mid-negotiation isn't mistaken for a permanently parked
+        # obstacle by _escalate_stationary_lead_blockage -- see its docstring.
+        cooperative_actor_ids = frozenset(
+            str(intent.actor_id) for intent in self._collect_cav_intents()
+        )
         executable_behavior = self.pipeline.prepare_executable_behavior(
             ExecutableBehaviorPreparationRequest(
                 planning_context=planning_context,
@@ -1046,6 +1053,7 @@ class CPXMPCPlannerBridge:
                 self.behavior_planner, "_reset_lane_change_state", None
             ),
             observe_stage_duration=self._accum_stage_ms,
+            cooperative_actor_ids=cooperative_actor_ids,
         )
         stop_goal_active = executable_behavior.stop_goal_active
         turn_prepare_speed_suppressed_by_lane_change = bool(

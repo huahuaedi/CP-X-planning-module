@@ -286,6 +286,7 @@ class BehaviorStage:
         front_obstacle: Optional[Mapping[str, object]], sim_time_s: float,
         object_track_id: Any, config: Mapping[str, object],
         runtime_config: Mapping[str, object],
+        cooperative_actor_ids: frozenset = frozenset(),
     ) -> SemanticBehaviorResponse:
         """Escalate a persistently-stopped lead vehicle to LANE_BLOCKAGE.
 
@@ -300,6 +301,19 @@ class BehaviorStage:
         never move again." Tracking how long the *same* obstacle id has been
         continuously stationary directly ahead recovers that missing signal
         without touching the lane safety score itself.
+
+        A front obstacle that is also one of ego's currently-broadcasting
+        cooperative CAV peers (``cooperative_actor_ids``, from this tick's
+        V2X intents) gets a much longer confirmation window instead of the
+        plain default: a cooperative CAV that is briefly stopped while it
+        negotiates its own merge is not "genuinely, permanently stationary,"
+        and escalating it the same way an anonymous parked car would be
+        escalated was confirmed, on a real four-CAV merge run, to trigger an
+        unnecessary defensive lane-borrow that then coupled two CAVs'
+        speeds together (one make_gap-bound to the other's near-zero speed)
+        for the rest of the run -- neither ever finished. Ego still escalates
+        a cooperative peer eventually, in case it really is stuck, just on a
+        longer clock that a normal negotiation stall does not reach.
         """
 
         if semantic_response.action != "NONE":
@@ -343,6 +357,13 @@ class BehaviorStage:
             "stationary_lead_blockage_confirm_s",
             runtime_config.get("stationary_lead_blockage_confirm_s", 4.0),
         ))
+        if obstacle_id in cooperative_actor_ids:
+            confirm_s = float(config.get(
+                "stationary_lead_blockage_confirm_s_cooperative",
+                runtime_config.get(
+                    "stationary_lead_blockage_confirm_s_cooperative", 12.0
+                ),
+            ))
         if stalled_s < confirm_s:
             return semantic_response
         distance_m = max(0.0, float(
@@ -484,7 +505,7 @@ class BehaviorStage:
         self, request: BehaviorCommandFrameRequest, *, behavior_planner: Any,
         static_obstacle_stage: Any, reference_map: Any,
         nearest_front_obstacles: Any, attempt_replan: Any,
-        object_track_id: Any,
+        object_track_id: Any, cooperative_actor_ids: frozenset = frozenset(),
     ) -> BehaviorCommandFrameResult:
         """Evaluate lane candidates and produce one command from a frozen frame."""
 
@@ -580,6 +601,7 @@ class BehaviorStage:
             config=request.config, runtime_config=request.runtime_config,
             attempt_replan=attempt_replan,
             object_track_id=object_track_id,
+            cooperative_actor_ids=cooperative_actor_ids,
         )
         return BehaviorCommandFrameResult(
             command=command, candidate_frame=candidate_frame,
@@ -619,6 +641,7 @@ class BehaviorStage:
         attempt_replan: Any, object_track_id: Any,
         lane_to_offset: Mapping[int, int] = MappingProxyType({}),
         static_obstacle_mpc_stall_failure_count: int = 0,
+        cooperative_actor_ids: frozenset = frozenset(),
     ) -> BehaviorCommandResult:
         """Produce one behavior command through the sole obstacle arbitration path."""
 
@@ -660,6 +683,7 @@ class BehaviorStage:
             object_track_id=object_track_id,
             config=config,
             runtime_config=runtime_config,
+            cooperative_actor_ids=cooperative_actor_ids,
         )
         # Recomputing purely from the current ego speed lets the dynamic
         # stopping envelope shrink as the ego brakes, which can flip

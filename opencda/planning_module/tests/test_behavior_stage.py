@@ -843,6 +843,69 @@ def test_stationary_lead_vehicle_escalates_to_lane_blockage_after_sustained_stal
     assert escalated.reason == "stationary_lead_blockage_confirmed_after_stall"
 
 
+def test_cooperative_lead_stall_does_not_escalate_at_the_plain_threshold():
+    # Regression for the real four-CAV merge run: a cooperative CAV that is
+    # briefly stopped mid-negotiation is not "genuinely, permanently
+    # stationary" the way an anonymous parked car is -- escalating it the
+    # same way triggered an unnecessary defensive lane-borrow that then
+    # coupled two CAVs' speeds together for the rest of the run.
+    stage = BehaviorStage()
+    obstacle = _stopped_vehicle_obstacle(vehicle_id="300")
+    unresolved = SemanticBehaviorResponse(
+        risk_kind="NONE", action="NONE", object_type="vehicle",
+        obstacle_id="300", distance_m=15.0,
+        reason="front_observation_requires_no_behavior_override",
+    )
+    stage._escalate_stationary_lead_blockage(
+        semantic_response=unresolved, front_obstacle=obstacle,
+        sim_time_s=0.0, object_track_id=lambda o: o["vehicle_id"],
+        config={}, runtime_config={}, cooperative_actor_ids=frozenset({"300"}),
+    )
+
+    still_within_cooperative_window = stage._escalate_stationary_lead_blockage(
+        semantic_response=unresolved, front_obstacle=obstacle,
+        sim_time_s=4.1, object_track_id=lambda o: o["vehicle_id"],
+        config={}, runtime_config={}, cooperative_actor_ids=frozenset({"300"}),
+    )
+    # Past the plain 4.0s confirm_s, but a known cooperative peer gets a
+    # longer window -- must not have escalated yet.
+    assert still_within_cooperative_window.action == "NONE"
+
+    escalated = stage._escalate_stationary_lead_blockage(
+        semantic_response=unresolved, front_obstacle=obstacle,
+        sim_time_s=12.1, object_track_id=lambda o: o["vehicle_id"],
+        config={}, runtime_config={}, cooperative_actor_ids=frozenset({"300"}),
+    )
+    # A cooperative peer that is still stopped well past its own longer
+    # window is still eventually escalated, in case it really is stuck.
+    assert escalated.action == "LANE_BLOCKAGE"
+
+
+def test_non_cooperative_lead_stall_still_escalates_at_the_plain_threshold():
+    # The same obstacle id, but not present in cooperative_actor_ids this
+    # tick (e.g. an anonymous parked car, or a peer that stopped
+    # broadcasting) -- must keep using the plain, shorter threshold.
+    stage = BehaviorStage()
+    obstacle = _stopped_vehicle_obstacle(vehicle_id="300")
+    unresolved = SemanticBehaviorResponse(
+        risk_kind="NONE", action="NONE", object_type="vehicle",
+        obstacle_id="300", distance_m=15.0,
+        reason="front_observation_requires_no_behavior_override",
+    )
+    stage._escalate_stationary_lead_blockage(
+        semantic_response=unresolved, front_obstacle=obstacle,
+        sim_time_s=0.0, object_track_id=lambda o: o["vehicle_id"],
+        config={}, runtime_config={},
+    )
+
+    escalated = stage._escalate_stationary_lead_blockage(
+        semantic_response=unresolved, front_obstacle=obstacle,
+        sim_time_s=4.1, object_track_id=lambda o: o["vehicle_id"],
+        config={}, runtime_config={},
+    )
+    assert escalated.action == "LANE_BLOCKAGE"
+
+
 def test_stationary_lead_escalation_resets_once_obstacle_moves_again():
     stage = BehaviorStage()
     unresolved = SemanticBehaviorResponse(

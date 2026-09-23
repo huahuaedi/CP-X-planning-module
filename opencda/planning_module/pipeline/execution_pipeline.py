@@ -926,6 +926,7 @@ class PlanningPipeline:
         object_track_id: Callable[..., Any],
         reset_lane_change: Optional[Callable[..., Any]] = None,
         observe_stage_duration: Optional[Callable[[str, float], None]] = None,
+        cooperative_actor_ids: frozenset = frozenset(),
     ) -> ExecutableBehaviorFrame:
         """Produce and override behavior once before geometry generation."""
 
@@ -938,6 +939,7 @@ class PlanningPipeline:
             nearest_front_obstacles=nearest_front_obstacles,
             attempt_replan=attempt_replan,
             object_track_id=object_track_id,
+            cooperative_actor_ids=cooperative_actor_ids,
         )
         if observe_stage_duration is not None:
             observe_stage_duration(
