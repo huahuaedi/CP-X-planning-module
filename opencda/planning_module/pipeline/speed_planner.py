@@ -112,6 +112,10 @@ def conflict_corridor_speed_constraint(
     ego_y_m: float,
     comfortable_deceleration_mps2: float,
     corridor_dt_s: float = 0.1,
+    ego_speed_mps: float = 0.0,
+    ego_acceleration_mps2: float = 0.0,
+    max_braking_mps2: float = 3.0,
+    max_jerk_mps3: float = 10.0,
 ) -> Optional[SpeedConstraint]:
     """Convert an active Stage-C progress bound into a nominal speed limit.
 
@@ -121,11 +125,28 @@ def conflict_corridor_speed_constraint(
     instead of asking the QP to wait and then use its hard deceleration limit.
     An open corridor produces no constraint and therefore leaves the normal
     single-vehicle speed path unchanged.
+
+    A row whose value is exactly ego's own per-stage braking-reachability
+    floor (build_longitudinal_corridor's ``_cap``: ``effective = max(value,
+    floor)``, so ``effective == floor`` precisely when no agent's real bound
+    was tighter than what ego's own kinematics already force) is excluded
+    from the candidates below. That floor is not evidence of an external
+    agent to comfortably brake toward -- Stage D's QP already enforces it
+    directly as a hard constraint -- and once ego is slow enough that its own
+    floor sits close to its current station, treating that floor row as a
+    binding external cap turns this into a self-referential "stopped because
+    stopped" loop: confirmed on the four-CAV merge scenario, where the
+    through vehicle in the busiest lane accumulated hundreds of buffer-reuse/
+    bounded-safe-stop ticks and never reached its destination in budget,
+    though never a collision or road-boundary breach.
     """
 
     from opencda.planning_module.pipeline.mpc_obstacle_relevance import (
         _polyline_xy,
         project_to_extended_polyline,
+    )
+    from opencda.planning_module.pipeline.spatiotemporal_corridor import (
+        _minimum_reachable_station_profile_m,
     )
 
     polyline = _polyline_xy(reference_samples)
@@ -133,6 +154,20 @@ def conflict_corridor_speed_constraint(
         return None
     upper_bounds = list(getattr(corridor, "s_hi", ()) or ())
     bindings = list(getattr(corridor, "binding", ()) or ())
+    ego_station_m = project_to_extended_polyline(
+        float(ego_x_m), float(ego_y_m), polyline
+    )[1]
+    floor_stations = [
+        float(ego_station_m) + delta
+        for delta in _minimum_reachable_station_profile_m(
+            v0_mps=float(ego_speed_mps),
+            current_acceleration_mps2=float(ego_acceleration_mps2),
+            max_braking_mps2=float(max_braking_mps2),
+            max_jerk_mps3=float(max_jerk_mps3),
+            horizon_steps=max(0, len(upper_bounds) - 1),
+            dt_s=float(corridor_dt_s),
+        )
+    ]
     active = [
         (index, float(upper), str(bindings[index]))
         for index, upper in enumerate(upper_bounds)
@@ -140,12 +175,21 @@ def conflict_corridor_speed_constraint(
         and str(bindings[index])
         and math.isfinite(float(upper))
         and abs(float(upper)) < 1.0e8
+        # Exclude rows ego's own braking floor is binding rather than a real
+        # agent -- see the docstring above. Stage 0's floor is always exactly
+        # ego's current station regardless of speed or braking params (the
+        # profile starts at zero displacement by construction), so a stage-0
+        # row at that same station is not distinguishable from a real agent
+        # sitting right at ego's nose this way; only stage >= 1 floor rows,
+        # where the profile has actually diverged from "haven't moved yet",
+        # are excluded.
+        and not (
+            index >= 1
+            and abs(float(upper) - floor_stations[index]) <= 1.0e-6
+        )
     ]
     if not active:
         return None
-    ego_station_m = project_to_extended_polyline(
-        float(ego_x_m), float(ego_y_m), polyline
-    )[1]
     deceleration_mps2 = max(0.1, float(comfortable_deceleration_mps2))
     dt_s = max(1.0e-3, float(corridor_dt_s))
     def physical_owner(binding: str) -> str:

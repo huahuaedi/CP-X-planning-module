@@ -141,6 +141,10 @@ class CAVInteractionStage:
             ego_x_m=float(ego_location.x), ego_y_m=float(ego_location.y),
             comfortable_deceleration_mps2=float(comfortable_deceleration_mps2),
             corridor_dt_s=step_s,
+            ego_speed_mps=float(ego_speed_mps),
+            ego_acceleration_mps2=float(current_acceleration_mps2),
+            max_braking_mps2=float(corridor_params.max_braking_mps2),
+            max_jerk_mps3=float(corridor_params.max_jerk_mps3),
         )
         peers_by_id = {
             int(intent.actor_id): intent for intent in list(cav_intents or [])

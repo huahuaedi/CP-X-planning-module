@@ -204,6 +204,68 @@ class SpeedPlannerTest(unittest.TestCase):
         self.assertAlmostEqual(constraint.maximum_mps, 0.0)
         self.assertIn("bound_velocity_mps=0.000", constraint.reason)
 
+    def test_rows_equal_to_egos_own_braking_floor_are_not_treated_as_a_peer(self):
+        # Regression for the four-CAV merge scenario: a through vehicle's own
+        # per-stage braking-reachability floor can equal build_longitudinal_
+        # corridor's published s_hi at several stages once it is slow enough
+        # (build_longitudinal_corridor's _cap: effective = max(value, floor)
+        # -- effective == floor exactly whenever no agent's real bound was
+        # tighter). Rows 1 and 2 below equal ego's own floor at
+        # ego_speed_mps=8.0/max_braking_mps2=3.0/max_jerk_mps3=10.0/dt=0.1
+        # (floor = [5.0, 5.8, 6.59, ...] with ego at station 5.0); stage 0
+        # cannot be told apart from a real peer this way (the floor there is
+        # always exactly ego's current station, for any input) and stays
+        # eligible. Without excluding rows 1/2, stage 0 would find stage 1's
+        # identical value as a "same owner" neighbor and read it as a peer
+        # moving in lockstep at 8 m/s (bound_velocity_mps=8.0); that peer
+        # does not exist -- it is ego's own floor -- so with the fix in place
+        # the constraint must fall back to treating stage 0 alone, at rest.
+        constraint = conflict_corridor_speed_constraint(
+            corridor=SimpleNamespace(
+                s_hi=[5.0, 5.8, 6.59],
+                binding=["peer"] * 3,
+            ),
+            reference_samples=[
+                {"x_ref_m": 0.0, "y_ref_m": 0.0},
+                {"x_ref_m": 30.0, "y_ref_m": 0.0},
+            ],
+            ego_x_m=5.0,
+            ego_y_m=0.0,
+            comfortable_deceleration_mps2=2.0,
+            corridor_dt_s=0.1,
+            ego_speed_mps=8.0,
+            ego_acceleration_mps2=0.0,
+            max_braking_mps2=3.0,
+            max_jerk_mps3=10.0,
+        )
+
+        self.assertIsNotNone(constraint)
+        self.assertAlmostEqual(constraint.maximum_mps, 0.0)
+        self.assertIn("bound_velocity_mps=0.000", constraint.reason)
+
+    def test_a_stage_zero_row_at_egos_floor_is_still_a_candidate(self):
+        # Stage 0 is never excluded (see the fix's docstring): a row at
+        # ego's current station at stage 0 remains a real candidate even
+        # though it numerically equals ego's own floor there too.
+        constraint = conflict_corridor_speed_constraint(
+            corridor=SimpleNamespace(
+                s_hi=[5.0],
+                binding=["peer"],
+            ),
+            reference_samples=[
+                {"x_ref_m": 0.0, "y_ref_m": 0.0},
+                {"x_ref_m": 30.0, "y_ref_m": 0.0},
+            ],
+            ego_x_m=5.0,
+            ego_y_m=0.0,
+            comfortable_deceleration_mps2=2.0,
+            corridor_dt_s=0.1,
+            ego_speed_mps=8.0,
+        )
+
+        self.assertIsNotNone(constraint)
+        self.assertAlmostEqual(constraint.maximum_mps, 0.0)
+
     def test_proposed_make_gap_prepares_room_without_zero_speed_step(self):
         constraint = cooperative_gap_speed_constraint(
             reference_samples=[
