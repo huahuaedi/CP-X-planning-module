@@ -528,38 +528,39 @@ def _build_effective_corridor(
     )
 
 
-def resolve_conflicts(
+@dataclass(frozen=True)
+class _ExpandedAgents:
+    """Physical agents with multimodal prediction expanded into QP-visible rows."""
+
+    physical_agents: List[Mapping[str, Any]]
+    all_agents: List[Mapping[str, Any]]
+    mode_groups: Dict[str, List[Tuple[Mapping[str, Any], float]]]
+    retained_mode_count: int
+    mode_capped_agent_count: int
+    raw_obstacle_count: int
+    cav_agent_count: int
+
+
+def _build_physical_agents_with_modes(
     *,
-    reference_samples: Sequence[Any],
-    ego_snapshot: Mapping[str, Any],
-    my_actor_id: int,
-    my_claim: Optional[ResourceClaim] = None,
-    obstacle_snapshots: Sequence[Mapping[str, Any]] = (),
-    cav_intents: Sequence[CavIntent] = (),
-    prediction_modes: Optional[Mapping[str, Sequence[Any]]] = None,
-    latch_state: Optional[Mapping[str, ArbitrationLatchEntry]] = None,
-    tag_state: Optional[Mapping[str, str]] = None,
-    classifier_params: ClassifierParams = ClassifierParams(),
-    corridor_params: CorridorParams = CorridorParams(),
-    rss_params: RSSParams = RSSParams(),
-    hysteresis_ticks: int = 3,
-    mode_probability_floor: float = 0.05,
-    credible_mode_probability_min: float = 0.15,
-    credible_mode_ttc_s: float = 2.0,
-    credible_mode_veto_release_s: float = 0.6,
-    credible_mode_veto_release_margin_s: float = 0.5,
-    sim_time_s: float = 0.0,
-    nominal_progress_limit_m: Optional[float] = None,
-    veto_state: Optional[Mapping[str, Any]] = None,
-    refresh_assignments: bool = True,
-    cached_assignments: Sequence[ConflictAssignment] = (),
-    rebuild_corridor: bool = True,
-    cached_corridor: Optional[Corridor] = None,
-    corridor_reference_samples: Optional[Sequence[Any]] = None,
-    max_relevant_agents: int = 6,
-    max_modes_per_agent: int = 3,
-) -> ConflictResolution:
-    cavs = list(cav_intents or [])
+    cavs: Sequence[CavIntent],
+    obstacle_snapshots: Sequence[Mapping[str, Any]],
+    prediction_modes: Optional[Mapping[str, Sequence[Any]]],
+    mode_probability_floor: float,
+    credible_mode_probability_min: float,
+    max_modes_per_agent: int,
+) -> _ExpandedAgents:
+    """Fuse CAV broadcasts with perception, then expand retained modes.
+
+    A connected vehicle's shared trajectory replaces its perception track (a
+    broadcast plan is the richer representation); everything else keeps all
+    retained prediction hypotheses.  An agent with more than one retained
+    mode is expanded into one ``id::modeN`` row per hypothesis so Stage A/C
+    see every mode as its own agent; single- or zero-mode agents pass through
+    as one physical row so Stage A's ``predicted_trajectory`` contract still
+    holds when no probabilistic aggregation is needed.
+    """
+
     # Only a peer carrying an actual shared plan owns future-trajectory data.
     # A pose/claim-only intent remains available to Stage B but must not erase
     # the prediction module's hypotheses for the same physical actor.
@@ -645,6 +646,65 @@ def resolve_conflicts(
             all_agents.append(expanded)
             mode_groups[actor_id].append((expanded, float(mode.probability)))
             retained_mode_count += 1
+
+    return _ExpandedAgents(
+        physical_agents=physical_agents,
+        all_agents=all_agents,
+        mode_groups=mode_groups,
+        retained_mode_count=retained_mode_count,
+        mode_capped_agent_count=mode_capped_agent_count,
+        raw_obstacle_count=len(raw_obstacles),
+        cav_agent_count=len(cav_agents),
+    )
+
+
+def resolve_conflicts(
+    *,
+    reference_samples: Sequence[Any],
+    ego_snapshot: Mapping[str, Any],
+    my_actor_id: int,
+    my_claim: Optional[ResourceClaim] = None,
+    obstacle_snapshots: Sequence[Mapping[str, Any]] = (),
+    cav_intents: Sequence[CavIntent] = (),
+    prediction_modes: Optional[Mapping[str, Sequence[Any]]] = None,
+    latch_state: Optional[Mapping[str, ArbitrationLatchEntry]] = None,
+    tag_state: Optional[Mapping[str, str]] = None,
+    classifier_params: ClassifierParams = ClassifierParams(),
+    corridor_params: CorridorParams = CorridorParams(),
+    rss_params: RSSParams = RSSParams(),
+    hysteresis_ticks: int = 3,
+    mode_probability_floor: float = 0.05,
+    credible_mode_probability_min: float = 0.15,
+    credible_mode_ttc_s: float = 2.0,
+    credible_mode_veto_release_s: float = 0.6,
+    credible_mode_veto_release_margin_s: float = 0.5,
+    sim_time_s: float = 0.0,
+    nominal_progress_limit_m: Optional[float] = None,
+    veto_state: Optional[Mapping[str, Any]] = None,
+    refresh_assignments: bool = True,
+    cached_assignments: Sequence[ConflictAssignment] = (),
+    rebuild_corridor: bool = True,
+    cached_corridor: Optional[Corridor] = None,
+    corridor_reference_samples: Optional[Sequence[Any]] = None,
+    max_relevant_agents: int = 6,
+    max_modes_per_agent: int = 3,
+) -> ConflictResolution:
+    cavs = list(cav_intents or [])
+    expanded = _build_physical_agents_with_modes(
+        cavs=cavs,
+        obstacle_snapshots=obstacle_snapshots,
+        prediction_modes=prediction_modes,
+        mode_probability_floor=mode_probability_floor,
+        credible_mode_probability_min=credible_mode_probability_min,
+        max_modes_per_agent=max_modes_per_agent,
+    )
+    physical_agents = expanded.physical_agents
+    all_agents = expanded.all_agents
+    mode_groups = expanded.mode_groups
+    retained_mode_count = expanded.retained_mode_count
+    mode_capped_agent_count = expanded.mode_capped_agent_count
+    raw_obstacle_count = expanded.raw_obstacle_count
+    cav_agent_count = expanded.cav_agent_count
 
     # Stage A -----------------------------------------------------------------
     # Every agent is classified before any count budget applies: a crossing
@@ -816,7 +876,7 @@ def resolve_conflicts(
         }),
         "mode_conflict_count": len(all_agents),
         "deduplicated_agent_count": (
-            len(raw_obstacles) + len(cav_agents) - len(physical_agents)
+            raw_obstacle_count + cav_agent_count - len(physical_agents)
         ),
         "relevant_agent_budget": int(max_relevant_agents),
         "relevant_agent_dropped_count": int(dropped_agent_count),
