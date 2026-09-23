@@ -210,5 +210,102 @@ class MTRPredictionBridgeTest(unittest.TestCase):
         self.assertEqual(bridge.dropped_request_count, 0)
 
 
+    def test_mid_run_disconnect_expires_cache_then_recovers(self):
+        # Point 5 in the multimodal-integration review: the server working,
+        # then dying mid-run, is a different case from never having worked
+        # (test_unreachable_server_leaves_fallback_contract_untouched) --
+        # here there is a fresh cache the bridge must hold for max_stale_s
+        # and then stop trusting, not discard immediately or keep forever.
+        bridge = MTRPredictionBridge(
+            server_url="http://127.0.0.1:1", timeout_s=0.05,
+            max_stale_s=0.3, asynchronous=False,
+        )
+        kwargs = dict(
+            object_snapshots=[{"track_id": "veh-1", "x": 1.0, "y": 2.0}],
+            horizon_s=1.0, dt_s=0.1,
+            ego_snapshot={"x": 0.0, "y": 0.0, "v": 0.0, "psi": 0.0},
+        )
+
+        # Tick 0: server up, response cached.
+        annotated = bridge.attach(timestamp_s=0.0, **kwargs)
+        self.assertIn("predicted_trajectory", annotated[0])
+        self.assertEqual(bridge.last_error, "")
+
+        # Server dies. Immediately after (well inside max_stale_s) the cache
+        # is still trusted.
+        self.urlopen.side_effect = OSError("connection refused")
+        annotated = bridge.attach(timestamp_s=0.1, **kwargs)
+        self.assertIn("predicted_trajectory", annotated[0])
+        self.assertTrue(bridge.last_error)
+
+        # Past max_stale_s with no successful refresh: the cache is no
+        # longer trusted and the caller sees the plain fallback contract,
+        # not a stale trajectory reported as current.
+        annotated = bridge.attach(timestamp_s=1.0, **kwargs)
+        self.assertNotIn("predicted_trajectory", annotated[0])
+
+        # Server recovers: a normal successful response resumes attachment.
+        self.urlopen.side_effect = None
+        self.urlopen.return_value = _FakeResponse()
+        annotated = bridge.attach(timestamp_s=1.1, **kwargs)
+        self.assertIn("predicted_trajectory", annotated[0])
+
+    def test_sudden_mode_probability_shift_is_not_smoothed_by_the_bridge(self):
+        # Point 5: a sudden mode-probability change is a scenario-level
+        # stability question for the corridor/credible-veto hysteresis
+        # downstream, but that hysteresis can only reason about it correctly
+        # if it knows this layer hands through the server's latest
+        # probabilities verbatim (renormalized, not blended with the
+        # previous tick's). Lock that contract here rather than leaving it
+        # to be discovered as a surprise inside the corridor's own tests.
+        bridge = MTRPredictionBridge(
+            server_url="http://127.0.0.1:1", update_hz=100.0,
+            asynchronous=False,
+        )
+        kwargs = dict(
+            object_snapshots=[{"track_id": "veh-1", "x": 1.0, "y": 2.0}],
+            horizon_s=1.0, dt_s=0.1,
+            ego_snapshot={"x": 0.0, "y": 0.0, "v": 0.0, "psi": 0.0},
+        )
+        bridge.attach(timestamp_s=0.0, **kwargs)
+        modes = bridge._cached_prediction_modes["veh-1"]
+        self.assertAlmostEqual(modes[0]["probability"], 0.6, places=6)
+
+        def flipped_response(*_args, **_kwargs):
+            class _R(_FakeResponse):
+                def read(self):
+                    return json.dumps({
+                        "predictions": {},
+                        "prediction_modes": {
+                            "veh-1": [
+                                {
+                                    "probability": 0.05,
+                                    "maneuver": "lane_keep",
+                                    "trajectory": [
+                                        {"x": 9.0, "y": 8.0, "t": 0.1, "v": 2.0},
+                                    ],
+                                },
+                                {
+                                    "probability": 0.95,
+                                    "maneuver": "brake",
+                                    "trajectory": [
+                                        {"x": 8.9, "y": 8.0, "t": 0.1, "v": 0.0},
+                                    ],
+                                },
+                            ]
+                        },
+                    }).encode("utf-8")
+            return _R()
+
+        self.urlopen.side_effect = flipped_response
+        bridge.attach(timestamp_s=0.02, **kwargs)
+        modes = sorted(
+            bridge._cached_prediction_modes["veh-1"],
+            key=lambda m: -m["probability"],
+        )
+        self.assertAlmostEqual(modes[0]["probability"], 0.95, places=6)
+        self.assertEqual(modes[0]["maneuver"], "brake")
+
+
 if __name__ == "__main__":
     unittest.main()
