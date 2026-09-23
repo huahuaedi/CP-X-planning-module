@@ -1,5 +1,7 @@
 import math
 
+import pytest
+
 from pipeline.cav_conflict_pipeline import resolve_conflicts
 from pipeline.conflict_classifier import CROSSING, FOLLOW, IGNORE, MERGE
 from pipeline.cooperative_arbitration import (
@@ -233,6 +235,43 @@ def test_stage_c_refresh_retains_pending_rows_for_unchanged_conflict():
     assert result.corridor.binding == cached.binding
 
 
+def test_fresh_actor_forecast_supersedes_its_cached_pending_rows():
+    cached = Corridor(
+        s_lo=[-_BIG] * 21,
+        s_hi=[18.0] * 21,
+        binding=["lead::mode2"] * 21,
+    )
+    modes = [
+        {
+            "probability": probability,
+            "trajectory": [
+                {"t": 0.1 * k, "x": 30.0 + k, "y": 0.1, "v": 10.0}
+                for k in range(21)
+            ],
+        }
+        for probability in (0.6, 0.25, 0.15)
+    ]
+    result = resolve_conflicts(
+        reference_samples=REF, ego_snapshot=EGO, my_actor_id=1,
+        obstacle_snapshots=[{
+            "id": "lead", "x": 30.0, "y": 0.1, "v": 10.0,
+            "psi": 0.0, "predicted_modes": modes,
+        }],
+        tag_state={
+            "lead::mode0": FOLLOW,
+            "lead::mode1": FOLLOW,
+            "lead::mode2": FOLLOW,
+        },
+        rebuild_corridor=True,
+        cached_corridor=cached,
+    )
+
+    assert result.diagnostics["corridor_rebuilt"]
+    assert all(value >= _BIG for value in result.fresh_corridor.s_hi)
+    assert all(value >= _BIG for value in result.corridor.s_hi)
+    assert not any(result.corridor.binding)
+
+
 def test_stage_a_geometric_clearance_filters_cache_without_stage_c_refresh():
     cached = Corridor(
         s_lo=[-_BIG] * 21,
@@ -358,7 +397,10 @@ def test_conflicting_claims_arbitrate_before_geometric_merge_begins():
         rebuild_corridor=False, refresh_assignments=True,
     )
     assert cached.diagnostics["roles"]["2"] == "make_gap"
-    assert cached.corridor.s_hi == pending.s_hi
+    # The peer's complete current path supersedes its old cached forecast.
+    # Its claim keeps the negotiated role, but cannot keep an obsolete
+    # physical-occupancy row after the new path remains in the adjacent lane.
+    assert all(value >= _BIG for value in cached.corridor.s_hi)
 
 
 def test_non_connected_crosser_defaults_to_yield_without_assignment():
@@ -392,6 +434,38 @@ def test_latch_state_round_trips_and_holds():
         latch_state=r1.latch_state, hysteresis_ticks=3,
     )
     assert r2.diagnostics["roles"].get("2") == "proceed"
+
+
+def test_tag_transition_rebuilds_corridor_without_refreshing_stage_b_roles():
+    """20 Hz geometry must not silently promote 5 Hz arbitration to 20 Hz."""
+
+    path = [(25.0 + 0.9 * k, 3.4 - 0.16 * k) for k in range(20)]
+    peer = _cav(2, (25.0, 3.4), committed_at_s=11.0, path=path)
+    initial = resolve_conflicts(
+        reference_samples=REF, ego_snapshot=EGO, my_actor_id=1,
+        my_claim=_claim(committed_at_s=10.0), cav_intents=[peer],
+    )
+    assert initial.assignments
+
+    changed = resolve_conflicts(
+        reference_samples=REF, ego_snapshot=EGO, my_actor_id=1,
+        my_claim=_claim(committed_at_s=10.0), cav_intents=[peer],
+        tag_state={"2": IGNORE},
+        latch_state=initial.latch_state,
+        refresh_assignments=False,
+        cached_assignments=initial.assignments,
+        rebuild_corridor=False,
+        cached_corridor=initial.corridor,
+    )
+
+    assert changed.diagnostics["tags"]["2"] != IGNORE
+    assert changed.diagnostics["corridor_rebuilt"] is True
+    assert changed.diagnostics["coordination_roles_refreshed"] is False
+    assert changed.diagnostics["coordination_refresh_reason"] == (
+        "corridor_tag_changed"
+    )
+    assert changed.assignments == initial.assignments
+    assert changed.latch_state == initial.latch_state
 
 
 def test_scheduled_role_refresh_prunes_a_disappeared_peer_latch():
@@ -528,6 +602,15 @@ def test_multimodal_corridors_use_expected_risk_and_credible_veto():
     assert any(h < _BIG for h in r_cross.corridor.s_hi)      # used the cross mode
     assert r_cross.diagnostics["multimodal_agent_count"] == 1
     assert r_cross.diagnostics["credible_mode_veto_count"] == 1
+    mode_trace = r_cross.diagnostics["prediction_modes"]
+    assert set(mode_trace) == {"npc::mode0", "npc::mode1"}
+    assert mode_trace["npc::mode0"]["probability"] == pytest.approx(0.2)
+    assert mode_trace["npc::mode0"]["tag"] == "IGNORE"
+    assert mode_trace["npc::mode1"]["probability"] == pytest.approx(0.8)
+    assert mode_trace["npc::mode1"]["tag"] == "CROSSING"
+    assert mode_trace["npc::mode1"]["raw_dangerous"]
+    assert mode_trace["npc::mode1"]["credible_veto_active"]
+    assert mode_trace["npc::mode1"]["veto_binding_stage_count"] > 0
     # The actor remains one physical conflict source; its modes are only
     # temporary classifier inputs and reduce to one final corridor.
     assert r_cross.diagnostics["conflict_agent_count"] == 1
@@ -629,36 +712,64 @@ def test_credible_veto_hysteresis_holds_through_a_brief_flicker():
     # tick 0: real danger -> engage immediately
     d, held, e = _apply_veto_hysteresis(
         mode_id="p::mode1", raw_dangerous=True, recovered=False,
-        veto_state=state, release_ticks=5)
+        veto_state=state, sim_time_s=0.0, release_duration_s=0.5)
     state = {"p::mode1": e}
     assert d and not held
 
     # ticks 1-4: raw flag drops but risk has NOT comfortably receded ->
     # veto is HELD, not released
-    for _ in range(4):
+    for tick in range(1, 5):
         d, held, e = _apply_veto_hysteresis(
             mode_id="p::mode1", raw_dangerous=False, recovered=False,
-            veto_state=state, release_ticks=5)
+            veto_state=state, sim_time_s=0.1 * tick,
+            release_duration_s=0.5)
         state = {"p::mode1": e}
         assert d and held
 
     # a single raw re-trigger resets the clear streak
     d, held, e = _apply_veto_hysteresis(
         mode_id="p::mode1", raw_dangerous=True, recovered=False,
-        veto_state=state, release_ticks=5)
+        veto_state=state, sim_time_s=0.5, release_duration_s=0.5)
     state = {"p::mode1": e}
-    assert d and not held and e["clear_streak"] == 0
+    assert d and not held and e["clear_since_s"] is None
 
 
 def test_credible_veto_releases_after_sustained_clear_and_recovery():
     from pipeline.cav_conflict_pipeline import _apply_veto_hysteresis
 
-    state = {"p::mode1": {"dangerous": True, "clear_streak": 0}}
+    state = {"p::mode1": {"dangerous": True, "clear_since_s": None}}
     for i in range(5):
         d, held, e = _apply_veto_hysteresis(
             mode_id="p::mode1", raw_dangerous=False, recovered=True,
-            veto_state=state, release_ticks=5)
+            veto_state=state, sim_time_s=1.0 + 0.1 * i,
+            release_duration_s=0.4)
         state = {"p::mode1": e}
         if i < 4:
             assert d and held           # still holding
-    assert not d and not held           # released on the 5th sustained clear+recovered
+    assert not d and not held           # released after 0.4 s clear+recovered
+
+
+def test_credible_veto_release_is_independent_of_evaluation_count():
+    from pipeline.cav_conflict_pipeline import _apply_veto_hysteresis
+
+    def release_time(evaluation_times):
+        state = {"p::mode1": {"dangerous": True, "clear_since_s": None}}
+        released_at = None
+        for now_s in evaluation_times:
+            dangerous, _held, entry = _apply_veto_hysteresis(
+                mode_id="p::mode1", raw_dangerous=False, recovered=True,
+                veto_state=state, sim_time_s=now_s,
+                release_duration_s=0.6,
+            )
+            state = {"p::mode1": entry}
+            if not dangerous:
+                released_at = now_s
+                break
+        return released_at
+
+    # Extra 20 Hz tag-driven rebuilds do not consume a release "tick".
+    assert release_time([1.0, 1.2, 1.4, 1.6]) == pytest.approx(1.6)
+    assert release_time([
+        1.0, 1.05, 1.10, 1.15, 1.20, 1.25, 1.30,
+        1.35, 1.40, 1.45, 1.50, 1.55, 1.60,
+    ]) == pytest.approx(1.6)

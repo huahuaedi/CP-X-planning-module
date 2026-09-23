@@ -1,0 +1,214 @@
+import json
+import threading
+import time
+import unittest
+from unittest import mock
+
+from opencda.planning_module.opencda_bridge.prediction_bridge import (
+    MTRPredictionBridge,
+)
+from opencda.planning_module.pipeline.prediction import mpc_stage_trajectory
+from opencda.planning_module.pipeline.tracker import CPXObstacleTracker
+
+
+class _FakeResponse:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def read(self):
+        return json.dumps({
+            "predictions": {
+                "veh-1": [
+                    {"x": 9.0, "y": 8.0, "t": 0.1, "v": 2.0},
+                    {"x": 9.2, "y": 8.0, "t": 0.2, "v": 2.0},
+                ]
+            },
+            "prediction_modes": {
+                "veh-1": [
+                    {
+                        "probability": 0.6,
+                        "maneuver": "lane_keep",
+                        "trajectory": [
+                            {"x": 9.0, "y": 8.0, "t": 0.1, "v": 2.0},
+                            {"x": 9.2, "y": 8.0, "t": 0.2, "v": 2.0},
+                        ],
+                    },
+                    {
+                        "probability": 0.3,
+                        "maneuver": "turn_left",
+                        "trajectory": [
+                            {"x": 9.0, "y": 8.1, "t": 0.1, "v": 1.8},
+                            {"x": 9.1, "y": 8.3, "t": 0.2, "v": 1.6},
+                        ],
+                    },
+                    {
+                        "probability": 0.1,
+                        "maneuver": "brake",
+                        "trajectory": [
+                            {"x": 8.9, "y": 8.0, "t": 0.1, "v": 1.0},
+                            {"x": 8.9, "y": 8.0, "t": 0.2, "v": 0.0},
+                        ],
+                    },
+                ]
+            }
+        }).encode("utf-8")
+
+
+class MTRPredictionBridgeTest(unittest.TestCase):
+    def setUp(self):
+        self.urlopen = mock.patch(
+            "opencda.planning_module.opencda_bridge.prediction_bridge.urllib.request.urlopen",
+            return_value=_FakeResponse(),
+        ).start()
+
+    def tearDown(self):
+        mock.patch.stopall()
+
+    def test_http_prediction_reaches_tracker_frame_and_mpc_format(self):
+        bridge = MTRPredictionBridge(update_hz=10.0, asynchronous=False)
+        obstacles = [{
+            "track_id": "veh-1", "x": 1.0, "y": 2.0,
+            "v": 3.0, "psi": 0.0,
+        }]
+        annotated = bridge.attach(
+            obstacles,
+            horizon_s=1.0,
+            dt_s=0.1,
+            ego_snapshot={"x": 0.0, "y": 0.0, "v": 4.0, "psi": 0.0},
+            timestamp_s=5.0,
+        )
+        tracker = CPXObstacleTracker()
+        tracker.update(obstacle_snapshots=obstacles, timestamp_s=5.0)
+        frame = tracker.predict(
+            ego_snapshot={"x": 0.0, "y": 0.0, "v": 4.0, "psi": 0.0},
+            obstacle_snapshots=annotated,
+            lane_assignments={"veh-1": 1},
+            available_lane_ids=[1],
+            horizon_s=1.0,
+            dt_s=0.1,
+            min_front_gap_m=2.0,
+            min_rear_gap_m=2.0,
+            min_ttc_s=1.0,
+        )
+
+        points = frame.obstacle_future_trajectories["veh-1"]
+        self.assertEqual(points[0]["x"], 9.0)
+        self.assertEqual(points[0]["v"], 2.0)
+        hypotheses = frame.predicted_objects["veh-1"].hypotheses
+        self.assertEqual(len(hypotheses), 3)
+        self.assertEqual(
+            [round(item.probability, 2) for item in hypotheses],
+            [0.6, 0.3, 0.1],
+        )
+        self.assertIn("veh-1", frame.revision)
+        self.assertIn("mtr:1", frame.revision)
+        stages = mpc_stage_trajectory(
+            points, fallback_heading_rad=0.0, horizon_steps=2, dt_s=0.1
+        )
+        self.assertEqual(stages[0][0:3], [9.0, 8.0, 2.0])
+        request = self.urlopen.call_args[0][0]
+        sent = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(sent["timestamp_s"], 5.0)
+        self.assertEqual(sent["ego_snapshot"]["v"], 4.0)
+        self.assertEqual(bridge.last_attached_count, 1)
+        self.assertEqual(bridge.last_attached_mode_count, 3)
+
+    def test_rate_limit_rebases_cached_prediction(self):
+        bridge = MTRPredictionBridge(update_hz=5.0, asynchronous=False)
+        kwargs = {
+            "object_snapshots": [{"track_id": "veh-1"}],
+            "horizon_s": 1.0,
+            "dt_s": 0.1,
+            "ego_snapshot": {"x": 0.0, "y": 0.0, "v": 0.0, "psi": 0.0},
+        }
+        first = bridge.attach(timestamp_s=1.0, **kwargs)
+        second = bridge.attach(timestamp_s=1.05, **kwargs)
+
+        self.assertEqual(self.urlopen.call_count, 1)
+        self.assertAlmostEqual(first[0]["predicted_trajectory"][0]["t"], 0.1)
+        self.assertAlmostEqual(second[0]["predicted_trajectory"][0]["t"], 0.05)
+
+    def test_history_updates_at_ten_hz_while_inference_stays_at_five_hz(self):
+        bridge = MTRPredictionBridge(
+            update_hz=5.0, history_update_hz=10.0, asynchronous=False
+        )
+        kwargs = {
+            "object_snapshots": [{"track_id": "veh-1"}],
+            "horizon_s": 1.0,
+            "dt_s": 0.1,
+            "ego_snapshot": {"x": 0.0, "y": 0.0, "v": 0.0, "psi": 0.0},
+        }
+
+        bridge.attach(timestamp_s=1.0, **kwargs)
+        bridge.attach(timestamp_s=1.1, **kwargs)
+        bridge.attach(timestamp_s=1.2, **kwargs)
+
+        self.assertEqual(self.urlopen.call_count, 3)
+        requests = [
+            json.loads(call[0][0].data.decode("utf-8"))
+            for call in self.urlopen.call_args_list
+        ]
+        self.assertEqual(
+            [request["run_inference"] for request in requests],
+            [True, False, True],
+        )
+        self.assertEqual(bridge.inference_request_count, 2)
+
+    def test_unreachable_server_leaves_fallback_contract_untouched(self):
+        self.urlopen.side_effect = OSError("connection refused")
+        bridge = MTRPredictionBridge(
+            server_url="http://127.0.0.1:1", timeout_s=0.05,
+            asynchronous=False,
+        )
+        annotated = bridge.attach(
+            [{"track_id": "veh-1", "x": 1.0, "y": 2.0}],
+            horizon_s=1.0,
+            dt_s=0.1,
+            ego_snapshot={"x": 0.0, "y": 0.0, "v": 0.0, "psi": 0.0},
+            timestamp_s=1.0,
+        )
+
+        self.assertNotIn("predicted_trajectory", annotated[0])
+        self.assertTrue(bridge.last_error)
+
+    def test_async_bridge_never_blocks_planning_tick(self):
+        request_started = threading.Event()
+        release_response = threading.Event()
+
+        def delayed_response(*_args, **_kwargs):
+            request_started.set()
+            release_response.wait(timeout=1.0)
+            return _FakeResponse()
+
+        self.urlopen.side_effect = delayed_response
+        bridge = MTRPredictionBridge(update_hz=5.0, asynchronous=True)
+        kwargs = {
+            "object_snapshots": [{"track_id": "veh-1"}],
+            "horizon_s": 1.0,
+            "dt_s": 0.1,
+            "ego_snapshot": {"x": 0.0, "y": 0.0, "v": 0.0, "psi": 0.0},
+        }
+
+        first = bridge.attach(timestamp_s=1.0, **kwargs)
+
+        # The worker's response is deliberately unavailable. If attach()
+        # shared the HTTP critical path, this assertion could only be reached
+        # after the one-second server timeout. It must instead return the
+        # unannotated fallback contract immediately.
+        self.assertEqual(bridge.success_count, 0)
+        self.assertNotIn("predicted_trajectory", first[0])
+        self.assertTrue(request_started.wait(timeout=1.0))
+        release_response.set()
+        deadline = time.monotonic() + 1.0
+        while bridge.success_count < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        second = bridge.attach(timestamp_s=1.05, **kwargs)
+        self.assertIn("predicted_trajectory", second[0])
+        self.assertEqual(bridge.dropped_request_count, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

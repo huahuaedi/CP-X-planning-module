@@ -199,24 +199,26 @@ def retain_pending_corridor(
     return effective
 
 
-def release_cleared_actor_bounds(
-    corridor: Optional[Corridor], cleared_actor_ids: Sequence[str],
+def remove_actor_bounds(
+    corridor: Optional[Corridor], actor_ids: Sequence[str],
 ) -> Optional[Corridor]:
-    """Remove only bounds whose observed owner is clear over the horizon.
+    """Return ``corridor`` without rows owned by the selected actors.
 
-    A cached corridor is still needed for actors that disappeared from
-    perception; this returns a filtered view without mutating that cache.
+    Stage C uses this for two authoritative events: an actor was observed
+    geometrically clear, or a newly built forecast supersedes that actor's
+    previous forecast.  Bounds belonging to actors absent from the new input
+    remain in the cache and age out normally.  The input is never mutated.
     """
 
-    cleared = {str(actor_id) for actor_id in cleared_actor_ids}
-    if corridor is None or not cleared:
+    removed = {str(actor_id) for actor_id in actor_ids}
+    if corridor is None or not removed:
         return corridor
     filtered = Corridor(
         s_lo=list(corridor.s_lo), s_hi=list(corridor.s_hi),
         binding=list(corridor.binding),
     )
     for k, owner in enumerate(filtered.binding):
-        if str(owner).split("::mode", 1)[0] in cleared:
+        if str(owner).split("::mode", 1)[0] in removed:
             filtered.s_lo[k] = -_BIG
             filtered.s_hi[k] = _BIG
             filtered.binding[k] = ""

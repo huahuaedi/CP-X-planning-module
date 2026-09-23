@@ -118,6 +118,7 @@ class CPXObstacleTracker:
         self,
         *,
         ego_snapshot: Mapping[str, object],
+        obstacle_snapshots: Optional[Sequence[Mapping[str, Any]]] = None,
         lane_assignments: Mapping[str, int],
         available_lane_ids: Sequence[int],
         horizon_s: float,
@@ -130,8 +131,15 @@ class CPXObstacleTracker:
         lane_step_fn: Optional[Callable[[float, float, float], Any]] = None,
         snapshot_transform: Optional[Callable[[dict, float], Any]] = None,
     ) -> PredictionFrame:
+        prediction_obstacles = [
+            dict(snapshot) for snapshot in (
+                self._latest_obstacles
+                if obstacle_snapshots is None else obstacle_snapshots
+            )
+        ]
         source_revisions = []
-        for snapshot in self._latest_obstacles:
+        for snapshot in prediction_obstacles:
+            source_track_id = self._track_key(snapshot)
             plan_revision = str(snapshot.get("plan_revision", "") or "")
             prediction_timestamp = snapshot.get("prediction_timestamp_s")
             has_external_prediction = bool(
@@ -141,12 +149,12 @@ class CPXObstacleTracker:
             )
             if plan_revision:
                 source_revisions.append(
-                    "%s:%s" % (str(snapshot.get("vehicle_id", "")), plan_revision)
+                    "%s:%s" % (str(source_track_id), plan_revision)
                 )
             elif has_external_prediction and prediction_timestamp is not None:
                 source_revisions.append(
                     "%s:%.3f" % (
-                        str(snapshot.get("vehicle_id", "")),
+                        str(source_track_id),
                         float(prediction_timestamp),
                     )
                 )
@@ -155,7 +163,7 @@ class CPXObstacleTracker:
                 # fresh tracker measurement, so they retain the tracker tick.
                 source_revisions.append(
                     "%s:tracker:%.3f" % (
-                        str(snapshot.get("vehicle_id", "")),
+                        str(source_track_id),
                         float(self._timestamp_s),
                     )
                 )
@@ -165,7 +173,7 @@ class CPXObstacleTracker:
         )
         return build_prediction_frame(
             ego_snapshot=ego_snapshot,
-            obstacle_snapshots=self._latest_obstacles,
+            obstacle_snapshots=prediction_obstacles,
             lane_assignments=lane_assignments,
             available_lane_ids=available_lane_ids,
             horizon_s=float(horizon_s),

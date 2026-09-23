@@ -18,6 +18,8 @@ vehicle_base:
     overtake_allowed: false
   planner:
     cav_conflict_enabled: true
+    use_mtr_prediction_bridge: true
+    mtr_prediction_server_url: "http://127.0.0.1:8765"
     following_idm_enabled: false
     record_evaluation_metrics: true
     prediction_lane_following_enabled: false

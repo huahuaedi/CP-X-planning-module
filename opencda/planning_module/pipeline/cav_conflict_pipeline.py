@@ -50,7 +50,7 @@ from opencda.planning_module.pipeline.spatiotemporal_corridor import (
     aggregate_mode_corridors,
     build_longitudinal_corridor,
     retain_pending_corridor,
-    release_cleared_actor_bounds,
+    remove_actor_bounds,
 )
 from opencda.planning_module.pipeline.speed_planner import SpeedConstraint
 from opencda.planning_module.pipeline.prediction_modes import as_modes, single_mode
@@ -232,6 +232,46 @@ def _prediction_evidence(agent: Mapping[str, Any]) -> dict:
     return {"sample_count": len(path)}
 
 
+def _mode_diagnostics(
+    mode_groups: Mapping[str, List[Tuple[Mapping[str, Any], float]]],
+    tag_by_id: Mapping[str, ConflictTag],
+) -> Dict[str, Dict[str, Any]]:
+    """Describe retained hypotheses at the Stage A/C ownership boundary."""
+
+    diagnostics: Dict[str, Dict[str, Any]] = {}
+    for actor_id, group in mode_groups.items():
+        for mode_agent, probability in group:
+            mode_id = _agent_id(mode_agent)
+            tag = tag_by_id.get(mode_id)
+            evidence = _prediction_evidence(mode_agent)
+            diagnostics[str(mode_id)] = {
+                "physical_actor_id": str(actor_id),
+                "probability": float(probability),
+                "tag": "" if tag is None else str(tag.tag),
+                "tag_reason": "" if tag is None else str(tag.reason),
+                "conflict_s_m": (
+                    None if tag is None or tag.conflict_s_m is None
+                    else float(tag.conflict_s_m)
+                ),
+                "conflict_t_s": (
+                    None if tag is None or tag.conflict_t_s is None
+                    else float(tag.conflict_t_s)
+                ),
+                "sample_count": int(evidence.get("sample_count", 0) or 0),
+                "end_x": evidence.get("end_x"),
+                "end_y": evidence.get("end_y"),
+                "included_in_expected_corridor": True,
+                "raw_dangerous": False,
+                "credible_veto_active": False,
+                "credible_veto_held": False,
+                "first_risk_stage": None,
+                "first_risk_time_s": None,
+                "active_corridor_stage_count": 0,
+                "veto_binding_stage_count": 0,
+            }
+    return diagnostics
+
+
 def _tags_on_corridor_reference(
     tags: Sequence[ConflictTag],
     source_reference: Sequence[Any],
@@ -286,34 +326,53 @@ def _claim_diagnostics(claim: Optional[ResourceClaim]) -> dict:
 
 
 def _apply_veto_hysteresis(
-    *, mode_id, raw_dangerous, recovered, veto_state, release_ticks,
+    *, mode_id, raw_dangerous, recovered, veto_state,
+    sim_time_s, release_duration_s,
 ):
     """Asymmetric latch for the credible-mode veto: engage immediately on a
-    real danger, release only after ``release_ticks`` consecutive clear
-    evaluations AND the risk has comfortably receded.
+    real danger, release only after the risk has remained comfortably clear
+    for ``release_duration_s`` of simulation time.
 
-    Without this the per-tick ``dangerous`` flag flips 0<->1 as the
+    Time is part of this contract deliberately.  Counting evaluations made
+    the hold duration depend on whether Stage C was rebuilt at the normal
+    5 Hz cadence or additionally by 20 Hz Stage-A tag transitions.  Without
+    this latch the per-tick ``dangerous`` flag flips 0<->1 as the
     oscillating ego speed nudges ``first_risk_stage`` across the TTC
     threshold, which churns ``credible_mode_veto_count`` -> the MPC
     constraint-revision hash -> a forced replan every other tick -> a
     speed limit cycle (see fig2 POST-scheduler)."""
 
     prev = dict((veto_state or {}).get(str(mode_id), {}) or {})
-    clear_streak = int(prev.get("clear_streak", 0))
     was_dangerous = bool(prev.get("dangerous", False))
+    now_s = float(sim_time_s)
+    release_s = max(0.0, float(release_duration_s))
+    clear_since_s = prev.get("clear_since_s")
+    try:
+        clear_since_s = (
+            None if clear_since_s is None else float(clear_since_s)
+        )
+    except (TypeError, ValueError):
+        clear_since_s = None
     held = False
     if raw_dangerous:
-        dangerous, clear_streak = True, 0
+        dangerous, clear_since_s = True, None
     elif was_dangerous:
-        clear_streak += 1
-        if clear_streak >= max(1, int(release_ticks)) and bool(recovered):
-            dangerous, clear_streak = False, int(release_ticks)
-        else:
+        if not bool(recovered):
+            clear_since_s = None
             dangerous, held = True, True
+        else:
+            if clear_since_s is None or now_s < clear_since_s:
+                clear_since_s = now_s
+            clear_elapsed_s = max(0.0, now_s - clear_since_s)
+            if clear_elapsed_s + 1.0e-9 >= release_s:
+                dangerous, clear_since_s = False, None
+            else:
+                dangerous, held = True, True
     else:
-        dangerous = False
+        dangerous, clear_since_s = False, None
     return dangerous, held, {
-        "dangerous": bool(dangerous), "clear_streak": int(clear_streak),
+        "dangerous": bool(dangerous),
+        "clear_since_s": clear_since_s,
     }
 
 
@@ -322,8 +381,10 @@ def _build_effective_corridor(
     tag_by_id, assign_by_id, corridor_params, rss_params,
     credible_mode_probability_min, credible_mode_ttc_s,
     nominal_progress_limit_m=None,
-    veto_state=None, veto_release_ticks=12, veto_release_margin_s=0.5,
+    veto_state=None, veto_release_duration_s=0.6,
+    veto_release_margin_s=0.5, sim_time_s=0.0,
 ):
+    mode_diagnostics = _mode_diagnostics(mode_groups, tag_by_id)
     items = []
     for agent in all_agents:
         aid = _agent_id(agent)
@@ -414,19 +475,57 @@ def _build_effective_corridor(
             dangerous, held, entry = _apply_veto_hysteresis(
                 mode_id=mode_id, raw_dangerous=raw_dangerous,
                 recovered=recovered, veto_state=veto_state,
-                release_ticks=veto_release_ticks,
+                sim_time_s=float(sim_time_s),
+                release_duration_s=float(veto_release_duration_s),
             )
             next_veto_state[str(mode_id)] = entry
             credible_veto_count += int(dangerous)
             held_veto_count += int(held)
             mode_corridors.append((mode_corridor, float(probability), dangerous, mode_id))
+            detail = mode_diagnostics.get(str(mode_id))
+            if detail is not None:
+                clear_since_s = entry.get("clear_since_s")
+                clear_elapsed_s = (
+                    0.0 if clear_since_s is None else max(
+                        0.0, float(sim_time_s) - float(clear_since_s)
+                    )
+                )
+                detail.update({
+                    "raw_dangerous": bool(raw_dangerous),
+                    "credible_veto_active": bool(dangerous),
+                    "credible_veto_held": bool(held),
+                    "credible_veto_clear_elapsed_s": float(clear_elapsed_s),
+                    "credible_veto_release_remaining_s": (
+                        max(
+                            0.0,
+                            float(veto_release_duration_s) - clear_elapsed_s,
+                        ) if bool(held) else 0.0
+                    ),
+                    "first_risk_stage": first_risk_stage,
+                    "first_risk_time_s": (
+                        None if first_risk_stage is None else float(risk_t_s)
+                    ),
+                    "active_corridor_stage_count": sum(
+                        1 for cap in mode_corridor.s_hi if float(cap) < 1.0e9
+                    ),
+                })
         aggregate = aggregate_mode_corridors(mode_corridors, nominal_s)
+        for _mode_corridor, _probability, _dangerous, mode_id in mode_corridors:
+            detail = mode_diagnostics.get(str(mode_id))
+            if detail is not None:
+                detail["veto_binding_stage_count"] = sum(
+                    1 for binding in aggregate.binding
+                    if str(binding) == str(mode_id)
+                )
         for k, cap in enumerate(aggregate.s_hi):
             if cap < corridor.s_hi[k]:
                 corridor.s_hi[k] = cap
                 corridor.binding[k] = aggregate.binding[k] or actor_id
     corridor.clamp_and_check()
-    return corridor, credible_veto_count, held_veto_count, next_veto_state
+    return (
+        corridor, credible_veto_count, held_veto_count,
+        next_veto_state, mode_diagnostics,
+    )
 
 
 def resolve_conflicts(
@@ -447,8 +546,9 @@ def resolve_conflicts(
     mode_probability_floor: float = 0.05,
     credible_mode_probability_min: float = 0.15,
     credible_mode_ttc_s: float = 2.0,
-    credible_mode_veto_release_ticks: int = 12,
+    credible_mode_veto_release_s: float = 0.6,
     credible_mode_veto_release_margin_s: float = 0.5,
+    sim_time_s: float = 0.0,
     nominal_progress_limit_m: Optional[float] = None,
     veto_state: Optional[Mapping[str, Any]] = None,
     refresh_assignments: bool = True,
@@ -477,8 +577,8 @@ def resolve_conflicts(
         if aid in cav_ids:
             continue
         # Fusion priority: a fresh broadcast plan (handled above as a CAV
-        # agent) wins; every other road user gets the prediction module's
-        # trajectory here, as a length-1 mode list today.
+        # agent) wins; every other road user gets all retained prediction
+        # hypotheses here.
         if "predicted_modes" not in a and aid in modes_by_id:
             a = {**a, "predicted_modes": list(as_modes(modes_by_id[aid]))}
             a.setdefault("trajectory_source", "prediction")
@@ -577,7 +677,14 @@ def resolve_conflicts(
     tag_changed = bool(
         tag_state is not None and current_tag_state != dict(tag_state or {})
     )
-    roles_refreshed = bool(refresh_assignments or tag_changed)
+    # Stage-A geometry runs every planning tick, so a tag transition must
+    # rebuild the Stage-C safety corridor immediately.  It does *not* own
+    # Stage-B cooperative priority: proceed/yield/make-gap changes only on
+    # the coordination schedule (or an asynchronous claim-structure event
+    # handled by that schedule).  Coupling tag churn to role refresh silently
+    # promoted Stage B from 5 Hz to 20 Hz near a cut-in and restarted its
+    # hysteresis latch on each geometric transition.
+    roles_refreshed = bool(refresh_assignments)
     # A scheduled refresh is authoritative for membership.  Preserve the
     # previous latch only while roles are deliberately cached between
     # coordination ticks; otherwise disappeared/ineligible peers would keep
@@ -641,14 +748,14 @@ def resolve_conflicts(
     cleared_actor_ids = (
         clearable_actor_ids - active_actor_ids - negotiated_gap_actor_ids
     )
-    cached_corridor = release_cleared_actor_bounds(
+    cached_corridor = remove_actor_bounds(
         cached_corridor, cleared_actor_ids,
     )
     incoming_veto_state = dict(veto_state or {})
     held_veto_count = 0
     if corridor_rebuilt or cached_corridor is None:
         (corridor, credible_veto_count, held_veto_count,
-         new_veto_state) = _build_effective_corridor(
+         new_veto_state, mode_diagnostics) = _build_effective_corridor(
             reference_samples=corridor_reference, ego_snapshot=ego_snapshot,
             all_agents=all_agents, mode_groups=mode_groups,
             tag_by_id=corridor_tag_by_id, assign_by_id=assign_by_id,
@@ -657,17 +764,32 @@ def resolve_conflicts(
             credible_mode_ttc_s=credible_mode_ttc_s,
             nominal_progress_limit_m=nominal_progress_limit_m,
             veto_state=incoming_veto_state,
-            veto_release_ticks=int(credible_mode_veto_release_ticks),
+            veto_release_duration_s=float(credible_mode_veto_release_s),
             veto_release_margin_s=float(credible_mode_veto_release_margin_s),
+            sim_time_s=float(sim_time_s),
         )
         fresh_corridor = corridor
         if cached_corridor is not None and not tag_changed:
+            # A complete current Stage-C build supersedes older rows owned by
+            # every actor present in that build.  Retention exists only to
+            # bridge a temporarily missing observation; otherwise an open
+            # new forecast would leave the same actor's obsolete cap active
+            # until the old horizon expired (a several-second ghost stop).
+            refreshed_actor_ids = {
+                _physical_agent_id(agent) for agent in physical_agents
+            }
+            cached_corridor = remove_actor_bounds(
+                cached_corridor, refreshed_actor_ids,
+            )
             corridor = retain_pending_corridor(corridor, cached_corridor)
         corridor_rebuilt = True
     else:
         corridor = cached_corridor
         fresh_corridor = None
         credible_veto_count = 0
+        mode_diagnostics = _mode_diagnostics(
+            mode_groups, corridor_tag_by_id
+        )
         # Carry the veto latch unchanged while the cache is reused so a
         # later rebuild resumes from the last real state.
         new_veto_state = incoming_veto_state
@@ -707,8 +829,12 @@ def resolve_conflicts(
             1 for a in physical_agents if len(as_modes(a.get("predicted_modes"))) > 1
         ),
         "retained_prediction_mode_count": int(retained_mode_count),
+        "prediction_modes": mode_diagnostics,
         "credible_mode_veto_count": int(credible_veto_count),
         "credible_mode_veto_held_count": int(held_veto_count),
+        "credible_mode_veto_release_s": float(
+            credible_mode_veto_release_s
+        ),
         "trajectory_source_counts": source_counts,
         "ego_claim_phase": (
             "none" if my_claim is None else str(my_claim.phase)
@@ -750,8 +876,10 @@ def resolve_conflicts(
         "corridor_binding": [b for b in corridor.binding if b],
         "coordination_roles_refreshed": bool(roles_refreshed),
         "coordination_refresh_reason": (
-            "conflict_tag_changed" if tag_changed
+            "scheduled_refresh_with_tag_change"
+            if refresh_assignments and tag_changed
             else "scheduled_refresh" if refresh_assignments
+            else "corridor_tag_changed" if tag_changed
             else "cached_roles"
         ),
         "corridor_rebuilt": bool(corridor_rebuilt),

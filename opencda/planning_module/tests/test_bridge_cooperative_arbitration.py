@@ -383,7 +383,8 @@ def test_config_knobs_and_planner_limits_reach_the_interaction_resolver(cache_ro
     assert seen["mode_probability_floor"] == pytest.approx(0.11)
     assert seen["credible_mode_probability_min"] == pytest.approx(0.22)
     assert seen["credible_mode_ttc_s"] == pytest.approx(3.3)
-    assert seen["credible_mode_veto_release_ticks"] == 9
+    assert seen["credible_mode_veto_release_s"] == pytest.approx(0.45)
+    assert seen["sim_time_s"] == pytest.approx(0.0)
     constraints = bridge.mpc.constraints
     assert seen["max_braking_mps2"] == pytest.approx(
         abs(constraints.min_acceleration_mps2)
@@ -420,4 +421,4 @@ def test_unconfigured_resolver_knobs_keep_their_documented_defaults(cache_root):
     assert seen["mode_probability_floor"] == pytest.approx(0.05)
     assert seen["credible_mode_probability_min"] == pytest.approx(0.15)
     assert seen["credible_mode_ttc_s"] == pytest.approx(2.0)
-    assert seen["credible_mode_veto_release_ticks"] == 12
+    assert seen["credible_mode_veto_release_s"] == pytest.approx(0.6)

@@ -1,22 +1,17 @@
 """Per-agent multi-modal prediction interface for the interaction pipeline.
 
-Today every producer emits exactly ONE mode:
-
-* a connected vehicle's broadcast ``planned_path`` (its committed MPC plan), or
-* the prediction module's single deterministic future for a non-connected
-  road user.
-
-The list-of-``PredictedMode`` shape exists now so a real multi-modal
-predictor -- one mode per hypothesised driver intent, each with a
-probability, e.g.::
+Producers may emit either a connected vehicle's committed ``planned_path`` or
+multiple prediction hypotheses for a non-connected road user.  A multi-modal
+predictor supplies one mode per hypothesised future with a probability, e.g.::
 
     keep lane        p = 0.60
     change left      p = 0.30
     brake and follow p = 0.10
 
-is a drop-in later (Contingency-MPC style) without touching Stage A / C / D.
-Stage A/C currently consume the single highest-probability mode via
-``primary_mode`` -> ``_obstacle_track_xy``.
+The interaction pipeline expands retained modes for Stage A classification,
+builds one Stage C corridor per mode, then combines them using expected risk
+plus the credible-danger veto.  Stage D therefore still consumes one convex
+corridor rather than multiplying the MPC decision variables by mode count.
 
 Pure. No pipeline imports.
 """

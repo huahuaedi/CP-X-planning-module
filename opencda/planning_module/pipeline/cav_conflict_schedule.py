@@ -26,6 +26,7 @@ class CAVConflictSchedule:
     corridor: Any = None
     corridor_reference: tuple = ()
     corridor_time_s: float = 0.0
+    corridor_prediction_revision: str = ""
     conflict_reference: Any = None
     _last_refresh_s: float = -float("inf")
     _last_structure_revision: str = ""
@@ -44,6 +45,7 @@ class CAVConflictSchedule:
         self.corridor = None
         self.corridor_reference = ()
         self.corridor_time_s = 0.0
+        self.corridor_prediction_revision = ""
         self.conflict_reference = None
         self._last_refresh_s = -float("inf")
         self._last_structure_revision = ""
@@ -172,6 +174,7 @@ class CAVConflictSchedule:
     def observe(
         self, *, sim_time_s: float, result: Any,
         reference_samples: Sequence[Any] = (),
+        prediction_revision: str = "",
     ) -> None:
         self.latch_state = dict(getattr(result, "latch_state", {}) or {})
         self.tag_state = dict(getattr(result, "tag_state", {}) or {})
@@ -190,28 +193,48 @@ class CAVConflictSchedule:
             for actor_id in getattr(result, "released_actor_ids", ()) or ()
         )
         if released_actor_ids and self.corridor is not None:
-            from .spatiotemporal_corridor import release_cleared_actor_bounds
-            self.corridor = release_cleared_actor_bounds(
+            from .spatiotemporal_corridor import remove_actor_bounds
+            self.corridor = remove_actor_bounds(
                 self.corridor, released_actor_ids,
             )
             if self.corridor is not None and not any(
                 float(cap) < 1.0e9 for cap in self.corridor.s_hi
             ):
-                self.corridor = None
-                self.corridor_reference = ()
-                self.corridor_time_s = 0.0
+                # An open corridor is still a valid Stage-C result. Keep it
+                # until the next scheduled refresh so a clear scene does not
+                # become a cache miss (and a full rebuild) at every 20 Hz
+                # planning tick.
+                self.corridor_time_s = float(sim_time_s)
         if bool(getattr(result, "diagnostics", {}).get(
             "corridor_rebuilt", False
         )):
             fresh = getattr(result, "fresh_corridor", None)
-            if fresh is not None and any(
-                float(cap) < 1.0e9 for cap in fresh.s_hi
-            ):
+            effective = getattr(result, "corridor", None)
+            fresh_is_open = bool(
+                fresh is not None and not any(
+                    float(cap) < 1.0e9 for cap in fresh.s_hi
+                )
+            )
+            effective_has_pending_bounds = bool(
+                effective is not None and any(
+                    float(cap) < 1.0e9 for cap in effective.s_hi
+                )
+            )
+            # ``retain_pending_corridor`` may expose old bounds in the
+            # effective result while the new prediction itself is clear. In
+            # that case the old cache must keep its original timestamp so the
+            # pending rows age out instead of being republished forever.
+            preserve_pending_cache = bool(
+                fresh_is_open and self.corridor is not None
+                and effective_has_pending_bounds
+            )
+            if fresh is not None and not preserve_pending_cache:
                 self.corridor = fresh
                 self.corridor_reference = tuple(
                     dict(sample) for sample in reference_samples or ()
                 )
                 self.corridor_time_s = float(sim_time_s)
+                self.corridor_prediction_revision = str(prediction_revision)
         if bool(getattr(result, "diagnostics", {}).get(
             "coordination_roles_refreshed", False
         )):

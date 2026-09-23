@@ -16,7 +16,7 @@ from pipeline.spatiotemporal_corridor import (
     aggregate_mode_corridors,
     build_longitudinal_corridor,
     retain_pending_corridor,
-    release_cleared_actor_bounds,
+    remove_actor_bounds,
     rebase_corridor,
     _minimum_reachable_station_profile_m,
 )
@@ -126,7 +126,7 @@ def test_fresh_geometric_clearance_releases_only_that_actors_pending_rows():
         binding=[""] * 4,
     )
 
-    filtered_cache = release_cleared_actor_bounds(previous, {"walker"})
+    filtered_cache = remove_actor_bounds(previous, {"walker"})
     released = retain_pending_corridor(current, filtered_cache)
 
     assert released.s_hi == [_BIG, _BIG, _BIG, 20.0]

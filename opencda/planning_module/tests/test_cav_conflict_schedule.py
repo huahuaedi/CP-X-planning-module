@@ -82,14 +82,49 @@ def test_fresh_clear_permanently_retires_cached_actor_bound():
         ),
     )
 
-    assert schedule.corridor is None
-    assert schedule.cached_corridor_for_tick(
+    # The released result is cached as an explicitly open corridor. This is
+    # semantically different from a cache miss and prevents Stage C from
+    # rebuilding the clear scene at every planning tick.
+    assert schedule.corridor is not None
+    open_corridor = schedule.cached_corridor_for_tick(
         sim_time_s=1.15,
         reference_samples=reference,
         ego_x_m=0.0,
         ego_y_m=0.0,
         dt_s=0.1,
-    ) is None
+    )
+    assert open_corridor is not None
+    assert all(value >= _BIG for value in open_corridor.s_hi)
+
+
+def test_open_corridor_is_cached_with_its_prediction_revision():
+    schedule = CAVConflictSchedule()
+    reference = [
+        {"x_ref_m": float(x), "y_ref_m": 0.0} for x in range(20)
+    ]
+    open_corridor = Corridor(
+        s_lo=[-_BIG] * 4, s_hi=[_BIG] * 4, binding=[""] * 4,
+    )
+
+    schedule.observe(
+        sim_time_s=1.0,
+        prediction_revision="prediction:17",
+        reference_samples=reference,
+        result=SimpleNamespace(
+            fresh_corridor=open_corridor,
+            diagnostics={"corridor_rebuilt": True},
+        ),
+    )
+
+    assert schedule.corridor is open_corridor
+    assert schedule.corridor_prediction_revision == "prediction:17"
+    assert schedule.cached_corridor_for_tick(
+        sim_time_s=1.05,
+        reference_samples=reference,
+        ego_x_m=0.0,
+        ego_y_m=0.0,
+        dt_s=0.1,
+    ) is not None
 
 
 def test_route_reset_clears_every_conflict_lifecycle_state():

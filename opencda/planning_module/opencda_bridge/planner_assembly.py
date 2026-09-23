@@ -570,6 +570,31 @@ def _mpc_and_reference_generation(bridge, parts: SimpleNamespace) -> None:
         ),
         max_position_jump_m=float(bridge.config.get("tracker_max_position_jump_m", 12.0)),
     )
+    bridge.prediction_bridge = None
+    if bool(bridge.config.get("use_mtr_prediction_bridge", False)):
+        from opencda.planning_module.opencda_bridge.prediction_bridge import (
+            MTRPredictionBridge,
+        )
+        bridge.prediction_bridge = MTRPredictionBridge(
+            server_url=str(bridge.config.get(
+                "mtr_prediction_server_url", "http://127.0.0.1:8765"
+            )),
+            timeout_s=float(bridge.config.get(
+                "mtr_prediction_server_timeout_s", 2.0
+            )),
+            update_hz=float(bridge.config.get(
+                "mtr_prediction_update_hz", 5.0
+            )),
+            history_update_hz=float(bridge.config.get(
+                "mtr_prediction_history_update_hz", 10.0
+            )),
+            max_stale_s=float(bridge.config.get(
+                "mtr_prediction_max_stale_s", 0.5
+            )),
+            asynchronous=bool(bridge.config.get(
+                "mtr_prediction_async", True
+            )),
+        )
     # Prediction-knowledge ablation (cv | blind | oracle). Built lazily on
     # first use so mpc.horizon_s / dt_s are settled; see
     # ``prediction_snapshot_transform``.

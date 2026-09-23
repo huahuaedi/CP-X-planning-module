@@ -35,6 +35,8 @@ scenario:
           debug: true
       planner:
         debug_output_dir: opencda/planning_module/opencda_bridge/debug_right_turn_highspeed
+        use_mtr_prediction_bridge: true
+        mtr_prediction_server_url: "http://127.0.0.1:8765"
         target_speed_mps: 12.0
         ignore_traffic_control: true
         # Functional-isolation run: keep AD-map topology/reference geometry,

@@ -1,0 +1,49 @@
+base_config: cpx_two_vehicle_cut_in.yaml
+
+description: |-
+  Real-MTR mode-separation fixture. The target first travels in the adjacent
+  lane and then cuts into ego's lane. MTR receives the AD-map lane centers and
+  road edges; keep-lane hypotheses remain IGNORE while a cut-in hypothesis
+  becomes CUT_IN and activates the credible-mode corridor veto.
+
+cpx_mature:
+  max_ticks: 850
+
+vehicle_base:
+  planner:
+    use_mtr_prediction_bridge: true
+    mtr_prediction_server_url: "http://127.0.0.1:8765"
+    mtr_prediction_update_hz: 5.0
+    mtr_prediction_max_stale_s: 0.6
+    prediction_mode_min_probability: 0.05
+    prediction_credible_probability_min: 0.15
+    prediction_credible_ttc_s: 2.0
+
+scenario:
+  single_cav_list:
+    - name: cut_in_ego
+      spawn_position: [-300.0, 8.3, 0.3, 0, 0, 0]
+      destination: [-90.0, 8.3, 0.3]
+      v2x:
+        enabled: true
+        communication_range: 80
+      planner:
+        target_speed_mps: 10.0
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_cut_in_mtr_multimodal
+  scripted_actors:
+    - blueprint: vehicle.tesla.model3
+      path:
+        - [-270.0, 4.8]
+        - [-252.0, 4.8]
+        - [-232.0, 8.3]
+        - [-50.0, 8.3]
+      speed_mps: 8.0
+      acceleration_mps2: 4.0
+      trigger:
+        axis: x
+        # Start while ego is still 20 m behind. The target then begins its
+        # lateral transition ahead of ego, so a cut-in mode has positive
+        # conflict station/time and can constrain the MPC.
+        cross: -290.0
+        from: below
+      z: 0.3

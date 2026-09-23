@@ -527,6 +527,9 @@ class PlannerDiagnosticsStage:
             "cav_credible_mode_veto_held_count": int(
                 cav_diag.get("credible_mode_veto_held_count", 0) or 0
             ),
+            "cav_credible_mode_veto_release_s": float(
+                cav_diag.get("credible_mode_veto_release_s", 0.0) or 0.0
+            ),
             "cav_trajectory_sources": ";".join(
                 f"{k}={v}"
                 for k, v in sorted(

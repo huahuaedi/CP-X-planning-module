@@ -325,8 +325,21 @@ class OpenCDAPlanningAdapter:
             float(bridge.target_speed_mps) * float(bridge.min_front_gap_time_s),
         )
         _ts = time.monotonic()
+        prediction_snapshots = tracked_obstacles
+        prediction_bridge = getattr(bridge, "prediction_bridge", None)
+        if prediction_bridge is not None:
+            from .prediction_map_context import mtr_map_polylines
+            prediction_snapshots = prediction_bridge.attach(
+                tracked_obstacles,
+                horizon_s=float(bridge.mpc.horizon_s),
+                dt_s=float(bridge.mpc.dt_s),
+                ego_snapshot=ego_snapshot,
+                timestamp_s=float(sim_time_s),
+                map_polylines=mtr_map_polylines(local_map),
+            )
         prediction_frame = bridge.tracker.predict(
             ego_snapshot=ego_snapshot,
+            obstacle_snapshots=prediction_snapshots,
             lane_assignments=lane_assignments,
             available_lane_ids=lane_ids,
             horizon_s=float(bridge.mpc.horizon_s),
@@ -423,7 +436,12 @@ class OpenCDAPlanningAdapter:
                 predicted_objects=dict(prediction_frame.predicted_objects),
                 revision=str(prediction_frame.revision),
                 timestamp_s=float(prediction_frame.timestamp_s),
-                model="constant_acceleration",
+                model=(
+                    str(getattr(prediction_bridge, "model_name", ""))
+                    if prediction_bridge is not None
+                    and int(getattr(prediction_bridge, "last_attached_count", 0)) > 0
+                    else "constant_acceleration"
+                ),
                 horizon_s=float(bridge.mpc.horizon_s),
                 dt_s=float(bridge.mpc.dt_s),
             ),
@@ -460,6 +478,10 @@ class OpenCDAPlanningAdapter:
                 "cp_message_age_s": cp_age_s,
                 "cp_message_valid": bool(cp_valid),
                 **dict(bridge.tracker.diagnostics),
+                **(
+                    dict(prediction_bridge.diagnostics)
+                    if prediction_bridge is not None else {}
+                ),
             },
         )
 

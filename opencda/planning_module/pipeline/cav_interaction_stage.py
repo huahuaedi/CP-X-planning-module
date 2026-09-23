@@ -28,7 +28,7 @@ class CAVInteractionStage:
         tag_state=None, veto_state=None,
         horizon_steps, dt_s, mode_probability_floor=0.05,
         credible_mode_probability_min=0.15, credible_mode_ttc_s=2.0,
-        credible_mode_veto_release_ticks=12,
+        credible_mode_veto_release_s=0.6, sim_time_s=0.0,
         nominal_progress_limit_m=None,
         refresh_assignments=True, cached_assignments=(),
         rebuild_corridor=True, cached_corridor=None,
@@ -69,7 +69,8 @@ class CAVInteractionStage:
             mode_probability_floor=float(mode_probability_floor),
             credible_mode_probability_min=float(credible_mode_probability_min),
             credible_mode_ttc_s=float(credible_mode_ttc_s),
-            credible_mode_veto_release_ticks=int(credible_mode_veto_release_ticks),
+            credible_mode_veto_release_s=float(credible_mode_veto_release_s),
+            sim_time_s=float(sim_time_s),
             nominal_progress_limit_m=nominal_progress_limit_m,
             refresh_assignments=bool(refresh_assignments),
             cached_assignments=cached_assignments,
@@ -187,6 +188,10 @@ class CAVInteractionStage:
             "anticipatory_speed_constraint_owner": (
                 "" if result.speed_constraint is None
                 else str(result.speed_constraint.owner)
+            ),
+            "anticipatory_speed_constraint_reason": (
+                "" if result.speed_constraint is None
+                else str(result.speed_constraint.reason)
             ),
             "shared_planned_paths": {
                 str(intent.actor_id): [

@@ -213,9 +213,16 @@ class CooperativeArbitrationStage:
             credible_mode_ttc_s=float(self._config.get(
                 "prediction_credible_ttc_s", 2.0
             )),
-            credible_mode_veto_release_ticks=int(self._config.get(
-                "prediction_credible_veto_release_ticks", 12
+            credible_mode_veto_release_s=float(self._config.get(
+                "prediction_credible_veto_release_s",
+                # Compatibility for configurations written before the veto
+                # lifecycle became time based.  The old value counted 20 Hz
+                # planner ticks, not 5 Hz prediction refreshes.
+                0.05 * int(self._config.get(
+                    "prediction_credible_veto_release_ticks", 12
+                )),
             )),
+            sim_time_s=float(sim_time_s),
             nominal_progress_limit_m=(
                 float(self._route_manager.last_status.remaining_distance_m)
                 if (
@@ -263,12 +270,16 @@ class CooperativeArbitrationStage:
         self.schedule.observe(
             sim_time_s=float(sim_time_s), result=cav_result,
             reference_samples=local_lane_center_reference,
+            prediction_revision=str(request.prediction_revision),
         )
         cav_result.diagnostics["coordination_schedule_reason"] = str(
             schedule.reason
         )
         cav_result.diagnostics["coordination_revision"] = int(
             self.schedule.revision
+        )
+        cav_result.diagnostics["corridor_prediction_revision"] = str(
+            self.schedule.corridor_prediction_revision
         )
         cav_result.diagnostics["transport"] = dict(
             request.transport_diagnostics
