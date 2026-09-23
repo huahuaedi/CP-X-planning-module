@@ -1,0 +1,50 @@
+base_config: cpx_two_cav_merge_conflict.yaml
+
+description: |-
+  Real-MTR MERGE validation. Same physical two-CAV opposing lane-exchange
+  setup as cpx_two_cav_merge_conflict, with the real MTR HTTP predictor
+  driving both CAVs' peer/obstacle predictions instead of the default
+  constant-velocity/acceleration rollout. Exercises the multimodal corridor
+  and credible-mode veto together with cooperative arbitration (Stage B) on
+  two real vehicles rather than one CAV plus a scripted actor.
+
+vehicle_base:
+  planner:
+    use_mtr_prediction_bridge: true
+    mtr_prediction_server_url: "http://127.0.0.1:8765"
+    mtr_prediction_update_hz: 5.0
+    mtr_prediction_max_stale_s: 0.6
+    prediction_mode_min_probability: 0.05
+    prediction_credible_probability_min: 0.15
+    prediction_credible_ttc_s: 2.0
+
+# Lists are repeated because OmegaConf replaces them wholesale.
+scenario:
+  single_cav_list:
+    - name: cav1
+      spawn_position: [-300.0, 8.3, 0.3, 0, 0, 0]
+      destination: [-70.0, 4.8, 0.3]
+      v2x:
+        enabled: true
+        communication_range: 80
+      behavior:
+        local_planner:
+          debug_trajectory: true
+          debug: true
+      planner:
+        target_speed_mps: 8.0
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_two_cav_merge_mtr_cav1
+
+    - name: cav2
+      spawn_position: [-306.0, 4.8, 0.3, 0, 0, 0]
+      destination: [-76.0, 8.3, 0.3]
+      v2x:
+        enabled: true
+        communication_range: 80
+      behavior:
+        local_planner:
+          debug_trajectory: true
+          debug: true
+      planner:
+        target_speed_mps: 8.0
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_two_cav_merge_mtr_cav2
