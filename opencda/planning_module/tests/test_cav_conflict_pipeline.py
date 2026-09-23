@@ -3,7 +3,7 @@ import math
 import pytest
 
 from pipeline.cav_conflict_pipeline import resolve_conflicts
-from pipeline.conflict_classifier import CROSSING, FOLLOW, IGNORE, MERGE
+from pipeline.conflict_classifier import CROSSING, FOLLOW, IGNORE, LEAD_BRAKE, MERGE
 from pipeline.cooperative_arbitration import (
     ArbitrationLatchEntry,
     CavIntent,
@@ -149,6 +149,57 @@ def test_mode_budget_never_drops_a_credible_mode_even_over_budget():
     )
     kept_mode_ids = {k for k in r.diagnostics["tags"] if k.startswith("multi::mode")}
     assert kept_mode_ids == {"multi::mode0", "multi::mode1"}
+
+
+def test_broadcast_cav_lead_brake_uses_its_own_planned_deceleration():
+    # Regression: _cav_to_agent_snapshot used to build a broadcasting CAV's
+    # agent dict with no acceleration field at all, so conflict_classifier's
+    # LEAD_BRAKE tag (same-lane, a_accel <= decel_threshold_mps2) could never
+    # fire against another CAV no matter how hard it actually braked --
+    # confirmed on a real scripted hard-brake run where cav_conflict_tags
+    # stayed FOLLOW for the whole encounter. The planned path's own v samples
+    # now derive a near-term acceleration from the CAV's committed plan.
+    decelerating_path = tuple(
+        (0.1 * k, 40.0 + 0.6 * min(k, 1) + 0.1 * max(k - 1, 0), 0.1,
+         6.0 if k == 0 else 1.0)
+        for k in range(21)
+    )
+    lead = CavIntent(
+        actor_id=2, position_xy=(40.0, 0.1),
+        claim=_claim(committed_at_s=10.0),
+        heading_rad=0.0, speed_mps=6.0,
+        planned_path=decelerating_path,
+        cooperative=True,
+    )
+    r = resolve_conflicts(
+        reference_samples=REF, ego_snapshot=EGO, my_actor_id=1,
+        my_claim=None, obstacle_snapshots=[], cav_intents=[lead],
+    )
+    assert r.diagnostics["tags"]["2"] == LEAD_BRAKE
+
+
+def test_broadcast_cav_at_constant_planned_speed_stays_follow():
+    # Companion case: an unchanging planned speed derives zero acceleration
+    # (as every other _cav()-built fixture in this file does), so the same
+    # physical setup without deceleration stays FOLLOW, not LEAD_BRAKE.
+    # Same spatial footprint as the deceleration case's post-brake plateau
+    # (constant v=1.0 the whole time instead of only from sample 1 on), so
+    # acceleration is the one thing that differs between the two tests.
+    level_path = tuple(
+        (0.1 * k, 40.0 + 0.1 * k, 0.1, 1.0) for k in range(21)
+    )
+    lead = CavIntent(
+        actor_id=2, position_xy=(40.0, 0.1),
+        claim=_claim(committed_at_s=10.0),
+        heading_rad=0.0, speed_mps=1.0,
+        planned_path=level_path,
+        cooperative=True,
+    )
+    r = resolve_conflicts(
+        reference_samples=REF, ego_snapshot=EGO, my_actor_id=1,
+        my_claim=None, obstacle_snapshots=[], cav_intents=[lead],
+    )
+    assert r.diagnostics["tags"]["2"] == FOLLOW
 
 
 def test_end_to_end_follow_is_delegated_to_speed_planner():

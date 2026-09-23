@@ -92,6 +92,21 @@ def _cav_to_agent_snapshot(cav: CavIntent) -> dict:
         {"x": float(x), "y": float(y), "t": float(t), "v": float(v)}
         for (t, x, y, v) in cav.planned_path
     ]
+    # conflict_classifier's LEAD_BRAKE tag reads an agent's "a"/"acceleration"
+    # /"acceleration_mps2" field (default 0.0 -- see _f); a broadcasting CAV
+    # never carried one, so LEAD_BRAKE could not fire against another CAV no
+    # matter how hard it actually braked (confirmed on a real scripted-brake
+    # run: cav_conflict_tags stayed FOLLOW for the whole encounter). The
+    # broadcast plan's own near-term samples are the CAV's committed intent,
+    # a more reliable early signal than a raw instantaneous accelerometer
+    # reading, and need no change to the broadcast message schema.
+    acceleration_mps2 = 0.0
+    if len(track) >= 2:
+        dt_s = float(track[1]["t"]) - float(track[0]["t"])
+        if dt_s > 1.0e-3:
+            acceleration_mps2 = (
+                float(track[1]["v"]) - float(track[0]["v"])
+            ) / dt_s
     snapshot = {
         "id": int(cav.actor_id),
         "vehicle_id": int(cav.actor_id),
@@ -101,6 +116,7 @@ def _cav_to_agent_snapshot(cav: CavIntent) -> dict:
         "psi": float(cav.heading_rad),
         "length_m": float(cav.length_m),
         "width_m": float(cav.width_m),
+        "acceleration_mps2": float(acceleration_mps2),
         "cooperative": bool(cav.cooperative),
         "predicted_trajectory": track,
         "trajectory_source": "broadcast" if track else "current_pose",
