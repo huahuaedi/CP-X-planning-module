@@ -1,0 +1,83 @@
+base_config: cpx_two_cav_merge_conflict.yaml
+
+description: |-
+  Real-MTR LEAD_BRAKE validation. Same-lane follow: the lead CAV drives
+  ahead of ego at a lower cruise speed, then a deterministic stimulus brakes
+  it hard for a fixed window once it crosses a trigger position. The
+  following CAV runs the real MTR HTTP predictor instead of a synthetic or
+  constant-velocity/acceleration model, so this exercises the corridor's
+  LEAD_BRAKE tag (conflict_classifier: FOLLOW and decelerating) against a
+  real predicted deceleration rather than a scripted/kinematic one.
+
+carla_traffic_manager:
+  vehicle_list: []
+
+vehicle_base:
+  behavior:
+    overtake_allowed: false
+  planner:
+    full_allow_opportunistic_lane_change: false
+
+cpx_mature:
+  max_ticks: 1200
+  destination_tolerance_m: 4.0
+  completion_mode: all_cavs
+  scripted_target_brake:
+    enabled: true
+    target_cav_index: 0
+    ego_cav_index: 1
+    # Exogenous stimulus shared with cpx_two_cav_multimodal_prediction's A/B
+    # arms: target progress is independent of how early the ego prediction
+    # constraint reacts.
+    minimum_start_tick: 80
+    trigger_target_position: {axis: x, value: -250.0, direction: increasing}
+    duration_ticks: 50
+    brake: 0.65
+
+scenario:
+  single_cav_list:
+    - name: lead_vehicle
+      # Start inside the planner's longitudinal interaction window. At the
+      # deterministic brake event the faster ego is closing on this CAV, so
+      # the interaction exercises FOLLOW/LEAD_BRAKE constraints rather than
+      # an out-of-range no-op.
+      spawn_position: [-300.0, 8.3, 0.3, 0, 0, 0]
+      # Continue beyond the ego goal after the brake event. Giving both
+      # same-lane vehicles the same destination makes all_cavs completion
+      # physically impossible because ego must stop a safe gap behind.
+      destination: [-100.0, 8.3, 0.3]
+      v2x:
+        enabled: true
+        communication_range: 80
+      behavior:
+        local_planner:
+          debug_trajectory: true
+          debug: true
+      planner:
+        target_speed_mps: 5.0
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_lead_braking_mtr_lead
+
+    - name: following_ego
+      spawn_position: [-325.0, 8.3, 0.3, 0, 0, 0]
+      destination: [-140.0, 8.3, 0.3]
+      v2x:
+        enabled: true
+        communication_range: 80
+      behavior:
+        local_planner:
+          debug_trajectory: true
+          debug: true
+      planner:
+        target_speed_mps: 10.0
+        use_mtr_prediction_bridge: true
+        mtr_prediction_server_url: "http://127.0.0.1:8765"
+        mtr_prediction_update_hz: 5.0
+        mtr_prediction_max_stale_s: 0.6
+        # IDM stays disabled so the prediction/corridor path, not the
+        # measured-lead IDM follower, is what reacts to the brake event.
+        following_idm_enabled: false
+        record_evaluation_metrics: true
+        prediction_mode_min_probability: 0.05
+        prediction_credible_probability_min: 0.15
+        prediction_credible_ttc_s: 2.0
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_lead_braking_mtr_ego
