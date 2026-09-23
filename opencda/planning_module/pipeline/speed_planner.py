@@ -116,6 +116,7 @@ def conflict_corridor_speed_constraint(
     ego_acceleration_mps2: float = 0.0,
     max_braking_mps2: float = 3.0,
     max_jerk_mps3: float = 10.0,
+    agent_speed_mps: Optional[Mapping[str, float]] = None,
 ) -> Optional[SpeedConstraint]:
     """Convert an active Stage-C progress bound into a nominal speed limit.
 
@@ -139,6 +140,14 @@ def conflict_corridor_speed_constraint(
     through vehicle in the busiest lane accumulated hundreds of buffer-reuse/
     bounded-safe-stop ticks and never reached its destination in budget,
     though never a collision or road-boundary breach.
+
+    ``agent_speed_mps`` is each binding agent's own best-known current speed
+    (keyed by the same id ``physical_owner()`` returns), used only when no
+    same-owner neighbor row exists to read a slope from -- see the fallback
+    below. Without it, a bound that wins only a single, isolated corridor
+    stage silently reads as a stationary wall no matter how fast that agent
+    is actually moving, which is needlessly conservative on a real moving
+    peer that just doesn't happen to dominate two adjacent stages.
     """
 
     from opencda.planning_module.pipeline.mpc_obstacle_relevance import (
@@ -237,6 +246,16 @@ def conflict_corridor_speed_constraint(
                 (neighbor_upper - upper)
                 / ((neighbor_index - index) * dt_s),
             )
+        elif agent_speed_mps:
+            # No same-owner neighbor stage to read a slope from -- this
+            # binding won only one isolated row of the corridor. Falling
+            # back to the agent's own current speed (when known) is still
+            # strictly better than silently assuming it is a stationary
+            # wall; a genuinely static/crossing agent has no entry here and
+            # keeps the original braking-distance approach unchanged.
+            known_speed = agent_speed_mps.get(physical_owner(binding))
+            if known_speed is not None:
+                bound_velocity_mps = max(0.0, float(known_speed))
         candidates.append((
             bound_velocity_mps
             + math.sqrt(2.0 * deceleration_mps2 * remaining_m),

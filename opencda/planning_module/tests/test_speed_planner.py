@@ -204,6 +204,81 @@ class SpeedPlannerTest(unittest.TestCase):
         self.assertAlmostEqual(constraint.maximum_mps, 0.0)
         self.assertIn("bound_velocity_mps=0.000", constraint.reason)
 
+    def test_isolated_row_without_agent_speed_still_reads_as_stationary(self):
+        # A binding that only wins a single corridor stage has no same-owner
+        # neighbor to read a slope from. Without agent_speed_mps supplied,
+        # behavior is unchanged from before the fix: fall back to 0.
+        constraint = conflict_corridor_speed_constraint(
+            corridor=SimpleNamespace(
+                s_hi=[5.8, 100.0],
+                binding=["peer", "other"],
+            ),
+            reference_samples=[
+                {"x_ref_m": 0.0, "y_ref_m": 0.0},
+                {"x_ref_m": 30.0, "y_ref_m": 0.0},
+            ],
+            ego_x_m=5.0,
+            ego_y_m=0.0,
+            comfortable_deceleration_mps2=2.0,
+            corridor_dt_s=0.1,
+        )
+
+        self.assertIsNotNone(constraint)
+        self.assertAlmostEqual(constraint.maximum_mps, math.sqrt(2.0 * 2.0 * 0.8))
+        self.assertIn("bound_velocity_mps=0.000", constraint.reason)
+
+    def test_isolated_row_falls_back_to_the_agents_own_known_speed(self):
+        # Regression: a binding that wins only one isolated corridor stage
+        # (no same-owner neighbor to slope from) used to always read as a
+        # stationary wall, regardless of how fast that agent actually is --
+        # needlessly conservative on a real moving peer that just doesn't
+        # happen to dominate two adjacent stages. With the peer's own known
+        # speed supplied, the fallback must use it instead of 0.
+        constraint = conflict_corridor_speed_constraint(
+            corridor=SimpleNamespace(
+                s_hi=[5.8, 100.0],
+                binding=["peer", "other"],
+            ),
+            reference_samples=[
+                {"x_ref_m": 0.0, "y_ref_m": 0.0},
+                {"x_ref_m": 30.0, "y_ref_m": 0.0},
+            ],
+            ego_x_m=5.0,
+            ego_y_m=0.0,
+            comfortable_deceleration_mps2=2.0,
+            corridor_dt_s=0.1,
+            agent_speed_mps={"peer": 8.0},
+        )
+
+        self.assertIsNotNone(constraint)
+        self.assertAlmostEqual(
+            constraint.maximum_mps, 8.0 + math.sqrt(2.0 * 2.0 * 0.8)
+        )
+        self.assertIn("bound_velocity_mps=8.000", constraint.reason)
+
+    def test_agent_speed_fallback_is_keyed_by_physical_owner_not_mode(self):
+        # The lookup must strip the ``::modeN`` suffix the same way the
+        # same-owner neighbor search does, so a mode-expanded binding still
+        # finds its physical actor's known speed.
+        constraint = conflict_corridor_speed_constraint(
+            corridor=SimpleNamespace(
+                s_hi=[5.8, 100.0],
+                binding=["peer::mode0", "other"],
+            ),
+            reference_samples=[
+                {"x_ref_m": 0.0, "y_ref_m": 0.0},
+                {"x_ref_m": 30.0, "y_ref_m": 0.0},
+            ],
+            ego_x_m=5.0,
+            ego_y_m=0.0,
+            comfortable_deceleration_mps2=2.0,
+            corridor_dt_s=0.1,
+            agent_speed_mps={"peer": 6.0},
+        )
+
+        self.assertIsNotNone(constraint)
+        self.assertIn("bound_velocity_mps=6.000", constraint.reason)
+
     def test_rows_equal_to_egos_own_braking_floor_are_not_treated_as_a_peer(self):
         # Regression for the four-CAV merge scenario: a through vehicle's own
         # per-stage braking-reachability floor can equal build_longitudinal_

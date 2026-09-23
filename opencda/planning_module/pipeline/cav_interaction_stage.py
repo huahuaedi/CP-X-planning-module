@@ -135,6 +135,12 @@ class CAVInteractionStage:
             if margin_m is not None:
                 make_gap_gate_margins_m[str(assignment.cav_actor_id)] = margin_m
         result.diagnostics["make_gap_gate_margin_m"] = make_gap_gate_margins_m
+        agent_speed_mps = {
+            str(agent_id): float(state.get("v", 0.0) or 0.0)
+            for agent_id, state in dict(
+                result.diagnostics.get("agent_states", {}) or {}
+            ).items()
+        }
         result.speed_constraint = conflict_corridor_speed_constraint(
             corridor=result.corridor,
             reference_samples=corridor_reference,
@@ -145,6 +151,7 @@ class CAVInteractionStage:
             ego_acceleration_mps2=float(current_acceleration_mps2),
             max_braking_mps2=float(corridor_params.max_braking_mps2),
             max_jerk_mps3=float(corridor_params.max_jerk_mps3),
+            agent_speed_mps=agent_speed_mps,
         )
         peers_by_id = {
             int(intent.actor_id): intent for intent in list(cav_intents or [])
