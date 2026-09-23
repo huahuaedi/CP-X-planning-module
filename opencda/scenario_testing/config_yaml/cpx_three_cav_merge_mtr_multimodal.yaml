@@ -1,0 +1,73 @@
+base_config: cpx_two_cav_merge_conflict.yaml
+
+description: |-
+  Real-MTR three-CAV validation. Same opposing lane-exchange as
+  cpx_two_cav_merge_conflict_mtr_multimodal (cav1 lane 8.3->4.8, cav2 lane
+  4.8->8.3), plus a third CAV (cav3) that stays in lane 4.8 the whole route
+  -- a genuine through vehicle each merging CAV's corridor/credible-veto
+  logic must reason about, not just each other. First closed-loop 3-CAV data
+  point for the multimodal integration review's point 6 (relevant-agent
+  budget is 6, mode budget is 3/agent -- three real CAVs plus each other's
+  broadcast intents is still comfortably inside both).
+
+vehicle_base:
+  planner:
+    use_mtr_prediction_bridge: true
+    mtr_prediction_server_url: "http://127.0.0.1:8765"
+    mtr_prediction_update_hz: 5.0
+    mtr_prediction_max_stale_s: 0.6
+    prediction_mode_min_probability: 0.05
+    prediction_credible_probability_min: 0.15
+    prediction_credible_ttc_s: 2.0
+
+# Lists are repeated because OmegaConf replaces them wholesale.
+scenario:
+  single_cav_list:
+    - name: cav1
+      spawn_position: [-300.0, 8.3, 0.3, 0, 0, 0]
+      destination: [-70.0, 4.8, 0.3]
+      v2x:
+        enabled: true
+        communication_range: 80
+      behavior:
+        local_planner:
+          debug_trajectory: true
+          debug: true
+      planner:
+        target_speed_mps: 8.0
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_three_cav_merge_mtr_cav1
+
+    - name: cav2
+      spawn_position: [-306.0, 4.8, 0.3, 0, 0, 0]
+      destination: [-76.0, 8.3, 0.3]
+      v2x:
+        enabled: true
+        communication_range: 80
+      behavior:
+        local_planner:
+          debug_trajectory: true
+          debug: true
+      planner:
+        target_speed_mps: 8.0
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_three_cav_merge_mtr_cav2
+
+    - name: cav3
+      # Behind both mergers, same lane as cav2's start (4.8) and staying
+      # there the whole route -- a through vehicle cav1's merge target and
+      # cav2's vacated lane both have to account for. Destination is short
+      # of cav1's own stop point (x=-70 in this same lane): with
+      # opportunistic lane change disabled for this experiment, a
+      # destination past where cav1 parks would make cav3's route
+      # physically blocked by a stationary lead, not a planner question.
+      spawn_position: [-318.0, 4.8, 0.3, 0, 0, 0]
+      destination: [-82.0, 4.8, 0.3]
+      v2x:
+        enabled: true
+        communication_range: 80
+      behavior:
+        local_planner:
+          debug_trajectory: true
+          debug: true
+      planner:
+        target_speed_mps: 7.0
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_three_cav_merge_mtr_cav3
