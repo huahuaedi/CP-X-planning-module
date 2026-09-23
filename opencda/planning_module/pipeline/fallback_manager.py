@@ -275,7 +275,29 @@ class TrajectoryFallbackManager:
             if committed
             else str(baseline_decision)
         )
-        decision = "emergency_brake" if collision_veto else retained_decision
+        # A collision-risk veto against a COMMITTED maneuver still has a live,
+        # geometrically valid fallback reference to decelerate along -- the
+        # window built above, tied to the locked lane-change master. Routing
+        # that straight into "emergency_brake" throws the reference away:
+        # authorize_mpc_entry() bypasses MPC entirely for that decision and
+        # applies an open-loop direct-control brake from whatever heading and
+        # lateral offset the vehicle happens to have mid-maneuver. Confirmed
+        # on a real-CARLA 4-CAV run (cpx_four_cav_merge_mtr_multimodal,
+        # 2026-09): this parked a CAV ~1.5m off lane-center with ~0.08m of
+        # road-boundary clearance mid-lane-change, and every MPC solve from
+        # that pose was permanently primal-infeasible afterward -- the CAV
+        # never moved again for the rest of the run. Keep a committed veto on
+        # the ordinary reference-tracked fallback path instead (the same path
+        # already used for every non-collision candidate-rejection reason)
+        # so deceleration happens under closed-loop steering, converging back
+        # toward the reference lane rather than freezing wherever the veto
+        # caught it. A veto with no usable reference to hold, or one that
+        # isn't protecting a committed maneuver, still needs the
+        # deterministic direct-control brake.
+        hard_emergency_brake = collision_veto and not (
+            committed and len(current_reference) >= 2
+        )
+        decision = "emergency_brake" if hard_emergency_brake else retained_decision
         destination = ()
         if reference:
             terminal = dict(reference[-1])

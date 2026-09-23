@@ -45,7 +45,13 @@ from pipeline.mpc_entry_stage import MPCEntryStage
 from pipeline.maneuver_manager import ManeuverManager
 from pipeline.fallback_manager import TrajectoryFallbackManager
 from pipeline.nominal_trajectory import NominalTrajectoryGenerator
-from pipeline.reference_line_provider import LANE_FOLLOW, TURN, ReferenceLineProvider
+from pipeline.reference_line_provider import (
+    LANE_CHANGE,
+    LANE_FOLLOW,
+    TURN,
+    ReferenceLineProvider,
+)
+from pipeline.stage_contracts import ManeuverCommitment
 from pipeline.perception_stage import PerceptionStage
 
 
@@ -763,6 +769,126 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         self.assertEqual(speed_mps, 0.0)
         self.assertEqual(debug["reference_source"], "reference_line_provider:turn")
         self.assertIn("bounded_safe_stop", debug["fallback_reason"])
+
+    def test_committed_lane_change_collision_veto_keeps_mpc_tracked_stop(self):
+        # Regression for the real-CARLA 4-CAV finding (2026-09): a collision-
+        # risk veto on the LOCKED lane-change continuation used to force
+        # "emergency_brake", which bypasses MPC entirely (authorize_mpc_entry)
+        # and open-loop brakes from whatever pose the abort caught the
+        # vehicle in. With a committed maneuver and a live geometric
+        # fallback reference available, the veto must instead keep the
+        # retained committed decision so the same bounded-safe-stop
+        # trajectory is tracked under closed-loop MPC control.
+        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
+        bridge.config = {}
+        bridge.mpc = types.SimpleNamespace(dt_s=0.1, horizon_steps=3)
+        bridge._stable_reference_line_provider = ReferenceLineProvider()
+        fallback = TrajectoryFallbackManager()
+        bridge.pipeline = types.SimpleNamespace(resolve_fallback=fallback.resolve)
+        bridge.route_manager = types.SimpleNamespace(route_revision="route-1")
+        bridge._stable_reference_line_provider.install(
+            LANE_CHANGE,
+            [
+                {"x_ref_m": 1.0, "y_ref_m": 4.0, "lane_id": 2, "speed_ref_mps": 6.0},
+                {"x_ref_m": 2.0, "y_ref_m": 4.0, "lane_id": 2, "speed_ref_mps": 6.0},
+                {"x_ref_m": 3.0, "y_ref_m": 4.0, "lane_id": 2, "speed_ref_mps": 6.0},
+            ],
+            route_revision="route-1",
+            map_epoch="town06",
+            event="maneuver_started",
+        )
+        bridge._sim_time_s = lambda: 1.0
+
+        commitment = ManeuverCommitment(
+            state="COMMITTED",
+            decision="lane_change_right",
+            source_lane_id=1,
+            target_lane_id=2,
+            progress=0.5,
+            reference_locked=True,
+        )
+        result = fallback.resolve_candidate_failure(
+            candidate_results=[
+                types.SimpleNamespace(
+                    feasibility_reason="candidate_prediction_collision_risk:0.64"
+                )
+            ],
+            baseline_decision="lane_follow",
+            baseline_target_lane_id=1,
+            current_lane_id=1,
+            current_state=[0.0, 0.0, 6.0, 0.0],
+            ego_x_m=0.0,
+            ego_y_m=4.0,
+            reference_provider=bridge._stable_reference_line_provider,
+            route_revision="route-1",
+            sim_time_s=1.0,
+            mpc_dt_s=0.1,
+            horizon_steps=3,
+            lane_change_min_first_forward_m=0.2,
+            lane_follow_min_first_forward_m=0.2,
+            summarize_candidates=lambda _rows: "collision",
+            maneuver_commitment=commitment,
+        )
+        decision = result.decision
+        speed_mps = result.target_speed_mps
+        debug = result.mutable_diagnostics()
+
+        self.assertEqual(decision, "lane_change_right")
+        self.assertEqual(speed_mps, 0.0)
+        self.assertEqual(
+            debug["reference_source"], "reference_line_provider:lane_change"
+        )
+        self.assertIn("bounded_safe_stop", debug["fallback_reason"])
+
+    def test_uncommitted_collision_veto_still_hard_brakes_even_with_reference(self):
+        # Same predictive-collision-veto shape as above, but with no active
+        # maneuver commitment -- there is no locked geometry whose closed-
+        # loop stop is worth preferring over the deterministic direct-control
+        # brake, so this must keep going through "emergency_brake" exactly
+        # as before.
+        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
+        bridge.config = {}
+        bridge.mpc = types.SimpleNamespace(dt_s=0.1, horizon_steps=3)
+        bridge._stable_reference_line_provider = ReferenceLineProvider()
+        fallback = TrajectoryFallbackManager()
+        bridge.pipeline = types.SimpleNamespace(resolve_fallback=fallback.resolve)
+        bridge.route_manager = types.SimpleNamespace(route_revision="route-1")
+        bridge._stable_reference_line_provider.install(
+            LANE_FOLLOW,
+            [
+                {"x_ref_m": 1.0, "y_ref_m": 0.0, "lane_id": 1, "speed_ref_mps": 6.0},
+                {"x_ref_m": 2.0, "y_ref_m": 0.0, "lane_id": 1, "speed_ref_mps": 6.0},
+                {"x_ref_m": 3.0, "y_ref_m": 0.0, "lane_id": 1, "speed_ref_mps": 6.0},
+            ],
+            route_revision="route-1",
+            map_epoch="town06",
+            event="maneuver_started",
+        )
+        bridge._sim_time_s = lambda: 1.0
+
+        result = fallback.resolve_candidate_failure(
+            candidate_results=[
+                types.SimpleNamespace(
+                    feasibility_reason="candidate_prediction_collision_risk:0.64"
+                )
+            ],
+            baseline_decision="lane_follow",
+            baseline_target_lane_id=1,
+            current_lane_id=1,
+            current_state=[0.0, 0.0, 6.0, 0.0],
+            ego_x_m=0.0,
+            ego_y_m=0.0,
+            reference_provider=bridge._stable_reference_line_provider,
+            route_revision="route-1",
+            sim_time_s=1.0,
+            mpc_dt_s=0.1,
+            horizon_steps=3,
+            lane_change_min_first_forward_m=0.2,
+            lane_follow_min_first_forward_m=0.2,
+            summarize_candidates=lambda _rows: "collision",
+        )
+
+        self.assertEqual(result.decision, "emergency_brake")
 
     def test_turn_exit_contract_miss_keeps_retained_turn_instead_of_stopping(self):
         from pipeline.maneuver_manager import ManeuverManager
