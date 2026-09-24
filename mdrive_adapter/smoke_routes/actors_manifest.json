@@ -1,0 +1,7 @@
+{
+  "ego": [
+    {"file": "ego_0.xml", "kind": "ego", "route_id": "cpx_smoke", "town": "Town06", "speed": 5.0},
+    {"file": "ego_1.xml", "kind": "ego", "route_id": "cpx_smoke", "town": "Town06", "speed": 5.0}
+  ],
+  "npc": [], "pedestrian": [], "static": [], "bicycle": []
+}

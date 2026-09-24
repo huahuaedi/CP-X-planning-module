@@ -181,3 +181,5 @@ global_planner_comparison_output/
 
 # ROS 2 workspace (separate git repo, nested here)
 /CP-ROS-WS/
+.runtime/
+!mdrive_adapter/smoke_routes/actors_manifest.json

@@ -1,8 +1,21 @@
 # CP-X Planning Module
 
+For closed-loop evaluation as an external MDrive planner with GT obstacle input,
+see [mdrive_adapter/README.md](mdrive_adapter/README.md). The adapter and launcher
+live entirely in this repository; MDrive source files are not modified.
+
+```bash
+./run_mdrive.sh --graphics-adapter 1                 # r26, GT, parallel
+./run_mdrive.sh --graphics-adapter 1 --record-video  # also record video
+./run_mdrive.sh --help
+```
+
+The script defaults to sibling `../MDrive` and `../envs/mdrive_tcp/bin/python`
+(or `python` on PATH). Override them with `MDRIVE_ROOT` and `CPX_PYTHON`.
+
 This repository is a OpenCDA-based CARLA planning stack focused on behavior planning, global routing, MPC trajectory planning, and evaluation metrics.
 
-The main development target is CARLA 0.9.12 with Python 3.7 so that it can be aligned with the OpenCDA 0.9.12 ecosystem and later integrated with the MDrive planner interface.
+The main development target is CARLA 0.9.12 with Python 3.7, aligned with the OpenCDA 0.9.12 ecosystem.
 
 ## Current Status
 

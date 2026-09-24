@@ -576,6 +576,7 @@ def write_planning_metrics_artifacts(
     artifact_dir: str,
     recorder: EvaluationMetricsRecorder,
     scenario_name: str = "scenario",
+    collision_events_available: bool = True,
 ) -> Dict[str, str]:
     os.makedirs(str(artifact_dir), exist_ok=True)
     json_path = os.path.join(str(artifact_dir), "planning_metrics.json")
@@ -584,6 +585,10 @@ def write_planning_metrics_artifacts(
         "scenario_name": str(scenario_name),
         "summary": recorder.summary(),
     }
+    if not collision_events_available:
+        payload["summary"]["collision_count"] = None
+        payload["summary"]["collision_rate_per_km"] = None
+        payload["collision_source"] = "MDrive evaluator results; no CP-X collision sensor"
     with open(json_path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2)
 

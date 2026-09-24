@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<routes>
+  <route id="cpx_smoke" town="Town06" role="ego" speed="5.0">
+    <waypoint x="195.8013" y="140.2317" z="0.0" yaw="0.234757" />
+    <waypoint x="230.8010" y="140.3751" z="0.0" yaw="0.234757" />
+  </route>
+</routes>

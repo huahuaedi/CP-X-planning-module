@@ -1,0 +1,39 @@
+# Oracle current-state inputs, NOT a sensor-only or cooperative-perception result.
+perception: gt
+gt_range_m: 70.0
+# MDrive requires passing the final waypoint; this only extends the stop target.
+route_end_clearance_m: 3.0
+controller:
+  speed_lookahead_s: 0.5
+  speed_kp: 1.0
+  speed_ki: 0.2
+mpc:
+  horizon_s: 2.0
+  plan_dt_s: 0.1
+  trajectory_generation_frequency_hz: 4.0
+  final_stop_speed_cap:
+    stop_buffer_m: 0.5
+  visualization:
+    show_global_route: false
+  obstacle_filter:
+    tracking_distance_m: 70.0
+    max_dynamic_obstacles: 64
+    max_planning_obstacles: 64
+  behavior_planner_runtime:
+    traffic_light_stop:
+      enabled: true
+scenario:
+  constraints:
+    min_velocity_mps: 0.0
+    max_velocity_mps: 7.0
+    min_acceleration_mps2: -10.0
+    max_acceleration_mps2: 3.0
+    max_jerk_mps3: 10.0
+    min_steer_rad: -0.6
+    max_steer_rad: 0.6
+    min_steer_rate_rps: -0.4
+    max_steer_rate_rps: 0.4
+    enforce_terminal_velocity_constraint: true
+    terminal_velocity_mps: 0.0
+  planning:
+    waypoint_sample_distance_m: 3.0
