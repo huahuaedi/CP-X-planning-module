@@ -440,6 +440,59 @@ def _core_config_and_behavior_stages(
     return parts
 
 
+def _mtr_prediction_bridge(bridge, bridge_type):
+    """Return the scenario-shared MTR bridge for this CAV world.
+
+    The external server owns one rolling scene history. Giving every CAV an
+    independent HTTP adapter sent the same world tick N times with a different
+    actor labelled as ego, corrupting that history as well as multiplying
+    inference load. The OpenCDA CAV world is already the lifecycle owner shared
+    by all VehicleManagers, so keep exactly one adapter on that object.
+    """
+
+    kwargs = dict(
+        server_url=str(bridge.config.get(
+            "mtr_prediction_server_url", "http://127.0.0.1:8765"
+        )),
+        timeout_s=float(bridge.config.get(
+            "mtr_prediction_server_timeout_s", 2.0
+        )),
+        update_hz=float(bridge.config.get(
+            "mtr_prediction_update_hz", 5.0
+        )),
+        history_update_hz=float(bridge.config.get(
+            "mtr_prediction_history_update_hz", 10.0
+        )),
+        max_stale_s=float(bridge.config.get(
+            "mtr_prediction_max_stale_s", 0.5
+        )),
+        asynchronous=bool(bridge.config.get(
+            "mtr_prediction_async", True
+        )),
+    )
+    if not bool(bridge.config.get("mtr_prediction_shared", True)):
+        return bridge_type(**kwargs)
+    v2x_manager = getattr(bridge.vehicle_manager, "v2x_manager", None)
+    cav_world = getattr(v2x_manager, "cav_world", None)
+    if cav_world is None:
+        return bridge_type(**kwargs)
+    registry = getattr(cav_world, "_cpx_mtr_prediction_bridges", None)
+    if registry is None:
+        registry = {}
+        setattr(cav_world, "_cpx_mtr_prediction_bridges", registry)
+    group = str(bridge.config.get("mtr_prediction_shared_group", "default"))
+    key = (group,) + tuple(sorted(kwargs.items()))
+    prediction_bridge = registry.get(key)
+    if prediction_bridge is None:
+        prediction_bridge = bridge_type(**kwargs)
+        prediction_bridge.shared_consumer_count = 0
+        registry[key] = prediction_bridge
+    prediction_bridge.shared_consumer_count = int(
+        getattr(prediction_bridge, "shared_consumer_count", 0)
+    ) + 1
+    return prediction_bridge
+
+
 def _mpc_and_reference_generation(bridge, parts: SimpleNamespace) -> None:
     ensure_planning_module_import_path()
     from opencda.planning_module.MPC.mpc import MPC
@@ -575,25 +628,8 @@ def _mpc_and_reference_generation(bridge, parts: SimpleNamespace) -> None:
         from opencda.planning_module.opencda_bridge.prediction_bridge import (
             MTRPredictionBridge,
         )
-        bridge.prediction_bridge = MTRPredictionBridge(
-            server_url=str(bridge.config.get(
-                "mtr_prediction_server_url", "http://127.0.0.1:8765"
-            )),
-            timeout_s=float(bridge.config.get(
-                "mtr_prediction_server_timeout_s", 2.0
-            )),
-            update_hz=float(bridge.config.get(
-                "mtr_prediction_update_hz", 5.0
-            )),
-            history_update_hz=float(bridge.config.get(
-                "mtr_prediction_history_update_hz", 10.0
-            )),
-            max_stale_s=float(bridge.config.get(
-                "mtr_prediction_max_stale_s", 0.5
-            )),
-            asynchronous=bool(bridge.config.get(
-                "mtr_prediction_async", True
-            )),
+        bridge.prediction_bridge = _mtr_prediction_bridge(
+            bridge, MTRPredictionBridge,
         )
     # Prediction-knowledge ablation (cv | blind | oracle). Built lazily on
     # first use so mpc.horizon_s / dt_s are settled; see

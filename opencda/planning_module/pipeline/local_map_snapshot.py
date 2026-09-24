@@ -209,10 +209,12 @@ class LocalMapSnapshot:
         }
 
 
-def _centerline_geometry(
+def build_local_lane_geometry(
     lane_id: int,
     samples: Sequence[Mapping[str, object]],
 ) -> LocalLaneGeometry:
+    """Freeze immutable geometry for one static AD-map lane."""
+
     clean: list[tuple[float, float, float, object, object, object, object]] = []
     for sample in samples:
         try:
@@ -354,6 +356,7 @@ def build_local_map_snapshot(
     route_revision: str = "",
     match: Mapping[str, object] | None,
     local_graph: Mapping[str, object] | None,
+    lane_geometries: Mapping[int, LocalLaneGeometry] | None = None,
     route_target_lane_id: int = 0,
     invariant_violations: Sequence[str] = (),
 ) -> LocalMapSnapshot:
@@ -362,6 +365,12 @@ def build_local_map_snapshot(
     raw_centerlines = {
         int(lane_id): list(samples or [])
         for lane_id, samples in dict(graph.get("lane_centerlines", {}) or {}).items()
+    }
+    frozen_lane_geometries = {
+        int(lane_id): geometry
+        for lane_id, geometry in dict(lane_geometries or {}).items()
+        if isinstance(geometry, LocalLaneGeometry)
+        and int(geometry.lane_id) == int(lane_id)
     }
     # Resolve raw graph overlap once at the immutable boundary.  Longitudinal
     # and route expansion can list one AD lane in multiple lateral corridors;
@@ -389,9 +398,11 @@ def build_local_map_snapshot(
         )
         lane_geometries = []
         for lane_id in normalized_lane_ids:
-            geometry = _centerline_geometry(
-                int(lane_id), raw_centerlines.get(int(lane_id), [])
-            )
+            geometry = frozen_lane_geometries.get(int(lane_id))
+            if geometry is None:
+                geometry = build_local_lane_geometry(
+                    int(lane_id), raw_centerlines.get(int(lane_id), [])
+                )
             if geometry.centerline:
                 lane_geometries.append(geometry)
         normalized_corridor_values.append(LocalLaneCorridor(

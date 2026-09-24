@@ -125,6 +125,25 @@ def test_construction_does_not_raise(bridge):
     assert bridge is not None
 
 
+def test_stage_timing_snapshot_and_waypoint_counters_are_per_tick(bridge):
+    bridge._begin_stage_timing_cycle()
+    bridge._accum_stage_ms("stage_a", 0.001)
+    bridge._accum_stage_ms("stage_a", 0.002)
+    bridge._accum_stage_ms("stage_b", 0.004)
+
+    assert bridge._stage_timing_snapshot() == {
+        "stage_a": pytest.approx(3.0),
+        "stage_b": pytest.approx(4.0),
+    }
+    bridge._waypoint_cache_hits_current = 3
+    bridge._waypoint_cache_misses_current = 1
+
+    bridge._begin_stage_timing_cycle()
+    assert bridge._stage_timing_snapshot() == {}
+    assert bridge._waypoint_cache_hits_current == 0
+    assert bridge._waypoint_cache_misses_current == 0
+
+
 def test_mpc_is_configured_with_bridge_vehicle_geometry(bridge):
     assert bridge.mpc.ego_width_m == pytest.approx(2.0)
     assert bridge.mpc.ego_length_m == pytest.approx(4.8)

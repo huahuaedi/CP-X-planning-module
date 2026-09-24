@@ -139,7 +139,9 @@ class MPCEntryStage:
         return bool(
             not hard_gate_active
             and stop_goal_active
-            and decision in {"stop_at_intersection", "stop_sign"}
+            and decision in {
+                "stop_at_intersection", "stop_sign", "destination_stop",
+            }
             and float(ego_speed_mps) <= self._suspend_speed_mps
         )
 

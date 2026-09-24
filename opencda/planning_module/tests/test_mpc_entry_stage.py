@@ -55,3 +55,25 @@ def test_stop_intent_has_one_mode_key_independent_of_lane():
         target_lane_id=9,
         stop_goal_active=False,
     ) == "stop"
+
+
+def test_destination_stop_uses_direct_hold_after_vehicle_is_captured():
+    stage = MPCEntryStage({})
+
+    assert stage.normal_stop_hold_required(
+        hard_gate_active=False,
+        stop_goal_active=True,
+        behavior_decision="destination_stop",
+        ego_speed_mps=0.25,
+    )
+
+
+def test_destination_stop_keeps_mpc_while_vehicle_is_still_moving():
+    stage = MPCEntryStage({})
+
+    assert not stage.normal_stop_hold_required(
+        hard_gate_active=False,
+        stop_goal_active=True,
+        behavior_decision="destination_stop",
+        ego_speed_mps=0.31,
+    )

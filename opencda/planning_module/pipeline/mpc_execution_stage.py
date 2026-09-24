@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
@@ -203,7 +202,6 @@ class MPCExecutionStage:
                 ),
             ))
             if replan:
-                _ts_plan = time.monotonic()
                 self._mpc.plan_trajectory(
                     current_state=request.current_state,
                     destination_state=request.destination_state,
@@ -219,16 +217,6 @@ class MPCExecutionStage:
                     road_envelope_payload_world=request.road_envelope_payload_world,
                     corridor_rows=request.corridor_rows,
                 )
-                _plan_ms = (time.monotonic() - _ts_plan) * 1000.0
-                self._replan_ms_total = getattr(self, "_replan_ms_total", 0.0) + _plan_ms
-                self._replan_count = getattr(self, "_replan_count", 0) + 1
-                if self._replan_count % 25 == 0:
-                    print(
-                        "[cpx_stage_timing] plan_trajectory (replanning only): "
-                        f"last 25 replans avg={self._replan_ms_total / 25:.1f}ms",
-                        flush=True,
-                    )
-                    self._replan_ms_total = 0.0
                 status = str(getattr(self._mpc, "_last_status", "")).strip().lower()
                 if status and status not in {"solved", "solved inaccurate"}:
                     raise RuntimeError("MPC status=" + status)

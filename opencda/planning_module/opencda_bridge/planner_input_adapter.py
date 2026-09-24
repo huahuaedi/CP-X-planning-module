@@ -142,6 +142,7 @@ class OpenCDAPlanningAdapter:
         current_lane_id = int(canonical_lane_id_for_waypoint(ego_waypoint) or 0)
 
         ego_snapshot = {
+            "actor_id": int(getattr(bridge.vehicle_manager.vehicle, "id", -1)),
             "x": float(ego_location.x),
             "y": float(ego_location.y),
             "v": float(ego_speed_mps),

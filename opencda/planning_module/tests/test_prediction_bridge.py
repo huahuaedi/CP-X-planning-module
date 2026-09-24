@@ -2,8 +2,12 @@ import json
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
+from opencda.planning_module.opencda_bridge.planner_assembly import (
+    _mtr_prediction_bridge,
+)
 from opencda.planning_module.opencda_bridge.prediction_bridge import (
     MTRPredictionBridge,
 )
@@ -116,6 +120,24 @@ class MTRPredictionBridgeTest(unittest.TestCase):
         self.assertEqual(bridge.last_attached_count, 1)
         self.assertEqual(bridge.last_attached_mode_count, 3)
 
+    def test_planners_in_one_cav_world_share_one_bridge_instance(self):
+        cav_world = SimpleNamespace()
+
+        def planner_bridge():
+            return SimpleNamespace(
+                config={"mtr_prediction_async": False},
+                vehicle_manager=SimpleNamespace(
+                    v2x_manager=SimpleNamespace(cav_world=cav_world)
+                ),
+            )
+
+        first = _mtr_prediction_bridge(planner_bridge(), MTRPredictionBridge)
+        second = _mtr_prediction_bridge(planner_bridge(), MTRPredictionBridge)
+
+        self.assertIs(first, second)
+        self.assertEqual(first.shared_consumer_count, 2)
+        self.assertTrue(first.diagnostics["prediction_bridge_shared"])
+
     def test_rate_limit_rebases_cached_prediction(self):
         bridge = MTRPredictionBridge(update_hz=5.0, asynchronous=False)
         kwargs = {
@@ -130,6 +152,48 @@ class MTRPredictionBridgeTest(unittest.TestCase):
         self.assertEqual(self.urlopen.call_count, 1)
         self.assertAlmostEqual(first[0]["predicted_trajectory"][0]["t"], 0.1)
         self.assertAlmostEqual(second[0]["predicted_trajectory"][0]["t"], 0.05)
+
+    def test_shared_scene_is_requested_once_for_multiple_egos_per_tick(self):
+        bridge = MTRPredictionBridge(update_hz=5.0, asynchronous=False)
+        actors = {
+            actor_id: {
+                "actor_id": actor_id, "track_id": str(actor_id),
+                "x": float(actor_id), "y": 0.0, "v": 2.0, "psi": 0.0,
+            }
+            for actor_id in (1, 2, 3)
+        }
+
+        bridge.attach(
+            [actors[2], actors[3]], horizon_s=1.0, dt_s=0.1,
+            ego_snapshot=actors[1], timestamp_s=1.0,
+        )
+        bridge.attach(
+            # A second ego can have a narrower local detection set. This is
+            # still the same world tick and may not multiply MTR requests.
+            [actors[1]], horizon_s=1.0, dt_s=0.1,
+            ego_snapshot=actors[2], timestamp_s=1.0,
+        )
+
+        self.assertEqual(self.urlopen.call_count, 1)
+        self.assertEqual(bridge.request_count, 1)
+        self.assertEqual(bridge.inference_request_count, 1)
+
+    def test_simulation_time_rollback_retires_previous_epoch_cache(self):
+        bridge = MTRPredictionBridge(update_hz=5.0, asynchronous=False)
+        kwargs = {
+            "object_snapshots": [{"track_id": "veh-1"}],
+            "horizon_s": 1.0, "dt_s": 0.1,
+            "ego_snapshot": {
+                "actor_id": 1, "x": 0.0, "y": 0.0,
+                "v": 0.0, "psi": 0.0,
+            },
+        }
+        bridge.attach(timestamp_s=10.0, **kwargs)
+        bridge.attach(timestamp_s=0.0, **kwargs)
+
+        self.assertEqual(self.urlopen.call_count, 2)
+        request = json.loads(self.urlopen.call_args[0][0].data.decode("utf-8"))
+        self.assertEqual(request["timestamp_s"], 0.0)
 
     def test_history_updates_at_ten_hz_while_inference_stays_at_five_hz(self):
         bridge = MTRPredictionBridge(

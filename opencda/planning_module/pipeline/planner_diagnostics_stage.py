@@ -445,6 +445,9 @@ class PlannerDiagnosticsStage:
             "cav_conflict_agent_states": dict(
                 cav_diag.get("agent_states", {}) or {}
             ),
+            "cav_agent_progress_speed_mps": dict(
+                cav_diag.get("agent_progress_speed_mps", {}) or {}
+            ),
             "cav_conflict_roles": dict(cav_diag.get("roles", {}) or {}),
             "cav_make_gap_gate_margin_m": dict(
                 cav_diag.get("make_gap_gate_margin_m", {}) or {}
@@ -698,6 +701,12 @@ class PlannerDiagnosticsStage:
             ),
             "prediction_bridge_error": reference_debug.get(
                 "prediction_bridge_error", ""
+            ),
+            "prediction_bridge_shared": reference_debug.get(
+                "prediction_bridge_shared", ""
+            ),
+            "prediction_bridge_shared_consumer_count": reference_debug.get(
+                "prediction_bridge_shared_consumer_count", ""
             ),
             "planner_input_perception_planning_count": reference_debug.get("planner_input_perception_planning_count", ""),
             "planner_input_cp_obstacle_count": reference_debug.get("planner_input_cp_obstacle_count", ""),
@@ -1276,6 +1285,14 @@ class PlannerDiagnosticsStage:
                 getattr(adapters.mpc, "_last_infeasibility_diagnostic", {}) or {}
             ),
             "mpc_solve_time_ms": float(getattr(adapters.mpc, "_last_solve_time_ms", 0.0)),
+            **{
+                "mpc_timing_%s_ms" % str(name): (
+                    float(value) if bool(mpc_replan_executed) else 0.0
+                )
+                for name, value in dict(
+                    getattr(adapters.mpc, "_last_timing_ms", {}) or {}
+                ).items()
+            },
             "mpc_nominal_steering_first_rad": (
                 float(adapters.mpc._last_nominal_steering_profile[1])
                 if len(getattr(adapters.mpc, "_last_nominal_steering_profile", ())) > 1

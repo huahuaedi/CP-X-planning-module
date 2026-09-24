@@ -73,6 +73,7 @@ class MTRPredictionBridge:
         self.dropped_request_count = 0
         self._asynchronous = bool(asynchronous)
         self._state_lock = threading.Lock()
+        self._schedule_lock = threading.Lock()
         self._request_queue = None
         if self._asynchronous:
             self._request_queue = queue.Queue(maxsize=8)
@@ -102,27 +103,50 @@ class MTRPredictionBridge:
         track_ids = {
             _track_id(snapshot) for snapshot in snapshots if _track_id(snapshot)
         }
-        track_set_changed = bool(track_ids != self._cached_track_ids)
-        inference_due = bool(
-            timestamp_s < self._last_request_timestamp_s
-            or timestamp_s - self._last_request_timestamp_s
-            >= self._minimum_interval_s - 1.0e-6
-            or track_set_changed
-        )
-        history_due = bool(
-            timestamp_s < self._last_history_timestamp_s
-            or timestamp_s - self._last_history_timestamp_s
-            >= self._history_interval_s - 1.0e-6
-            or track_set_changed
-        )
-        if history_due:
-            self._schedule_request(
-                ego_snapshot=ego_snapshot,
-                obstacle_snapshots=snapshots,
-                timestamp_s=timestamp_s,
-                map_polylines=map_polylines,
-                run_inference=inference_due,
+        ego_track_id = _track_id(ego_snapshot)
+        if ego_track_id:
+            # A shared scene bridge is called once by each ego planner.  The
+            # observer changes, but the physical scene membership does not:
+            # one ego's actor is present in every other ego's obstacle list.
+            # Including ego in the signature makes that invariant explicit
+            # and prevents N identical history/inference requests per tick.
+            track_ids.add(ego_track_id)
+        # Multiple CAV planners share this bridge and enter it sequentially (or
+        # from different application threads) for the same world tick.  Keep
+        # cadence detection and its timestamp update atomic so exactly one
+        # caller publishes that scene to the prediction server.
+        with self._schedule_lock:
+            self._reset_after_time_discontinuity(timestamp_s)
+            same_world_tick = bool(
+                math.isfinite(self._last_history_timestamp_s)
+                and abs(timestamp_s - self._last_history_timestamp_s) <= 1.0e-6
             )
+            track_set_changed = bool(track_ids != self._cached_track_ids)
+            inference_due = bool(
+                not same_world_tick
+                and (
+                    timestamp_s - self._last_request_timestamp_s
+                    >= self._minimum_interval_s - 1.0e-6
+                    or track_set_changed
+                )
+            )
+            history_due = bool(
+                not same_world_tick
+                and (
+                    timestamp_s - self._last_history_timestamp_s
+                    >= self._history_interval_s - 1.0e-6
+                    or track_set_changed
+                )
+            )
+            if history_due:
+                self._schedule_request(
+                    ego_snapshot=ego_snapshot,
+                    obstacle_snapshots=snapshots,
+                    timestamp_s=timestamp_s,
+                    map_polylines=map_polylines,
+                    run_inference=inference_due,
+                    scene_track_ids=track_ids,
+                )
 
         with self._state_lock:
             prediction_timestamp_s = float(self._prediction_timestamp_s)
@@ -208,6 +232,12 @@ class MTRPredictionBridge:
                 self.last_map_polyline_count
             ),
             "prediction_bridge_error": last_error,
+            "prediction_bridge_shared": bool(
+                getattr(self, "shared_consumer_count", 1) > 1
+            ),
+            "prediction_bridge_shared_consumer_count": int(
+                getattr(self, "shared_consumer_count", 1)
+            ),
         }
 
     def _schedule_request(
@@ -218,15 +248,13 @@ class MTRPredictionBridge:
         timestamp_s: float,
         map_polylines: Sequence[Mapping[str, Any]],
         run_inference: bool,
+        scene_track_ids: Sequence[str],
     ) -> None:
         self._last_history_timestamp_s = float(timestamp_s)
         if bool(run_inference):
             self._last_request_timestamp_s = float(timestamp_s)
             self.inference_request_count += 1
-        self._cached_track_ids = {
-            _track_id(snapshot) for snapshot in obstacle_snapshots
-            if _track_id(snapshot)
-        }
+        self._cached_track_ids = set(scene_track_ids or ())
         request_data = {
             "ego_snapshot": dict(ego_snapshot),
             "obstacle_snapshots": [dict(row) for row in obstacle_snapshots],
@@ -244,6 +272,19 @@ class MTRPredictionBridge:
             self.dropped_request_count += 1
             with self._state_lock:
                 self.last_error = "prediction_request_queue_full"
+
+    def _reset_after_time_discontinuity(self, timestamp_s: float) -> None:
+        """Retire predictions from a previous simulation-time epoch."""
+
+        if float(timestamp_s) >= self._last_history_timestamp_s - 1.0e-6:
+            return
+        self._last_request_timestamp_s = -float("inf")
+        self._last_history_timestamp_s = -float("inf")
+        self._cached_track_ids.clear()
+        with self._state_lock:
+            self._prediction_timestamp_s = -float("inf")
+            self._cached_predictions = {}
+            self._cached_prediction_modes = {}
 
     def _worker_loop(self) -> None:
         while True:

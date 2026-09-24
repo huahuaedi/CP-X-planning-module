@@ -3,14 +3,17 @@
 Owns the per-tick map match, the frozen local lane graph/snapshot and the
 authoritative ego waypoint.  It is the only writer of that state and asks
 RouteManager -- the sole owner of route progress -- to sync and publish.
-The planner, route manager and clock are passed per call rather than held,
-so the stage never keeps a stale reference to a replaced collaborator.
+The planner, route manager and clock are passed per call.  The only retained
+planner reference scopes the immutable lane-geometry cache and invalidates it
+as soon as the planner instance is replaced.
 """
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+import time
 from types import SimpleNamespace
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterator, Mapping, Optional
 
 from .map_matching import (
     DiagnosticHDMapMatcher,
@@ -18,7 +21,27 @@ from .map_matching import (
     local_lane_frame_invariants,
     topology_relation,
 )
-from .local_map_snapshot import LocalMapSnapshot, build_local_map_snapshot
+from .local_map_snapshot import (
+    LocalLaneGeometry,
+    LocalMapSnapshot,
+    build_local_lane_geometry,
+    build_local_map_snapshot,
+)
+
+
+@contextmanager
+def _stage_timer(
+    observer: Optional[Callable[[str, float], None]],
+    name: str,
+) -> Iterator[None]:
+    """Report one route-context substage without coupling to the bridge."""
+
+    started_s = time.monotonic()
+    try:
+        yield
+    finally:
+        if observer is not None:
+            observer(str(name), time.monotonic() - started_s)
 
 
 class RouteContextStage:
@@ -29,6 +52,69 @@ class RouteContextStage:
         self.local_map_frame_id = 0
         self.local_map_snapshot = LocalMapSnapshot()
         self.authoritative_ego_waypoint: Any = None
+        # Lane centre geometry is immutable for the lifetime of one loaded
+        # global planner. Cache its serialized representation here; dynamic
+        # map matching, RouteCursor progress and the rolling lane graph still
+        # run every tick and remain owned by their respective stages.
+        self._centerline_cache_owner: Any = None
+        self._lane_geometries: dict[int, LocalLaneGeometry] = {}
+
+    def _cached_lane_geometry(
+        self,
+        global_planner: Any,
+        lane_id: int,
+    ) -> LocalLaneGeometry:
+        """Return deeply immutable geometry scoped to one loaded map."""
+
+        if self._centerline_cache_owner is not global_planner:
+            self._centerline_cache_owner = global_planner
+            self._lane_geometries.clear()
+        lane_key = int(lane_id)
+        cached = self._lane_geometries.get(lane_key)
+        if cached is not None:
+            return cached
+        try:
+            centerline_waypoints = global_planner.get_lane_centerline(lane_key)
+        except Exception:
+            centerline_waypoints = []
+        samples: list[dict[str, float]] = []
+        for waypoint in list(centerline_waypoints or []):
+            position = dict(getattr(waypoint, "position", {}) or {})
+            try:
+                sample = {
+                    "x_m": float(position["x"]),
+                    "y_m": float(position["y"]),
+                    "lane_width_m": max(
+                        0.1,
+                        float(
+                            getattr(waypoint, "lane_width_m", 3.5) or 3.5
+                        ),
+                    ),
+                }
+                left_boundary = getattr(
+                    waypoint, "left_boundary_position", None
+                )
+                right_boundary = getattr(
+                    waypoint, "right_boundary_position", None
+                )
+                if isinstance(left_boundary, Mapping) and isinstance(
+                    right_boundary, Mapping
+                ):
+                    sample.update({
+                        "left_boundary_x_m": float(left_boundary["x"]),
+                        "left_boundary_y_m": float(left_boundary["y"]),
+                        "right_boundary_x_m": float(right_boundary["x"]),
+                        "right_boundary_y_m": float(right_boundary["y"]),
+                    })
+                samples.append(sample)
+            except (KeyError, TypeError, ValueError):
+                continue
+        if len(samples) < 2:
+            return LocalLaneGeometry(lane_id=lane_key)
+        geometry = build_local_lane_geometry(lane_key, samples)
+        if geometry.centerline:
+            self._lane_geometries[lane_key] = geometry
+        return geometry
 
     def build(
         self,
@@ -39,22 +125,26 @@ class RouteContextStage:
         ego_location: Any,
         ego_heading_rad: float,
         fallback_lane_id: int,
+        observe_stage_duration: Optional[
+            Callable[[str, float], None]
+        ] = None,
     ) -> dict[str, object]:
         """The AD-map authoritative route summary for this tick."""
 
         self.authoritative_ego_waypoint = None
         matched_waypoint = None
         try:
-            raw_candidates = list(
-                global_planner.get_waypoint_candidates(
-                    {
-                        "x": float(ego_location.x),
-                        "y": float(ego_location.y),
-                        "z": float(getattr(ego_location, "z", 0.0)),
-                    }
+            with _stage_timer(observe_stage_duration, "route_map_match"):
+                raw_candidates = list(
+                    global_planner.get_waypoint_candidates(
+                        {
+                            "x": float(ego_location.x),
+                            "y": float(ego_location.y),
+                            "z": float(getattr(ego_location, "z", 0.0)),
+                        }
+                    )
+                    or []
                 )
-                or []
-            )
             previous_frame = dict(self.local_lane_frame or {})
             previous_corridors = {
                 int(key): list(value or [])
@@ -115,25 +205,26 @@ class RouteContextStage:
                 "candidate_count": 0,
             }
         try:
-            authoritative_lane_id = int(
-                self.map_matching.get("ad_lane_id", 0) or 0
-            )
-            route_manager.sync_route_progress(
-                ego_x_m=float(ego_location.x),
-                ego_y_m=float(ego_location.y),
-                ego_heading_rad=float(ego_heading_rad),
-                current_lane_id=int(authoritative_lane_id),
-            )
+            with _stage_timer(observe_stage_duration, "route_cursor_sync"):
+                authoritative_lane_id = int(
+                    self.map_matching.get("ad_lane_id", 0) or 0
+                )
+                route_manager.sync_route_progress(
+                    ego_x_m=float(ego_location.x),
+                    ego_y_m=float(ego_location.y),
+                    ego_heading_rad=float(ego_heading_rad),
+                    current_lane_id=int(authoritative_lane_id),
+                )
             # RouteManager owns the only runtime cursor.  The global
             # planner stores immutable topology and never advances a
             # second per-query nearest-node index for behavior.
-            route_values = route_manager.get_route_info(
-                x_m=float(ego_location.x),
-                y_m=float(ego_location.y),
-                query_key="authoritative_route_cursor",
-                fallback_lane_id=int(authoritative_lane_id or fallback_lane_id),
-                ego_waypoint=matched_waypoint,
-            )
+                route_values = route_manager.get_route_info(
+                    x_m=float(ego_location.x),
+                    y_m=float(ego_location.y),
+                    query_key="authoritative_route_cursor",
+                    fallback_lane_id=int(authoritative_lane_id or fallback_lane_id),
+                    ego_waypoint=matched_waypoint,
+                )
             summary = SimpleNamespace(**dict(route_values))
             summary.distance_to_destination_m = float(
                 route_values.get("remaining_distance_m", 0.0) or 0.0
@@ -162,35 +253,37 @@ class RouteContextStage:
         local_direction = ""
         local_offset = 0
         target_in_local_frame = False
+        lane_geometries: dict[int, LocalLaneGeometry] = {}
         try:
-            local_graph = global_planner.get_local_lane_graph(
-                float(ego_location.x),
-                float(ego_location.y),
-                z_m=float(getattr(ego_location, "z", 0.0)),
-                forward_distance_m=100.0,
-                backward_distance_m=100.0,
-                ego_waypoint=matched_waypoint,
-            )
+            with _stage_timer(observe_stage_duration, "route_local_graph"):
+                local_graph = global_planner.get_local_lane_graph(
+                    float(ego_location.x),
+                    float(ego_location.y),
+                    z_m=float(getattr(ego_location, "z", 0.0)),
+                    forward_distance_m=100.0,
+                    backward_distance_m=100.0,
+                    ego_waypoint=matched_waypoint,
+                )
             # Freeze the actual AD-map centre geometry into this frame.
             # Downstream planning must not call the map again and derive a
             # different centreline from the same lane identity.
-            lane_centerlines: dict[int, list[dict[str, float]]] = {}
             local_lane_ids = {
                 int(lane_id)
                 for lane_ids in dict(local_graph.get("corridors", {}) or {}).values()
                 for lane_id in list(lane_ids or [])
             }
-            try:
-                raw_route_lane_sequence = (
-                    global_planner.get_local_route_lane_sequence(
-                        float(ego_location.x),
-                        float(ego_location.y),
-                        forward_distance_m=100.0,
-                        backward_distance_m=100.0,
+            with _stage_timer(observe_stage_duration, "route_lane_sequence"):
+                try:
+                    raw_route_lane_sequence = (
+                        global_planner.get_local_route_lane_sequence(
+                            float(ego_location.x),
+                            float(ego_location.y),
+                            forward_distance_m=100.0,
+                            backward_distance_m=100.0,
+                        )
                     )
-                )
-            except Exception:
-                raw_route_lane_sequence = []
+                except Exception:
+                    raw_route_lane_sequence = []
             # Keep stored-route order. The corridor is a set-like lookup;
             # it must never be used to infer successor topology.
             local_graph["route_lane_sequence"] = [
@@ -198,49 +291,13 @@ class RouteContextStage:
                 for lane_id in list(raw_route_lane_sequence or [])
                 if int(lane_id) in local_lane_ids
             ]
-            for lane_id in sorted(local_lane_ids):
-                try:
-                    centerline_waypoints = global_planner.get_lane_centerline(
-                        int(lane_id)
+            with _stage_timer(observe_stage_duration, "route_lane_centerlines"):
+                for lane_id in sorted(local_lane_ids):
+                    geometry = self._cached_lane_geometry(
+                        global_planner, int(lane_id)
                     )
-                except Exception:
-                    centerline_waypoints = []
-                samples: list[dict[str, float]] = []
-                for waypoint in list(centerline_waypoints or []):
-                    position = dict(getattr(waypoint, "position", {}) or {})
-                    try:
-                        sample = {
-                            "x_m": float(position["x"]),
-                            "y_m": float(position["y"]),
-                            "lane_width_m": max(
-                                0.1,
-                                float(
-                                    getattr(waypoint, "lane_width_m", 3.5)
-                                    or 3.5
-                                ),
-                            ),
-                        }
-                        left_boundary = getattr(
-                            waypoint, "left_boundary_position", None
-                        )
-                        right_boundary = getattr(
-                            waypoint, "right_boundary_position", None
-                        )
-                        if isinstance(left_boundary, Mapping) and isinstance(
-                            right_boundary, Mapping
-                        ):
-                            sample.update({
-                                "left_boundary_x_m": float(left_boundary["x"]),
-                                "left_boundary_y_m": float(left_boundary["y"]),
-                                "right_boundary_x_m": float(right_boundary["x"]),
-                                "right_boundary_y_m": float(right_boundary["y"]),
-                            })
-                        samples.append(sample)
-                    except (KeyError, TypeError, ValueError):
-                        continue
-                if len(samples) >= 2:
-                    lane_centerlines[int(lane_id)] = samples
-            local_graph["lane_centerlines"] = lane_centerlines
+                    if geometry.centerline:
+                        lane_geometries[int(lane_id)] = geometry
             self.local_lane_frame = dict(local_graph)
             if int(ad_current_lane_id) == 0:
                 # Compatibility/degraded-mode fallback only. In normal
@@ -288,17 +345,19 @@ class RouteContextStage:
             target_in_local_frame
         )
         self.local_map_frame_id += 1
-        self.local_map_snapshot = build_local_map_snapshot(
-            frame_id=int(self.local_map_frame_id),
-            timestamp_s=float(clock()),
-            route_revision=str(
-                getattr(route_manager, "route_revision", "") or ""
-            ),
-            match=self.map_matching,
-            local_graph=self.local_lane_frame,
-            route_target_lane_id=int(ad_target_lane_id),
-            invariant_violations=violations,
-        )
+        with _stage_timer(observe_stage_duration, "route_snapshot_freeze"):
+            self.local_map_snapshot = build_local_map_snapshot(
+                frame_id=int(self.local_map_frame_id),
+                timestamp_s=float(clock()),
+                route_revision=str(
+                    getattr(route_manager, "route_revision", "") or ""
+                ),
+                match=self.map_matching,
+                local_graph=self.local_lane_frame,
+                lane_geometries=lane_geometries,
+                route_target_lane_id=int(ad_target_lane_id),
+                invariant_violations=violations,
+            )
         # Compatibility mirror only. New planning consumers must read the
         # immutable snapshot, not mutate this dictionary.
         self.local_lane_frame = (

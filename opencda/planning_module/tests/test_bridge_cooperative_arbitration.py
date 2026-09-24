@@ -208,8 +208,10 @@ def _peer_lane_change_claim(bridge, *, committed_at_s, phase="committed"):
 
 
 def _arbitrate(bridge, frame, *, sim_time_s, proposal):
+    cav_intents = tuple(bridge._collect_cav_intents())
     request = bridge._build_cooperative_request(
-        cooperative_proposal=proposal, sim_time_s=sim_time_s, **frame
+        cooperative_proposal=proposal, sim_time_s=sim_time_s,
+        cav_intents=cav_intents, **frame
     )
     result = bridge.pipeline.resolve_cooperative(request)
     return result.cav_resolution, result.lane_change_deferred

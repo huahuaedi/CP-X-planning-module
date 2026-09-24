@@ -4619,6 +4619,17 @@ class MPC:
             Solve one MPC optimization and return future states [x,y,v,psi].
         """
 
+        plan_started_s = time.perf_counter()
+        timing_ms = {
+            "prepare": 0.0,
+            "reference": 0.0,
+            "qp_build": 0.0,
+            "qp_solve_wall": 0.0,
+            "cost_evaluation": 0.0,
+            "finalize": 0.0,
+            "total": 0.0,
+        }
+        self._last_timing_ms = {}
         if len(current_state) != 4:
             raise ValueError("current_state must be [x, y, v, psi].")
 
@@ -4793,6 +4804,10 @@ class MPC:
                     shifted_seed_x,
                     np.asarray(shifted_seed[1], dtype=float),
                 )
+        timing_ms["prepare"] = 1000.0 * (
+            time.perf_counter() - plan_started_s
+        )
+        reference_started_s = time.perf_counter()
         # Build the immutable tracking target from the current published
         # reference.  A shifted previous solution may still seed dynamics
         # linearisation below, but must never replace this target.
@@ -4829,6 +4844,9 @@ class MPC:
             speed_upper_bound_mps=float(active_speed_upper_bound_mps),
             reachable_speed_floor_profile_mps=reachable_speed_floor_profile_mps,
         )
+        timing_ms["reference"] += 1000.0 * (
+            time.perf_counter() - reference_started_s
+        )
 
         def _run_sequential_qp(
             initial_x_ref_rollout: np.ndarray,
@@ -4844,6 +4862,7 @@ class MPC:
             status_text = "not_solved"
 
             for iteration_idx in range(int(self.reference_sequential_iterations)):
+                qp_build_started_s = time.perf_counter()
                 P, q, A, l, u, index = self._build_qp(
                     x0=x0,
                     x_ref_target=destination,
@@ -4868,7 +4887,14 @@ class MPC:
                     corridor_rows=corridor_rows,
                     tracking_ref_rollout=fixed_tracking_x_ref_rollout,
                 )
+                timing_ms["qp_build"] += 1000.0 * (
+                    time.perf_counter() - qp_build_started_s
+                )
+                qp_solve_started_s = time.perf_counter()
                 solution, status, solve_time_ms = self._solve_qp(P=P, q=q, A=A, l=l, u=u)
+                timing_ms["qp_solve_wall"] += 1000.0 * (
+                    time.perf_counter() - qp_solve_started_s
+                )
                 solve_time_total_ms += float(solve_time_ms)
 
                 if solution is None:
@@ -4926,6 +4952,7 @@ class MPC:
                     f"{int(self.reference_consecutive_solver_failure_reset_threshold)} consecutive replans; "
                     "clearing stored solution and retrying with a fresh rollout."
                 )
+            reference_started_s = time.perf_counter()
             clean_x_ref_rollout, clean_u_ref_rollout = self._reference_rollout(
                 x0=x0,
                 x_ref_target=destination,
@@ -4950,6 +4977,9 @@ class MPC:
                         reachable_speed_floor_profile_mps
                     ),
                 )
+            )
+            timing_ms["reference"] += 1000.0 * (
+                time.perf_counter() - reference_started_s
             )
             (
                 best_x_solution,
@@ -4977,6 +5007,7 @@ class MPC:
 
         self._last_status = str(best_status)
         self._last_solve_time_ms = float(total_solve_time_ms)
+        finalize_started_s = time.perf_counter()
 
         if best_x_solution is None or best_u_solution is None:
             x_solution, u_solution = self._fail_safe_fallback_trajectory(
@@ -5016,6 +5047,7 @@ class MPC:
             x_ref_rollout=np.asarray(tracking_x_ref_rollout, dtype=float),
             lane_center_reference=lane_center_reference,
         )
+        cost_started_s = time.perf_counter()
         self._last_cost_terms = self._evaluate_plan_cost_terms(
             x_traj=x_solution,
             u_traj=u_solution,
@@ -5028,6 +5060,9 @@ class MPC:
             tracking_reference_rollout=np.asarray(
                 tracking_x_ref_rollout, dtype=float
             ),
+        )
+        timing_ms["cost_evaluation"] = 1000.0 * (
+            time.perf_counter() - cost_started_s
         )
 
         world_x_solution_internal = np.asarray(x_solution, dtype=float).copy()
@@ -5063,6 +5098,17 @@ class MPC:
                     float(self._wrap_angle(float(x_solution[k, 3]))),
                 ]
             )
+        timing_ms["finalize"] = max(
+            0.0,
+            1000.0 * (time.perf_counter() - finalize_started_s)
+            - float(timing_ms["cost_evaluation"]),
+        )
+        timing_ms["total"] = 1000.0 * (
+            time.perf_counter() - plan_started_s
+        )
+        self._last_timing_ms = {
+            str(name): float(value) for name, value in timing_ms.items()
+        }
         return output
 
     def probe_trajectory_feasibility(
@@ -5082,6 +5128,7 @@ class MPC:
         mutable_fields = (
             "_last_status",
             "_last_solve_time_ms",
+            "_last_timing_ms",
             "_last_active_max_velocity_mps",
             "_last_cost_terms",
             "_last_lane_keeping_profile",

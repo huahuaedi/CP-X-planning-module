@@ -78,14 +78,29 @@ class CAVConflictSchedule:
         an otherwise valid held control solution.
         """
         diag = dict(diagnostics or {})
+        longitudinal_rows = int(diag.get("longitudinal_qp_row_count", 0) or 0)
+        homotopy_rows = int(diag.get("homotopy_qp_row_count", 0) or 0)
+        credible_vetoes = int(diag.get("credible_mode_veto_count", 0) or 0)
+        feasible = bool(diag.get("corridor_feasible", True))
+        # Roles and classifications are planning diagnostics until they
+        # produce an MPC row (or an infeasible/veto safety state).  Treating
+        # harmless FOLLOW/CROSSING tag churn as a constraint revision made a
+        # 5 Hz MPC solve again at the 20 Hz perception rate in clear scenes.
+        if (
+            longitudinal_rows == 0
+            and homotopy_rows == 0
+            and credible_vetoes == 0
+            and feasible
+        ):
+            return "open"
         return repr((
             tuple(sorted(dict(diag.get("roles", {})).items())),
             tuple(sorted(dict(diag.get("tags", {})).items())),
             tuple(diag.get("corridor_binding", ()) or ()),
-            int(diag.get("credible_mode_veto_count", 0) or 0),
-            bool(diag.get("corridor_feasible", True)),
-            int(diag.get("longitudinal_qp_row_count", 0) or 0),
-            int(diag.get("homotopy_qp_row_count", 0) or 0),
+            credible_vetoes,
+            feasible,
+            longitudinal_rows,
+            homotopy_rows,
         ))
 
     @staticmethod

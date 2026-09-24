@@ -104,6 +104,71 @@ class SpeedConstraint:
     reason: str = ""
 
 
+def project_agent_progress_speeds(
+    *,
+    agent_states: Mapping[str, Mapping[str, object]],
+    reference_samples: Sequence[Mapping[str, object]],
+) -> dict[str, float]:
+    """Project each agent's velocity onto its nearest reference tangent.
+
+    A corridor upper bound advances in the ego reference's station
+    coordinate, so its velocity fallback must be ``ds/dt`` rather than the
+    agent's unsigned world speed.  In particular, a crossing agent moving at
+    8 m/s has approximately zero progress along a perpendicular ego path and
+    must not loosen the longitudinal speed cap by 8 m/s.
+    """
+
+    from opencda.planning_module.pipeline.mpc_obstacle_relevance import (
+        _polyline_xy,
+    )
+
+    polyline = _polyline_xy(reference_samples)
+    if len(polyline) < 2:
+        return {}
+    projected: dict[str, float] = {}
+    for agent_id, state in dict(agent_states or {}).items():
+        try:
+            px = float(state.get("x", state.get("x_m", 0.0)) or 0.0)
+            py = float(state.get("y", state.get("y_m", 0.0)) or 0.0)
+            speed_mps = max(
+                0.0, float(state.get("v", state.get("speed_mps", 0.0)) or 0.0)
+            )
+            heading_rad = float(
+                state.get("psi", state.get("heading_rad", 0.0)) or 0.0
+            )
+        except (TypeError, ValueError):
+            continue
+        best_distance2 = float("inf")
+        best_tangent = None
+        for (ax, ay), (bx, by) in zip(polyline[:-1], polyline[1:]):
+            dx, dy = float(bx) - float(ax), float(by) - float(ay)
+            length2 = dx * dx + dy * dy
+            if length2 <= 1.0e-12:
+                continue
+            parameter = min(
+                1.0,
+                max(0.0, ((px - ax) * dx + (py - ay) * dy) / length2),
+            )
+            closest_x = float(ax) + parameter * dx
+            closest_y = float(ay) + parameter * dy
+            distance2 = (px - closest_x) ** 2 + (py - closest_y) ** 2
+            if distance2 < best_distance2:
+                length = math.sqrt(length2)
+                best_distance2 = distance2
+                best_tangent = (dx / length, dy / length)
+        if best_tangent is None:
+            continue
+        velocity_x = speed_mps * math.cos(heading_rad)
+        velocity_y = speed_mps * math.sin(heading_rad)
+        # A negative projection is an oncoming/moving-away boundary, not a
+        # forward-moving lead that may relax ego's approach speed.
+        projected[str(agent_id)] = max(
+            0.0,
+            velocity_x * best_tangent[0] + velocity_y * best_tangent[1],
+        )
+    return projected
+
+
 def conflict_corridor_speed_constraint(
     *,
     corridor: object,
@@ -116,7 +181,7 @@ def conflict_corridor_speed_constraint(
     ego_acceleration_mps2: float = 0.0,
     max_braking_mps2: float = 3.0,
     max_jerk_mps3: float = 10.0,
-    agent_speed_mps: Optional[Mapping[str, float]] = None,
+    agent_progress_speed_mps: Optional[Mapping[str, float]] = None,
 ) -> Optional[SpeedConstraint]:
     """Convert an active Stage-C progress bound into a nominal speed limit.
 
@@ -141,13 +206,11 @@ def conflict_corridor_speed_constraint(
     bounded-safe-stop ticks and never reached its destination in budget,
     though never a collision or road-boundary breach.
 
-    ``agent_speed_mps`` is each binding agent's own best-known current speed
-    (keyed by the same id ``physical_owner()`` returns), used only when no
-    same-owner neighbor row exists to read a slope from -- see the fallback
-    below. Without it, a bound that wins only a single, isolated corridor
-    stage silently reads as a stationary wall no matter how fast that agent
-    is actually moving, which is needlessly conservative on a real moving
-    peer that just doesn't happen to dominate two adjacent stages.
+    ``agent_progress_speed_mps`` is each binding agent's current velocity
+    projected onto the local ego-reference tangent (keyed by the same id
+    ``physical_owner()`` returns). It is used only when no same-owner neighbor
+    row exists to read a slope from. An unsigned world speed is invalid here:
+    it would let crossing/oncoming motion relax a longitudinal station bound.
     """
 
     from opencda.planning_module.pipeline.mpc_obstacle_relevance import (
@@ -246,14 +309,14 @@ def conflict_corridor_speed_constraint(
                 (neighbor_upper - upper)
                 / ((neighbor_index - index) * dt_s),
             )
-        elif agent_speed_mps:
+        elif agent_progress_speed_mps:
             # No same-owner neighbor stage to read a slope from -- this
             # binding won only one isolated row of the corridor. Falling
             # back to the agent's own current speed (when known) is still
             # strictly better than silently assuming it is a stationary
-            # wall; a genuinely static/crossing agent has no entry here and
-            # keeps the original braking-distance approach unchanged.
-            known_speed = agent_speed_mps.get(physical_owner(binding))
+            # wall. The supplied value is already reference-projected, so
+            # crossing/oncoming motion cannot loosen this longitudinal cap.
+            known_speed = agent_progress_speed_mps.get(physical_owner(binding))
             if known_speed is not None:
                 bound_velocity_mps = max(0.0, float(known_speed))
         candidates.append((

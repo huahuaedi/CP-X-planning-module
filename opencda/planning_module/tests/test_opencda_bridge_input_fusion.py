@@ -56,6 +56,37 @@ from pipeline.perception_stage import PerceptionStage
 
 
 class OpenCDABridgeInputFusionTests(unittest.TestCase):
+    def test_route_context_reuses_immutable_lane_geometry_by_planner(self):
+        stage = RouteContextStage()
+        waypoint = SimpleNamespace(
+            position={"x": 1.0, "y": 2.0},
+            lane_width_m=3.6,
+            left_boundary_position={"x": 1.0, "y": 3.8},
+            right_boundary_position={"x": 1.0, "y": 0.2},
+        )
+        next_waypoint = SimpleNamespace(
+            position={"x": 2.0, "y": 2.0},
+            lane_width_m=3.6,
+            left_boundary_position={"x": 2.0, "y": 3.8},
+            right_boundary_position={"x": 2.0, "y": 0.2},
+        )
+        planner = SimpleNamespace(
+            get_lane_centerline=Mock(return_value=[waypoint, next_waypoint])
+        )
+
+        first = stage._cached_lane_geometry(planner, 42)
+        second = stage._cached_lane_geometry(planner, 42)
+
+        planner.get_lane_centerline.assert_called_once_with(42)
+        self.assertIs(first, second)
+        self.assertEqual(second.centerline[0].x_m, 1.0)
+        replacement = SimpleNamespace(
+            get_lane_centerline=Mock(return_value=[waypoint, next_waypoint])
+        )
+        replacement_geometry = stage._cached_lane_geometry(replacement, 42)
+        replacement.get_lane_centerline.assert_called_once_with(42)
+        self.assertIsNot(replacement_geometry, first)
+
     def test_reset_pipeline_for_route_revision_runs_every_step_despite_a_failure(self):
         # One sub-reset raising must not skip the rest and leave a mix of
         # new-route and still-stale state -- worse than any single

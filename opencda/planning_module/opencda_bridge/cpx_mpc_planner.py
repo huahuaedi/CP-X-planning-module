@@ -183,38 +183,29 @@ class CPXMPCPlannerBridge:
             "sim_time_s": float(self._sim_time_s()),
         }
 
-    # Ad-hoc stage-level timing: run_step's own wall time was found to be the
-    # dominant cost in MDrive's per-tick loop (~150ms/call vs. mpc_solve_time_ms's
-    # 3ms), so this locates which of the pipeline's stages inside that call
-    # actually spends it.
-    def _accum_stage_ms(self, name: str, seconds: float) -> None:
-        stats = self.__dict__.setdefault("_stage_ms_stats", {})
-        total, count = stats.get(name, (0.0, 0))
-        stats[name] = (total + seconds * 1000.0, count + 1)
+    def _begin_stage_timing_cycle(self) -> None:
+        """Open one structured timing/cache frame for the planning tick."""
 
-    def _print_and_reset_stage_ms(self) -> None:
-        stats = self.__dict__.get("_stage_ms_stats", {})
-        if stats:
-            parts = [
-                f"{name}: total={total:.0f}ms avg={total / max(1, count):.1f}ms"
-                for name, (total, count) in stats.items()
-            ]
-            print("[cpx_stage_timing] last 50 calls -- " + " | ".join(parts), flush=True)
-            self._stage_ms_stats = {}
-        wp_hits = self.__dict__.get("_waypoint_cache_hits", 0)
-        wp_misses = self.__dict__.get("_waypoint_cache_misses", 0)
-        if wp_hits or wp_misses:
-            wp_total = wp_hits + wp_misses
-            print(
-                "[cpx_stage_timing] prediction get_waypoint cache -- "
-                f"last 50 ticks: hits={wp_hits} misses={wp_misses} "
-                f"hit_rate={100.0 * wp_hits / max(1, wp_total):.0f}% "
-                f"(native calls avoided: {wp_hits}/{wp_total})",
-                flush=True,
+        self._stage_ms_current = {}
+        self._waypoint_cache_hits_current = 0
+        self._waypoint_cache_misses_current = 0
+
+    def _accum_stage_ms(self, name: str, seconds: float) -> None:
+        """Accumulate one named duration in the current tick."""
+
+        elapsed_ms = max(0.0, float(seconds) * 1000.0)
+        current = self.__dict__.setdefault("_stage_ms_current", {})
+        current[str(name)] = float(current.get(str(name), 0.0)) + elapsed_ms
+
+    def _stage_timing_snapshot(self) -> dict:
+        """Return the immutable timing evidence for the current planner tick."""
+
+        return {
+            str(name): round(float(elapsed_ms), 6)
+            for name, elapsed_ms in sorted(
+                dict(self.__dict__.get("_stage_ms_current", {}) or {}).items()
             )
-            self._waypoint_cache_hits = 0
-            self._waypoint_cache_misses = 0
-            self._per_tick_waypoint_repeat_pct = []
+        }
 
     def run_step(self) -> carla.VehicleControl:
         """Plan and return a low-level CARLA control command.
@@ -251,6 +242,7 @@ class CPXMPCPlannerBridge:
            control path.
         """
 
+        _run_step_started = time.monotonic()
         try:
             planner_output = self.execute_planning_pipeline()
         except Exception as exc:
@@ -271,10 +263,32 @@ class CPXMPCPlannerBridge:
             return stop.control
         self.last_output = planner_output
         self.last_debug = planner_output.diagnostics_dict()
+        self._accum_stage_ms(
+            "execute_planning_pipeline_total",
+            time.monotonic() - _run_step_started,
+        )
+        self.last_debug["stage_timing_ms"] = self._stage_timing_snapshot()
+        waypoint_hits = int(getattr(self, "_waypoint_cache_hits_current", 0))
+        waypoint_misses = int(
+            getattr(self, "_waypoint_cache_misses_current", 0)
+        )
+        waypoint_queries = waypoint_hits + waypoint_misses
+        self.last_debug["waypoint_cache"] = {
+            "hits": waypoint_hits,
+            "misses": waypoint_misses,
+            "hit_rate": (
+                float(waypoint_hits) / float(waypoint_queries)
+                if waypoint_queries else 0.0
+            ),
+        }
+        self.last_debug["previous_debug_record_ms"] = float(
+            getattr(self, "_previous_debug_record_ms", 0.0)
+        )
+        _debug_record_started = time.monotonic()
         self._record_debug(self.last_debug)
-        self._stage_timing_call_count = getattr(self, "_stage_timing_call_count", 0) + 1
-        if self._stage_timing_call_count % 50 == 0:
-            self._print_and_reset_stage_ms()
+        self._previous_debug_record_ms = 1000.0 * (
+            time.monotonic() - _debug_record_started
+        )
         return planner_output.control
 
     def _apply_velocity_steering_interface(
@@ -366,7 +380,9 @@ class CPXMPCPlannerBridge:
         plan() through PlanningTickAdapters.
         """
 
+        self._begin_stage_timing_cycle()
         latest_update = dict(getattr(self, "_latest_opencda_update", {}) or {})
+        _ts_stage = time.monotonic()
         if self.cp_provider is not None:
             try:
                 self.cp_provider.publish(
@@ -379,6 +395,7 @@ class CPXMPCPlannerBridge:
             except Exception as exc:
                 if self.debug:
                     print(f"[CP-X OpenCDA Bridge] native CP publish failed: {exc}")
+        self._accum_stage_ms("cp_publish", time.monotonic() - _ts_stage)
         _ts_stage = time.monotonic()
         cycle = self.pipeline.begin_cycle(
             timestamp_s=float(self._sim_time_s()),
@@ -412,12 +429,14 @@ class CPXMPCPlannerBridge:
             ),
         )
         self._accum_stage_ms("begin_cycle", time.monotonic() - _ts_stage)
+        _ts_stage = time.monotonic()
         output = self.pipeline.plan(
             cycle,
             self._planning_tick_adapters(
                 safety_manager=latest_update.get("safety_manager"),
             ),
         )
+        self._accum_stage_ms("pipeline_plan_total", time.monotonic() - _ts_stage)
         self._last_accel_mps2 = float(output.acceleration_mps2)
         self._last_steer_rad = float(output.steering_rad)
         return output
@@ -1002,12 +1021,13 @@ class CPXMPCPlannerBridge:
                 LANE_CHANGE
             ).mutable_samples()
         )
-        # Known ahead of the full cav_intents collection below (used later
-        # for corridor/arbitration) so a cooperative peer that is briefly
-        # stopped mid-negotiation isn't mistaken for a permanently parked
-        # obstacle by _escalate_stationary_lead_blockage -- see its docstring.
+        # Freeze the V2X inbox once for this planning tick. Behavior and
+        # cooperative arbitration must consume the same peer/claim snapshot;
+        # collecting again later can observe a different peer sequence inside
+        # one nominally immutable planning frame.
+        cav_intents = tuple(self._collect_cav_intents())
         cooperative_actor_ids = frozenset(
-            str(intent.actor_id) for intent in self._collect_cav_intents()
+            str(intent.actor_id) for intent in cav_intents
         )
         executable_behavior = self.pipeline.prepare_executable_behavior(
             ExecutableBehaviorPreparationRequest(
@@ -1154,6 +1174,7 @@ class CPXMPCPlannerBridge:
                 planned_speed_mps=planned_speed_mps,
                 planner_input_frame=planner_input_frame,
                 sim_time_s=sim_time_s,
+                cav_intents=cav_intents,
             )
         )
         selected_reference = self.pipeline.select_candidate_reference(
@@ -1223,11 +1244,10 @@ class CPXMPCPlannerBridge:
         self, *, cooperative_proposal, current_state, ego_location,
         ego_yaw_rad, ego_speed_mps, local_lane_center_reference,
         local_map_snapshot, object_snapshots, planned_speed_mps,
-        planner_input_frame, sim_time_s,
+        planner_input_frame, sim_time_s, cav_intents,
     ):
-        """Adapt OpenCDA/V2X inputs into the cooperative stage contract."""
+        """Adapt one frozen tick's OpenCDA/V2X inputs into the stage contract."""
 
-        cav_intents = self._collect_cav_intents()
         return CooperativeArbitrationRequest(
             proposal=cooperative_proposal,
             current_state=current_state,
@@ -1242,7 +1262,7 @@ class CPXMPCPlannerBridge:
             prediction_revision=str(planner_input_frame.prediction.revision),
             predicted_objects=planner_input_frame.prediction.predicted_objects,
             sim_time_s=sim_time_s,
-            cav_intents=cav_intents,
+            cav_intents=tuple(cav_intents or ()),
             transport_diagnostics=self._cav_transport_diagnostics,
             last_accel_mps2=self._last_accel_mps2,
         )
@@ -1753,9 +1773,13 @@ class CPXMPCPlannerBridge:
         def get_waypoint_fn(pose):
             key = (round(float(pose["x"]), 1), round(float(pose["y"]), 1))
             if key in _waypoint_cache:
-                self._waypoint_cache_hits = getattr(self, "_waypoint_cache_hits", 0) + 1
+                self._waypoint_cache_hits_current = int(
+                    getattr(self, "_waypoint_cache_hits_current", 0)
+                ) + 1
                 return _waypoint_cache[key]
-            self._waypoint_cache_misses = getattr(self, "_waypoint_cache_misses", 0) + 1
+            self._waypoint_cache_misses_current = int(
+                getattr(self, "_waypoint_cache_misses_current", 0)
+            ) + 1
             result = _raw_get_waypoint_fn(pose)
             _waypoint_cache[key] = result
             return result
@@ -2139,6 +2163,7 @@ class CPXMPCPlannerBridge:
                 ego_location=ego_location,
                 ego_heading_rad=ego_heading_rad,
                 fallback_lane_id=fallback_lane_id,
+                observe_stage_duration=self._accum_stage_ms,
             )
         if not hasattr(self, "route_manager"):
             return {

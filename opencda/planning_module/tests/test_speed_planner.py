@@ -25,6 +25,7 @@ conflict_corridor_speed_constraint = (
     speed_planner.conflict_corridor_speed_constraint
 )
 cooperative_gap_speed_constraint = speed_planner.cooperative_gap_speed_constraint
+project_agent_progress_speeds = speed_planner.project_agent_progress_speeds
 
 
 class SpeedPlannerTest(unittest.TestCase):
@@ -206,7 +207,7 @@ class SpeedPlannerTest(unittest.TestCase):
 
     def test_isolated_row_without_agent_speed_still_reads_as_stationary(self):
         # A binding that only wins a single corridor stage has no same-owner
-        # neighbor to read a slope from. Without agent_speed_mps supplied,
+        # neighbor to read a slope from. Without a projected speed supplied,
         # behavior is unchanged from before the fix: fall back to 0.
         constraint = conflict_corridor_speed_constraint(
             corridor=SimpleNamespace(
@@ -247,7 +248,7 @@ class SpeedPlannerTest(unittest.TestCase):
             ego_y_m=0.0,
             comfortable_deceleration_mps2=2.0,
             corridor_dt_s=0.1,
-            agent_speed_mps={"peer": 8.0},
+            agent_progress_speed_mps={"peer": 8.0},
         )
 
         self.assertIsNotNone(constraint)
@@ -273,11 +274,49 @@ class SpeedPlannerTest(unittest.TestCase):
             ego_y_m=0.0,
             comfortable_deceleration_mps2=2.0,
             corridor_dt_s=0.1,
-            agent_speed_mps={"peer": 6.0},
+            agent_progress_speed_mps={"peer": 6.0},
         )
 
         self.assertIsNotNone(constraint)
         self.assertIn("bound_velocity_mps=6.000", constraint.reason)
+
+    def test_agent_speed_projection_uses_reference_progress_not_world_speed(self):
+        reference = [
+            {"x_ref_m": 0.0, "y_ref_m": 0.0},
+            {"x_ref_m": 30.0, "y_ref_m": 0.0},
+        ]
+        projected = project_agent_progress_speeds(
+            agent_states={
+                "lead": {"x": 8.0, "y": 0.0, "v": 8.0, "psi": 0.0},
+                "crossing": {
+                    "x": 8.0, "y": 1.0, "v": 8.0, "psi": math.pi / 2.0,
+                },
+                "oncoming": {
+                    "x": 8.0, "y": 0.0, "v": 8.0, "psi": math.pi,
+                },
+            },
+            reference_samples=reference,
+        )
+
+        self.assertAlmostEqual(projected["lead"], 8.0)
+        self.assertAlmostEqual(projected["crossing"], 0.0, places=6)
+        self.assertAlmostEqual(projected["oncoming"], 0.0, places=6)
+
+    def test_agent_speed_projection_uses_nearest_curved_reference_segment(self):
+        projected = project_agent_progress_speeds(
+            agent_states={
+                "northbound": {
+                    "x": 10.0, "y": 8.0, "v": 5.0, "psi": math.pi / 2.0,
+                },
+            },
+            reference_samples=[
+                {"x_ref_m": 0.0, "y_ref_m": 0.0},
+                {"x_ref_m": 10.0, "y_ref_m": 0.0},
+                {"x_ref_m": 10.0, "y_ref_m": 10.0},
+            ],
+        )
+
+        self.assertAlmostEqual(projected["northbound"], 5.0)
 
     def test_rows_equal_to_egos_own_braking_floor_are_not_treated_as_a_peer(self):
         # Regression for the four-CAV merge scenario: a through vehicle's own

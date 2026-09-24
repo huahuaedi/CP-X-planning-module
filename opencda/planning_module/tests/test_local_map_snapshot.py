@@ -2,7 +2,11 @@ import dataclasses
 
 import pytest
 
-from pipeline.local_map_snapshot import audit_local_map_rows, build_local_map_snapshot
+from pipeline.local_map_snapshot import (
+    audit_local_map_rows,
+    build_local_lane_geometry,
+    build_local_map_snapshot,
+)
 
 
 def _snapshot(**overrides):
@@ -112,6 +116,26 @@ def test_centerline_geometry_is_deeply_immutable():
     assert geometry is not None
     with pytest.raises(dataclasses.FrozenInstanceError):
         geometry.centerline[0].x_m = 99.0
+
+
+def test_prebuilt_lane_geometry_is_structurally_shared():
+    geometry = build_local_lane_geometry(10, [
+        {"x_m": 0.0, "y_m": 0.0},
+        {"x_m": 1.0, "y_m": 0.0},
+    ])
+    snapshot = build_local_map_snapshot(
+        frame_id=1,
+        timestamp_s=1.0,
+        match={"valid": True, "ad_lane_id": 10},
+        local_graph={
+            "corridors": {0: [10]},
+            "lane_to_offset": {10: 0},
+        },
+        lane_geometries={10: geometry},
+    )
+
+    assert snapshot.geometry_for_lane(10) is geometry
+    assert snapshot.valid
 
 
 def test_admap_boundaries_are_preserved_instead_of_reconstructed_from_width():

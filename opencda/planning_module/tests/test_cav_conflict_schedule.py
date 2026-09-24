@@ -227,6 +227,21 @@ def test_constraint_revision_changes_with_constraint_topology():
     )
 
 
+def test_constraint_revision_ignores_nonbinding_role_and_tag_churn():
+    first = {
+        "roles": {7: "yield"}, "tags": {7: "FOLLOW"},
+        "corridor_binding": [], "corridor_feasible": True,
+        "longitudinal_qp_row_count": 0, "homotopy_qp_row_count": 0,
+    }
+    second = {
+        "roles": {7: "proceed"}, "tags": {7: "CROSSING"},
+        "corridor_binding": [], "corridor_feasible": True,
+        "longitudinal_qp_row_count": 0, "homotopy_qp_row_count": 0,
+    }
+    assert CAVConflictSchedule.constraint_revision(first) == "open"
+    assert CAVConflictSchedule.constraint_revision(second) == "open"
+
+
 def _proposal(target=20):
     return SimpleNamespace(
         maneuver="lane_change_left", target_corridor_id=target,
