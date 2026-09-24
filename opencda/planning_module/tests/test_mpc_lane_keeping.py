@@ -1682,6 +1682,108 @@ class CrossTrackSuppressionIntegrationTests(unittest.TestCase):
         # ...while the along-track (braking) term is completely unaffected.
         self.assertAlmostEqual(x_q_off, x_q_on, places=9)
 
+    def test_vectorized_obstacle_cost_matches_scalar_cost(self):
+        obstacle_state = [4.0, -1.0, 2.0, 0.35]
+        points = np.asarray(
+            [[0.0, 0.0], [1.5, -0.2], [4.1, -1.1], [7.0, 2.0]],
+            dtype=float,
+        )
+        for log_barrier_enabled, replace_exponential in (
+            (False, False),
+            (True, False),
+            (True, True),
+        ):
+            config = self._obstacle_mpc_config(
+                cross_track_suppression_enabled=False
+            )
+            repulsive = config[0]["cost"]["repulsive_potential"]
+            repulsive["log_barrier_enabled"] = bool(log_barrier_enabled)
+            repulsive["log_barrier_replace_exponential"] = bool(
+                replace_exponential
+            )
+            repulsive["w_log_barrier"] = 13.0
+            repulsive["log_barrier_gain"] = 4.0
+            mpc = MPC(*config)
+            batch = mpc._superellipsoid_obstacle_cost_xy_batch(
+                ego_xy=points,
+                obstacle_state=obstacle_state,
+                obstacle_length_m=4.7,
+                obstacle_width_m=2.1,
+            )
+            scalar = np.asarray(
+                [
+                    mpc._superellipsoid_obstacle_cost(
+                        ego_state=[point[0], point[1], 9.0, -2.0],
+                        obstacle_state=obstacle_state,
+                        obstacle_length_m=4.7,
+                        obstacle_width_m=2.1,
+                    )
+                    for point in points
+                ],
+                dtype=float,
+            )
+            np.testing.assert_allclose(
+                batch, scalar, rtol=1.0e-12, atol=1.0e-12
+            )
+
+    def test_vectorized_taylor_matches_xy_scalar_stencil(self):
+        mpc = MPC(*self._obstacle_mpc_config(cross_track_suppression_enabled=False))
+        ego_state = np.asarray([1.2, -0.4, 5.0, 0.7], dtype=float)
+        obstacle_state = [4.0, 0.8, 1.0, -0.2]
+        p0, gradient, hessian = mpc._superellipsoid_cost_taylor_terms(
+            ego_state_ref=ego_state,
+            obstacle_state=obstacle_state,
+            obstacle_length_m=4.5,
+            obstacle_width_m=2.0,
+        )
+
+        def scalar(dx, dy):
+            state = ego_state.copy()
+            state[0] += dx
+            state[1] += dy
+            return mpc._superellipsoid_obstacle_cost(
+                ego_state=state,
+                obstacle_state=obstacle_state,
+                obstacle_length_m=4.5,
+                obstacle_width_m=2.0,
+            )
+
+        step = 0.05
+        expected_gradient_x = (scalar(step, 0.0) - scalar(-step, 0.0)) / (2.0 * step)
+        expected_gradient_y = (scalar(0.0, step) - scalar(0.0, -step)) / (2.0 * step)
+        expected_hessian_xy = (
+            scalar(step, step) - scalar(step, -step)
+            - scalar(-step, step) + scalar(-step, -step)
+        ) / (4.0 * step * step)
+        self.assertAlmostEqual(p0, scalar(0.0, 0.0), places=12)
+        self.assertAlmostEqual(gradient[0], expected_gradient_x, places=10)
+        self.assertAlmostEqual(gradient[1], expected_gradient_y, places=10)
+        self.assertAlmostEqual(hessian[0, 1], expected_hessian_xy, places=9)
+        np.testing.assert_array_equal(gradient[2:], np.zeros(2, dtype=float))
+        np.testing.assert_array_equal(hessian[2:, :], np.zeros((2, 4), dtype=float))
+        np.testing.assert_array_equal(hessian[:, 2:], np.zeros((4, 2), dtype=float))
+
+    def test_sparse_qp_topology_is_reused_with_fresh_values(self):
+        mpc = MPC(*self._obstacle_mpc_config(cross_track_suppression_enabled=False))
+        first = mpc._cached_csc_matrix(
+            family="test",
+            rows=[0, 1, 0],
+            cols=[0, 0, 1],
+            values=[1.0, 2.0, 3.0],
+            shape=(2, 2),
+        )
+        second = mpc._cached_csc_matrix(
+            family="test",
+            rows=[0, 1, 0],
+            cols=[0, 0, 1],
+            values=[4.0, 5.0, 6.0],
+            shape=(2, 2),
+        )
+        np.testing.assert_array_equal(first.toarray(), [[1.0, 3.0], [2.0, 0.0]])
+        np.testing.assert_array_equal(second.toarray(), [[4.0, 6.0], [5.0, 0.0]])
+        self.assertEqual(mpc._qp_sparse_pattern_cache_misses, 1)
+        self.assertEqual(mpc._qp_sparse_pattern_cache_hits, 1)
+
 
 class MinimumProgressContractTests(unittest.TestCase):
     @staticmethod

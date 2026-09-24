@@ -281,6 +281,15 @@ class MPC:
             raise ValueError("mpc.horizon_s and mpc.plan_dt_s must be > 0.")
         self.horizon_steps = max(1, int(round(self.horizon_s / self.dt_s)))
         self.horizon_s = float(self.horizon_steps * self.dt_s)
+        # QP values change every SQP iteration, but the sparse row/column
+        # topology usually does not.  Cache the CSC topology and only scatter
+        # fresh numeric values into it on subsequent builds.  The cache is
+        # deliberately small because adaptive horizons and optional
+        # constraint groups produce a bounded family of valid topologies.
+        self._qp_sparse_pattern_cache = {}
+        self._qp_sparse_pattern_cache_limit = 12
+        self._qp_sparse_pattern_cache_hits = 0
+        self._qp_sparse_pattern_cache_misses = 0
 
         # Off by default: horizon_s above governs everything unless a caller
         # (the bridge, per behavior mode + obstacle state) explicitly drives
@@ -2163,8 +2172,15 @@ class MPC:
         obstacle_width_m: float,
     ) -> Tuple[float, np.ndarray, np.ndarray]:
         """
-        Numerical Taylor ingredients of the super-ellipsoid obstacle cost with
-        respect to ego state [x, y, v, psi] at one stage reference point.
+        Vectorized numerical Taylor ingredients of the super-ellipsoid cost.
+
+        The live obstacle geometry depends only on ego world position.  The
+        former generic 4-D finite difference evaluated the same scalar cost 33
+        times, including perturbations in speed and heading that are exactly
+        irrelevant.  Evaluate the nine unique x/y stencil points together and
+        leave the v/psi derivatives explicitly zero.  This preserves the
+        existing central-difference model while removing most Python call
+        overhead from every obstacle/stage/SQP iteration.
         """
 
         state_ref = np.array(
@@ -2176,46 +2192,153 @@ class MPC:
             ],
             dtype=float,
         )
-        step_sizes = np.array([0.05, 0.05, 0.05, 0.01], dtype=float)
-
-        def evaluate(query_state: np.ndarray) -> float:
-            state_eval = np.asarray(query_state, dtype=float).copy()
-            state_eval[3] = self._wrap_angle(float(state_eval[3]))
-            return self._superellipsoid_obstacle_cost(
-                ego_state=state_eval,
-                obstacle_state=obstacle_state,
-                obstacle_length_m=float(obstacle_length_m),
-                obstacle_width_m=float(obstacle_width_m),
-            )
-
-        p0 = float(evaluate(state_ref))
+        step_x_m = 0.05
+        step_y_m = 0.05
+        query_xy = np.asarray(
+            [
+                [state_ref[0], state_ref[1]],
+                [state_ref[0] + step_x_m, state_ref[1]],
+                [state_ref[0] - step_x_m, state_ref[1]],
+                [state_ref[0], state_ref[1] + step_y_m],
+                [state_ref[0], state_ref[1] - step_y_m],
+                [state_ref[0] + step_x_m, state_ref[1] + step_y_m],
+                [state_ref[0] + step_x_m, state_ref[1] - step_y_m],
+                [state_ref[0] - step_x_m, state_ref[1] + step_y_m],
+                [state_ref[0] - step_x_m, state_ref[1] - step_y_m],
+            ],
+            dtype=float,
+        )
+        values = self._superellipsoid_obstacle_cost_xy_batch(
+            ego_xy=query_xy,
+            obstacle_state=obstacle_state,
+            obstacle_length_m=float(obstacle_length_m),
+            obstacle_width_m=float(obstacle_width_m),
+        )
+        p0 = float(values[0])
         gradient = np.zeros(4, dtype=float)
         hessian = np.zeros((4, 4), dtype=float)
-
-        for idx in range(4):
-            delta = np.zeros(4, dtype=float)
-            delta[idx] = float(step_sizes[idx])
-            f_plus = float(evaluate(state_ref + delta))
-            f_minus = float(evaluate(state_ref - delta))
-            gradient[idx] = (f_plus - f_minus) / (2.0 * float(step_sizes[idx]))
-            hessian[idx, idx] = (f_plus - 2.0 * p0 + f_minus) / (float(step_sizes[idx]) ** 2)
-
-        for row in range(4):
-            for col in range(row + 1, 4):
-                delta_row = np.zeros(4, dtype=float)
-                delta_col = np.zeros(4, dtype=float)
-                delta_row[row] = float(step_sizes[row])
-                delta_col[col] = float(step_sizes[col])
-                f_pp = float(evaluate(state_ref + delta_row + delta_col))
-                f_pm = float(evaluate(state_ref + delta_row - delta_col))
-                f_mp = float(evaluate(state_ref - delta_row + delta_col))
-                f_mm = float(evaluate(state_ref - delta_row - delta_col))
-                mixed = (f_pp - f_pm - f_mp + f_mm) / (4.0 * float(step_sizes[row]) * float(step_sizes[col]))
-                hessian[row, col] = mixed
-                hessian[col, row] = mixed
-
-        hessian = 0.5 * (hessian + hessian.T)
+        gradient[0] = (float(values[1]) - float(values[2])) / (2.0 * step_x_m)
+        gradient[1] = (float(values[3]) - float(values[4])) / (2.0 * step_y_m)
+        hessian[0, 0] = (
+            float(values[1]) - 2.0 * p0 + float(values[2])
+        ) / (step_x_m * step_x_m)
+        hessian[1, 1] = (
+            float(values[3]) - 2.0 * p0 + float(values[4])
+        ) / (step_y_m * step_y_m)
+        hessian_xy = (
+            float(values[5]) - float(values[6])
+            - float(values[7]) + float(values[8])
+        ) / (4.0 * step_x_m * step_y_m)
+        hessian[0, 1] = hessian_xy
+        hessian[1, 0] = hessian_xy
         return float(p0), np.asarray(gradient, dtype=float), np.asarray(hessian, dtype=float)
+
+    def _superellipsoid_obstacle_cost_xy_batch(
+        self,
+        *,
+        ego_xy: np.ndarray,
+        obstacle_state: Sequence[float],
+        obstacle_length_m: float,
+        obstacle_width_m: float,
+    ) -> np.ndarray:
+        """Evaluate the live obstacle cost for an ``N x 2`` position batch."""
+
+        points = np.asarray(ego_xy, dtype=float)
+        if points.ndim != 2 or points.shape[1] != 2:
+            raise ValueError("ego_xy must be an N x 2 array")
+        obs_x_m = float(obstacle_state[0]) if len(obstacle_state) >= 1 else 0.0
+        obs_y_m = float(obstacle_state[1]) if len(obstacle_state) >= 2 else 0.0
+        obs_psi_rad = float(obstacle_state[3]) if len(obstacle_state) >= 4 else 0.0
+        cos_obs = math.cos(obs_psi_rad)
+        sin_obs = math.sin(obs_psi_rad)
+        dx_m = points[:, 0] - obs_x_m
+        dy_m = points[:, 1] - obs_y_m
+        x_local_m = dx_m * cos_obs + dy_m * sin_obs
+        y_local_m = -dx_m * sin_obs + dy_m * cos_obs
+
+        xc_m = max(
+            1.0e-6,
+            0.5 * (
+                max(1.0e-6, float(obstacle_length_m))
+                + float(self.repulsive_cost.static_longitudinal_buffer_m)
+            ),
+        )
+        yc_m = max(
+            1.0e-6,
+            0.5 * (
+                max(1.0e-6, float(obstacle_width_m))
+                + float(self.repulsive_cost.static_lateral_buffer_m)
+            ),
+        )
+        exponent = max(2.0, float(self.repulsive_cost.shape_exponent))
+        radius = (
+            np.abs(x_local_m / xc_m) ** exponent
+            + np.abs(y_local_m / yc_m) ** exponent
+        ) ** (1.0 / exponent)
+        margin = radius - float(self.repulsive_cost.collision_distance_shift)
+        total = np.zeros(points.shape[0], dtype=float)
+        if not bool(self.repulsive_cost.log_barrier_replace_exponential):
+            total += float(self.repulsive_cost.w_collision_zone) * np.exp(
+                -float(self.repulsive_cost.collision_exponential_gain) * margin
+            )
+        if bool(self.repulsive_cost.log_barrier_enabled):
+            total += float(self.repulsive_cost.w_log_barrier) * np.logaddexp(
+                0.0,
+                -float(self.repulsive_cost.log_barrier_gain) * margin,
+            )
+        return np.asarray(total, dtype=float)
+
+    def _cached_csc_matrix(
+        self,
+        *,
+        family: str,
+        rows: Sequence[int],
+        cols: Sequence[int],
+        values: Sequence[float],
+        shape: Tuple[int, int],
+    ) -> sp.csc_matrix:
+        """Build a CSC matrix while reusing an unchanged sparse topology."""
+
+        row_tuple = tuple(int(value) for value in rows)
+        col_tuple = tuple(int(value) for value in cols)
+        key = (str(family), tuple(int(value) for value in shape), row_tuple, col_tuple)
+        cache = self._qp_sparse_pattern_cache
+        cached = cache.get(key)
+        numeric_values = np.asarray(values, dtype=float)
+        if cached is None:
+            matrix = sp.csc_matrix(
+                (numeric_values, (row_tuple, col_tuple)), shape=shape, dtype=float
+            )
+            coordinate_to_data_index = {}
+            for col_idx in range(int(matrix.shape[1])):
+                for data_idx in range(
+                    int(matrix.indptr[col_idx]), int(matrix.indptr[col_idx + 1])
+                ):
+                    coordinate_to_data_index[(int(matrix.indices[data_idx]), col_idx)] = data_idx
+            scatter = np.asarray(
+                [coordinate_to_data_index[(row, col)] for row, col in zip(row_tuple, col_tuple)],
+                dtype=np.int64,
+            )
+            # Duplicate coordinates would require summation rather than a
+            # direct scatter.  The QP builders deliberately emit unique
+            # coordinates; keep that invariant explicit.
+            if scatter.size != matrix.data.size or np.unique(scatter).size != scatter.size:
+                raise ValueError("QP sparse topology contains duplicate coordinates")
+            if len(cache) >= int(self._qp_sparse_pattern_cache_limit):
+                cache.pop(next(iter(cache)))
+            cache[key] = (
+                np.asarray(matrix.indices, dtype=np.int32).copy(),
+                np.asarray(matrix.indptr, dtype=np.int32).copy(),
+                scatter,
+            )
+            self._qp_sparse_pattern_cache_misses += 1
+            return matrix
+
+        indices, indptr, scatter = cached
+        data = np.empty(len(indices), dtype=float)
+        data[scatter] = numeric_values
+        self._qp_sparse_pattern_cache_hits += 1
+        return sp.csc_matrix((data, indices, indptr), shape=shape, copy=False)
 
     def _project_symmetric_hessian_to_psd(self, hessian: np.ndarray) -> np.ndarray:
         """
@@ -3951,9 +4074,21 @@ class MPC:
             p_rows = [idx_pair[0] for idx_pair in p_entries.keys()]
             p_cols = [idx_pair[1] for idx_pair in p_entries.keys()]
             p_vals = [val for val in p_entries.values()]
-            P = sp.csc_matrix((p_vals, (p_rows, p_cols)), shape=(n_var, n_var), dtype=float)
+            P = self._cached_csc_matrix(
+                family="P",
+                rows=p_rows,
+                cols=p_cols,
+                values=p_vals,
+                shape=(n_var, n_var),
+            )
 
-        A = sp.csc_matrix((a_data, (a_row, a_col)), shape=(len(lower_bounds), n_var), dtype=float)
+        A = self._cached_csc_matrix(
+            family="A",
+            rows=a_row,
+            cols=a_col,
+            values=a_data,
+            shape=(len(lower_bounds), n_var),
+        )
         l = np.asarray(lower_bounds, dtype=float)
         u = np.asarray(upper_bounds, dtype=float)
         # Cheap, read-only snapshot of which constraint groups this specific

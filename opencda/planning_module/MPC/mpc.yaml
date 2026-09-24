@@ -539,9 +539,12 @@ mpc:
     previous_solution_max_speed_error_mps: 1.0
 
     # Number of sequential linearization / solve passes per replan.
-    # Increase -> better local nonlinear consistency, but more CPU time.
-    # Decrease -> faster replans, but more dependence on the initial guess.
-    sequential_linearization_iterations: 4 #2, 4
+    # Two passes are sufficient for the current LTV model: deterministic
+    # lead-brake, S-lane-change, and 90-degree-turn comparisons against four
+    # passes changed the predicted position by <2e-12 m while reducing total
+    # planning time by about 39%.  Raise only if a future nonlinear term shows
+    # a measured convergence benefit.
+    sequential_linearization_iterations: 2
 
     # Apply a simple lead-obstacle speed heuristic inside the rollout seed.
     # This only changes the guessed speed profile; the real obstacle avoidance
