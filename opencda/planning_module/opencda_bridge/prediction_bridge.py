@@ -1,9 +1,16 @@
-"""HTTP adapter from the external MTR service to planner predictions.
+"""Adapter from an external MTR predictor to planner predictions.
 
 The adapter has one responsibility: annotate immutable tracker snapshots with
 ``predicted_trajectory``.  The existing ``CPXObstacleTracker`` remains the
 single owner of ``PredictionFrame`` construction, freshness revisions, lane
 risk, and the constant-acceleration fallback.
+
+``MTRPredictionBridge`` itself never talks HTTP or CUDA directly -- it owns
+scheduling (rate limiting, time-rebasing between refreshes, the multi-
+consumer dedup lock) against a small ``client`` interface (one ``request()``
+method). ``_HttpMTRPredictorClient`` is the only backend wired up anywhere
+today; ``_InProcessMTRPredictorClient`` documents the other one for later
+(see its docstring for why it can't run yet).
 """
 
 from __future__ import annotations
@@ -23,6 +30,95 @@ def _track_id(snapshot: Mapping[str, Any]) -> str:
         if value is not None and str(value).strip():
             return str(value).strip()
     return ""
+
+
+class _HttpMTRPredictorClient:
+    """Sends one scene to the external MTR server over localhost HTTP.
+
+    This is the only backend usable today: CARLA 0.9.12's Python client
+    only ships for Python 3.7 (this process's interpreter, env
+    ``opencda_planning``), while the real MTR model needs a torch build
+    matching this machine's GPU (RTX PRO 4000 Blackwell, sm_120) that only
+    exists for Python >=3.9 (env ``cpx-mtr-blackwell``) -- the two cannot
+    share an interpreter, so the model runs as a separate process and is
+    reached over this HTTP call. See ``MTRPredictionBridge``'s docstring and
+    ``_InProcessMTRPredictorClient`` below for the other side of that
+    boundary once it goes away (planning as a ROS 2 node, not tied to
+    CARLA 0.9.12's interpreter).
+    """
+
+    def __init__(self, *, server_url: str, timeout_s: float) -> None:
+        self._url = str(server_url).rstrip("/") + "/predict"
+        self._timeout_s = max(0.01, float(timeout_s))
+
+    def request(self, request_data: Mapping[str, Any]) -> Mapping[str, Any]:
+        """POST one scene; return the decoded JSON payload, or raise."""
+
+        body = json.dumps({
+            "ego_snapshot": dict(request_data["ego_snapshot"]),
+            "obstacle_snapshots": list(request_data["obstacle_snapshots"]),
+            "timestamp_s": float(request_data["timestamp_s"]),
+            "map_polylines": list(request_data["map_polylines"]),
+            "run_inference": bool(request_data["run_inference"]),
+        }).encode("utf-8")
+        request = urllib.request.Request(
+            self._url,
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(
+            request, timeout=float(self._timeout_s)
+        ) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+
+class _InProcessMTRPredictorClient:
+    """Calls a local ``MTRLivePredictor`` directly -- no network hop.
+
+    Not wired up anywhere yet. ``MTRLivePredictor`` lives in the separate
+    CP-X-Prediction repo (``Intersection-Code/Intersection-MTR/Prediction/
+    MTR/live_inference/mtr_live_predictor.py``) and needs torch + the ``mtr``
+    package importable in this interpreter, which is exactly the Python
+    3.7-vs-3.9 conflict ``_HttpMTRPredictorClient`` documents -- unusable
+    until this planning module runs somewhere no longer tied to CARLA
+    0.9.12's interpreter (the ROS 2 node this repo is converting to). This
+    class exists so that day's change is "construct ``MTRPredictionBridge``
+    with a different ``client``," not a rewrite of its scheduling: it deliberately
+    mirrors ``mtr_prediction_server.py``'s HTTP handler (``observe()`` then
+    ``predict_modes()``, gated on ``run_inference``, wrapped in the exact
+    response shape ``_request()`` below already parses) so no format
+    translation is needed on either side once a real predictor is passed in.
+    """
+
+    def __init__(self, predictor: Any) -> None:
+        self._predictor = predictor
+
+    def request(self, request_data: Mapping[str, Any]) -> Mapping[str, Any]:
+        self._predictor.observe(
+            ego_snapshot=request_data["ego_snapshot"],
+            obstacle_snapshots=request_data["obstacle_snapshots"],
+        )
+        run_inference = bool(request_data["run_inference"])
+        prediction_modes = (
+            self._predictor.predict_modes(
+                map_polylines=request_data["map_polylines"],
+            )
+            if run_inference else {}
+        )
+        predictions = {
+            track_id: list(modes[0]["trajectory"])
+            for track_id, modes in prediction_modes.items()
+            if modes
+        }
+        return {
+            "predictions": predictions,
+            "prediction_modes": prediction_modes,
+            "inference_ran": run_inference,
+            "map_polyline_count": int(
+                getattr(self._predictor, "last_map_polyline_count", 0)
+            ),
+        }
 
 
 class MTRPredictionBridge:
@@ -47,9 +143,16 @@ class MTRPredictionBridge:
         history_update_hz: float = 10.0,
         max_stale_s: float = 0.5,
         asynchronous: bool = True,
+        client: Optional[Any] = None,
     ) -> None:
-        self._url = str(server_url).rstrip("/") + "/predict"
-        self._timeout_s = max(0.01, float(timeout_s))
+        # ``client`` owns only "send this scene, get a payload back" --
+        # everything below (rate limiting, caching, time-rebasing, the
+        # multi-consumer dedup lock) is backend-agnostic and stays exactly
+        # as it is regardless of which client this holds. Defaults to HTTP,
+        # the only backend usable today; see _InProcessMTRPredictorClient.
+        self._client = client or _HttpMTRPredictorClient(
+            server_url=server_url, timeout_s=timeout_s,
+        )
         self._minimum_interval_s = 1.0 / max(0.1, float(update_hz))
         self._history_interval_s = 1.0 / max(
             float(update_hz), float(history_update_hz), 0.1
@@ -295,25 +398,9 @@ class MTRPredictionBridge:
                 self._request_queue.task_done()
 
     def _request(self, request_data: Mapping[str, Any]) -> None:
-        body = json.dumps({
-            "ego_snapshot": dict(request_data["ego_snapshot"]),
-            "obstacle_snapshots": list(request_data["obstacle_snapshots"]),
-            "timestamp_s": float(request_data["timestamp_s"]),
-            "map_polylines": list(request_data["map_polylines"]),
-            "run_inference": bool(request_data["run_inference"]),
-        }).encode("utf-8")
-        request = urllib.request.Request(
-            self._url,
-            data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
         started = time.monotonic()
         try:
-            with urllib.request.urlopen(
-                request, timeout=float(self._timeout_s)
-            ) as response:
-                payload = json.loads(response.read().decode("utf-8"))
+            payload = self._client.request(request_data)
             inference_ran = bool(payload.get("inference_ran", True))
             if inference_ran:
                 predictions = self._normalize_predictions(

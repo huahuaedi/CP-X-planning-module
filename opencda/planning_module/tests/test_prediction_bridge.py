@@ -371,5 +371,146 @@ class MTRPredictionBridgeTest(unittest.TestCase):
         self.assertEqual(modes[0]["maneuver"], "brake")
 
 
+class _FakeClient:
+    """A minimal stand-in for a ``request()``-shaped backend."""
+
+    def __init__(self, payload):
+        self.payload = payload
+        self.calls = []
+
+    def request(self, request_data):
+        self.calls.append(dict(request_data))
+        return self.payload
+
+
+class MTRPredictionBridgeClientSeamTest(unittest.TestCase):
+    """A custom ``client`` bypasses HTTP entirely -- the seam a future
+    ``_InProcessMTRPredictorClient`` will use."""
+
+    def test_custom_client_is_used_instead_of_http(self):
+        urlopen = mock.patch(
+            "opencda.planning_module.opencda_bridge.prediction_bridge."
+            "urllib.request.urlopen",
+        ).start()
+        self.addCleanup(mock.patch.stopall)
+        client = _FakeClient({
+            "predictions": {
+                "veh-1": [{"x": 9.0, "y": 8.0, "t": 0.1, "v": 2.0}],
+            },
+            "prediction_modes": {
+                "veh-1": [
+                    {
+                        "probability": 1.0,
+                        "maneuver": "lane_keep",
+                        "trajectory": [
+                            {"x": 9.0, "y": 8.0, "t": 0.1, "v": 2.0},
+                        ],
+                    },
+                ]
+            },
+            "inference_ran": True,
+        })
+        bridge = MTRPredictionBridge(
+            update_hz=10.0, asynchronous=False, client=client,
+        )
+
+        annotated = bridge.attach(
+            [{"track_id": "veh-1", "x": 1.0, "y": 2.0, "v": 3.0, "psi": 0.0}],
+            horizon_s=1.0, dt_s=0.1,
+            ego_snapshot={"x": 0.0, "y": 0.0, "v": 4.0, "psi": 0.0},
+            timestamp_s=5.0,
+        )
+
+        self.assertEqual(urlopen.call_count, 0)
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(
+            annotated[0]["predicted_trajectory"][0]["x"], 9.0
+        )
+
+
+class InProcessMTRPredictorClientTest(unittest.TestCase):
+    """Locks the target shape for the not-yet-wired in-process backend so it
+    keeps matching ``mtr_prediction_server.py``'s HTTP handler."""
+
+    def test_request_mirrors_the_http_servers_response_shape(self):
+        from opencda.planning_module.opencda_bridge.prediction_bridge import (
+            _InProcessMTRPredictorClient,
+        )
+
+        class _FakePredictor:
+            last_map_polyline_count = 3
+
+            def __init__(self):
+                self.observed = None
+
+            def observe(self, *, ego_snapshot, obstacle_snapshots):
+                self.observed = (dict(ego_snapshot), list(obstacle_snapshots))
+
+            def predict_modes(self, *, map_polylines):
+                del map_polylines
+                return {
+                    "veh-1": [
+                        {
+                            "probability": 1.0,
+                            "maneuver": "lane_keep",
+                            "trajectory": [
+                                {"x": 9.0, "y": 8.0, "t": 0.1, "v": 2.0},
+                            ],
+                        },
+                    ]
+                }
+
+        predictor = _FakePredictor()
+        client = _InProcessMTRPredictorClient(predictor)
+
+        payload = client.request({
+            "ego_snapshot": {"x": 0.0, "y": 0.0, "v": 4.0, "psi": 0.0},
+            "obstacle_snapshots": [{"track_id": "veh-1"}],
+            "timestamp_s": 5.0,
+            "map_polylines": [],
+            "run_inference": True,
+        })
+
+        self.assertIsNotNone(predictor.observed)
+        self.assertTrue(payload["inference_ran"])
+        self.assertEqual(payload["map_polyline_count"], 3)
+        self.assertEqual(
+            payload["predictions"]["veh-1"][0]["x"], 9.0
+        )
+        self.assertEqual(
+            payload["prediction_modes"]["veh-1"][0]["maneuver"], "lane_keep"
+        )
+
+    def test_request_skips_the_forward_pass_when_inference_is_not_due(self):
+        from opencda.planning_module.opencda_bridge.prediction_bridge import (
+            _InProcessMTRPredictorClient,
+        )
+
+        class _FakePredictor:
+            last_map_polyline_count = 0
+
+            def __init__(self):
+                self.predict_modes_calls = 0
+
+            def observe(self, *, ego_snapshot, obstacle_snapshots):
+                pass
+
+            def predict_modes(self, *, map_polylines):
+                self.predict_modes_calls += 1
+                return {}
+
+        predictor = _FakePredictor()
+        client = _InProcessMTRPredictorClient(predictor)
+
+        payload = client.request({
+            "ego_snapshot": {}, "obstacle_snapshots": [],
+            "timestamp_s": 5.0, "map_polylines": [],
+            "run_inference": False,
+        })
+
+        self.assertFalse(payload["inference_ran"])
+        self.assertEqual(predictor.predict_modes_calls, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
