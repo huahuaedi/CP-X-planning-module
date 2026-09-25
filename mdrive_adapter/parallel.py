@@ -64,11 +64,16 @@ def planner_worker(connection, cpu, settings):
         context = None
         actor = None
         connection.send({"ok": True, "ready": True})
+        last_frame = None
         while True:
             command = connection.recv()
             if command["kind"] == "close":
                 break
+            if command["kind"] != "step":
+                raise ValueError("Unknown planner worker command")
             frame = command["frame"]
+            if last_frame is not None and frame <= last_frame:
+                raise RuntimeError("Planner frames must increase monotonically")
             started = time.perf_counter()
             deadline = started + 10
             while world.get_snapshot().frame < frame and time.perf_counter() < deadline:
@@ -99,6 +104,7 @@ def planner_worker(connection, cpu, settings):
             result.update({"frame": frame, "worker_cpu": cpu, "worker_pid": os.getpid(),
                            "planning_ms": (time.perf_counter() - started) * 1000})
             connection.send({"ok": True, "result": result})
+            last_frame = frame
     except (EOFError, BrokenPipeError):
         pass
     except BaseException:
@@ -107,9 +113,11 @@ def planner_worker(connection, cpu, settings):
         except (EOFError, BrokenPipeError):
             pass
     finally:
-        if steps is not None:
-            steps.close()
-        connection.close()
+        try:
+            if steps is not None:
+                steps.close()
+        finally:
+            connection.close()
 
 
 class PlannerPool:
@@ -133,13 +141,25 @@ class PlannerPool:
                 if not pipe.poll(max(0, deadline - time.monotonic())):
                     raise RuntimeError("Planner worker did not initialize")
                 response = pipe.recv()
-                if not response.get("ready"):
+                if not response.get("ok") or not response.get("ready"):
                     raise RuntimeError("Planner worker initialization failed: %s" % response)
         except BaseException:
             self.close()
             raise
 
     def step(self, jobs, concurrent=True):
+        if any(slot < 0 or slot >= len(self.workers) for slot in jobs):
+            raise ValueError("Unknown planner worker slot")
+        if len({job["frame"] for job in jobs.values()}) > 1:
+            raise ValueError("All planners in a barrier must receive the same frame")
+        try:
+            return self._step(jobs, concurrent)
+        except BaseException:
+            # A partial barrier cannot be retried: some planners already advanced.
+            self.close()
+            raise
+
+    def _step(self, jobs, concurrent):
         results = {}
         deadline = time.monotonic() + self.timeout_s
 

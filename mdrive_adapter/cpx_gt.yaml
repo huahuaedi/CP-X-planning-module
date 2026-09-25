@@ -4,7 +4,6 @@ gt_range_m: 70.0
 # MDrive requires passing the final waypoint; this only extends the stop target.
 route_end_clearance_m: 3.0
 controller:
-  speed_lookahead_s: 0.5
   speed_kp: 1.0
   speed_ki: 0.2
 mpc:
@@ -35,5 +34,3 @@ scenario:
     max_steer_rate_rps: 0.4
     enforce_terminal_velocity_constraint: true
     terminal_velocity_mps: 0.0
-  planning:
-    waypoint_sample_distance_m: 3.0

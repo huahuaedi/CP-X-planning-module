@@ -1,6 +1,8 @@
-"""GT inputs and caller-owned route context for the CP-X planning generator."""
+"""MDrive GT and control boundary for the current CP-X planning pipeline."""
 import copy
 import math
+from pathlib import Path
+from types import SimpleNamespace
 
 
 def merge_config(base, overrides):
@@ -14,13 +16,11 @@ def merge_config(base, overrides):
 
 
 def collect_gt(world):
-    """Current GT states keyed by actor ID; no future motion or occlusion model."""
+    """Collect one current-state GT frame in the evaluator, shared by all egos."""
     snapshots = []
     for actor in world.get_actors():
         kind = actor.type_id
-        if not kind.startswith(("vehicle.", "walker.pedestrian.", "static.prop.")):
-            continue
-        if not actor.is_alive:
+        if not kind.startswith(("vehicle.", "walker.pedestrian.", "static.prop.")) or not actor.is_alive:
             continue
         transform = actor.get_transform()
         bbox = getattr(actor, "bounding_box", None)
@@ -28,7 +28,6 @@ def collect_gt(world):
             continue
         velocity = actor.get_velocity()
         offset = bbox.location
-        # CARLA Boost.Python Location objects cannot be copied/pickled.
         center = transform.transform(type(offset)(x=offset.x, y=offset.y, z=offset.z))
         speed = math.hypot(velocity.x, velocity.y)
         heading = math.radians(transform.rotation.yaw + bbox.rotation.yaw)
@@ -36,6 +35,9 @@ def collect_gt(world):
             heading = math.atan2(velocity.y, velocity.x)
         snapshots.append({
             "vehicle_id": str(actor.id), "type": kind,
+            "object_type": ("pedestrian" if kind.startswith("walker.") else
+                            "vehicle" if kind.startswith("vehicle.") else "static_object"),
+            "source": "mdrive_gt", "provider_source": "current_state_oracle",
             "x": float(center.x), "y": float(center.y), "z": float(center.z),
             "v": speed, "psi": heading,
             "length_m": max(0.2, float(bbox.extent.x) * 2),
@@ -46,76 +48,20 @@ def collect_gt(world):
 
 
 def make_planner(slot, actor, world, route, config, output):
-    """Identical planner construction for in-process and process workers."""
-    from pathlib import Path
-    import carla
-    from planning_runner import iter_planning_steps
-    output = Path(output)
-    output.mkdir(parents=True, exist_ok=True)
+    """Use the same stateful bridge in serial and spawned-worker execution."""
     context = ExternalContext(actor, route, config)
-    message_path = str(output / "cp_message.json")
-    scenario = copy.deepcopy(config["scenario"])
-    scenario.update({"name": "cpx_gt_ego_%d" % slot, "_scenario_dir": str(output),
-                     "camera": {"enabled": False}, "sumo": {"enabled": False},
-                     "traffic_manager": {"enabled": False}, "runtime": {}, "obstacles": {},
-                     "metrics": {"collision_sensor_enabled": False}})
-    context.config = merge_config(config, {"mpc": {"behavior_planner_runtime": {
-        "cooperative_message_path": message_path,
-        "rule_based": {"cooperative_message_path": message_path}}}})
-    return context, iter_planning_steps(None, world, scenario, carla, external=context)
+    return context, planning_steps(context, slot, world, Path(output))
 
 
 class ExternalContext:
     def __init__(self, vehicle, route, config):
         if len(route) < 2:
-            raise ValueError("CP-X requires a non-empty MDrive world route (at least two points)")
+            raise ValueError("CP-X requires at least two MDrive route points")
         self.vehicle = vehicle
         self.route = list(route)
-        self.destination_transform = self.route[-1][0]
-        self.config = config
+        self.config = copy.deepcopy(config)
         self.snapshots = []
-        self.plan_time_s = None
-        self.signal_query_key = "mdrive:%s:%s" % (getattr(vehicle, "id", "test"), id(self))
-        self._speed_integral = 0.0
-        self._control_time_s = None
-
-    def configure_mpc(self, base):
-        return merge_config(base, self.config.get("mpc", {}))
-
-    def control_index(self, sim_time_s, dt_s):
-        if self.plan_time_s is None:
-            return 0
-        return max(0, int(math.floor((sim_time_s - self.plan_time_s + 1e-8) / dt_s)))
-
-    def close(self):
-        from behavior_planner.traffic_light_stop import _clear_stop_target_query_state
-        _clear_stop_target_query_state(self.signal_query_key)
-
-    def track_control(self, control, trajectory, index, mpc_dt_s, sim_time_s):
-        """Track MPC speed with feedback to overcome drivetrain resistance."""
-        if not trajectory:
-            return control
-        settings = self.config.get("controller", {})
-        lookahead = max(0.0, float(settings.get("speed_lookahead_s", 0.5)))
-        target_index = min(len(trajectory) - 1, index + max(0, int(round(lookahead / mpc_dt_s)) - 1))
-        target_speed = max(0.0, float(trajectory[target_index][2]))
-        velocity = self.vehicle.get_velocity()
-        speed = math.hypot(velocity.x, velocity.y)
-        dt = 0.05 if self._control_time_s is None else max(0.0, min(0.2, sim_time_s - self._control_time_s))
-        self._control_time_s = sim_time_s
-        error = target_speed - speed
-        self._speed_integral = max(-1.0, min(1.0, self._speed_integral + error * dt))
-        if target_speed < 0.05:
-            self._speed_integral = 0.0
-        pedal = (float(control.throttle) - float(control.brake)
-                 + float(settings.get("speed_kp", 1.0)) * error
-                 + float(settings.get("speed_ki", 0.2)) * self._speed_integral)
-        control.throttle = min(1.0, max(0.0, pedal))
-        control.brake = min(1.0, max(0.0, -pedal))
-        if target_speed < 0.05 and speed < 0.1:
-            control.throttle = 0.0
-            control.brake = max(0.3, control.brake)
-        return control
+        self.bridge = None
 
     def obstacles(self):
         location = self.vehicle.get_location()
@@ -123,39 +69,92 @@ class ExternalContext:
         result = [dict(item) for item in self.snapshots
                   if item["vehicle_id"] != str(self.vehicle.id)
                   and math.hypot(item["x"] - location.x, item["y"] - location.y) <= radius]
-        return sorted(result, key=lambda item: math.hypot(item["x"] - location.x, item["y"] - location.y))
+        return sorted(result, key=lambda item: (math.hypot(item["x"] - location.x, item["y"] - location.y),
+                                                item["vehicle_id"]))
 
-    def install_route(self, planner, world_map, carla):
-        from utility.global_planner import RoutePlanSummary
-        from utility import canonical_lane_id_for_waypoint
-        points, options, lanes, roads = [], [], [], []
-        for transform, option in self.route:
-            waypoint = world_map.get_waypoint(transform.location, project_to_road=True,
-                                             lane_type=carla.LaneType.Driving)
-            if waypoint is None:
-                raise ValueError("MDrive route point has no driving waypoint: %s" % transform.location)
-            points.append([float(transform.location.x), float(transform.location.y)])
-            options.append(str(getattr(option, "name", option)).split(".")[-1])
-            lanes.append(int(canonical_lane_id_for_waypoint(waypoint)))
-            roads.append(str(waypoint.road_id))
-        length = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(points, points[1:]))
-        summary = RoutePlanSummary(
-            route_found=True, start_road_id=roads[0], start_lane_id=lanes[0],
-            goal_road_id=roads[-1], goal_lane_id=lanes[-1], optimal_lane_id=lanes[0],
-            distance_to_destination_m=length, next_macro_maneuver="straight",
-            route_waypoints=points, road_options=options, current_road_option=options[0],
-        )
-        planner.store_initial_route(summary, options, lanes)
-        # Extend only the stop target so cars cross MDrive's final waypoint.
-        clearance = max(0.0, float(self.config.get("route_end_clearance_m", 3.0)))
-        if clearance > 0:
-            continuations = waypoint.next(clearance)
-            if continuations:
-                end = self.route[-1][0]
-                yaw = math.radians(end.rotation.yaw)
-                expected_x = end.location.x + clearance * math.cos(yaw)
-                expected_y = end.location.y + clearance * math.sin(yaw)
-                continuation = min(continuations, key=lambda w: math.hypot(
-                    w.transform.location.x - expected_x, w.transform.location.y - expected_y))
-                self.destination_transform = continuation.transform
-        return summary
+
+def build_bridge_config(config, output, world_map):
+    """Translate adapter settings without silently discarding MPC overrides."""
+    import yaml
+    root = Path(__file__).resolve().parents[1]
+    output.mkdir(parents=True, exist_ok=True)
+    with (root / "opencda/planning_module/MPC/mpc.yaml").open() as stream:
+        payload = yaml.safe_load(stream)
+    payload["mpc"] = merge_config(payload["mpc"], config.get("mpc", {}))
+    constraints = config.get("scenario", {}).get("constraints", {})
+    payload["mpc"]["constraints"] = merge_config(payload["mpc"].get("constraints", {}), constraints)
+    mpc_path = output / "mpc.yaml"
+    mpc_path.write_text(yaml.safe_dump(payload))
+    # The actual simulator map is the authoritative map, including local edits.
+    xodr = output / "map.xodr"
+    xodr.write_text(world_map.to_opendrive())
+    bridge_config = merge_config({
+        "target_speed_mps": float(constraints.get("max_velocity_mps", 7.0)),
+        "max_mpc_obstacles": int(config.get("mpc", {}).get("obstacle_filter", {}).get("max_planning_obstacles", 64)),
+        "publish_cp_message": False,
+        "cav_intent_broadcast_enabled": False,
+        "route_replan_enabled": False,
+        "route_reached_distance_m": 0.5,
+        "debug": False,
+    }, config.get("bridge", {}))
+    bridge_config.update({"mpc_config_path": str(mpc_path), "global_planner_xodr_path": str(xodr),
+                          "global_planner_cache_root": str(output / "map_cache"),
+                          "cp_message_path": str(output / "cp_message.json"),
+                          "debug_output_dir": str(output), "scenario_name": "mdrive"})
+    return bridge_config
+
+
+def install_route(bridge, context):
+    """Keep benchmark waypoints/options; append only a terminal stopping tail."""
+    points = [[float(t.location.x), float(t.location.y), float(t.location.z)] for t, _ in context.route]
+    options = [str(getattr(option, "name", option)).split(".")[-1] for _, option in context.route]
+    clearance = max(0.0, float(context.config.get("route_end_clearance_m", 3.0)))
+    if clearance:
+        end = context.route[-1][0]
+        yaw = math.radians(end.rotation.yaw)
+        # Keep every benchmark point in order and make stopping happen past its finish line.
+        points.append([points[-1][0] + clearance * math.cos(yaw),
+                       points[-1][1] + clearance * math.sin(yaw), points[-1][2]])
+        options.append("LANEFOLLOW")
+    bridge.route_manager.install_external_route(points, options, allow_replan=False)
+
+
+def planning_steps(context, slot, world, output):
+    from opencda.core.actuation.pid_controller import Controller
+    from opencda.planning_module.opencda_bridge.cpx_mpc_planner import CPXMPCPlannerBridge
+    actor = context.vehicle
+    world_map = world.get_map()
+    settings = context.config.get("controller", {})
+    controller = Controller({"max_brake": 1.0, "max_throttle": 1.0, "max_steering": 1.0,
+        "lon": {"k_p": float(settings.get("speed_kp", 1.0)) / 3.6,
+                "k_i": float(settings.get("speed_ki", 0.2)) / 3.6, "k_d": 0.0},
+        "lat": {"k_p": 0.0, "k_i": 0.0, "k_d": 0.0}, "dt": 0.05, "dynamic": False})
+    def speed_kmh():
+        velocity = actor.get_velocity()
+        return 3.6 * math.hypot(velocity.x, velocity.y)
+    manager = SimpleNamespace(vehicle=actor, carla_map=world_map, controller=controller,
+        localizer=SimpleNamespace(get_ego_pos=actor.get_transform, get_ego_spd=speed_kmh),
+        perception_manager=SimpleNamespace(objects={}), v2x_manager=None,
+        _opencda_agent_finished=False)
+    bridge = None
+    try:
+        bridge = CPXMPCPlannerBridge(manager, build_bridge_config(context.config, output, world_map))
+        context.bridge = bridge
+        install_route(bridge, context)
+        while True:
+            bridge.update_information(ego_transform=actor.get_transform(), ego_speed_kmh=speed_kmh(),
+                                      detected_objects={"vehicles": context.obstacles()})
+            # Use the full pipeline but propagate exceptions to the benchmark. Its normal
+            # bounded fallback controls remain valid; programming errors must fail the run.
+            result = bridge.execute_planning_pipeline()
+            bridge.last_output = result
+            bridge.last_debug = result.diagnostics_dict()
+            bridge._record_debug(bridge.last_debug)
+            yield {"done": bool(manager._opencda_agent_finished), "control": result.control,
+                   "trajectory": [list(state) for state in result.planned_trajectory],
+                   "status": dict(bridge.mpc.get_runtime_status()),
+                   "behavior": str(result.behavior_command.decision)}
+    finally:
+        if bridge is not None:
+            bridge.destroy()
+        context.bridge = None

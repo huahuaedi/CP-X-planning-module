@@ -167,6 +167,24 @@ class CPXRouteManager:
         self._route_stalled_motion_m: float = 0.0
         self._handled_lane_closure_ids = set()
         self._last_status = RouteManagerStatus(debug_reason="route_not_initialized")
+        self._external_route_locked = False
+
+    def install_external_route(self, points, options, *, allow_replan=False):
+        """Install a benchmark route using AD-map lane identities and progress."""
+        if len(points) < 2 or len(options) != len(points):
+            raise ValueError("External route requires matching points/options and at least two points")
+        summary = self.global_planner.register_imported_route(points, road_options=options)
+        if summary is None or not summary.route_found:
+            raise ValueError("External route could not be mapped to AD-map")
+        self._start_point = dict(zip(("x", "y", "z"), points[0]))
+        self._goal_point = dict(zip(("x", "y", "z"), points[-1]))
+        self._active_route_summary = summary
+        self._fallback_route_points = []
+        self._build_admap_route_entries()
+        self._route_revision += 1
+        self._last_status = self._status_from_summary(summary)
+        self._external_route_locked = not allow_replan
+        return summary
 
     def set_destination(
         self,
@@ -175,6 +193,7 @@ class CPXRouteManager:
         goal_point: Mapping[str, object],
     ) -> Any:
         self._start_point = _point_dict(start_point)
+        self._external_route_locked = False
         self._goal_point = _point_dict(goal_point)
         self._active_route_summary = self.global_planner.plan_route_from_locations(
             start_location=self._start_point,
@@ -202,6 +221,8 @@ class CPXRouteManager:
     ) -> RouteReplanResult:
         """Atomically rebuild the route from ego to the existing destination."""
 
+        if self._external_route_locked:
+            return RouteReplanResult(False, "external_benchmark_route_locked")
         if self._goal_point is None:
             return RouteReplanResult(False, "route_replan_goal_unavailable")
         snapshot = {

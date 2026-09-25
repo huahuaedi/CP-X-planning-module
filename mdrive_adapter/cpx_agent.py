@@ -16,7 +16,7 @@ import yaml
 from leaderboard.autoagents.autonomous_agent import AutonomousAgent, Track
 from srunner.scenariomanager.carla_data_provider import CarlaDataProvider
 from mdrive_adapter.runtime import collect_gt, make_planner
-from MPC.mpc import _OSQP_AVAILABLE
+from opencda.planning_module.MPC.mpc import _OSQP_AVAILABLE
 
 
 def get_entry_point():
@@ -60,10 +60,13 @@ class CPXAgent(AutonomousAgent):
         # Preserve every supplied waypoint, including turns and elevation.
         self._close_planners()
         self._routes = [list(route) for route in world_plan]
+        if len(self._routes) != self.ego_vehicles_num or any(len(route) < 2 for route in self._routes):
+            raise ValueError("MDrive must supply a route with at least two points for every ego")
         self._global_plan_world_coord = self._routes
         self._global_plan_world_coord_all = self._routes
         self._global_plan = gps_plan
         self._last_frame = None
+        self._last_controls = None
         # Connect before warmup: a paused world cannot supply a new client's first snapshot.
         if self.execution != "serial" and self._routes:
             self._start_pool()
@@ -96,6 +99,8 @@ class CPXAgent(AutonomousAgent):
         frame = world.get_snapshot().frame
         if frame == self._last_frame:
             return self._last_controls
+        if self._last_frame is not None and frame < self._last_frame:
+            raise RuntimeError("Simulator frame moved backwards without resetting the route")
         snapshots = collect_gt(world)
         gt_ms = (time.perf_counter() - frame_started) * 1000
         live_ids = {item["vehicle_id"] for item in snapshots}
@@ -125,6 +130,8 @@ class CPXAgent(AutonomousAgent):
                 started = time.perf_counter()
                 if self._steps[slot] is None:
                     self._start(slot, actor, world)
+                if self._contexts[slot].vehicle.id != actor.id:
+                    raise RuntimeError("Ego identity changed without resetting the planner")
                 self._contexts[slot].snapshots = snapshots
                 try:
                     result = next(self._steps[slot])

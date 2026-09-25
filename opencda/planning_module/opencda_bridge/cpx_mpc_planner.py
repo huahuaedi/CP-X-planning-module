@@ -1928,6 +1928,8 @@ class CPXMPCPlannerBridge:
     ) -> tuple[bool, bool, str]:
         """Block the obstacle lane and atomically rebuild the active route."""
 
+        if not bool(self.config.get("route_replan_enabled", True)):
+            return False, False, "route_replan_disabled"
         block_fn = getattr(self.global_planner, "block_lane_at_position", None)
         if not callable(block_fn):
             reason = "static_obstacle_block_lane_unsupported"

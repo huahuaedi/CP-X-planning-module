@@ -1,8 +1,9 @@
 # MDrive adapter
 
 Run CP-X through MDrive's external agent interface without modifying MDrive.
-Perception uses current-state GT within 70 m; prediction, behavior planning and
-MPC remain CP-X's own pipeline. MDrive owns simulation ticks, controls and scoring.
+Perception uses current-state GT within 70 m. The adapter calls the current
+`CPXMPCPlannerBridge` pipeline with AD-map topology, prediction, behavior planning,
+MPC, and the velocity/steering control boundary. MDrive owns simulation ticks, controls and scoring.
 
 ## Setup
 
@@ -13,6 +14,17 @@ export MDRIVE_ROOT=/path/to/MDrive
 export CPX_PYTHON=/path/to/mdrive/environment/bin/python
 "$CPX_PYTHON" -m pip install --no-deps --target .runtime/deps -r mdrive_adapter/requirements.txt
 ```
+
+Build the current branch's native AD-map backend with the same Python ABI:
+
+```bash
+PYTHON_BIN="$CPX_PYTHON" BUILD_JOBS=6 \
+  opencda/planning_module/Global_Planner/build_ad_map.sh
+```
+
+See `opencda/planning_module/Global_Planner/RUNNING.md` for build dependencies.
+`GLOBAL_PLANNER_AD_MAP_INSTALL` can point at an existing compatible installation.
+The launcher checks backend imports before starting CARLA.
 
 ## Run
 
@@ -64,23 +76,28 @@ Compare sequentially executed runs with identical configs and video settings:
   /path/to/serial_run /path/to/parallel_run --output /path/to/comparison.json
 ```
 
-One r26 six-ego comparison (video off) measured 408 → 152 ms/frame after excluding
-the first 20 frames, and 489 → 256 s evaluator wall time. Both ran 826 frames;
-all 4,956 controls and positions matched. Collisions and blocked vehicles remained.
-These are single-run measurements, not a general performance guarantee.
-
 ## Semantics and limits
 
 - This is a GT/oracle baseline: no occlusion or communication model, and no GT future trajectories.
 - Each ego has independent planner state; parallel execution is not joint optimization.
-- Benchmark waypoints are preserved and global rerouting is disabled. The stop
-  target extends 3 m past the endpoint so cars can cross MDrive's finish line.
-- Decision timers and MPC control indexing use simulation time. Longitudinal
-  feedback tracks MPC speed; steering remains the MPC output.
+- Benchmark waypoints are preserved and global rerouting is disabled. An internal
+  3 m stopping tail is appended after the final waypoint so cars can cross
+  MDrive's finish line; benchmark routes and scoring are unchanged.
+- Decision timers and the MPC control buffer use simulation time. The current
+  bridge maps MPC velocity/steering through longitudinal PID and physical
+  steering geometry. No legacy standalone runner is used.
+- Every parallel barrier receives the same GT frame. Workers never tick the
+  simulator or apply controls. A stale frame, worker error, or timeout fails
+  the barrier and closes the pool. Planning exceptions propagate to MDrive.
+- `mpc` and `scenario.constraints` settings are merged into a private per-ego
+  MPC YAML. Current bridge options can be supplied under `bridge`. Map caches,
+  message paths, controller state and diagnostics are isolated per ego.
+- This GT baseline does not exchange cooperative intents between workers.
 - Direct mode uses MDrive's no-NPC configuration, which forces traffic lights green.
   Episode recovery and open-loop replay are unsupported.
 - `closed_loop_executed` means execution succeeded, not collision-free completion.
-  Use MDrive's collision metrics; auxiliary CP-X collision fields are null.
+  Use MDrive's collision metrics: the bridge does not own a collision sensor,
+  so its auxiliary collision counters are not authoritative.
 
 ## Tests
 

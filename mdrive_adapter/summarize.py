@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 
-def summarize(run_dir):
+def summarize(run_dir, expected_egos=None):
     run_dir = Path(run_dir)
     results = []
     for path in sorted(run_dir.glob("results/ego_vehicle_*/results.json")):
@@ -26,11 +26,13 @@ def summarize(run_dir):
                 item["max_step_ms"] = max(item["max_step_ms"], row["planning_ms"])
                 status = row["status"]["solver_status"]
                 item["solver_status_frames"][status] = item["solver_status_frames"].get(status, 0) + 1
-    valid = bool(results) and all(
+    complete = expected_egos is None or {r["ego"] for r in results} == set(range(expected_egos))
+    valid = complete and bool(results) and all(
         r["ego"] in stats and stats[r["ego"]]["control_frames"] > 1
         and not any(word in str(r["status"]).lower() for word in ("crash", "reject", "setup"))
         for r in results)
     report = {"perception": "gt_current_state_oracle", "closed_loop_executed": valid,
+              "expected_egos": expected_egos,
               "route_results": results, "planner_diagnostics": stats,
               "note": "Successful execution does not imply collision-free driving or route completion. "
                       "solver_status_frames counts control frames, not separate MPC solves."}

@@ -532,6 +532,8 @@ class CustomGlobalPlannerAdapter:
     def register_imported_route(
         self,
         route_points: Sequence[Sequence[object]],
+        *,
+        road_options: Sequence[str] | None = None,
     ) -> RoutePlanSummary | None:
         points: List[List[float]] = []
         waypoints: List[Waypoint | None] = []
@@ -542,8 +544,16 @@ class CustomGlobalPlannerAdapter:
             waypoints.append(waypoint)
         if len(points) < 2:
             return None
+        if road_options is not None and len(road_options) != len(points):
+            raise ValueError("Imported route options must match the route points")
+        if any(waypoint is None for waypoint in waypoints):
+            raise ValueError("Imported route contains a point outside the AD-map")
         summary = self._summary_from_samples(points, waypoints)
-        self._store_route(summary, waypoints)
+        if road_options is not None:
+            summary = replace(summary, road_options=list(road_options),
+                              current_road_option=str(road_options[0]),
+                              next_macro_maneuver=self._next_macro_maneuver(road_options, 0))
+        self._store_route(summary, waypoints, options=road_options)
         return summary
 
     def replace_stored_route(

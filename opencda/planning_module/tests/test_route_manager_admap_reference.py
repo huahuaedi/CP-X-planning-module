@@ -80,6 +80,26 @@ def _planner(points_and_options):
 
 
 class RouteManagerADMapReferenceTest(unittest.TestCase):
+    def test_external_benchmark_route_preserves_options_and_blocks_replan(self):
+        planner = _planner([(0, 0, 1, "LANEFOLLOW"), (10, 0, 1, "LEFT"), (10, 10, 2, "LANEFOLLOW")])
+        imported = []
+        def register(points, *, road_options):
+            imported.append((points, road_options))
+            return planner.plan_route_from_locations()
+        planner.register_imported_route = register
+        manager = CPXRouteManager(global_planner=planner)
+        points = [[0, 0, 0], [10, 0, 0], [10, 10, 0]]
+        options = ["LANEFOLLOW", "LEFT", "LANEFOLLOW"]
+        manager.install_external_route(points, options)
+        self.assertEqual(imported, [(points, options)])
+        self.assertEqual(len(manager.route_points()), 3)
+        count = len(planner.plan_calls)
+        result = manager.replan_from(start_point={"x": 1, "y": 0}, trigger_reason="test")
+        self.assertFalse(result.success)
+        self.assertEqual(len(planner.plan_calls), count)
+        manager.set_destination(start_point={"x": 0, "y": 0}, goal_point={"x": 10, "y": 10})
+        self.assertFalse(manager._external_route_locked)
+
     def test_cp_lane_closure_atomically_installs_one_new_route_revision(self):
         initial = [
             {"waypoint": _ADMapWaypoint(0.0, 0.0, 10), "road_option": "LANEFOLLOW"},

@@ -76,6 +76,24 @@ class ParallelTests(unittest.TestCase):
         finally:
             pool.close()
 
+    def test_failed_barrier_reaps_every_worker(self):
+        pool = PlannerPool([{"fail": True}, {"delay": .1}], [0, 1], target=fake_worker)
+        workers = [process for process, _ in pool.workers]
+        with self.assertRaisesRegex(RuntimeError, "intentional failure"):
+            pool.step({0: {"frame": 1, "value": 0}, 1: {"frame": 1, "value": 0}})
+        self.assertEqual(pool.workers, [])
+        self.assertTrue(all(not process.is_alive() for process in workers))
+
+    def test_mixed_frames_rejected_before_dispatch(self):
+        pool = PlannerPool([{}, {}], [0, 1], target=fake_worker)
+        try:
+            with self.assertRaisesRegex(ValueError, "same frame"):
+                pool.step({0: {"frame": 1, "value": 0}, 1: {"frame": 2, "value": 0}})
+            result = pool.step({0: {"frame": 3, "value": 0}})
+            self.assertEqual(result[0]["value"], 1)
+        finally:
+            pool.close()
+
 
 if __name__ == "__main__":
     unittest.main()

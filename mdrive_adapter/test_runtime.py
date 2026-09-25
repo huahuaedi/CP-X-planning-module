@@ -13,14 +13,6 @@ from mdrive_adapter.runtime import ExternalContext, collect_gt, merge_config
 
 
 class RuntimeTests(unittest.TestCase):
-    def test_control_time_grid_not_simulation_tick_count(self):
-        context = ExternalContext(None, [(None, None), (None, None)], {})
-        context.plan_time_s = 12.0
-        self.assertEqual([context.control_index(t, .1) for t in (12., 12.05, 12.1, 12.15, 12.2)],
-                         [0, 0, 1, 1, 2])
-        context.plan_time_s = 12.25
-        self.assertEqual(context.control_index(12.25, .1), 0)
-
     def test_ego_filter_keeps_other_egos_and_independent_snapshots(self):
         def actor(identifier, x):
             return types.SimpleNamespace(id=identifier, get_location=lambda: types.SimpleNamespace(x=x, y=0))
@@ -54,86 +46,90 @@ class RuntimeTests(unittest.TestCase):
         result["a"]["c"].append(2)
         self.assertEqual(base, {"a": {"b": 2, "c": [1]}})
 
-    def test_benchmark_route_keeps_intermediate_turn_and_order(self):
-        route = [(types.SimpleNamespace(location=types.SimpleNamespace(x=x,y=y,z=0)),
-                  types.SimpleNamespace(name=option))
-                 for x, y, option in ((0,0,"LANEFOLLOW"),(10,0,"LEFT"),(10,10,"LANEFOLLOW"))]
-        context = ExternalContext(None, route, {"route_end_clearance_m": 0})
-        planner = mock.Mock()
-        world_map = mock.Mock()
-        world_map.get_waypoint.return_value = types.SimpleNamespace(road_id=12)
-        carla = types.SimpleNamespace(LaneType=types.SimpleNamespace(Driving=1))
-        with mock.patch("utility.canonical_lane_id_for_waypoint", return_value=2):
-            summary = context.install_route(planner, world_map, carla)
-        self.assertEqual(summary.route_waypoints, [[0,0],[10,0],[10,10]])
-        self.assertEqual(summary.road_options, ["LANEFOLLOW","LEFT","LANEFOLLOW"])
-        self.assertEqual(summary.distance_to_destination_m, 20)
-        planner.store_initial_route.assert_called_once_with(summary, summary.road_options, [2,2,2])
-
-    def test_finish_clearance_moves_only_stop_target(self):
-        def transform(x):
-            return types.SimpleNamespace(location=types.SimpleNamespace(x=x,y=0,z=0),
-                                         rotation=types.SimpleNamespace(yaw=0))
-        finish = transform(32)
-        continuation = types.SimpleNamespace(transform=transform(35))
-        waypoint = types.SimpleNamespace(road_id=12, next=lambda distance: [continuation])
-        route = [(transform(0), "LANEFOLLOW"), (finish, "LANEFOLLOW")]
+    def test_benchmark_route_keeps_turns_and_only_appends_stop_tail(self):
+        from mdrive_adapter.runtime import install_route
+        def transform(x, y, yaw):
+            return types.SimpleNamespace(location=types.SimpleNamespace(x=x, y=y, z=1),
+                                         rotation=types.SimpleNamespace(yaw=yaw))
+        route = [(transform(0, 0, 0), "LANEFOLLOW"),
+                 (transform(10, 0, 90), "LEFT"),
+                 (transform(10, 10, 90), "LANEFOLLOW")]
         context = ExternalContext(None, route, {"route_end_clearance_m": 3})
-        world_map = mock.Mock()
-        world_map.get_waypoint.return_value = waypoint
-        carla = types.SimpleNamespace(LaneType=types.SimpleNamespace(Driving=1))
-        with mock.patch("utility.canonical_lane_id_for_waypoint", return_value=1):
-            summary = context.install_route(mock.Mock(), world_map, carla)
-        self.assertEqual(summary.route_waypoints[-1], [32,0])
-        self.assertIs(context.route[-1][0], finish)
-        self.assertEqual(context.destination_transform.location.x, 35)
+        bridge = mock.Mock()
+        install_route(bridge, context)
+        points, options = bridge.route_manager.install_external_route.call_args[0]
+        self.assertEqual(points[:3], [[0, 0, 1], [10, 0, 1], [10, 10, 1]])
+        self.assertAlmostEqual(points[-1][0], 10)
+        self.assertAlmostEqual(points[-1][1], 13)
+        self.assertEqual(options, ["LANEFOLLOW", "LEFT", "LANEFOLLOW", "LANEFOLLOW"])
+        self.assertEqual(len(context.route), 3)
+        self.assertFalse(bridge.route_manager.install_external_route.call_args[1]["allow_replan"])
 
-    def test_standalone_driver_applies_yielded_controls_and_closes(self):
-        import planning_runner
-        vehicle = mock.Mock()
-        closed = []
-        def steps():
-            try:
-                yield {"vehicle": vehicle, "control": "first"}
-                yield {"vehicle": vehicle, "control": "second"}
-            finally:
-                closed.append(True)
-        with mock.patch.object(planning_runner, "iter_planning_steps", return_value=steps()):
-            self.assertEqual(planning_runner.run_loaded_world(None, None, {}, None), 0)
-        self.assertEqual(vehicle.apply_control.call_args_list, [mock.call("first"), mock.call("second")])
-        self.assertEqual(closed, [True])
-
-    def test_speed_feedback_can_start_then_brake_without_changing_steering(self):
-        actor = types.SimpleNamespace(id=1, get_velocity=lambda: types.SimpleNamespace(x=0, y=0))
-        context = ExternalContext(actor, [(None, None), (None, None)], {})
-        command = types.SimpleNamespace(throttle=.13, brake=0, steer=.12)
-        path = [[i*.1, 0, .1*(i+1), 0] for i in range(20)]
-        command = context.track_control(command, path, 0, .1, 0)
-        self.assertGreater(command.throttle, .3)
-        self.assertEqual(command.brake, 0)
-        self.assertEqual(command.steer, .12)
-        actor.get_velocity = lambda: types.SimpleNamespace(x=3, y=0)
-        command = context.track_control(command, [[0,0,0,0]] * 20, 0, .1, .05)
-        self.assertEqual(command.throttle, 0)
-        self.assertGreater(command.brake, 0)
-
-    def test_stopped_car_can_approach_distant_stop_goal(self):
+    def test_bridge_config_preserves_constraints_and_isolates_artifacts(self):
+        import tempfile
         import yaml
-        from MPC.mpc import MPC
-        from planning_runner import _apply_stop_target_speed_cap
-        base = yaml.safe_load((ROOT / "opencda/planning_module/MPC/mpc.yaml").read_text())["mpc"]
-        adapter = yaml.safe_load((ROOT / "mdrive_adapter/cpx_gt.yaml").read_text())
-        config = merge_config(base, adapter["mpc"])
-        config["constraints"] = adapter["scenario"]["constraints"]
-        destination, cap = _apply_stop_target_speed_cap(
-            temporary_destination_state=[32,0,0,0,1], ego_state=[0,0,0,0],
-            stop_target_distance_m=32, original_max_velocity_mps=7,
-            braking_deceleration_mps2=10, stop_buffer_m=0)
-        self.assertGreater(cap, 0)
-        planner = MPC(config, {"lane_count": 1, "lane_width_m": 3.5})
-        trajectory = planner.plan_trajectory([0,0,0,0], destination, [], 0, 0, stop_goal_active=True)
-        self.assertEqual(planner.get_runtime_status()["solver_status"], "solved")
-        self.assertGreater(max(state[2] for state in trajectory), .1)
+        from mdrive_adapter.runtime import build_bridge_config
+        config = {"mpc": {"horizon_s": 2.5},
+                  "scenario": {"constraints": {"max_velocity_mps": 6}},
+                  "bridge": {"max_mpc_obstacles": 17}}
+        world_map = types.SimpleNamespace(to_opendrive=lambda: "<OpenDRIVE/>")
+        with tempfile.TemporaryDirectory() as directory:
+            a = build_bridge_config(config, Path(directory) / "ego0", world_map)
+            b = build_bridge_config(config, Path(directory) / "ego1", world_map)
+            self.assertNotEqual(a["cp_message_path"], b["cp_message_path"])
+            self.assertNotEqual(a["global_planner_cache_root"], b["global_planner_cache_root"])
+            payload = yaml.safe_load(Path(a["mpc_config_path"]).read_text())
+            self.assertEqual(payload["mpc"]["horizon_s"], 2.5)
+            self.assertEqual(payload["mpc"]["constraints"]["max_velocity_mps"], 6)
+            self.assertEqual(a["target_speed_mps"], 6)
+            self.assertEqual(a["max_mpc_obstacles"], 17)
+            self.assertFalse(a["publish_cp_message"])
+
+    def test_pipeline_exceptions_propagate_and_cleanup_runs(self):
+        from mdrive_adapter.runtime import make_planner
+        actor = mock.Mock()
+        actor.get_velocity.return_value = types.SimpleNamespace(x=0, y=0)
+        world = mock.Mock()
+        with mock.patch("mdrive_adapter.runtime.build_bridge_config", return_value={}), \
+             mock.patch("mdrive_adapter.runtime.install_route"), \
+             mock.patch("opencda.planning_module.opencda_bridge.cpx_mpc_planner.CPXMPCPlannerBridge") as cls:
+            bridge = cls.return_value
+            bridge.execute_planning_pipeline.side_effect = ValueError("broken pipeline")
+            context, steps = make_planner(0, actor, world, [(None,None)] * 2, {}, "/unused")
+            with self.assertRaisesRegex(ValueError, "broken pipeline"):
+                next(steps)
+            bridge.destroy.assert_called_once_with()
+            self.assertIsNone(context.bridge)
+
+    def test_disabled_rerouting_does_not_block_benchmark_lane(self):
+        from opencda.planning_module.opencda_bridge.cpx_mpc_planner import CPXMPCPlannerBridge
+        bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
+        bridge.config = {"route_replan_enabled": False}
+        bridge.global_planner = mock.Mock()
+        result = bridge._attempt_static_obstacle_route_replan(
+            ego_location=None, obstacle={"x": 1, "y": 2})
+        self.assertEqual(result, (False, False, "route_replan_disabled"))
+        bridge.global_planner.block_lane_at_position.assert_not_called()
+
+
+class SummaryTests(unittest.TestCase):
+    def test_missing_ego_is_not_a_successful_parallel_run(self):
+        import json
+        import tempfile
+        from mdrive_adapter.summarize import summarize
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = root / 'results/ego_vehicle_0/results.json'
+            result.parent.mkdir(parents=True)
+            result.write_text(json.dumps({'_checkpoint': {'records': [
+                {'status': 'Completed', 'scores': {}, 'infractions': {}}]}}))
+            steps = root / 'results/image/cpx_gt/steps.jsonl'
+            steps.parent.mkdir(parents=True)
+            row = {'ego': 0, 'x': 0, 'y': 0, 'planning_ms': 1,
+                   'status': {'solver_status': 'solved'}}
+            steps.write_text((json.dumps(row) + '\n') * 2)
+            self.assertTrue(summarize(root, expected_egos=1)['closed_loop_executed'])
+            self.assertFalse(summarize(root, expected_egos=2)['closed_loop_executed'])
 
 
 if __name__ == "__main__":

@@ -69,6 +69,14 @@ def main():
              mdrive, mdrive / "simulation/leaderboard", mdrive / "simulation/scenario_runner",
              Path(env["CARLA_ROOT"]) / "PythonAPI/carla"]
     env["PYTHONPATH"] = os.pathsep.join(map(str, paths)) + os.pathsep + env.get("PYTHONPATH", "")
+    # Fail before launching a simulator if the current planning backend is missing.
+    subprocess.check_call([sys.executable, "-c",
+        "import sys, yaml; "
+        "from opencda.planning_module.opencda_bridge.cpx_mpc_planner import CPXMPCPlannerBridge; "
+        "from opencda.planning_module.Global_Planner.global_planner.runtime import import_ad_map_access; "
+        "config = yaml.safe_load(open(sys.argv[1])) or {}; "
+        "import_ad_map_access(config.get('bridge', {}).get('ad_map_install_root'))",
+        str(config)], cwd=str(ROOT), env=env)
     agent_args = ["--agent", str(ROOT / "mdrive_adapter/cpx_agent.py"),
                   "--agent-config", str(run_dir / "agent.yaml"), "--track", "MAP"]
     server_command = None
@@ -177,7 +185,7 @@ def main():
                 "execution": args.execution, "worker_cpus": args.worker_cpus,
                 "record_video": args.record_video, "evaluator_wall_s": time.perf_counter() - evaluation_started,
                 "returncode": returncode, "thread_limit": 1}, indent=2))
-            report = summarize(run_dir)
+            report = summarize(run_dir, expected_egos=ego_count)
             print("CP-X closed-loop execution:", report["closed_loop_executed"], flush=True)
             if not report["closed_loop_executed"] and returncode == 0:
                 returncode = 2
