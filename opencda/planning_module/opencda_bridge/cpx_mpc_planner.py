@@ -1928,7 +1928,10 @@ class CPXMPCPlannerBridge:
     ) -> tuple[bool, bool, str]:
         """Block the obstacle lane and atomically rebuild the active route."""
 
-        if not bool(self.config.get("route_replan_enabled", True)):
+        # Treat a partially constructed bridge like the normal default-enabled
+        # configuration. The policy switch is optional, not required state.
+        config = getattr(self, "config", {})
+        if not bool(config.get("route_replan_enabled", True)):
             return False, False, "route_replan_disabled"
         block_fn = getattr(self.global_planner, "block_lane_at_position", None)
         if not callable(block_fn):
