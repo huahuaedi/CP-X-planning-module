@@ -122,6 +122,7 @@ def test_mode_budget_trims_only_the_sub_credible_tail():
     r = resolve_conflicts(
         reference_samples=REF, ego_snapshot=EGO, my_actor_id=1,
         my_claim=None, obstacle_snapshots=[agent], cav_intents=[],
+        max_modes_per_agent=3,
     )
     assert r.diagnostics["mode_budget_per_agent"] == 3
     assert r.diagnostics["mode_budget_capped_agent_count"] == 1
@@ -754,6 +755,41 @@ def test_multimodal_probability_boundaries_are_inclusive():
     assert resolve(0.149).diagnostics["credible_mode_veto_count"] == 0
     assert resolve(0.150).diagnostics["credible_mode_veto_count"] == 1
     assert resolve(0.151).diagnostics["credible_mode_veto_count"] == 1
+
+
+def test_six_mode_budget_reports_raw_and_retained_counts():
+    modes = [
+        {
+            "path": [
+                {"x": 20.0 + float(k), "y": 5.0 + 0.1 * float(index)}
+                for k in range(20)
+            ],
+            "probability": probability,
+        }
+        for index, probability in enumerate(
+            (0.30, 0.25, 0.14, 0.12, 0.10, 0.09)
+        )
+    ]
+    obstacle = {
+        "id": "six_mode_target", "x": 20.0, "y": 5.0,
+        "v": 8.0, "psi": 0.0, "predicted_modes": modes,
+    }
+
+    capped = resolve_conflicts(
+        reference_samples=REF, ego_snapshot=EGO, my_actor_id=1,
+        obstacle_snapshots=[obstacle], max_modes_per_agent=3,
+    )
+    assert capped.diagnostics["raw_prediction_mode_count"] == 6
+    assert capped.diagnostics["retained_prediction_mode_count"] == 3
+    assert capped.diagnostics["mode_budget_capped_agent_count"] == 1
+
+    all_modes = resolve_conflicts(
+        reference_samples=REF, ego_snapshot=EGO, my_actor_id=1,
+        obstacle_snapshots=[obstacle], max_modes_per_agent=6,
+    )
+    assert all_modes.diagnostics["raw_prediction_mode_count"] == 6
+    assert all_modes.diagnostics["retained_prediction_mode_count"] == 6
+    assert all_modes.diagnostics["mode_budget_capped_agent_count"] == 0
 
 
 def test_credible_veto_hysteresis_holds_through_a_brief_flicker():

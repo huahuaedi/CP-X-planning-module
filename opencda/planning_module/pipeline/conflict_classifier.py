@@ -26,6 +26,7 @@ from typing import Any, List, Mapping, Optional, Sequence, Tuple
 from opencda.planning_module.pipeline.mpc_obstacle_relevance import (
     _obstacle_track_xy,
     _polyline_xy,
+    project_points_to_extended_polyline,
     project_to_extended_polyline,
 )
 
@@ -224,9 +225,13 @@ def classify_conflicts(
         conflict_s = conflict_t = None
         lat_series: List[float] = []
         signed_lat: List[float] = []
-        for k in range(min(n, len(track))):
-            px, py = track[k]
-            perp, along = project_to_extended_polyline(px, py, poly)
+        projected_track = track[:min(n, len(track))]
+        lateral_values, station_values = project_points_to_extended_polyline(
+            projected_track, poly,
+        )
+        for k, ((px, py), perp, along) in enumerate(zip(
+            projected_track, lateral_values, station_values,
+        )):
             # signed lateral: + is left of the ego path direction at that point
             i = max(0, min(len(poly) - 2, int(along / max(1e-6, poly_len) * (len(poly) - 1))))
             seg_h = math.atan2(poly[i + 1][1] - poly[i][1], poly[i + 1][0] - poly[i][0])

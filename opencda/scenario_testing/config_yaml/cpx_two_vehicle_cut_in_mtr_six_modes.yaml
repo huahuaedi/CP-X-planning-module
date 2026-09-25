@@ -1,0 +1,28 @@
+base_config: cpx_two_vehicle_cut_in_mtr_multimodal.yaml
+
+description: |-
+  Six-mode MTR integration fixture.  This keeps every mode emitted for the
+  scripted cut-in target so raw-versus-retained mode counts, Stage-A tags,
+  credible veto behavior and conflict-stage runtime can be compared with the
+  normal three-mode fixture.  The fixed six-mode floor is intentionally local
+  to this validation scenario; production scenarios retain compute-governor
+  degradation.
+
+vehicle_base:
+  planner:
+    cav_conflict_max_modes_per_agent: 6
+    cav_conflict_min_modes_per_agent: 6
+    prediction_mode_min_probability: 0.0
+
+scenario:
+  single_cav_list:
+    - name: cut_in_ego
+      spawn_position: [-300.0, 8.3, 0.3, 0, 0, 0]
+      destination: [-90.0, 8.3, 0.3]
+      v2x:
+        enabled: true
+        communication_range: 80
+      planner:
+        target_speed_mps: 10.0
+        debug_output_dir: opencda/planning_module/opencda_bridge/debug_cut_in_mtr_six_modes
+

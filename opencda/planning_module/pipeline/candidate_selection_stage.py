@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Mapping, Sequence
 
@@ -157,6 +158,17 @@ class CandidateSelectionStage:
                 samples=baseline, source="executed_reference",
                 reason="cooperative_maneuver_has_no_lateral_geometry",
             )
+        # Once the maneuver is committed, ``baseline_reference`` is the
+        # persistent lane-change reference installed by the maneuver owner.
+        # Rebuilding an equivalent preview here both duplicates ownership and
+        # re-runs the full corridor geometry pipeline at every 5 Hz
+        # coordination refresh.  Stage A should classify against the path the
+        # vehicle is actually committed to drive.
+        if bool(getattr(proposal, "committed", False)):
+            return CooperativeConflictReference(
+                samples=baseline, source="executed_reference",
+                reason="cooperative_maneuver_committed",
+            )
         source_lane_id = int(getattr(proposal, "source_corridor_id", 0))
         target_lane_id = int(getattr(proposal, "target_corridor_id", 0))
         duration_s = max(
@@ -176,6 +188,30 @@ class CandidateSelectionStage:
             target_lane_id=int(target_lane_id),
             target_speed_mps=float(target_speed_mps),
         )
+        # The local-map target corridor spans roughly 200 m, while the
+        # cooperative preview only needs the transition plus one MPC horizon.
+        # Window it before alignment/resampling so cost is proportional to the
+        # consumer horizon rather than the map-frame length.
+        spacing_m = max(0.05, float(geometry.step_m))
+        target_count = max(
+            int(horizon_steps),
+            int(math.ceil(
+                float(geometry.geometry_length_m) / spacing_m
+            )) + int(horizon_steps),
+        )
+        target_window = self._provider.window_from_reference(
+            target_reference,
+            ego_x_m=float(current_state[0]),
+            ego_y_m=float(current_state[1]),
+            lower_s_m=0.0,
+            first_forward_m=spacing_m,
+            spacing_m=spacing_m,
+            count=int(target_count),
+        ) if target_reference else None
+        if target_window is not None and target_window.samples:
+            target_reference = [
+                dict(sample) for sample in target_window.samples
+            ]
         built = self._provider.lane_change_candidate(
             local_map=local_map,
             current_state=current_state,
@@ -187,7 +223,7 @@ class CandidateSelectionStage:
             geometry_speed_mps=float(geometry.geometry_speed_mps),
             geometry_length_m=float(geometry.geometry_length_m),
             transition_duration_s=float(duration_s),
-            spacing_m=float(geometry.step_m),
+            spacing_m=spacing_m,
             horizon_steps=int(horizon_steps),
             lane_width_m=float(lane_width_m),
             destination_state=(), trajectory_variant="normal",

@@ -23,6 +23,8 @@ from __future__ import annotations
 import math
 from typing import Any, List, Mapping, Sequence, Tuple
 
+import numpy as np
+
 Snapshot = Mapping[str, Any]
 XY = Tuple[float, float]
 
@@ -184,6 +186,92 @@ def project_to_extended_polyline(
             return float(cross_m), float(arc_m + beyond_m)
 
     return float(lateral_m), float(station_m)
+
+
+def project_points_to_extended_polyline(
+    points: Sequence[XY], poly: Sequence[XY],
+) -> Tuple[List[float], List[float]]:
+    """Vectorized equivalent of :func:`project_to_extended_polyline`.
+
+    Stage A projects every future point of every retained prediction mode
+    onto the same reference.  Calling the scalar projector made that a pure
+    Python ``agents x horizon x segments`` loop.  This function evaluates the
+    point/segment distance matrix in NumPy while preserving the scalar
+    projector's finite-polyline and infinite-endpoint-tangent semantics.
+    """
+
+    point_rows = [] if points is None else list(points)
+    poly_rows = [] if poly is None else list(poly)
+    if not point_rows:
+        return [], []
+    if len(poly_rows) < 2:
+        # Match the scalar helper: with no valid segment, perpendicular
+        # distance remains infinite and station remains at the origin.
+        return [math.inf] * len(point_rows), [0.0] * len(point_rows)
+
+    point_xy = np.asarray(point_rows, dtype=float).reshape((-1, 2))
+    poly_xy = np.asarray(poly_rows, dtype=float).reshape((-1, 2))
+    starts = poly_xy[:-1]
+    deltas = poly_xy[1:] - starts
+    length_sq = np.einsum("ij,ij->i", deltas, deltas)
+    valid = length_sq > 1.0e-12
+    lengths = np.zeros_like(length_sq)
+    lengths[valid] = np.sqrt(length_sq[valid])
+    arc_start = np.concatenate((np.zeros(1), np.cumsum(lengths[:-1])))
+
+    relative = point_xy[:, None, :] - starts[None, :, :]
+    numerators = np.einsum("nsi,si->ns", relative, deltas)
+    raw_t = np.zeros_like(numerators)
+    np.divide(
+        numerators, length_sq[None, :], out=raw_t,
+        where=valid[None, :],
+    )
+    clamped_t = np.clip(raw_t, 0.0, 1.0)
+    closest = starts[None, :, :] + clamped_t[:, :, None] * deltas[None, :, :]
+    residual = point_xy[:, None, :] - closest
+    distance_sq = np.einsum("nsi,nsi->ns", residual, residual)
+    distance_sq[:, ~valid] = np.inf
+    best_segment = np.argmin(distance_sq, axis=1)
+    row_index = np.arange(point_xy.shape[0])
+    lateral = np.sqrt(distance_sq[row_index, best_segment])
+    station = (
+        arc_start[best_segment]
+        + clamped_t[row_index, best_segment] * lengths[best_segment]
+    )
+    total_arc = float(np.sum(lengths))
+
+    # Preserve the scalar helper's infinite extension of the first and last
+    # segment tangents.  Only points whose closest finite projection is the
+    # corresponding endpoint are eligible for extension.
+    first_delta = deltas[0]
+    first_length = float(lengths[0])
+    if first_length > 1.0e-9:
+        from_first = point_xy - poly_xy[0]
+        before = np.dot(from_first, first_delta) / first_length
+        mask = (station <= 1.0e-6) & (before < 0.0)
+        if np.any(mask):
+            cross = np.abs(
+                first_delta[0] * from_first[:, 1]
+                - first_delta[1] * from_first[:, 0]
+            ) / first_length
+            lateral[mask] = cross[mask]
+            station[mask] = before[mask]
+
+    last_delta = deltas[-1]
+    last_length = float(lengths[-1])
+    if last_length > 1.0e-9:
+        from_last = point_xy - poly_xy[-1]
+        beyond = np.dot(from_last, last_delta) / last_length
+        mask = (station >= total_arc - 1.0e-6) & (beyond > 0.0)
+        if np.any(mask):
+            cross = np.abs(
+                last_delta[0] * from_last[:, 1]
+                - last_delta[1] * from_last[:, 0]
+            ) / last_length
+            lateral[mask] = cross[mask]
+            station[mask] = total_arc + beyond[mask]
+
+    return lateral.tolist(), station.tolist()
 
 
 def split_relevant_mpc_obstacles(

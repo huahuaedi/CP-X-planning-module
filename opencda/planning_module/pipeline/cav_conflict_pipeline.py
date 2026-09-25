@@ -551,6 +551,7 @@ class _ExpandedAgents:
     physical_agents: List[Mapping[str, Any]]
     all_agents: List[Mapping[str, Any]]
     mode_groups: Dict[str, List[Tuple[Mapping[str, Any], float]]]
+    raw_prediction_mode_count: int
     retained_mode_count: int
     mode_capped_agent_count: int
     raw_obstacle_count: int
@@ -603,10 +604,12 @@ def _build_physical_agents_with_modes(
     physical_agents: List[Mapping[str, Any]] = perception_agents + cav_agents
     all_agents: List[Mapping[str, Any]] = []
     mode_groups: Dict[str, List[Tuple[Mapping[str, Any], float]]] = {}
+    raw_prediction_mode_count = 0
     retained_mode_count = 0
     mode_capped_agent_count = 0
     for agent in physical_agents:
         modes = as_modes(agent.get("predicted_modes"))
+        raw_prediction_mode_count += len(modes)
         retained = [
             mode for mode in modes
             if float(mode.probability) >= max(0.0, float(mode_probability_floor))
@@ -667,6 +670,7 @@ def _build_physical_agents_with_modes(
         physical_agents=physical_agents,
         all_agents=all_agents,
         mode_groups=mode_groups,
+        raw_prediction_mode_count=raw_prediction_mode_count,
         retained_mode_count=retained_mode_count,
         mode_capped_agent_count=mode_capped_agent_count,
         raw_obstacle_count=len(raw_obstacles),
@@ -703,7 +707,7 @@ def resolve_conflicts(
     cached_corridor: Optional[Corridor] = None,
     corridor_reference_samples: Optional[Sequence[Any]] = None,
     max_relevant_agents: int = 6,
-    max_modes_per_agent: int = 3,
+    max_modes_per_agent: int = 6,
 ) -> ConflictResolution:
     cavs = list(cav_intents or [])
     expanded = _build_physical_agents_with_modes(
@@ -717,6 +721,7 @@ def resolve_conflicts(
     physical_agents = expanded.physical_agents
     all_agents = expanded.all_agents
     mode_groups = expanded.mode_groups
+    raw_prediction_mode_count = expanded.raw_prediction_mode_count
     retained_mode_count = expanded.retained_mode_count
     mode_capped_agent_count = expanded.mode_capped_agent_count
     raw_obstacle_count = expanded.raw_obstacle_count
@@ -904,6 +909,7 @@ def resolve_conflicts(
         "multimodal_agent_count": sum(
             1 for a in physical_agents if len(as_modes(a.get("predicted_modes"))) > 1
         ),
+        "raw_prediction_mode_count": int(raw_prediction_mode_count),
         "retained_prediction_mode_count": int(retained_mode_count),
         "prediction_modes": mode_diagnostics,
         "credible_mode_veto_count": int(credible_veto_count),

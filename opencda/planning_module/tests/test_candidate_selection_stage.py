@@ -103,10 +103,16 @@ def test_cooperative_conflict_uses_uncommitted_candidate_geometry():
         step_m=1.0, operational_curvature_limit_1pm=0.2,
     ))
     captured = {}
+
+    def window_target(reference, **kwargs):
+        captured["target_window"] = kwargs
+        return SimpleNamespace(samples=tuple(reference))
+
     provider = SimpleNamespace(
         lane_change_target_reference=lambda *_args, **_kwargs: (
             ({"x_ref_m": 1.0, "y_ref_m": 3.5},), "target_ready"
         ),
+        window_from_reference=window_target,
         lane_change_candidate=lambda **kwargs: (
             captured.update(kwargs) or SimpleNamespace(samples=(
                 {"x_ref_m": 0.0, "y_ref_m": 0.0},
@@ -139,6 +145,41 @@ def test_cooperative_conflict_uses_uncommitted_candidate_geometry():
     assert len(result.samples) == 2
     assert captured["current_lane_id"] == 10
     assert captured["target_lane_id"] == 20
+    assert captured["target_window"]["count"] == 38
+
+
+def test_cooperative_conflict_reuses_committed_execution_reference():
+    def fail_if_target_geometry_is_rebuilt(*_args, **_kwargs):
+        raise AssertionError(
+            "committed maneuver must not rebuild target geometry"
+        )
+
+    provider = SimpleNamespace(
+        lane_change_target_reference=fail_if_target_geometry_is_rebuilt,
+    )
+    stage = _post_selection_stage()
+    stage._provider = provider
+    proposal = CooperativeManeuverProposal.from_behavior(
+        maneuver="lane_change_left", source_corridor_id=10,
+        target_corridor_id=20, route_required=False,
+        maneuver_active=True, committed_at_s=1.0,
+    )
+    baseline = (
+        {"x_ref_m": 0.0, "y_ref_m": 0.0},
+        {"x_ref_m": 10.0, "y_ref_m": 3.5},
+    )
+
+    result = stage.cooperative_conflict_reference(
+        proposal=proposal, local_map=object(),
+        current_state=(0.0, 0.0, 6.0, 0.0),
+        baseline_reference=baseline,
+        target_speed_mps=8.0, horizon_steps=10, dt_s=0.2,
+        lane_width_m=3.5,
+    )
+
+    assert result.source == "executed_reference"
+    assert result.reason == "cooperative_maneuver_committed"
+    assert result.samples == baseline
 
 
 def test_cooperative_conflict_keeps_executed_reference_without_request():

@@ -512,6 +512,9 @@ class PlannerDiagnosticsStage:
             "cav_multimodal_agent_count": int(
                 cav_diag.get("multimodal_agent_count", 0) or 0
             ),
+            "cav_raw_prediction_mode_count": int(
+                cav_diag.get("raw_prediction_mode_count", 0) or 0
+            ),
             "cav_retained_prediction_mode_count": int(
                 cav_diag.get("retained_prediction_mode_count", 0) or 0
             ),

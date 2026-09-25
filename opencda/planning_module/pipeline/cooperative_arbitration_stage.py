@@ -65,7 +65,10 @@ class CooperativeArbitrationStage:
         )
         self.governor = CAVConflictComputeGovernor(
             max_agents=int(config.get("cav_conflict_max_relevant_agents", 6)),
-            max_modes=int(config.get("cav_conflict_max_modes_per_agent", 3)),
+            # MTR's native contract is six hypotheses per predicted actor.
+            # Start with all six; the governor remains the single owner of
+            # runtime degradation when the conflict-stage budget is exceeded.
+            max_modes=int(config.get("cav_conflict_max_modes_per_agent", 6)),
             min_agents=int(config.get("cav_conflict_min_relevant_agents", 2)),
             min_modes=int(config.get("cav_conflict_min_modes_per_agent", 1)),
             budget_ms=float(config.get("cav_conflict_budget_ms", 100.0)),

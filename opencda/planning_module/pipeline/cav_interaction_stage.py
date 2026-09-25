@@ -37,7 +37,7 @@ class CAVInteractionStage:
         current_acceleration_mps2=0.0, max_jerk_mps3=10.0,
         comfortable_deceleration_mps2=1.5,
         cooperative_preparation_time_s=4.0,
-        max_relevant_agents=6, max_modes_per_agent=3,
+        max_relevant_agents=6, max_modes_per_agent=6,
     ):
         """Classify on proposal geometry and constrain executable geometry."""
 

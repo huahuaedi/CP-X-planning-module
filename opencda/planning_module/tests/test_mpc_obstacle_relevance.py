@@ -1,4 +1,8 @@
+import math
+import random
+
 from pipeline.mpc_obstacle_relevance import (
+    project_points_to_extended_polyline,
     project_to_extended_polyline,
     split_relevant_mpc_obstacles,
 )
@@ -15,6 +19,37 @@ def test_extended_projection_does_not_override_a_closer_curved_interior():
     lateral, station = project_to_extended_polyline(8.0, 4.0, poly)
     assert abs(lateral - 2.0) < 1.0e-9
     assert abs(station - 14.0) < 1.0e-9
+
+
+def test_vectorized_projection_matches_scalar_projection():
+    rng = random.Random(17)
+    poly = [
+        (-10.0, 0.0), (-4.0, 0.0), (2.0, 1.5),
+        (7.0, 6.0), (7.0, 6.0), (12.0, 12.0),
+    ]
+    points = [
+        (rng.uniform(-30.0, 30.0), rng.uniform(-20.0, 25.0))
+        for _ in range(200)
+    ]
+    expected = [
+        project_to_extended_polyline(x, y, poly) for x, y in points
+    ]
+    lateral, station = project_points_to_extended_polyline(points, poly)
+
+    assert len(lateral) == len(points)
+    assert len(station) == len(points)
+    for vectorized, scalar in zip(zip(lateral, station), expected):
+        assert math.isclose(vectorized[0], scalar[0], abs_tol=1.0e-9)
+        assert math.isclose(vectorized[1], scalar[1], abs_tol=1.0e-9)
+
+
+def test_vectorized_projection_preserves_endpoint_extensions():
+    poly = [(0.0, 0.0), (5.0, 0.0), (10.0, 0.0)]
+    lateral, station = project_points_to_extended_polyline(
+        [(25.0, 0.2), (-4.0, -0.3), (7.0, 2.0)], poly,
+    )
+    assert lateral == [0.2, 0.3, 2.0]
+    assert station == [25.0, -4.0, 7.0]
 
 
 # Ego reference: straight line along +x from (0,0) to (60,0).

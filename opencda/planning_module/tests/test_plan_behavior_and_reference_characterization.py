@@ -216,10 +216,14 @@ def test_cav_conflict_governor_resets_when_the_route_changes():
         bridge.route_manager.route_revision
     )
 
-    for _ in range(20):
+    # Capacity degrades modes first (6 -> 1), then physical agents. Use a
+    # sufficiently long over-budget streak to cross both phases without
+    # coupling the test to the former three-mode ceiling.
+    for _ in range(40):
         bridge.pipeline.cooperative.governor.observe_stage_ms(500.0)
     assert bridge.pipeline.cooperative.governor.current_max_relevant_agents < 6
 
     bridge.route_manager.set_destination(start_point=START_XYZ, goal_point=GOAL_XYZ)
     _call(bridge)
     assert bridge.pipeline.cooperative.governor.current_max_relevant_agents == 6
+    assert bridge.pipeline.cooperative.governor.current_max_modes_per_agent == 6

@@ -46,7 +46,7 @@ class CAVConflictComputeGovernor:
         self,
         *,
         max_agents: int = 6,
-        max_modes: int = 3,
+        max_modes: int = 6,
         min_agents: int = 2,
         min_modes: int = 1,
         budget_ms: float = 100.0,
@@ -134,9 +134,9 @@ class CAVConflictComputeGovernor:
         return self._decision("holding")
 
     def _step_down(self) -> None:
-        # Modes first: halving a 3-mode agent to 1 removes 2 rows' worth of
-        # corridor work per agent for every agent at once, which is usually
-        # cheaper to give up than a whole agent's worth of negotiation.
+        # Modes first: removing one hypothesis per agent reduces corridor
+        # work across every retained agent before sacrificing an entire
+        # physical participant from negotiation.
         if self._modes > self._min_modes:
             self._modes -= 1
         elif self._agents > self._min_agents:
