@@ -45,7 +45,7 @@ vehicle_base:
     target_speed_mps: 8.0
     full_allow_opportunistic_lane_change: false
     cp_lane_closure_reroute_enabled: true
-    debug_output_dir: opencda/planning_module/opencda_bridge/debug_cp_lane_closure
+    debug_output_dir: artifacts/debug/cp_lane_closure
 
 scenario:
   single_cav_list:

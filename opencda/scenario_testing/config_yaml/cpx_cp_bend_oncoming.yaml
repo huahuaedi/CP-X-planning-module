@@ -48,7 +48,7 @@ vehicle_base:
     route_reached_distance_m: 1.5
     record_evaluation_metrics: true
     debug_log_formats: [jsonl]
-    debug_output_dir: opencda/planning_module/opencda_bridge/debug_cp_bend_oncoming_on
+    debug_output_dir: artifacts/debug/cp_bend_oncoming_on
 
 scenario:
   single_cav_list:
@@ -60,7 +60,7 @@ scenario:
         enabled: true
         communication_range: 250
       planner:
-        debug_output_dir: opencda/planning_module/opencda_bridge/debug_cp_bend_oncoming_on
+        debug_output_dir: artifacts/debug/cp_bend_oncoming_on
 
     - name: observer
       # A stationary roadside/adjacent-lane observer beyond the bend. Keeping

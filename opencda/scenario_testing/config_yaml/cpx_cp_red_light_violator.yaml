@@ -43,7 +43,7 @@ vehicle_base:
     ignore_traffic_control: true
     record_evaluation_metrics: true
     debug_log_formats: [jsonl]
-    debug_output_dir: opencda/planning_module/opencda_bridge/debug_cp_red_light_on
+    debug_output_dir: artifacts/debug/cp_red_light_on
 
 scenario:
   single_cav_list:
@@ -54,7 +54,7 @@ scenario:
         enabled: true
         communication_range: 100
       planner:
-        debug_output_dir: opencda/planning_module/opencda_bridge/debug_cp_red_light_on
+        debug_output_dir: artifacts/debug/cp_red_light_on
 
     - name: observer
       # Opposite carriageway beyond the junction. It remains outside ego's

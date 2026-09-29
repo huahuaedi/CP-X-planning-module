@@ -6,13 +6,13 @@ each arm's debug directory and prints one metrics table.
 
     python opencda/scenario_testing/compare_prediction_ablation.py
     python opencda/scenario_testing/compare_prediction_ablation.py \
-        --dir blind=/abs/debug_intersection_cross_blind \
-        --dir oracle=/abs/debug_intersection_cross_oracle
+        --dir blind=/abs/artifacts/debug/intersection_cross_blind \
+        --dir oracle=/abs/artifacts/debug/intersection_cross_oracle
 
-With no --dir, looks for these under opencda/planning_module/opencda_bridge/:
-    cv      -> debug_intersection_cross
-    blind   -> debug_intersection_cross_blind
-    oracle  -> debug_intersection_cross_oracle
+With no --dir, looks for these under artifacts/debug/:
+    cv      -> intersection_cross
+    blind   -> intersection_cross_blind
+    oracle  -> intersection_cross_oracle
 """
 
 from __future__ import annotations
@@ -30,11 +30,11 @@ except ModuleNotFoundError:
     from planner_debug_records import load_planner_records
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_DEFAULT_BASE = _REPO_ROOT / "opencda" / "planning_module" / "opencda_bridge"
+_DEFAULT_BASE = _REPO_ROOT / "artifacts" / "debug"
 _DEFAULT_ARMS = {
-    "cv": "debug_intersection_cross",
-    "blind": "debug_intersection_cross_blind",
-    "oracle": "debug_intersection_cross_oracle",
+    "cv": "intersection_cross",
+    "blind": "intersection_cross_blind",
+    "oracle": "intersection_cross_oracle",
 }
 _HARD_BRAKE = 0.6           # applied_brake fraction
 _HARD_DECEL_MPS2 = -3.0     # measured_accel_mps2

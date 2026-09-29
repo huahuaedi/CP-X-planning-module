@@ -24,5 +24,5 @@ scenario:
         communication_range: 80
       planner:
         target_speed_mps: 10.0
-        debug_output_dir: opencda/planning_module/opencda_bridge/debug_cut_in_mtr_six_modes
+        debug_output_dir: artifacts/debug/cut_in_mtr_six_modes
 

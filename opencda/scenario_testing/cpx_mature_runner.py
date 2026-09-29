@@ -772,7 +772,7 @@ def run_mature_scenario(opt, scenario_params, *, script_name):
                     exception=scenario_exception,
                     completion_mode=completion_mode,
                     fallback_debug_output_dir=(
-                        "opencda/planning_module/opencda_bridge/debug_cpx_default"
+                        "artifacts/debug/cpx_default"
                     ),
                 )
                 if status_paths:

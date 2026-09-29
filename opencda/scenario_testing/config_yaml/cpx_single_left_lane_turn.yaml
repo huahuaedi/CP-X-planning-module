@@ -42,7 +42,7 @@ scenario:
           debug_trajectory: true
           debug: true
       planner:
-        debug_output_dir: opencda/planning_module/opencda_bridge/debug_single_left_lane_turn
+        debug_output_dir: artifacts/debug/single_left_lane_turn
         global_planner_mode: dij
         global_planner_xodr_path: Global_Planner/maps/Town06.xodr
         global_planner_strict: true

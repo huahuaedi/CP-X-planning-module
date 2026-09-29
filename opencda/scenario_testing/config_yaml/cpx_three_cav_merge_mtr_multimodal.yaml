@@ -35,7 +35,7 @@ scenario:
           debug: true
       planner:
         target_speed_mps: 8.0
-        debug_output_dir: opencda/planning_module/opencda_bridge/debug_three_cav_merge_mtr_cav1
+        debug_output_dir: artifacts/debug/three_cav_merge_mtr_cav1
 
     - name: cav2
       spawn_position: [-306.0, 4.8, 0.3, 0, 0, 0]
@@ -49,7 +49,7 @@ scenario:
           debug: true
       planner:
         target_speed_mps: 8.0
-        debug_output_dir: opencda/planning_module/opencda_bridge/debug_three_cav_merge_mtr_cav2
+        debug_output_dir: artifacts/debug/three_cav_merge_mtr_cav2
 
     - name: cav3
       # Behind both mergers, same lane as cav2's start (4.8) and staying
@@ -70,4 +70,4 @@ scenario:
           debug: true
       planner:
         target_speed_mps: 7.0
-        debug_output_dir: opencda/planning_module/opencda_bridge/debug_three_cav_merge_mtr_cav3
+        debug_output_dir: artifacts/debug/three_cav_merge_mtr_cav3

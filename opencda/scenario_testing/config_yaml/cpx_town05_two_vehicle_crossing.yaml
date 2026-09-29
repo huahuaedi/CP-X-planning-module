@@ -54,7 +54,7 @@ scenario:
         communication_range: 100
       planner:
         target_speed_mps: 8.0
-        debug_output_dir: opencda/planning_module/opencda_bridge/debug_town05_crossing_multimodal
+        debug_output_dir: artifacts/debug/town05_crossing_multimodal
         # Investigation-only: dump every tick with an active Stage-D corridor
         # row to tools/frame_replay.py's FrameCapture format. min_row_count
         # keeps this to the conflict window instead of the whole run.

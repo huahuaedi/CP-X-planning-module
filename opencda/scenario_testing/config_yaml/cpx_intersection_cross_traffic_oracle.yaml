@@ -5,7 +5,7 @@ description: |-
   is replaced with its recorded ground-truth trajectory (+ a maneuver-intent
   label) from the recording run. Requires intersection_cross.jsonl to exist
   (run `cpx_intersection_cross_traffic` first). Debug output auto-suffixed to
-  debug_intersection_cross_oracle/.
+  artifacts/debug/intersection_cross_oracle/.
 
 vehicle_base:
   planner:

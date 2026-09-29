@@ -31,7 +31,7 @@ vehicle_base:
     require_native_opencda_cp: false
     prediction_lane_following_enabled: false
     max_mpc_obstacles: 0
-    debug_output_dir: opencda/planning_module/opencda_bridge/debug_single_left_lane_turn_isolated
+    debug_output_dir: artifacts/debug/single_left_lane_turn_isolated
 
 scenario:
   max_ticks: 2400

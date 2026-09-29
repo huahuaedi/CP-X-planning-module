@@ -20,7 +20,7 @@ scenario:
       planner:
         publish_cp_message: false
         require_native_opencda_cp: false
-        debug_output_dir: opencda/planning_module/opencda_bridge/debug_cp_roadway_object_off
+        debug_output_dir: artifacts/debug/cp_roadway_object_off
 
     - name: observer
       spawn_position: [-240.0, 4.8, 0.3, 0, 0, 0]

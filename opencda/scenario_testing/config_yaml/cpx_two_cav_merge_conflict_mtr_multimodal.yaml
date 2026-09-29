@@ -33,7 +33,7 @@ scenario:
           debug: true
       planner:
         target_speed_mps: 8.0
-        debug_output_dir: opencda/planning_module/opencda_bridge/debug_two_cav_merge_mtr_cav1
+        debug_output_dir: artifacts/debug/two_cav_merge_mtr_cav1
 
     - name: cav2
       spawn_position: [-306.0, 4.8, 0.3, 0, 0, 0]
@@ -47,4 +47,4 @@ scenario:
           debug: true
       planner:
         target_speed_mps: 8.0
-        debug_output_dir: opencda/planning_module/opencda_bridge/debug_two_cav_merge_mtr_cav2
+        debug_output_dir: artifacts/debug/two_cav_merge_mtr_cav2

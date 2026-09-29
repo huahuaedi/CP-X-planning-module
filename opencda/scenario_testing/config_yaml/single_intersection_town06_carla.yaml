@@ -252,7 +252,7 @@ vehicle_base:
     record_debug: true
     record_evaluation_metrics: true
     record_collision_sensor: true
-    debug_output_dir: opencda/planning_module/opencda_bridge/debug_intersection
+    debug_output_dir: artifacts/debug/intersection
     debug: true
 
 # define the background traffic control by carla
@@ -427,5 +427,5 @@ scenario:
         record_debug: true
         record_evaluation_metrics: true
         record_collision_sensor: true
-        debug_output_dir: opencda/planning_module/opencda_bridge/debug_intersection
+        debug_output_dir: artifacts/debug/intersection
         debug: true

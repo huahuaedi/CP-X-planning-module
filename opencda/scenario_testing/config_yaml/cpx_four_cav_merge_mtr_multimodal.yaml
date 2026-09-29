@@ -43,7 +43,7 @@ scenario:
           debug: true
       planner:
         target_speed_mps: 8.0
-        debug_output_dir: opencda/planning_module/opencda_bridge/debug_four_cav_merge_mtr_cav1
+        debug_output_dir: artifacts/debug/four_cav_merge_mtr_cav1
 
     - name: cav2
       spawn_position: [-306.0, 4.8, 0.3, 0, 0, 0]
@@ -57,7 +57,7 @@ scenario:
           debug: true
       planner:
         target_speed_mps: 8.0
-        debug_output_dir: opencda/planning_module/opencda_bridge/debug_four_cav_merge_mtr_cav2
+        debug_output_dir: artifacts/debug/four_cav_merge_mtr_cav2
 
     - name: cav3
       # Through vehicle in lane 4.8, destination short of cav1's stop point
@@ -73,7 +73,7 @@ scenario:
           debug: true
       planner:
         target_speed_mps: 7.0
-        debug_output_dir: opencda/planning_module/opencda_bridge/debug_four_cav_merge_mtr_cav3
+        debug_output_dir: artifacts/debug/four_cav_merge_mtr_cav3
 
     - name: cav4
       # Through vehicle in lane 8.3, destination short of cav2's stop point
@@ -90,4 +90,4 @@ scenario:
           debug: true
       planner:
         target_speed_mps: 7.0
-        debug_output_dir: opencda/planning_module/opencda_bridge/debug_four_cav_merge_mtr_cav4
+        debug_output_dir: artifacts/debug/four_cav_merge_mtr_cav4

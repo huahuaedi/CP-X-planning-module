@@ -21,7 +21,7 @@ scenario:
       planner:
         publish_cp_message: false
         require_native_opencda_cp: false
-        debug_output_dir: opencda/planning_module/opencda_bridge/debug_cp_bend_oncoming_off
+        debug_output_dir: artifacts/debug/cp_bend_oncoming_off
 
     - name: observer
       spawn_position: [6.3, -80.0, 0.3, 0, -90, 0]

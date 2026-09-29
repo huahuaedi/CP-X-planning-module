@@ -34,7 +34,7 @@ scenario:
         communication_range: 100
       planner:
         target_speed_mps: 8.0
-        debug_output_dir: opencda/planning_module/opencda_bridge/debug_conflict_oncoming
+        debug_output_dir: artifacts/debug/conflict_oncoming
   scripted_actors:
     - blueprint: vehicle.tesla.model3
       path:

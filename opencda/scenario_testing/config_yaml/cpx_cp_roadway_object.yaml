@@ -36,7 +36,7 @@ vehicle_base:
     require_native_opencda_cp: true
     full_allow_opportunistic_lane_change: false
     following_idm_enabled: true
-    debug_output_dir: opencda/planning_module/opencda_bridge/debug_cp_roadway_object_on
+    debug_output_dir: artifacts/debug/cp_roadway_object_on
 
 scenario:
   single_cav_list:
@@ -47,7 +47,7 @@ scenario:
         enabled: true
         communication_range: 60
       planner:
-        debug_output_dir: opencda/planning_module/opencda_bridge/debug_cp_roadway_object_on
+        debug_output_dir: artifacts/debug/cp_roadway_object_on
 
     - name: observer
       spawn_position: [-240.0, 4.8, 0.3, 0, 0, 0]

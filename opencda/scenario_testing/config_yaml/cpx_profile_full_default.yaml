@@ -152,5 +152,5 @@ vehicle_base:
     opencda_reference_recovery_speed_mps: 1.2
     record_debug: true
     # Always overridden per scenario -- placeholder only.
-    debug_output_dir: opencda/planning_module/opencda_bridge/debug_cpx_default
+    debug_output_dir: artifacts/debug/cpx_default
     debug: true

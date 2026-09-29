@@ -247,7 +247,7 @@ class VehicleManager(object):
         planner_config["draw_world_debug"] = bool(
             planner_config.get("draw_world_debug", False)
         )
-        debug_output_dir = Path(str(planner_config.get("debug_output_dir", "opencda/planning_module/opencda_bridge/debug")))
+        debug_output_dir = Path(str(planner_config.get("debug_output_dir", "artifacts/debug/cpx_default")))
         self.shadow_comparison_timeout_s = max(0.0, float(planner_config.get("shadow_comparison_timeout_s", 5.0)))
         self.shadow_comparison_output_path = debug_output_dir / "planner_comparison.jsonl"
         self.opencda_planner_input_output_path = debug_output_dir / "opencda_planner_input_adapter_output.jsonl"

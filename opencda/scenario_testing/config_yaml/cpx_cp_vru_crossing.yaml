@@ -43,7 +43,7 @@ vehicle_base:
     following_idm_enabled: true
     record_evaluation_metrics: true
     debug_log_formats: [jsonl]
-    debug_output_dir: opencda/planning_module/opencda_bridge/debug_cp_vru_crossing_on
+    debug_output_dir: artifacts/debug/cp_vru_crossing_on
 
 scenario:
   single_cav_list:
@@ -54,7 +54,7 @@ scenario:
         enabled: true
         communication_range: 150
       planner:
-        debug_output_dir: opencda/planning_module/opencda_bridge/debug_cp_vru_crossing_on
+        debug_output_dir: artifacts/debug/cp_vru_crossing_on
 
     - name: observer
       # Starts beyond the crossing point, so it supplies a remote viewpoint

@@ -419,7 +419,7 @@ def run_scenario(opt, scenario_params):
             debug_output_dir = str(
                 planner_cfg.get(
                     "debug_output_dir",
-                    "opencda/planning_module/opencda_bridge/debug_intersection",
+                    "artifacts/debug/intersection",
                 )
             )
             # Mirror cpx_mpc_planner._resolved_debug_output_dir(): the

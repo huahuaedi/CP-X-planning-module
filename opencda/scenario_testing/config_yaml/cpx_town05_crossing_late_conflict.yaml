@@ -16,7 +16,7 @@ scenario:
         communication_range: 100
       planner:
         target_speed_mps: 8.0
-        debug_output_dir: opencda/planning_module/opencda_bridge/debug_town05_late_conflict
+        debug_output_dir: artifacts/debug/town05_late_conflict
         frame_capture:
           out_dir: artifacts/deflection_frames/late_conflict_after_fix
           min_row_count: 1

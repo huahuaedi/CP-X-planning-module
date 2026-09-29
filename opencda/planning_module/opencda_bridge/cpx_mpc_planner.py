@@ -668,7 +668,10 @@ class CPXMPCPlannerBridge:
         base = Path(
             self.config.get(
                 "debug_output_dir",
-                Path(__file__).resolve().parent / "debug",
+                Path(__file__).resolve().parents[3]
+                / "artifacts"
+                / "debug"
+                / "cpx_default",
             )
         )
         mode = str(getattr(self, "_prediction_mode", "cv"))

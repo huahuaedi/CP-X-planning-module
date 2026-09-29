@@ -21,7 +21,7 @@ scenario:
       planner:
         publish_cp_message: false
         require_native_opencda_cp: false
-        debug_output_dir: opencda/planning_module/opencda_bridge/debug_cp_red_light_off
+        debug_output_dir: artifacts/debug/cp_red_light_off
 
     - name: observer
       spawn_position: [-115.0, 94.868, 0.6, 0, 0, 0]

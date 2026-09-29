@@ -58,7 +58,7 @@ scenario:
           debug: true
       planner:
         target_speed_mps: 5.0
-        debug_output_dir: opencda/planning_module/opencda_bridge/debug_multimodal_target
+        debug_output_dir: artifacts/debug/multimodal_target
 
     - name: prediction_ego
       spawn_position: [-325.0, 8.3, 0.3, 0, 0, 0]
@@ -82,4 +82,4 @@ scenario:
         prediction_mode_min_probability: 0.05
         prediction_credible_probability_min: 0.15
         prediction_credible_ttc_s: 2.0
-        debug_output_dir: opencda/planning_module/opencda_bridge/debug_multimodal_ego
+        debug_output_dir: artifacts/debug/multimodal_ego

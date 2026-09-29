@@ -62,7 +62,7 @@ vehicle_base:
     candidate_lane_change_assertive_speed_scale: 1.0
     candidate_lane_change_normal_speed_scale: 0.9
     candidate_lane_change_conservative_speed_scale: 0.7
-    debug_output_dir: opencda/planning_module/opencda_bridge/debug_cpx_lane_change_2lanefree
+    debug_output_dir: artifacts/debug/cpx_lane_change_2lanefree
 
 # Single slow vehicle parked in ego's own lane (y=8.3, same lane cav1 spawns
 # in), 170m ahead of cav1's spawn point. auto_lane_change defaults to false
