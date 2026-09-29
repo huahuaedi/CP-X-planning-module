@@ -26,8 +26,9 @@ cpx_mature:
     enabled: true
     target_cav_index: 0
     ego_cav_index: 1
-    # Exogenous stimulus is triggered from target progress, so its timing is
-    # independent of how early the ego prediction constraint reacts.
+    # Exogenous stimulus shared with cpx_two_cav_multimodal_prediction's A/B
+    # arms: target progress is independent of how early the ego prediction
+    # constraint reacts.
     minimum_start_tick: 80
     trigger_target_position: {axis: x, value: -250.0, direction: increasing}
     duration_ticks: 50
