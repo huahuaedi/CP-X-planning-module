@@ -181,6 +181,49 @@ class CPXMPCPlannerBridge:
             "safety_manager": safety_manager,
             "map_manager": map_manager,
             "sim_time_s": float(self._sim_time_s()),
+            "external_runtime": False,
+        }
+
+    def update_external_information(
+        self,
+        *,
+        ego_transform: Any,
+        ego_speed_mps: float,
+        object_snapshots: Sequence[Mapping[str, Any]],
+        cp_payload: Optional[Mapping[str, Any]],
+        sim_time_s: float,
+        safety_manager: Any = None,
+        v2x_manager: Any = None,
+        map_manager: Any = None,
+    ) -> None:
+        """Install one simulator-neutral input frame for the next tick.
+
+        ROS owns transport and synchronization; the planner owns planning.
+        This port deliberately accepts the same normalized obstacle and CP
+        dictionaries already consumed by the perception stage, so a ROS
+        adapter never needs to imitate an OpenCDA VehicleManager or copy
+        planning logic. The legacy update_information path remains unchanged
+        for native OpenCDA scenarios.
+        """
+
+        timestamp_s = float(sim_time_s)
+        speed_mps = max(0.0, float(ego_speed_mps))
+        self._latest_opencda_update = {
+            "ego_transform": ego_transform,
+            "ego_speed_kmh": 3.6 * speed_mps,
+            "detected_objects": {
+                "vehicles": [
+                    dict(snapshot)
+                    for snapshot in list(object_snapshots or ())
+                    if isinstance(snapshot, Mapping)
+                ]
+            },
+            "cp_payload": dict(cp_payload or {}),
+            "safety_manager": safety_manager,
+            "v2x_manager": v2x_manager,
+            "map_manager": map_manager,
+            "sim_time_s": timestamp_s,
+            "external_runtime": True,
         }
 
     def _begin_stage_timing_cycle(self) -> None:
@@ -383,7 +426,8 @@ class CPXMPCPlannerBridge:
         self._begin_stage_timing_cycle()
         latest_update = dict(getattr(self, "_latest_opencda_update", {}) or {})
         _ts_stage = time.monotonic()
-        if self.cp_provider is not None:
+        external_runtime = bool(latest_update.get("external_runtime", False))
+        if self.cp_provider is not None and not external_runtime:
             try:
                 self.cp_provider.publish(
                     world=self.vehicle_manager.vehicle.get_world(),
@@ -413,7 +457,11 @@ class CPXMPCPlannerBridge:
                     self.vehicle_manager.perception_manager, "objects", {}
                 ) or {}
             ),
-            cp_payload=self._load_cp_message_payload(),
+            cp_payload=(
+                dict(latest_update.get("cp_payload", {}) or {})
+                if external_runtime
+                else self._load_cp_message_payload()
+            ),
             ignore_dynamic_objects=bool(
                 self.functional_test_ignore_dynamic_objects
             ),
@@ -1696,6 +1744,12 @@ class CPXMPCPlannerBridge:
         )
 
     def _sim_time_s(self) -> float:
+        latest_update = dict(getattr(self, "_latest_opencda_update", {}) or {})
+        if bool(latest_update.get("external_runtime", False)):
+            try:
+                return float(latest_update["sim_time_s"])
+            except (KeyError, TypeError, ValueError):
+                return 0.0
         try:
             snapshot = self.vehicle_manager.vehicle.get_world().get_snapshot()
             return float(snapshot.timestamp.elapsed_seconds)
