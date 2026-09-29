@@ -2,8 +2,8 @@ import math
 
 import pytest
 
-from pipeline.stable_reference_line_provider import StableReferenceLineProvider
-from pipeline.local_map_snapshot import build_local_map_snapshot
+from pipeline.reference.stable_reference_line_provider import StableReferenceLineProvider
+from pipeline.perception.local_map_snapshot import build_local_map_snapshot
 
 
 def _line(count=30, step=1.2):

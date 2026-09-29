@@ -20,7 +20,7 @@ from opencda.scenario_testing.utils.yaml_utils import add_current_time
 
 try:  # optional: prediction-knowledge ablation (scripted crossers + trace record)
     from opencda.scenario_testing.scripted_actor import spawn_scripted_actors
-    from opencda.planning_module.pipeline.prediction_ablation import TraceRecorder
+    from opencda.planning_module.pipeline.interaction.prediction_ablation import TraceRecorder
 except Exception:  # pragma: no cover - keep base scenarios importable
     spawn_scripted_actors = None
     TraceRecorder = None

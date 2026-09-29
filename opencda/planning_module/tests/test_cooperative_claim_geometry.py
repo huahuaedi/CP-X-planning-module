@@ -1,5 +1,5 @@
-from pipeline.cooperative_claim_geometry import project_claim_interval
-from pipeline.local_map_snapshot import build_local_map_snapshot
+from pipeline.interaction.cooperative_claim_geometry import project_claim_interval
+from pipeline.perception.local_map_snapshot import build_local_map_snapshot
 
 
 def _snapshot():

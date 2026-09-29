@@ -1,6 +1,6 @@
 import math
 
-from pipeline.conflict_classifier import (
+from pipeline.interaction.conflict_classifier import (
     CROSSING,
     CUT_IN,
     FOLLOW,

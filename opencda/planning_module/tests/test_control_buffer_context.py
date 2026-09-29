@@ -1,6 +1,6 @@
 import unittest
 
-from pipeline.control_buffer import MPCControlBuffer
+from pipeline.execution.control_buffer import MPCControlBuffer
 
 
 class MPCControlBufferContextTests(unittest.TestCase):

@@ -29,8 +29,8 @@ CASES = {
         "risk": "VRU_CONFLICT",
         "action": "YIELD_STOP",
         "dependencies": (
-            "opencda/planning_module/pipeline/behavior_risk.py",
-            "opencda/planning_module/pipeline/behavior_stage.py",
+            "opencda/planning_module/pipeline/behavior/behavior_risk.py",
+            "opencda/planning_module/pipeline/behavior/behavior_stage.py",
             "opencda/planning_module/opencda_bridge/cp_provider.py",
         ),
     },
@@ -55,9 +55,9 @@ CASES = {
         "action": "PREPARE_LANE_CHANGE",
         "decision": "lane_change_left",
         "dependencies": (
-            "opencda/planning_module/pipeline/behavior_risk.py",
-            "opencda/planning_module/pipeline/behavior_stage.py",
-            "opencda/planning_module/pipeline/static_obstacle_stage.py",
+            "opencda/planning_module/pipeline/behavior/behavior_risk.py",
+            "opencda/planning_module/pipeline/behavior/behavior_stage.py",
+            "opencda/planning_module/pipeline/behavior/static_obstacle_stage.py",
             "opencda/planning_module/opencda_bridge/cp_provider.py",
             "opencda/scenario_testing/cpx_mature_runner.py",
         ),
@@ -80,9 +80,9 @@ CASES = {
         "route_completion_expected": True,
         "requires_corridor_binding": True,
         "dependencies": (
-            "opencda/planning_module/pipeline/conflict_classifier.py",
-            "opencda/planning_module/pipeline/cav_conflict_pipeline.py",
-            "opencda/planning_module/pipeline/cooperative_arbitration.py",
+            "opencda/planning_module/pipeline/interaction/conflict_classifier.py",
+            "opencda/planning_module/pipeline/interaction/cav_conflict_pipeline.py",
+            "opencda/planning_module/pipeline/interaction/cooperative_arbitration.py",
             "opencda/planning_module/opencda_bridge/cp_provider.py",
         ),
     },
@@ -102,10 +102,10 @@ CASES = {
         "route_completion_expected": True,
         "requires_corridor_binding": True,
         "dependencies": (
-            "opencda/planning_module/pipeline/conflict_classifier.py",
-            "opencda/planning_module/pipeline/cav_conflict_pipeline.py",
-            "opencda/planning_module/pipeline/cooperative_arbitration.py",
-            "opencda/planning_module/pipeline/spatiotemporal_corridor.py",
+            "opencda/planning_module/pipeline/interaction/conflict_classifier.py",
+            "opencda/planning_module/pipeline/interaction/cav_conflict_pipeline.py",
+            "opencda/planning_module/pipeline/interaction/cooperative_arbitration.py",
+            "opencda/planning_module/pipeline/interaction/spatiotemporal_corridor.py",
             "opencda/planning_module/opencda_bridge/cp_provider.py",
         ),
     },
@@ -130,9 +130,9 @@ CASES = {
         "configs": ("cpx_two_cav_merge_conflict.yaml",),
         "route_completion_expected": True,
         "dependencies": (
-            "opencda/planning_module/pipeline/cav_conflict_pipeline.py",
-            "opencda/planning_module/pipeline/cooperative_arbitration.py",
-            "opencda/planning_module/pipeline/spatiotemporal_corridor.py",
+            "opencda/planning_module/pipeline/interaction/cav_conflict_pipeline.py",
+            "opencda/planning_module/pipeline/interaction/cooperative_arbitration.py",
+            "opencda/planning_module/pipeline/interaction/spatiotemporal_corridor.py",
         ),
     },
     "two_cav_merge_on_cav2": {
@@ -140,9 +140,9 @@ CASES = {
         "configs": ("cpx_two_cav_merge_conflict.yaml",),
         "route_completion_expected": True,
         "dependencies": (
-            "opencda/planning_module/pipeline/cav_conflict_pipeline.py",
-            "opencda/planning_module/pipeline/cooperative_arbitration.py",
-            "opencda/planning_module/pipeline/spatiotemporal_corridor.py",
+            "opencda/planning_module/pipeline/interaction/cav_conflict_pipeline.py",
+            "opencda/planning_module/pipeline/interaction/cooperative_arbitration.py",
+            "opencda/planning_module/pipeline/interaction/spatiotemporal_corridor.py",
         ),
     },
     "two_cav_merge_off_cav1": {
@@ -176,9 +176,9 @@ CASES = {
         "route_completion_expected": True,
         "requires_cp_lane_closure_reroute": True,
         "dependencies": (
-            "opencda/planning_module/pipeline/route_authorization.py",
-            "opencda/planning_module/pipeline/route_manager.py",
-            "opencda/planning_module/pipeline/planner_diagnostics_stage.py",
+            "opencda/planning_module/pipeline/route/route_authorization.py",
+            "opencda/planning_module/pipeline/route/route_manager.py",
+            "opencda/planning_module/pipeline/diagnostics/planner_diagnostics_stage.py",
             "opencda/planning_module/opencda_bridge/cpx_mpc_planner.py",
             "opencda/scenario_testing/cpx_mature_runner.py",
         ),
@@ -301,7 +301,7 @@ def analyze_case(root, name, contract):
     # Every case's route-completion check reads _mission_completed(), which
     # is only as fresh as this file regardless of what else a case declares.
     always_dependencies = (
-        REPO_ROOT / "opencda/planning_module/pipeline/destination_speed_stage.py",
+        REPO_ROOT / "opencda/planning_module/pipeline/behavior/destination_speed_stage.py",
     )
     dependencies = code_paths + config_paths + always_dependencies
     newest_input_mtime = max(

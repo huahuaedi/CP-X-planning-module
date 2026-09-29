@@ -1,6 +1,6 @@
-from pipeline.cooperative_arbitration import ConflictAssignment
-from pipeline.cooperative_claim_manager import CooperativeClaimManager
-from pipeline.cooperative_maneuver_proposal import CooperativeManeuverProposal
+from pipeline.interaction.cooperative_arbitration import ConflictAssignment
+from pipeline.interaction.cooperative_claim_manager import CooperativeClaimManager
+from pipeline.interaction.cooperative_maneuver_proposal import CooperativeManeuverProposal
 
 
 def _assignment(role):

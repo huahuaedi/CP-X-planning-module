@@ -1,6 +1,6 @@
 import unittest
 
-from pipeline.architecture_profile import normalize_architecture_config
+from pipeline.core.architecture_profile import normalize_architecture_config
 
 
 class ArchitectureProfileTests(unittest.TestCase):

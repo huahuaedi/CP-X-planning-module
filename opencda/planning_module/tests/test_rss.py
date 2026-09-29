@@ -1,6 +1,6 @@
 import math
 
-from pipeline.rss import (
+from pipeline.safety.rss import (
     RSSParams,
     arrival_margin_s,
     lateral_safe_distance,

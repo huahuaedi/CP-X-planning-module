@@ -2,7 +2,7 @@ import dataclasses
 
 import pytest
 
-from pipeline.local_map_snapshot import (
+from pipeline.perception.local_map_snapshot import (
     audit_local_map_rows,
     build_local_lane_geometry,
     build_local_map_snapshot,

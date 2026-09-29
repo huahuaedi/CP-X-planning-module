@@ -86,12 +86,12 @@ memories have been removed. `full_cpx_mpc` is the only CP-X planner mode.
 
 The obsolete bridge-private launch, overspeed, negative-acceleration release,
 and lateral-recovery control guards have been removed. Signal debounce now
-lives in `pipeline/traffic_light_memory.py`; `ScenarioManager` consumes the
+lives in `pipeline/behavior/traffic_light_memory.py`; `ScenarioManager` consumes the
 resolved state without adding a second debounce timer.
 
 ## Reference generation boundary
 
-`pipeline/reference_generator.py` owns all geometric sampling used by MPC.
+`pipeline/reference/reference_generator.py` owns all geometric sampling used by MPC.
 Its public API returns either `GeneratedReference` (named samples,
 destination, source, and reason) or explicitly named sample collections:
 
@@ -107,7 +107,7 @@ Callers do not unpack anonymous `(destination, samples)` tuples and do not call
 generator-private waypoint helpers. This prevents a destination vector from
 being silently treated as a trajectory.
 
-`pipeline/reference_pipeline.py` is the sole post-generation owner. Both
+`pipeline/reference/reference_pipeline.py` is the sole post-generation owner. Both
 candidate evaluation and final MPC input use the same `ReferencePipelineRequest`.
 The pipeline:
 

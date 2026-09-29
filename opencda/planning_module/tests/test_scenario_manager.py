@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import yaml
 
-from opencda.planning_module.pipeline.scenario_manager import (
+from opencda.planning_module.pipeline.behavior.scenario_manager import (
     BOUNDARY_RECOVERY,
     BoundaryRecoveryRequest,
     CPXScenarioManager,

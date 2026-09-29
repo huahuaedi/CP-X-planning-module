@@ -21,7 +21,7 @@ def _trajectory_points(snapshot: Mapping[str, object]) -> list[dict]:
 
     A CP-supplied or tracker-supplied trajectory may already carry v/psi/a
     per point; those are kept as-is (never silently dropped -- callers such
-    as ``pipeline.prediction.mpc_stage_trajectory`` read ``v`` straight off
+    as ``pipeline.interaction.prediction.mpc_stage_trajectory`` read ``v`` straight off
     each point, and a point missing it degrades to a stale/zero speed with
     no error). Whatever is missing is derived from the trajectory itself
     (finite difference for v, local tangent for psi) rather than left

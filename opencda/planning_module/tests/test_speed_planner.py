@@ -1,20 +1,9 @@
-import importlib.util
 import math
-import pathlib
-import sys
 import unittest
 from unittest import mock
 from types import SimpleNamespace
 
-
-ROOT = pathlib.Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location(
-    "speed_planner_under_test",
-    ROOT / "pipeline" / "speed_planner.py",
-)
-speed_planner = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = speed_planner
-SPEC.loader.exec_module(speed_planner)
+from opencda.planning_module.pipeline.behavior import speed_planner
 build_speed_plan = speed_planner.build_speed_plan
 enforce_speed_ceiling = speed_planner.enforce_speed_ceiling
 turn_approach_lookahead_m = speed_planner.turn_approach_lookahead_m

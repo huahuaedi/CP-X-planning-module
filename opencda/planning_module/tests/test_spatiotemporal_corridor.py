@@ -2,15 +2,15 @@ import math
 
 import pytest
 
-from pipeline.conflict_classifier import (
+from pipeline.interaction.conflict_classifier import (
     CROSSING,
     CUT_IN,
     FOLLOW,
     MERGE,
     ConflictTag,
 )
-from pipeline.cooperative_arbitration import ConflictAssignment
-from pipeline.spatiotemporal_corridor import (
+from pipeline.interaction.cooperative_arbitration import ConflictAssignment
+from pipeline.interaction.spatiotemporal_corridor import (
     Corridor,
     CorridorParams,
     aggregate_mode_corridors,

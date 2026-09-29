@@ -25,13 +25,13 @@ if "carla" not in sys.modules:
     fake_carla.VehicleControl = _VehicleControl
     sys.modules["carla"] = fake_carla
 
-from pipeline.map_matching import (
+from pipeline.perception.map_matching import (
     DiagnosticHDMapMatcher,
     LaneProjectionCandidate,
     local_lane_frame_invariants,
     topology_relation,
 )
-from pipeline.route_authorization import authorize_route_lane_change
+from pipeline.route.route_authorization import authorize_route_lane_change
 from utility.global_planner import CustomGlobalPlannerAdapter
 
 

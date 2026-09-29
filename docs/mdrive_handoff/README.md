@@ -124,7 +124,7 @@ debug jsonl kept climbing (121 -> 225 ticks over several minutes). In the debug 
    data point in a 3-ego scenario; it says nothing yet about the 6-ego cases.
 
 **What is not known:** which stage inside a single `run_step()` grows super-linearly. Candidates
-(unverified): `classify_conflicts` in `opencda/planning_module/pipeline/conflict_classifier.py`
+(unverified): `classify_conflicts` in `opencda/planning_module/pipeline/interaction/conflict_classifier.py`
 (at least O(agents x horizon)), candidate evaluation, and the cooperative-arbitration step.
 `py-spy` could not attach on our machine (ptrace blocked, no passwordless sudo).
 

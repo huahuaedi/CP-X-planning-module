@@ -2,7 +2,7 @@ import math
 import types
 import unittest
 
-from pipeline.reference_generator import ReferenceGenerator
+from pipeline.reference.reference_generator import ReferenceGenerator
 
 
 def _body_frame_xy(

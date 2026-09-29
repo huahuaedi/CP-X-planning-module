@@ -1,6 +1,6 @@
 import unittest
 
-from pipeline.mpc_command_extractor import MPCCommandExtractor
+from pipeline.execution.mpc_command_extractor import MPCCommandExtractor
 
 
 class MPCCommandExtractorTest(unittest.TestCase):

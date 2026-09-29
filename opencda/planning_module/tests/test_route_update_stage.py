@@ -1,8 +1,8 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from pipeline.route_manager import LaneClosureRouteResult
-from pipeline.route_update_stage import RouteUpdateRequest, RouteUpdateStage
+from pipeline.route.route_manager import LaneClosureRouteResult
+from pipeline.route.route_update_stage import RouteUpdateRequest, RouteUpdateStage
 
 
 def _request(route_manager, reset, **overrides):

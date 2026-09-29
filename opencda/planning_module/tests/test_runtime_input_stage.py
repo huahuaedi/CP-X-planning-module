@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from pipeline.runtime_input_stage import RuntimeInputStage
+from pipeline.perception.runtime_input_stage import RuntimeInputStage
 
 
 class _ActuatorMapper:

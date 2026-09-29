@@ -16,30 +16,30 @@ from types import SimpleNamespace
 from typing import Any, Mapping, Optional
 import yaml
 from opencda.planning_module.utility.carla_compat import carla
-from opencda.planning_module.pipeline.route_context_stage import RouteContextStage
-from opencda.planning_module.pipeline.boundary_recovery import BoundaryRecoveryTracker
-from opencda.planning_module.pipeline.road_boundary_monitor import RoadBoundaryMonitor
-from opencda.planning_module.pipeline.cooperative_arbitration_stage import CooperativeArbitrationStage
-from opencda.planning_module.pipeline.cav_interaction_stage import CAVInteractionStage
-from opencda.planning_module.pipeline.traffic_light_memory import TrafficLightMemory
-from opencda.planning_module.pipeline.reference_line_provider import ReferenceLineProvider
-from opencda.planning_module.pipeline.reference_planning_stage import ReferencePlanningStage
-from opencda.planning_module.pipeline.maneuver_manager import ManeuverManager
-from opencda.planning_module.pipeline.nominal_trajectory import NominalTrajectoryGenerator
-from opencda.planning_module.pipeline.fallback_manager import TrajectoryFallbackManager
-from opencda.planning_module.pipeline.speed_planner import SpeedTargetPlanner
-from opencda.planning_module.pipeline.destination_speed_stage import DestinationSpeedStage
-from opencda.planning_module.pipeline.reference_publication_stage import ReferencePublicationStage
-from opencda.planning_module.pipeline.mpc_entry_stage import MPCEntryStage
-from opencda.planning_module.pipeline.mpc_cost_profile_stage import MPCCostProfileStage
-from opencda.planning_module.pipeline.mpc_execution_stage import MPCExecutionStage
-from opencda.planning_module.pipeline.perception_stage import PerceptionStage
-from opencda.planning_module.pipeline.execution_pipeline import PlanningPipeline
-from opencda.planning_module.pipeline.static_obstacle_stage import StaticObstacleStage
-from opencda.planning_module.pipeline.control_safety_stage import ControlSafetyStage
-from opencda.planning_module.pipeline.candidate_evaluation import CandidateTrajectoryEvaluator
-from opencda.planning_module.pipeline.candidate_selection_stage import CandidateSelectionStage
-from opencda.planning_module.pipeline.behavior_stage import BehaviorStage
+from opencda.planning_module.pipeline.route.route_context_stage import RouteContextStage
+from opencda.planning_module.pipeline.safety.boundary_recovery import BoundaryRecoveryTracker
+from opencda.planning_module.pipeline.safety.road_boundary_monitor import RoadBoundaryMonitor
+from opencda.planning_module.pipeline.interaction.cooperative_arbitration_stage import CooperativeArbitrationStage
+from opencda.planning_module.pipeline.interaction.cav_interaction_stage import CAVInteractionStage
+from opencda.planning_module.pipeline.behavior.traffic_light_memory import TrafficLightMemory
+from opencda.planning_module.pipeline.reference.reference_line_provider import ReferenceLineProvider
+from opencda.planning_module.pipeline.reference.reference_planning_stage import ReferencePlanningStage
+from opencda.planning_module.pipeline.behavior.maneuver_manager import ManeuverManager
+from opencda.planning_module.pipeline.execution.nominal_trajectory import NominalTrajectoryGenerator
+from opencda.planning_module.pipeline.safety.fallback_manager import TrajectoryFallbackManager
+from opencda.planning_module.pipeline.behavior.speed_planner import SpeedTargetPlanner
+from opencda.planning_module.pipeline.behavior.destination_speed_stage import DestinationSpeedStage
+from opencda.planning_module.pipeline.reference.reference_publication_stage import ReferencePublicationStage
+from opencda.planning_module.pipeline.execution.mpc_entry_stage import MPCEntryStage
+from opencda.planning_module.pipeline.execution.mpc_cost_profile_stage import MPCCostProfileStage
+from opencda.planning_module.pipeline.execution.mpc_execution_stage import MPCExecutionStage
+from opencda.planning_module.pipeline.perception.perception_stage import PerceptionStage
+from opencda.planning_module.pipeline.execution.execution_pipeline import PlanningPipeline
+from opencda.planning_module.pipeline.behavior.static_obstacle_stage import StaticObstacleStage
+from opencda.planning_module.pipeline.safety.control_safety_stage import ControlSafetyStage
+from opencda.planning_module.pipeline.behavior.candidate_evaluation import CandidateTrajectoryEvaluator
+from opencda.planning_module.pipeline.behavior.candidate_selection_stage import CandidateSelectionStage
+from opencda.planning_module.pipeline.behavior.behavior_stage import BehaviorStage
 
 
 class _WaypointMapAdapter:
@@ -191,7 +191,7 @@ def _core_config_and_behavior_stages(
 
     parts = SimpleNamespace()
     bridge.vehicle_manager = vehicle_manager
-    from opencda.planning_module.pipeline.architecture_profile import (
+    from opencda.planning_module.pipeline.core.architecture_profile import (
         normalize_architecture_config,
     )
 
@@ -282,7 +282,7 @@ def _core_config_and_behavior_stages(
             bridge.config.get("full_traffic_fail_safe_max_unknown_hold_s", 6.0)
         ),
     )
-    from opencda.planning_module.pipeline.scenario_manager import (
+    from opencda.planning_module.pipeline.behavior.scenario_manager import (
         CPXScenarioManager,
     )
 
@@ -301,7 +301,7 @@ def _core_config_and_behavior_stages(
         fallback_manager=fallback_manager,
         behavior_stage=behavior_stage,
     )
-    from opencda.planning_module.pipeline.behavior_reference_execution_stage import (
+    from opencda.planning_module.pipeline.behavior.behavior_reference_execution_stage import (
         BehaviorReferenceExecutionStage,
     )
     behavior_reference_execution_stage = BehaviorReferenceExecutionStage(
@@ -499,23 +499,23 @@ def _mpc_and_reference_generation(bridge, parts: SimpleNamespace) -> None:
     from opencda.planning_module.behavior_planner import LaneSafetyScorer, RuleBasedBehaviorPlanner
     from opencda.planning_module.opencda_bridge.cp_provider import OpenCDACPProvider
     from opencda.planning_module.opencda_bridge.planner_input_adapter import OpenCDAPlanningAdapter
-    from opencda.planning_module.pipeline.control_buffer import MPCControlBuffer
-    from opencda.planning_module.pipeline.mpc_feedback import BehaviorMPCFeedback
-    from opencda.planning_module.pipeline.mpc_command_extractor import (
+    from opencda.planning_module.pipeline.execution.control_buffer import MPCControlBuffer
+    from opencda.planning_module.pipeline.execution.mpc_feedback import BehaviorMPCFeedback
+    from opencda.planning_module.pipeline.execution.mpc_command_extractor import (
         MPCCommandExtractor,
     )
-    from opencda.planning_module.pipeline.route_manager import CPXRouteManager
-    from opencda.planning_module.pipeline.reference_gate import FinalReferenceGate
-    from opencda.planning_module.pipeline.reference_generator import ReferenceGenerator
-    from opencda.planning_module.pipeline.reference_pipeline import (
+    from opencda.planning_module.pipeline.route.route_manager import CPXRouteManager
+    from opencda.planning_module.pipeline.reference.reference_gate import FinalReferenceGate
+    from opencda.planning_module.pipeline.reference.reference_generator import ReferenceGenerator
+    from opencda.planning_module.pipeline.reference.reference_pipeline import (
         ReferencePipeline,
     )
-    from opencda.planning_module.pipeline.safety_supervisor import SafetySupervisor
-    from opencda.planning_module.pipeline.runtime_input_stage import RuntimeInputStage
-    from opencda.planning_module.pipeline.velocity_steering_adapter import (
+    from opencda.planning_module.pipeline.safety.safety_supervisor import SafetySupervisor
+    from opencda.planning_module.pipeline.perception.runtime_input_stage import RuntimeInputStage
+    from opencda.planning_module.pipeline.execution.velocity_steering_adapter import (
         OpenCDAVelocitySteeringAdapter,
     )
-    from opencda.planning_module.pipeline.tracker import CPXObstacleTracker
+    from opencda.planning_module.pipeline.perception.tracker import CPXObstacleTracker
     from opencda.planning_module.utility.evaluation_metrics import (
         EvaluationMetricsRecorder,
         write_planning_metrics_artifacts,
@@ -544,7 +544,7 @@ def _mpc_and_reference_generation(bridge, parts: SimpleNamespace) -> None:
         # in the QP (else it is computed but ignored). mpc.yaml's
         # cost.corridor block still tunes w_slack / max_slack_m.
         bridge.mpc.corridor_constraint_enabled = True
-    from opencda.planning_module.pipeline.actuator_mapper import CarlaActuatorMapper
+    from opencda.planning_module.pipeline.execution.actuator_mapper import CarlaActuatorMapper
     from opencda.planning_module.opencda_bridge.platform_ports import (
         ActuatorPort,
         MapLookupPort,
@@ -642,7 +642,7 @@ def _mpc_and_reference_generation(bridge, parts: SimpleNamespace) -> None:
     bridge._synthetic_prediction_actor_activation = None
     bridge._oracle_trace_store = None
     if bridge._prediction_mode == "oracle":
-        from opencda.planning_module.pipeline.prediction_ablation import (
+        from opencda.planning_module.pipeline.interaction.prediction_ablation import (
             OracleTraceStore,
         )
         oracle_path = str(bridge.config.get("oracle_trace_path", "") or "")
@@ -701,14 +701,14 @@ def _pipeline_route_and_finalization(bridge, parts: SimpleNamespace) -> None:
     from opencda.planning_module.behavior_planner import RuleBasedBehaviorPlanner
     from opencda.planning_module.opencda_bridge.cp_provider import OpenCDACPProvider
     from opencda.planning_module.opencda_bridge.platform_ports import MapLookupPort
-    from opencda.planning_module.pipeline.control_buffer import MPCControlBuffer
-    from opencda.planning_module.pipeline.mpc_feedback import BehaviorMPCFeedback
-    from opencda.planning_module.pipeline.mpc_command_extractor import (
+    from opencda.planning_module.pipeline.execution.control_buffer import MPCControlBuffer
+    from opencda.planning_module.pipeline.execution.mpc_feedback import BehaviorMPCFeedback
+    from opencda.planning_module.pipeline.execution.mpc_command_extractor import (
         MPCCommandExtractor,
     )
-    from opencda.planning_module.pipeline.route_manager import CPXRouteManager
-    from opencda.planning_module.pipeline.safety_supervisor import SafetySupervisor
-    from opencda.planning_module.pipeline.velocity_steering_adapter import (
+    from opencda.planning_module.pipeline.route.route_manager import CPXRouteManager
+    from opencda.planning_module.pipeline.safety.safety_supervisor import SafetySupervisor
+    from opencda.planning_module.pipeline.execution.velocity_steering_adapter import (
         OpenCDAVelocitySteeringAdapter,
     )
     from opencda.planning_module.utility.evaluation_metrics import (
@@ -919,7 +919,7 @@ def _pipeline_route_and_finalization(bridge, parts: SimpleNamespace) -> None:
         hold_s=float(bridge.config.get("mpc_feedback_hold_s", 1.5)),
         min_failures=int(bridge.config.get("mpc_feedback_min_failures", 1)),
     )
-    from opencda.planning_module.pipeline.control_finalization_stage import (
+    from opencda.planning_module.pipeline.execution.control_finalization_stage import (
         ControlFinalizationStage,
     )
     bridge.pipeline.control_finalization = ControlFinalizationStage(
@@ -963,7 +963,7 @@ def _pipeline_route_and_finalization(bridge, parts: SimpleNamespace) -> None:
             )
         ),
     )
-    from opencda.planning_module.pipeline.lane_change_lifecycle_stage import (
+    from opencda.planning_module.pipeline.behavior.lane_change_lifecycle_stage import (
         LaneChangeLifecycleStage,
     )
     bridge.lane_change_lifecycle_stage = LaneChangeLifecycleStage(

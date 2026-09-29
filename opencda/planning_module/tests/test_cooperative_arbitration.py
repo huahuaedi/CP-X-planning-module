@@ -1,7 +1,7 @@
 import math
 import unittest
 
-from opencda.planning_module.pipeline.cooperative_arbitration import (
+from opencda.planning_module.pipeline.interaction.cooperative_arbitration import (
     CavIntent,
     ResourceClaim,
     assign_conflict_roles,

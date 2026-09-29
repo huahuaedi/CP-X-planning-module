@@ -1,6 +1,6 @@
 import numpy as np
 
-from opencda.planning_module.pipeline.route_manager import RouteCursorSnapshot
+from opencda.planning_module.pipeline.route.route_manager import RouteCursorSnapshot
 from utility.global_planner import CustomGlobalPlannerAdapter
 
 

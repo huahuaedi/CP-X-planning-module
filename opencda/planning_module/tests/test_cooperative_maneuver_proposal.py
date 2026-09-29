@@ -1,5 +1,5 @@
-from pipeline.cooperative_maneuver_proposal import CooperativeManeuverProposal
-from pipeline.behavior_stage import BehaviorStage
+from pipeline.interaction.cooperative_maneuver_proposal import CooperativeManeuverProposal
+from pipeline.behavior.behavior_stage import BehaviorStage
 from types import SimpleNamespace
 
 

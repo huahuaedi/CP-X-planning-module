@@ -1,13 +1,13 @@
 from types import SimpleNamespace
 
-from pipeline.candidate_selection_stage import (
+from pipeline.behavior.candidate_selection_stage import (
     CandidateArbitrationRequest,
     CandidateSelectionRequest,
     CandidateSelectionStage,
 )
-from pipeline.candidate_evaluation import CandidateSelectionResult
-from pipeline.cooperative_maneuver_proposal import CooperativeManeuverProposal
-from pipeline.speed_planner import SpeedPlan
+from pipeline.behavior.candidate_evaluation import CandidateSelectionResult
+from pipeline.interaction.cooperative_maneuver_proposal import CooperativeManeuverProposal
+from pipeline.behavior.speed_planner import SpeedPlan
 
 
 def _post_selection_stage(config=None):

@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from opencda.planning_module.pipeline.decision_record import (
+from opencda.planning_module.pipeline.core.decision_record import (
     build_decision_record,
     decision_record_from_diagnostics,
 )

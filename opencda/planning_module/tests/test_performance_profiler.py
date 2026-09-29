@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from pipeline.performance_profiler import PlannerStageProfiler
+from pipeline.diagnostics.performance_profiler import PlannerStageProfiler
 
 
 class _ConflictPipeline:

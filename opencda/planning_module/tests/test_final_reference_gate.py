@@ -1,6 +1,6 @@
 import unittest
 
-from pipeline.reference_gate import FinalReferenceGate
+from pipeline.reference.reference_gate import FinalReferenceGate
 
 
 def _straight_reference(lane_id=1, terminal_speed=2.0):

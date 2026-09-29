@@ -1,6 +1,6 @@
 import unittest
 
-from pipeline.output import BehaviorCommand
+from pipeline.core.output import BehaviorCommand
 
 
 class BehaviorCommandStopSemanticsTests(unittest.TestCase):

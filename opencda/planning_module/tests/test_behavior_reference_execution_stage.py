@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from pipeline.behavior_reference_execution_stage import (
+from pipeline.behavior.behavior_reference_execution_stage import (
     BehaviorReferenceExecutionStage,
     BehaviorReferenceRequest,
     BehaviorReferenceResult,

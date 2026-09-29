@@ -149,7 +149,7 @@ class MPCRepulsivePotentialSpec:
 
 def _row_attr(row: Any, name: str, default: float = 0.0) -> float:
     """Read ``stage``/``a_x``/``a_y``/``lower``/``upper`` from a linear row
-    that is either an object (``pipeline.mpc_corridor_constraints.LinearRow``)
+    that is either an object (``pipeline.execution.mpc_corridor_constraints.LinearRow``)
     or a plain mapping -- keeps mpc.py free of a pipeline import."""
 
     if isinstance(row, Mapping):
@@ -424,7 +424,7 @@ class MPC:
             0.0, float(control_cfg.get("temporal_consistency_weight", 0.0))
         )
         # Stage-D spatiotemporal corridor: soft per-stage longitudinal band
-        # supplied by the interaction-aware layer (pipeline.cav_conflict_pipeline
+        # supplied by the interaction-aware layer (pipeline.interaction.cav_conflict_pipeline
         # -> mpc_corridor_constraints.corridor_rows). Off by default; when on
         # and no rows are passed it is still a no-op.
         corridor_cfg = dict(cost_cfg.get("corridor", {}))

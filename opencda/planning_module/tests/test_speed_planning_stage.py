@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from pipeline.speed_planning_stage import (
+from pipeline.behavior.speed_planning_stage import (
     SpeedPlanningRequest,
     SpeedPlanningStage,
 )

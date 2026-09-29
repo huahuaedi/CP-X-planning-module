@@ -1,7 +1,7 @@
 import math
 import unittest
 
-from pipeline.stage_contracts import (
+from pipeline.core.stage_contracts import (
     LaneChangeContract,
     authorize_mpc_entry,
     evaluate_lane_change_completion,

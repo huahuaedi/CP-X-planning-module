@@ -1,9 +1,9 @@
-"""Tests for pipeline/reference_geometry.py and pipeline/route_geometry.py."""
+"""Tests for pipeline/reference/reference_geometry.py and pipeline/route/route_geometry.py."""
 import math
 import unittest
 
-from opencda.planning_module.pipeline import reference_geometry as rg
-from opencda.planning_module.pipeline.route_geometry import (
+from opencda.planning_module.pipeline.reference import reference_geometry as rg
+from opencda.planning_module.pipeline.route.route_geometry import (
     JUNCTION_TURN,
     LANE_CHANGE,
     LANE_FOLLOW,
@@ -99,7 +99,7 @@ class StableReferenceLineTests(unittest.TestCase):
         ))
 
     def test_frenet_prefix_is_valid_during_receding_horizon_lane_change(self):
-        from opencda.planning_module.pipeline.reference_contract import (
+        from opencda.planning_module.pipeline.reference.reference_contract import (
             contract_from_config,
             validate_reference_contract,
         )

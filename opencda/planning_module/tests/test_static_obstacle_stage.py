@@ -1,4 +1,4 @@
-from pipeline.static_obstacle_stage import StaticObstacleStage
+from pipeline.behavior.static_obstacle_stage import StaticObstacleStage
 
 
 def _evaluate(stage, **overrides):

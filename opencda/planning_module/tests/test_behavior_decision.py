@@ -1,4 +1,4 @@
-from opencda.planning_module.pipeline.behavior_decision import BehaviorDecision
+from opencda.planning_module.pipeline.behavior.behavior_decision import BehaviorDecision
 
 
 def test_behavior_decision_freezes_behavior_values():

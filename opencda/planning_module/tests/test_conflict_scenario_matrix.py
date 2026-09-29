@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from pipeline.cav_conflict_pipeline import resolve_conflicts
+from pipeline.interaction.cav_conflict_pipeline import resolve_conflicts
 
 
 REF = [{"x_ref_m": float(x), "y_ref_m": 0.0} for x in range(0, 101, 2)]

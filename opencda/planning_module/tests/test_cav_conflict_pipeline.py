@@ -2,14 +2,14 @@ import math
 
 import pytest
 
-from pipeline.cav_conflict_pipeline import resolve_conflicts
-from pipeline.conflict_classifier import CROSSING, FOLLOW, IGNORE, LEAD_BRAKE, MERGE
-from pipeline.cooperative_arbitration import (
+from pipeline.interaction.cav_conflict_pipeline import resolve_conflicts
+from pipeline.interaction.conflict_classifier import CROSSING, FOLLOW, IGNORE, LEAD_BRAKE, MERGE
+from pipeline.interaction.cooperative_arbitration import (
     ArbitrationLatchEntry,
     CavIntent,
     ResourceClaim,
 )
-from pipeline.spatiotemporal_corridor import Corridor
+from pipeline.interaction.spatiotemporal_corridor import Corridor
 
 REF = [{"x_ref_m": float(x), "y_ref_m": 0.0} for x in range(0, 121, 2)]
 EGO = {"x": 0.0, "y": 0.0, "v": 10.0, "psi": 0.0}
@@ -718,8 +718,8 @@ def test_low_probability_distant_mode_does_not_bind_the_mpc_corridor():
 
 
 def test_connected_cav_snapshot_carries_a_single_broadcast_mode():
-    from pipeline.cav_conflict_pipeline import _cav_to_agent_snapshot
-    from pipeline.prediction_modes import as_modes
+    from pipeline.interaction.cav_conflict_pipeline import _cav_to_agent_snapshot
+    from pipeline.interaction.prediction_modes import as_modes
     path = [(20.0 + k, 0.0) for k in range(10)]
     snap = _cav_to_agent_snapshot(_cav(2, (20.0, 0.0), committed_at_s=4.0, path=path))
     modes = as_modes(snap["predicted_modes"])
@@ -793,7 +793,7 @@ def test_six_mode_budget_reports_raw_and_retained_counts():
 
 
 def test_credible_veto_hysteresis_holds_through_a_brief_flicker():
-    from pipeline.cav_conflict_pipeline import _apply_veto_hysteresis
+    from pipeline.interaction.cav_conflict_pipeline import _apply_veto_hysteresis
 
     state = {}
     # tick 0: real danger -> engage immediately
@@ -822,7 +822,7 @@ def test_credible_veto_hysteresis_holds_through_a_brief_flicker():
 
 
 def test_credible_veto_releases_after_sustained_clear_and_recovery():
-    from pipeline.cav_conflict_pipeline import _apply_veto_hysteresis
+    from pipeline.interaction.cav_conflict_pipeline import _apply_veto_hysteresis
 
     state = {"p::mode1": {"dangerous": True, "clear_since_s": None}}
     for i in range(5):
@@ -837,7 +837,7 @@ def test_credible_veto_releases_after_sustained_clear_and_recovery():
 
 
 def test_credible_veto_release_is_independent_of_evaluation_count():
-    from pipeline.cav_conflict_pipeline import _apply_veto_hysteresis
+    from pipeline.interaction.cav_conflict_pipeline import _apply_veto_hysteresis
 
     def release_time(evaluation_times):
         state = {"p::mode1": {"dangerous": True, "clear_since_s": None}}

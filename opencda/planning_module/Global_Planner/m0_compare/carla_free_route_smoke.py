@@ -31,8 +31,8 @@ from utility.global_planner import (  # noqa: E402
     canonical_lane_id_for_waypoint,
 )
 from utility.carla_compat import carla as _carla, CARLA_AVAILABLE  # noqa: E402
-from pipeline.route_manager import CPXRouteManager  # noqa: E402
-from pipeline.reference_generator import ReferenceGenerator  # noqa: E402
+from pipeline.route.route_manager import CPXRouteManager  # noqa: E402
+from pipeline.reference.reference_generator import ReferenceGenerator  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 
 

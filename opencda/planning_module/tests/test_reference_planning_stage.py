@@ -1,7 +1,7 @@
 from types import MappingProxyType, SimpleNamespace
 
-from pipeline.nominal_trajectory import NominalTrajectoryGenerator
-from pipeline.reference_planning_stage import (
+from pipeline.execution.nominal_trajectory import NominalTrajectoryGenerator
+from pipeline.reference.reference_planning_stage import (
     BehaviorReferencePreparationRequest,
     BehaviorReferenceRequest,
     CandidatePlanningPreparationRequest,

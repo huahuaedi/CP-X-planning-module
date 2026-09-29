@@ -3,11 +3,11 @@ from types import SimpleNamespace
 import numpy as np
 
 from MPC.mpc import MPC
-from pipeline.mpc_execution_stage import (
+from pipeline.execution.mpc_execution_stage import (
     MPCExecutionRequest,
     MPCExecutionStage,
 )
-from pipeline.mpc_corridor_constraints import LinearRow
+from pipeline.execution.mpc_corridor_constraints import LinearRow
 
 
 class _Buffer:

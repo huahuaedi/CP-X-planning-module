@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from pipeline.control_finalization_stage import (
+from pipeline.execution.control_finalization_stage import (
     ControlFinalizationRequest,
     ControlFinalizationStage,
 )

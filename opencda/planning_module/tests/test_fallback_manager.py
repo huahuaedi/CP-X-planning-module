@@ -1,4 +1,4 @@
-from pipeline.fallback_manager import (
+from pipeline.safety.fallback_manager import (
     FailureReason,
     FallbackRequest,
     TrajectoryFallbackManager,

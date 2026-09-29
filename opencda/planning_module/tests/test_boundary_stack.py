@@ -19,9 +19,9 @@ from unittest.mock import patch
 
 import pytest
 
-from pipeline.boundary_recovery import BoundaryRecoveryTracker  # noqa: E402
-from pipeline.road_boundary_monitor import RoadBoundaryMonitor  # noqa: E402
-from pipeline.turn_road_envelope import rolling_turn_envelope_payload_world  # noqa: E402
+from opencda.planning_module.pipeline.safety.boundary_recovery import BoundaryRecoveryTracker  # noqa: E402
+from opencda.planning_module.pipeline.safety.road_boundary_monitor import RoadBoundaryMonitor  # noqa: E402
+from opencda.planning_module.pipeline.reference.turn_road_envelope import rolling_turn_envelope_payload_world  # noqa: E402
 
 # =========================== FIXTURES (the only part tied to the layout) ===========================
 
@@ -675,7 +675,7 @@ def test_counters_accumulate_across_calls():
 
 # ====================================== envelope ======================================
 
-_BLOCKS_FN = "opencda.planning_module.pipeline.candidate_pipeline.build_turn_reference_envelope_blocks"
+_BLOCKS_FN = "opencda.planning_module.pipeline.behavior.candidate_pipeline.build_turn_reference_envelope_blocks"
 _CORRECTION_FN = "opencda.planning_module.MPC.lane_keep.road_envelope_conservativeness_correction"
 
 

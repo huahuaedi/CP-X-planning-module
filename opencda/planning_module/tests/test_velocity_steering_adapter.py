@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 
 from opencda.planning_module.opencda_bridge.platform_ports import VehicleDynamics
-from opencda.planning_module.pipeline.velocity_steering_adapter import (
+from opencda.planning_module.pipeline.execution.velocity_steering_adapter import (
     OpenCDAVelocitySteeringAdapter,
     VelocitySteeringCommand,
 )

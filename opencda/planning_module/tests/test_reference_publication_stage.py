@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
-from pipeline.behavior_decision import BehaviorDecision
-from pipeline.reference_publication_stage import ReferencePublicationStage
+from pipeline.behavior.behavior_decision import BehaviorDecision
+from pipeline.reference.reference_publication_stage import ReferencePublicationStage
 
 
 class _Pipeline:

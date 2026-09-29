@@ -26,7 +26,7 @@ Status tags:
 | Behavior FSM | DONE | `behavior_planner/planner.py` chooses emergency brake, traffic/stop-sign stop, reroute, lane-change, or lane follow. FSM states include `IDLE`, `LANE_KEEP`, `PREPARE_LANE_CHANGE_*`, `EXECUTE_LANE_CHANGE_*`, and abort/reset states. |
 | Behavior command contract | PARTIAL | `behavior_planner/contract.py` documents the command shape. Runtime still passes a loose dict, but `_enforce_behavior_command_invariants()` corrects unsafe lane/stop inconsistencies before output. |
 | Traffic-light stop logic | PARTIAL | Red/yellow/green detection, stop target matching, signal memory, unknown release, and raw actor state logging are implemented. Recent issue: red was detected but speed profile still allowed high speed; this is now addressed with conservative stop speed shaping. |
-| Other-vehicle prediction | PARTIAL | Behavior risk checks use CP `predicted_trajectory` when provided and constant-acceleration fallback otherwise. This is implemented in `behavior_planner/trajectory_risk.py` and `pipeline/prediction.py`. |
+| Other-vehicle prediction | PARTIAL | Behavior risk checks use CP `predicted_trajectory` when provided and constant-acceleration fallback otherwise. This is implemented in `behavior_planner/trajectory_risk.py` and `pipeline/interaction/prediction.py`. |
 | Temp destination | PARTIAL | `temp_des` is stabilized and guarded against behind-ego / wrong-lane jumps, but it is still both a display point and a local goal input to MPC. Stop target movement is now step-limited. |
 | Reference intent contract | PARTIAL | `behavior_planner/reference_generator.py` now chooses whether MPC should track lane center, route branch, lane-change, stop, or follow-lead reference. This is the first step toward separating `temp_des` from the actual MPC reference. |
 | Lane-center reference | PARTIAL | `lane_center_reference_samples` are generated for MPC. Non-lane-change jumps are frozen, and repeated freeze can re-anchor to ego heading. Route-branch reference is no longer treated as ordinary lane-follow noise inside junctions. |
@@ -402,7 +402,7 @@ Remaining gap:
 
 Current files:
 
-- `pipeline/prediction.py`
+- `pipeline/interaction/prediction.py`
 - `behavior_planner/trajectory_risk.py`
 - lane-safety logic in `behavior_planner/lane_safety.py`
 

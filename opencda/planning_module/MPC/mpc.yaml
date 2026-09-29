@@ -858,7 +858,7 @@ mpc:
 
     # Stage-D spatiotemporal constraints: soft longitudinal corridor bands
     # and latched lateral homotopy half-spaces, supplied per planning tick
-    # (pipeline.cav_conflict_pipeline.resolve_conflicts ->
+    # (pipeline.interaction.cav_conflict_pipeline.resolve_conflicts ->
     # mpc_corridor_constraints.corridor_rows). Encodes the yield / follow /
     # merge-gap decision as a convex constraint instead of the potential
     # field. Disabled by default; a no-op when no rows are passed.

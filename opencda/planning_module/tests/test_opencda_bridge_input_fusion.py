@@ -28,31 +28,31 @@ if "carla" not in sys.modules:
 from opencda_bridge.cpx_mpc_planner import (
     CPXMPCPlannerBridge,
 )
-from pipeline.static_obstacle_stage import (
+from pipeline.behavior.static_obstacle_stage import (
     cooldown_policy as _static_obstacle_cooldown_policy,
     select_local_avoidance_lane as _select_static_obstacle_local_avoidance_lane,
 )
 from opencda_bridge.cp_provider import OpenCDACPProvider
-from pipeline.traffic_light_memory import TrafficLightMemory
-from pipeline.reference_gate import FinalReferenceGate
-from pipeline.reference_generator import GeneratedReference, ReferenceGenerator
-from pipeline.reference_pipeline import ReferencePipeline, ReferencePipelineRequest
-from pipeline.route_manager import RouteReplanResult
-from pipeline.route_context_stage import RouteContextStage
-from pipeline.boundary_recovery import BoundaryRecoveryTracker
-from pipeline.road_boundary_monitor import RoadBoundaryMonitor
-from pipeline.mpc_entry_stage import MPCEntryStage
-from pipeline.maneuver_manager import ManeuverManager
-from pipeline.fallback_manager import TrajectoryFallbackManager
-from pipeline.nominal_trajectory import NominalTrajectoryGenerator
-from pipeline.reference_line_provider import (
+from pipeline.behavior.traffic_light_memory import TrafficLightMemory
+from pipeline.reference.reference_gate import FinalReferenceGate
+from pipeline.reference.reference_generator import GeneratedReference, ReferenceGenerator
+from pipeline.reference.reference_pipeline import ReferencePipeline, ReferencePipelineRequest
+from pipeline.route.route_manager import RouteReplanResult
+from pipeline.route.route_context_stage import RouteContextStage
+from pipeline.safety.boundary_recovery import BoundaryRecoveryTracker
+from pipeline.safety.road_boundary_monitor import RoadBoundaryMonitor
+from pipeline.execution.mpc_entry_stage import MPCEntryStage
+from pipeline.behavior.maneuver_manager import ManeuverManager
+from pipeline.safety.fallback_manager import TrajectoryFallbackManager
+from pipeline.execution.nominal_trajectory import NominalTrajectoryGenerator
+from pipeline.reference.reference_line_provider import (
     LANE_CHANGE,
     LANE_FOLLOW,
     TURN,
     ReferenceLineProvider,
 )
-from pipeline.stage_contracts import ManeuverCommitment
-from pipeline.perception_stage import PerceptionStage
+from pipeline.core.stage_contracts import ManeuverCommitment
+from pipeline.perception.perception_stage import PerceptionStage
 
 
 class OpenCDABridgeInputFusionTests(unittest.TestCase):
@@ -682,7 +682,7 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
             "boundary_recovery_cooldown_s": 2.0,
         })
     def test_strict_reference_veto_hard_gates_explicit_fallback(self):
-        from pipeline.stage_contracts import authorize_mpc_entry
+        from pipeline.core.stage_contracts import authorize_mpc_entry
 
         authorization = authorize_mpc_entry(
             candidate_status="explicit_fallback",
@@ -698,7 +698,7 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         self.assertIn("strict_reference_veto", authorization.reason)
 
     def test_emergency_brake_always_uses_direct_control_hard_gate(self):
-        from pipeline.stage_contracts import authorize_mpc_entry
+        from pipeline.core.stage_contracts import authorize_mpc_entry
 
         authorization = authorize_mpc_entry(
             candidate_status="explicit_fallback",
@@ -922,7 +922,7 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         self.assertEqual(result.decision, "emergency_brake")
 
     def test_turn_exit_contract_miss_keeps_retained_turn_instead_of_stopping(self):
-        from pipeline.maneuver_manager import ManeuverManager
+        from pipeline.behavior.maneuver_manager import ManeuverManager
 
         bridge = CPXMPCPlannerBridge.__new__(CPXMPCPlannerBridge)
         bridge.config = {}

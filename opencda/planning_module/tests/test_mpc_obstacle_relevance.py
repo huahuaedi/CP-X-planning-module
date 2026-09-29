@@ -1,7 +1,7 @@
 import math
 import random
 
-from pipeline.mpc_obstacle_relevance import (
+from pipeline.execution.mpc_obstacle_relevance import (
     project_points_to_extended_polyline,
     project_to_extended_polyline,
     split_relevant_mpc_obstacles,

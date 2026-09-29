@@ -8,7 +8,7 @@ from types import SimpleNamespace
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
     "safety_supervisor_under_test",
-    ROOT / "pipeline" / "safety_supervisor.py",
+    ROOT / "pipeline" / "safety" / "safety_supervisor.py",
 )
 safety_supervisor = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = safety_supervisor

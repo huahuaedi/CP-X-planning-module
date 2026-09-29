@@ -7,6 +7,8 @@ import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 PIPELINE_ROOT = ROOT / "pipeline"
 _MISSING = object()
 _SAVED_MODULES = {}
@@ -14,8 +16,8 @@ for _name in (
     "opencda",
     "opencda.planning_module",
     "opencda.planning_module.pipeline",
-    "opencda.planning_module.pipeline.reference_contract",
-    "opencda.planning_module.pipeline.candidate_pipeline",
+    "opencda.planning_module.pipeline.reference.reference_contract",
+    "opencda.planning_module.pipeline.behavior.candidate_pipeline",
 ):
     _SAVED_MODULES[_name] = sys.modules.get(_name, _MISSING)
 for package_name in ("opencda", "opencda.planning_module", "opencda.planning_module.pipeline"):
@@ -25,16 +27,16 @@ for package_name in ("opencda", "opencda.planning_module", "opencda.planning_mod
         sys.modules[package_name] = module
 
 REFERENCE_SPEC = importlib.util.spec_from_file_location(
-    "opencda.planning_module.pipeline.reference_contract",
-    PIPELINE_ROOT / "reference_contract.py",
+    "opencda.planning_module.pipeline.reference.reference_contract",
+    PIPELINE_ROOT / "reference" / "reference_contract.py",
 )
 reference_contract = importlib.util.module_from_spec(REFERENCE_SPEC)
 sys.modules[REFERENCE_SPEC.name] = reference_contract
 REFERENCE_SPEC.loader.exec_module(reference_contract)
 
 CANDIDATE_SPEC = importlib.util.spec_from_file_location(
-    "opencda.planning_module.pipeline.candidate_pipeline",
-    PIPELINE_ROOT / "candidate_pipeline.py",
+    "opencda.planning_module.pipeline.behavior.candidate_pipeline",
+    PIPELINE_ROOT / "behavior" / "candidate_pipeline.py",
 )
 candidate_pipeline = importlib.util.module_from_spec(CANDIDATE_SPEC)
 sys.modules[CANDIDATE_SPEC.name] = candidate_pipeline

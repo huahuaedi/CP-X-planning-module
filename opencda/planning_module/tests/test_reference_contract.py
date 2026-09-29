@@ -1,14 +1,6 @@
 import unittest
-import importlib.util
-from pathlib import Path
-import sys
 
-
-_MODULE_PATH = Path(__file__).resolve().parents[1] / "pipeline" / "reference_contract.py"
-_SPEC = importlib.util.spec_from_file_location("reference_contract", str(_MODULE_PATH))
-reference_contract = importlib.util.module_from_spec(_SPEC)
-sys.modules["reference_contract"] = reference_contract
-_SPEC.loader.exec_module(reference_contract)
+from opencda.planning_module.pipeline.reference import reference_contract
 
 contract_from_config = reference_contract.contract_from_config
 validate_reference_contract = reference_contract.validate_reference_contract

@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
-from pipeline.cav_conflict_schedule import CAVConflictSchedule
-from pipeline.spatiotemporal_corridor import Corridor
+from pipeline.interaction.cav_conflict_schedule import CAVConflictSchedule
+from pipeline.interaction.spatiotemporal_corridor import Corridor
 
 _BIG = 1.0e9
 

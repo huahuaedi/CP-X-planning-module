@@ -64,7 +64,7 @@ ARC_TOL_M = 6.0
 
 def _load_route_geometry():
     from utility.global_planner import CustomGlobalPlannerAdapter
-    from pipeline.route_manager import CPXRouteManager
+    from pipeline.route.route_manager import CPXRouteManager
 
     adapter = CustomGlobalPlannerAdapter(
         xodr_path=str(MAPS_DIR / f"{SCENARIO_MAP}.xodr"),

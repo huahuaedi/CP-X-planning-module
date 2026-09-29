@@ -468,7 +468,7 @@ class RuleBasedBehaviorPlanner:
         candidate_route_deviation_weight: float = 0.15,
         candidate_lane_change_weight: float = 0.20,
     ) -> None:
-        # Candidate scoring belongs to pipeline.candidate_evaluation.  Keep
+        # Candidate scoring belongs to pipeline.behavior.candidate_evaluation.  Keep
         # these legacy constructor arguments source-compatible for the
         # standalone runner, but do not retain a second set of policy state.
         del candidate_route_deviation_weight, candidate_lane_change_weight
@@ -1116,11 +1116,11 @@ class RuleBasedBehaviorPlanner:
             # Compatibility path for direct BehaviorPlanner users: invoke the
             # same canonical strategy evaluator used by the full pipeline.
             try:
-                from opencda.planning_module.pipeline.candidate_evaluation import (
+                from opencda.planning_module.pipeline.behavior.candidate_evaluation import (
                     evaluate_behavior_candidates,
                 )
             except ImportError:
-                from pipeline.candidate_evaluation import (
+                from pipeline.behavior.candidate_evaluation import (
                     evaluate_behavior_candidates,
                 )
             canonical_evaluation = evaluate_behavior_candidates(

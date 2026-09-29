@@ -1,4 +1,4 @@
-from pipeline.cav_conflict_compute_governor import CAVConflictComputeGovernor
+from pipeline.interaction.cav_conflict_compute_governor import CAVConflictComputeGovernor
 
 
 def _governor(**overrides):

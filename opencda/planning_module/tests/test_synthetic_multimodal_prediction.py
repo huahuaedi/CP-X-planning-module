@@ -1,5 +1,5 @@
-from pipeline.prediction import build_prediction_frame
-from pipeline.prediction_ablation import synthetic_multimodal_snapshot_transform
+from pipeline.interaction.prediction import build_prediction_frame
+from pipeline.interaction.prediction_ablation import synthetic_multimodal_snapshot_transform
 from utility.planning_context import PredictionContext
 
 

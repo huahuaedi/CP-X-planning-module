@@ -2,23 +2,23 @@ from types import SimpleNamespace
 
 import pytest
 
-from pipeline.cooperative_arbitration import CavIntent, ResourceClaim
-from pipeline.behavior_reference_finalization_stage import (
+from pipeline.interaction.cooperative_arbitration import CavIntent, ResourceClaim
+from pipeline.behavior.behavior_reference_finalization_stage import (
     BehaviorFrameFinalizationRequest,
     BehaviorReferenceFinalizationRequest,
     MPCCostProfileRequest,
 )
-from pipeline.execution_pipeline import (
+from pipeline.execution.execution_pipeline import (
     CooperativePlanningFrame,
     ExecutableBehaviorRequest,
     NominalPlanningRequest,
     PlanningPipeline,
 )
-from pipeline.planning_context_stage import PlanningContextRequest
-from pipeline.cav_interaction_stage import CAVInteractionStage
-from pipeline.perception_stage import PerceptionStage
-from pipeline.runtime_input_stage import RuntimeInputStage
-from pipeline.reference_planning_stage import PostTurnReferenceRequest
+from pipeline.core.planning_context_stage import PlanningContextRequest
+from pipeline.interaction.cav_interaction_stage import CAVInteractionStage
+from pipeline.perception.perception_stage import PerceptionStage
+from pipeline.perception.runtime_input_stage import RuntimeInputStage
+from pipeline.reference.reference_planning_stage import PostTurnReferenceRequest
 
 
 class _Mapper:

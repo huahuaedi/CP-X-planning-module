@@ -29,13 +29,13 @@ from opencda_bridge.cpx_mpc_planner import (
     CPXMPCPlannerBridge,
     _adaptive_target_horizon_s,
 )
-from pipeline.reference_generator import ReferenceGenerator
-from pipeline.local_map_snapshot import LocalMapSnapshot, build_local_map_snapshot
-from pipeline.route_context_stage import RouteContextStage
-from pipeline.maneuver_manager import ManeuverManager
-from pipeline.fallback_manager import TrajectoryFallbackManager
-from pipeline.candidate_evaluation import CandidateTrajectoryEvaluator
-from pipeline.reference_line_provider import (
+from pipeline.reference.reference_generator import ReferenceGenerator
+from pipeline.perception.local_map_snapshot import LocalMapSnapshot, build_local_map_snapshot
+from pipeline.route.route_context_stage import RouteContextStage
+from pipeline.behavior.maneuver_manager import ManeuverManager
+from pipeline.safety.fallback_manager import TrajectoryFallbackManager
+from pipeline.behavior.candidate_evaluation import CandidateTrajectoryEvaluator
+from pipeline.reference.reference_line_provider import (
     CandidateReferenceBuildContext,
     LANE_CHANGE,
     LANE_FOLLOW,

@@ -1,8 +1,8 @@
 import json
 import math
 
-from pipeline.prediction import build_prediction_frame
-from pipeline.prediction_ablation import (
+from pipeline.interaction.prediction import build_prediction_frame
+from pipeline.interaction.prediction_ablation import (
     OracleTraceStore,
     TraceRecorder,
     build_snapshot_transform,

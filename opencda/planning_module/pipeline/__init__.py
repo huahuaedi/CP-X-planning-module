@@ -4,20 +4,20 @@ This package keeps the high-level planning stages explicit:
 cooperative perception input, prediction, behavior decision, and trajectory generation.
 """
 
-from .candidate_evaluation import (
+from .behavior.candidate_evaluation import (
     BehaviorCandidate,
     CandidateEvaluationFrame,
     evaluate_behavior_candidates,
 )
-from .cav_interaction_stage import CAVInteractionStage
-from .candidate_selection_stage import (
+from .interaction.cav_interaction_stage import CAVInteractionStage
+from .behavior.candidate_selection_stage import (
     CandidateArbitrationRequest,
     CandidateArbitrationResult,
     CandidateSelectionStage,
 )
-from .actuator_mapper import ActuatorCommand, CarlaActuatorMapper
-from .architecture_profile import ArchitectureProfile, normalize_architecture_config
-from .candidate_pipeline import (
+from .execution.actuator_mapper import ActuatorCommand, CarlaActuatorMapper
+from .core.architecture_profile import ArchitectureProfile, normalize_architecture_config
+from .behavior.candidate_pipeline import (
     CandidateBehaviorIntent,
     CandidateReferenceResult,
     CandidateSelectionOutcome,
@@ -27,9 +27,9 @@ from .candidate_pipeline import (
     select_candidate_with_commitment,
     summarize_candidate_results,
 )
-from .control_buffer import MPCControlBuffer
-from .behavior_decision import BehaviorConstraint, BehaviorDecision
-from .behavior_stage import (
+from .execution.control_buffer import MPCControlBuffer
+from .behavior.behavior_decision import BehaviorConstraint, BehaviorDecision
+from .behavior.behavior_stage import (
     BehaviorStage,
     BehaviorStageResult,
     BehaviorCommandFrameRequest,
@@ -38,53 +38,53 @@ from .behavior_stage import (
     ConflictResolutionResult,
     RouteBehaviorContextResult,
 )
-from .fallback_manager import (
+from .safety.fallback_manager import (
     FailureReason,
     FallbackRequest,
     FallbackResult,
     TrajectoryFallbackManager,
 )
-from .decision_record import DecisionRecord, DecisionVeto, build_decision_record
-from .destination_speed_stage import (
+from .core.decision_record import DecisionRecord, DecisionVeto, build_decision_record
+from .behavior.destination_speed_stage import (
     DestinationSpeedStage,
     DestinationSpeedStageResult,
 )
-from .execution_pipeline import (
+from .execution.execution_pipeline import (
     CooperativePlanningFrame,
     PlanningPipeline,
 )
-from .planning_context_stage import PlanningContextFrame, PlanningContextRequest
-from .mpc_feedback import BehaviorMPCFeedback
-from .mpc_command_extractor import MPCCommandExtractor, MPCTrackingCommand
-from .mpc_entry_stage import MPCEntryStage, MPCEntryStageResult
-from .mpc_cost_profile_stage import MPCCostProfileStage, MPCCostProfileState
-from .mpc_execution_stage import (
+from .core.planning_context_stage import PlanningContextFrame, PlanningContextRequest
+from .execution.mpc_feedback import BehaviorMPCFeedback
+from .execution.mpc_command_extractor import MPCCommandExtractor, MPCTrackingCommand
+from .execution.mpc_entry_stage import MPCEntryStage, MPCEntryStageResult
+from .execution.mpc_cost_profile_stage import MPCCostProfileStage, MPCCostProfileState
+from .execution.mpc_execution_stage import (
     MPCExecutionRequest,
     MPCExecutionResult,
     MPCExecutionStage,
 )
-from .maneuver_manager import LaneChangeLifecycle, ManeuverManager, TurnLifecycle
-from .nominal_trajectory import (
+from .behavior.maneuver_manager import LaneChangeLifecycle, ManeuverManager, TurnLifecycle
+from .execution.nominal_trajectory import (
     NominalTarget,
     NominalTrajectory,
     NominalTrajectoryGenerator,
 )
-from .prediction import PredictionFrame, build_prediction_frame
-from .output import BehaviorCommand, PlannerDiagnostics, PlannerOutput
-from .perception_stage import PerceptionStage, PerceptionStageResult
-from .reference_contract import (
+from .interaction.prediction import PredictionFrame, build_prediction_frame
+from .core.output import BehaviorCommand, PlannerDiagnostics, PlannerOutput
+from .perception.perception_stage import PerceptionStage, PerceptionStageResult
+from .reference.reference_contract import (
     ReferenceContract,
     ReferenceValidationResult,
     contract_from_config,
     validate_reference_contract,
 )
-from .reference_gate import FinalReferenceGate, FinalReferenceGateResult
-from .reference_line_provider import (
+from .reference.reference_gate import FinalReferenceGate, FinalReferenceGateResult
+from .reference.reference_line_provider import (
     ReferenceLineProvider,
     ReferenceLineRequest,
     ReferenceLineResult,
 )
-from .reference_planning_stage import (
+from .reference.reference_planning_stage import (
     BehaviorReferenceFrame,
     BehaviorReferencePreparationRequest,
     BehaviorReferenceRequest,
@@ -93,7 +93,7 @@ from .reference_planning_stage import (
     PostTurnReferenceRequest,
     ReferencePlanningStage,
 )
-from .reference_generator import (
+from .reference.reference_generator import (
     BoundaryRecoveryValidation,
     DrivableFootprintOccupancy,
     GeneratedReference,
@@ -101,45 +101,45 @@ from .reference_generator import (
     ReferenceCorridorProjection,
     ReferenceGenerator,
 )
-from .reference_pipeline import (
+from .reference.reference_pipeline import (
     ConditionedReference,
     ReferencePipeline,
     ReferencePipelineRequest,
     ReferencePipelineResult,
 )
-from .reference_publication_stage import (
+from .reference.reference_publication_stage import (
     ReferencePublicationStage,
     ReferencePublicationStageResult,
 )
-from .runtime_input_stage import RuntimeInputStage, RuntimeTickSnapshot
-from .traffic_light_memory import TrafficLightMemory
-from .stage_contracts import ManeuverCommitment
-from .route_authorization import (
+from .perception.runtime_input_stage import RuntimeInputStage, RuntimeTickSnapshot
+from .behavior.traffic_light_memory import TrafficLightMemory
+from .core.stage_contracts import ManeuverCommitment
+from .route.route_authorization import (
     LaneChangeAuthorization,
     RouteManeuver,
     authorize_route_lane_change,
     normalize_route_maneuver,
 )
-from .route_manager import CPXRouteManager, RouteCursorSnapshot, RouteManagerStatus
-from .safety_supervisor import SafetySupervisor
-from .scenario_manager import (
+from .route.route_manager import CPXRouteManager, RouteCursorSnapshot, RouteManagerStatus
+from .safety.safety_supervisor import SafetySupervisor
+from .behavior.scenario_manager import (
     BoundaryRecoveryRequest,
     CPXScenarioDecision,
     CPXScenarioManager,
 )
-from .speed_planner import (
+from .behavior.speed_planner import (
     SpeedConstraint,
     SpeedPlan,
     SpeedTarget,
     SpeedTargetPlanner,
     build_speed_plan,
 )
-from .velocity_steering_adapter import (
+from .execution.velocity_steering_adapter import (
     CarlaVelocitySteeringAdapter,
     OpenCDAVelocitySteeringAdapter,
     VelocitySteeringCommand,
 )
-from .tracker import CPXObstacleTracker
+from .perception.tracker import CPXObstacleTracker
 
 __all__ = [
     "ActuatorCommand",

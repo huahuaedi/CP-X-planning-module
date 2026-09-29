@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
-from pipeline.destination_speed_stage import DestinationSpeedStage
-from pipeline.speed_planner import SpeedTargetPlanner
+from pipeline.behavior.destination_speed_stage import DestinationSpeedStage
+from pipeline.behavior.speed_planner import SpeedTargetPlanner
 
 
 def _status(*, remaining_m, reached=False, found=True):

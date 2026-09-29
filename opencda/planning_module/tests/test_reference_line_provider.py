@@ -3,11 +3,11 @@ import math
 import pytest
 from types import SimpleNamespace
 
-from pipeline.behavior_decision import BehaviorDecision
-from pipeline.candidate_evaluation import mpc_cost_profile_for_behavior
-from pipeline.maneuver_manager import ManeuverManager
+from pipeline.behavior.behavior_decision import BehaviorDecision
+from pipeline.behavior.candidate_evaluation import mpc_cost_profile_for_behavior
+from pipeline.behavior.maneuver_manager import ManeuverManager
 
-from pipeline.reference_line_provider import (
+from pipeline.reference.reference_line_provider import (
     CONNECTOR,
     CandidateReferenceOverrideResult,
     LANE_CHANGE,
@@ -19,8 +19,8 @@ from pipeline.reference_line_provider import (
     ReferenceLineRequest,
     TurnReferenceRequest,
 )
-from pipeline.stable_reference_line_provider import StableReferenceLineProvider
-from pipeline.reference_geometry import signed_curvature_at_samples_1pm
+from pipeline.reference.stable_reference_line_provider import StableReferenceLineProvider
+from pipeline.reference.reference_geometry import signed_curvature_at_samples_1pm
 
 
 def _line(y_m=0.0):

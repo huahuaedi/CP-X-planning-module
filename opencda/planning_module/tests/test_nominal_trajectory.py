@@ -1,6 +1,6 @@
 import pytest
 
-from opencda.planning_module.pipeline.nominal_trajectory import (
+from opencda.planning_module.pipeline.execution.nominal_trajectory import (
     NominalTarget,
     NominalTrajectoryGenerator,
 )

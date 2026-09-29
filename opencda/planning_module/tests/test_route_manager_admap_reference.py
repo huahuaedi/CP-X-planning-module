@@ -2,7 +2,7 @@ import math
 import types
 import unittest
 
-from opencda.planning_module.pipeline.route_manager import CPXRouteManager
+from opencda.planning_module.pipeline.route.route_manager import CPXRouteManager
 
 
 class _Location:

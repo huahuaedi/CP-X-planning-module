@@ -4,9 +4,9 @@ import unittest
 
 import carla
 
-from pipeline.reference_gate import FinalReferenceGate
-from pipeline.reference_generator import ReferenceGenerator
-from pipeline.reference_pipeline import ReferencePipeline, ReferencePipelineRequest
+from pipeline.reference.reference_gate import FinalReferenceGate
+from pipeline.reference.reference_generator import ReferenceGenerator
+from pipeline.reference.reference_pipeline import ReferencePipeline, ReferencePipelineRequest
 
 
 def _body_frame_xy(

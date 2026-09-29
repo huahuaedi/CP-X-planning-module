@@ -1,6 +1,6 @@
 import unittest
 
-from pipeline.maneuver_manager import ManeuverManager
+from pipeline.behavior.maneuver_manager import ManeuverManager
 
 
 class ManeuverManagerTests(unittest.TestCase):

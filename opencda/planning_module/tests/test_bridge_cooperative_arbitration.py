@@ -54,12 +54,12 @@ if "carla" not in sys.modules:
     sys.modules["carla"] = fake_carla
 
 from opencda_bridge.cpx_mpc_planner import CPXMPCPlannerBridge  # noqa: E402
-from pipeline.cav_intent_codec import (  # noqa: E402
+from pipeline.interaction.cav_intent_codec import (  # noqa: E402
     build_ego_cav_intent,
     cav_intent_to_payload,
 )
-from pipeline.cooperative_arbitration import ResourceClaim  # noqa: E402
-from pipeline.cooperative_maneuver_proposal import (  # noqa: E402
+from pipeline.interaction.cooperative_arbitration import ResourceClaim  # noqa: E402
+from pipeline.interaction.cooperative_maneuver_proposal import (  # noqa: E402
     CooperativeManeuverProposal,
 )
 

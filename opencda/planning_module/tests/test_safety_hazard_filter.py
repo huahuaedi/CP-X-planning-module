@@ -22,7 +22,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from pipeline.safety_supervisor import SafetySupervisor
+from pipeline.safety.safety_supervisor import SafetySupervisor
 
 # =============================== FIXTURE ===============================
 

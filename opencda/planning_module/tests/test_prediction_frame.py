@@ -1,7 +1,7 @@
 import math
 import unittest
 
-from opencda.planning_module.pipeline.prediction import (
+from opencda.planning_module.pipeline.interaction.prediction import (
     build_prediction_frame,
     mpc_stage_trajectory,
     obstacle_track_id,

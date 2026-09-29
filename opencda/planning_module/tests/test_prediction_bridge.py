@@ -11,8 +11,8 @@ from opencda.planning_module.opencda_bridge.planner_assembly import (
 from opencda.planning_module.opencda_bridge.prediction_bridge import (
     MTRPredictionBridge,
 )
-from opencda.planning_module.pipeline.prediction import mpc_stage_trajectory
-from opencda.planning_module.pipeline.tracker import CPXObstacleTracker
+from opencda.planning_module.pipeline.interaction.prediction import mpc_stage_trajectory
+from opencda.planning_module.pipeline.perception.tracker import CPXObstacleTracker
 
 
 class _FakeResponse:

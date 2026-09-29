@@ -4,7 +4,7 @@ import sys
 import unittest
 
 
-_MODULE_PATH = Path(__file__).resolve().parents[1] / "pipeline" / "route_authorization.py"
+_MODULE_PATH = Path(__file__).resolve().parents[1] / "pipeline" / "route" / "route_authorization.py"
 _SPEC = importlib.util.spec_from_file_location("route_authorization", str(_MODULE_PATH))
 route_authorization = importlib.util.module_from_spec(_SPEC)
 sys.modules["route_authorization"] = route_authorization

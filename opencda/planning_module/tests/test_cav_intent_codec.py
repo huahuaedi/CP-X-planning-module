@@ -1,5 +1,5 @@
-from pipeline.cooperative_arbitration import CavIntent, ResourceClaim
-from pipeline.cav_intent_codec import (
+from pipeline.interaction.cooperative_arbitration import CavIntent, ResourceClaim
+from pipeline.interaction.cav_intent_codec import (
     SCHEMA_VERSION,
     build_ego_cav_intent,
     collect_cav_intents,

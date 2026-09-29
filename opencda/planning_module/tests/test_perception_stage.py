@@ -3,8 +3,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from pipeline.perception_stage import PerceptionStage
-from pipeline.tracker import CPXObstacleTracker
+from pipeline.perception.perception_stage import PerceptionStage
+from pipeline.perception.tracker import CPXObstacleTracker
 
 
 def test_perception_stage_builds_one_fused_obstacle_view():

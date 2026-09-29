@@ -20,9 +20,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pipeline.cav_conflict_pipeline import resolve_conflicts
-from pipeline.conflict_classifier import ClassifierParams
-from pipeline.spatiotemporal_corridor import CorridorParams
+from pipeline.interaction.cav_conflict_pipeline import resolve_conflicts
+from pipeline.interaction.conflict_classifier import ClassifierParams
+from pipeline.interaction.spatiotemporal_corridor import CorridorParams
 
 from tools.frame_replay import (
     FrameCapture,

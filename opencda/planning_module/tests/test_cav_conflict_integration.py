@@ -17,12 +17,12 @@ import numpy as np
 import yaml
 
 from MPC.mpc import MPC
-from pipeline.cav_conflict_pipeline import resolve_conflicts
-from pipeline.conflict_classifier import ClassifierParams
-from pipeline.cooperative_arbitration import CavIntent, ResourceClaim
-from pipeline.mpc_corridor_constraints import corridor_rows
-from pipeline.cav_interaction_stage import CAVInteractionStage
-from pipeline.spatiotemporal_corridor import CorridorParams
+from pipeline.interaction.cav_conflict_pipeline import resolve_conflicts
+from pipeline.interaction.conflict_classifier import ClassifierParams
+from pipeline.interaction.cooperative_arbitration import CavIntent, ResourceClaim
+from pipeline.execution.mpc_corridor_constraints import corridor_rows
+from pipeline.interaction.cav_interaction_stage import CAVInteractionStage
+from pipeline.interaction.spatiotemporal_corridor import CorridorParams
 
 # Ego reference: straight +y, 0..60 m.
 REF = [{"x_ref_m": 0.0, "y_ref_m": float(y)} for y in range(0, 61, 2)]

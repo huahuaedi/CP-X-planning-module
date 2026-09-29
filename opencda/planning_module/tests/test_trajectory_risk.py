@@ -289,7 +289,7 @@ class PredictionPointKinematicsTests(unittest.TestCase):
     see behavior_planner.trajectory_risk._trajectory_points /
     _fill_missing_kinematics. Without this, a real per-point speed a
     CP message or tracker attaches gets silently thrown away, and anything
-    reading the normalized points back (pipeline.prediction.mpc_stage_trajectory
+    reading the normalized points back (pipeline.interaction.prediction.mpc_stage_trajectory
     -> MPC._get_object_state_at_stage) sees no v/psi at all instead of the
     real ones."""
 

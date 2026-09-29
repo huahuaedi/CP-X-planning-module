@@ -55,10 +55,10 @@ for _p in (str(_PM_DIR), str(_REPO_ROOT)):
 import numpy as np  # noqa: E402
 import yaml  # noqa: E402
 
-from pipeline.mpc_obstacle_relevance import _point_to_polyline, _polyline_xy  # noqa: E402
-from pipeline.reference_geometry import pose_at_arc  # noqa: E402
-from pipeline.spatiotemporal_corridor import Corridor  # noqa: E402
-from pipeline.mpc_corridor_constraints import (  # noqa: E402
+from pipeline.execution.mpc_obstacle_relevance import _point_to_polyline, _polyline_xy  # noqa: E402
+from pipeline.reference.reference_geometry import pose_at_arc  # noqa: E402
+from pipeline.interaction.spatiotemporal_corridor import Corridor  # noqa: E402
+from pipeline.execution.mpc_corridor_constraints import (  # noqa: E402
     corridor_rows as build_corridor_rows,
     homotopy_keepout_rows,
 )

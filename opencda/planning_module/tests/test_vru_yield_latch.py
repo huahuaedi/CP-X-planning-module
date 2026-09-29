@@ -1,6 +1,6 @@
-from pipeline.behavior_risk import SemanticBehaviorResponse
-from pipeline.conflict_classifier import NO_RISK, VRU_CONFLICT
-from pipeline.vru_yield_latch import VRUYieldLatch
+from pipeline.behavior.behavior_risk import SemanticBehaviorResponse
+from pipeline.interaction.conflict_classifier import NO_RISK, VRU_CONFLICT
+from pipeline.behavior.vru_yield_latch import VRUYieldLatch
 
 
 def _vru_response(action, obstacle_id="walker_1", object_type="pedestrian"):

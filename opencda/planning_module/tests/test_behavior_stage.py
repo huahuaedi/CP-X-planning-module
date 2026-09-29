@@ -1,8 +1,8 @@
 import math
 from types import SimpleNamespace
 
-from pipeline.behavior_risk import SemanticBehaviorResponse
-from pipeline.behavior_stage import (
+from pipeline.behavior.behavior_risk import SemanticBehaviorResponse
+from pipeline.behavior.behavior_stage import (
     BehaviorCandidateRequest,
     BehaviorOverrideRequest,
     BehaviorStage,
@@ -10,7 +10,7 @@ from pipeline.behavior_stage import (
     OpportunisticLaneChangeRequest,
     RouteLaneChangeRequest,
 )
-from pipeline.maneuver_manager import ManeuverManager
+from pipeline.behavior.maneuver_manager import ManeuverManager
 
 
 def test_lane_alignment_uses_stateful_frame_match_at_junction():

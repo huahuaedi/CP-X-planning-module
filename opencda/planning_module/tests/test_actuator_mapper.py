@@ -1,4 +1,4 @@
-from opencda.planning_module.pipeline.actuator_mapper import CarlaActuatorMapper
+from opencda.planning_module.pipeline.execution.actuator_mapper import CarlaActuatorMapper
 
 
 def test_compensation_adds_feedforward_and_speed_error_boost():

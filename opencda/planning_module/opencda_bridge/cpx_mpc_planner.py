@@ -19,54 +19,54 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 
 from opencda.planning_module.utility.carla_compat import carla
 from opencda.planning_module.opencda_bridge.planner_assembly import assemble_planner
-from opencda.planning_module.pipeline.safety_supervisor import pipeline_failure_stop
-from opencda.planning_module.pipeline.turn_road_envelope import (
+from opencda.planning_module.pipeline.safety.safety_supervisor import pipeline_failure_stop
+from opencda.planning_module.pipeline.reference.turn_road_envelope import (
     rolling_turn_envelope_payload_world,
 )
-from opencda.planning_module.pipeline.cooperative_arbitration_stage import (
+from opencda.planning_module.pipeline.interaction.cooperative_arbitration_stage import (
     CooperativeArbitrationRequest,
 )
 
-from opencda.planning_module.pipeline.local_map_snapshot import LocalMapSnapshot
-from opencda.planning_module.pipeline.reference_line_provider import (
+from opencda.planning_module.pipeline.perception.local_map_snapshot import LocalMapSnapshot
+from opencda.planning_module.pipeline.reference.reference_line_provider import (
     LANE_CHANGE,
     POST_TURN,
     TURN,
     ReferenceLineProvider,
 )
-from opencda.planning_module.pipeline.reference_planning_stage import (
+from opencda.planning_module.pipeline.reference.reference_planning_stage import (
     BehaviorReferencePreparationRequest,
     CandidatePlanningPreparationRequest,
 )
-from opencda.planning_module.pipeline.planner_diagnostics_stage import (
+from opencda.planning_module.pipeline.diagnostics.planner_diagnostics_stage import (
     PlannerDiagnosticsStage,
     ReferenceDebugDependencies,
     ReferenceDiagnosticsRequest,
 )
-from opencda.planning_module.pipeline.mpc_execution_stage import (
+from opencda.planning_module.pipeline.execution.mpc_execution_stage import (
     MPCExecutionRequest,
 )
-from opencda.planning_module.pipeline.mpc_cost_profile_stage import (
+from opencda.planning_module.pipeline.execution.mpc_cost_profile_stage import (
     adaptive_target_horizon_s as _adaptive_target_horizon_s,
     select_profile_with_hysteresis as _select_mpc_cost_profile_with_hysteresis,
 )
-from opencda.planning_module.pipeline.execution_pipeline import (
+from opencda.planning_module.pipeline.execution.execution_pipeline import (
     ExecutableBehaviorPreparationRequest,
     NominalPlanningRequest,
 )
-from opencda.planning_module.pipeline.planning_context_stage import (
+from opencda.planning_module.pipeline.core.planning_context_stage import (
     PlanningContextRequest,
 )
-from opencda.planning_module.pipeline.behavior_reference_finalization_stage import (
+from opencda.planning_module.pipeline.behavior.behavior_reference_finalization_stage import (
     BehaviorReferenceFinalizationPreparationRequest,
 )
-from opencda.planning_module.pipeline.speed_planning_stage import (
+from opencda.planning_module.pipeline.behavior.speed_planning_stage import (
     SpeedPlanningPreparationRequest,
 )
-from opencda.planning_module.pipeline.route_update_stage import (
+from opencda.planning_module.pipeline.route.route_update_stage import (
     RouteUpdateRequest,
 )
-from opencda.planning_module.pipeline.candidate_selection_stage import (
+from opencda.planning_module.pipeline.behavior.candidate_selection_stage import (
     CandidateSelectionStage,
 )
 class CPXMPCPlannerBridge:
@@ -303,7 +303,7 @@ class CPXMPCPlannerBridge:
     ):
         """Map planner-owned speed/steering before final safety supervision."""
 
-        from opencda.planning_module.pipeline.velocity_steering_adapter import (
+        from opencda.planning_module.pipeline.execution.velocity_steering_adapter import (
             VelocitySteeringCommand,
         )
 
@@ -450,7 +450,7 @@ class CPXMPCPlannerBridge:
         convention.
         """
 
-        from opencda.planning_module.pipeline.execution_pipeline import (
+        from opencda.planning_module.pipeline.execution.execution_pipeline import (
             PlanningTickAdapters,
         )
 
@@ -1277,7 +1277,7 @@ class CPXMPCPlannerBridge:
         """Store this CAV's broadcast (planned trajectory + claim + pose) on
         ``self.last_cav_intent_payload`` for the V2X adapter to transport."""
 
-        from opencda.planning_module.pipeline.cav_intent_codec import (
+        from opencda.planning_module.pipeline.interaction.cav_intent_codec import (
             build_ego_cav_intent,
             cav_intent_to_payload,
             rebase_mpc_state_plan,
@@ -1331,7 +1331,7 @@ class CPXMPCPlannerBridge:
         cav_nearby = dict(getattr(v2x_manager, "cav_nearby", {}) or {})
         if not cav_nearby:
             return []
-        from opencda.planning_module.pipeline.cav_intent_codec import collect_cav_intents
+        from opencda.planning_module.pipeline.interaction.cav_intent_codec import collect_cav_intents
 
         records = []
         for cav_id, cav_manager in cav_nearby.items():
@@ -1470,7 +1470,7 @@ class CPXMPCPlannerBridge:
         stage = getattr(self, "lane_change_lifecycle_stage", None)
         if stage is not None:
             return stage
-        from opencda.planning_module.pipeline.lane_change_lifecycle_stage import (
+        from opencda.planning_module.pipeline.behavior.lane_change_lifecycle_stage import (
             LaneChangeLifecycleStage,
         )
         stage = LaneChangeLifecycleStage(
@@ -1532,7 +1532,7 @@ class CPXMPCPlannerBridge:
             "lane_change_left", "lane_change_right",
         }:
             return str(lc_state or "LANE_KEEP")
-        from opencda.planning_module.pipeline.candidate_selection_stage import (
+        from opencda.planning_module.pipeline.behavior.candidate_selection_stage import (
             CandidateSelectionStage,
         )
         return CandidateSelectionStage.normalized_lane_change_state(
@@ -1552,7 +1552,7 @@ class CPXMPCPlannerBridge:
         lane_center_reference: Sequence[Mapping[str, object]],
         committed_lane_change_tracking_active: bool = False,
     ):
-        from opencda.planning_module.pipeline.reference_contract import (
+        from opencda.planning_module.pipeline.reference.reference_contract import (
             contract_from_config,
             validate_reference_contract,
         )
@@ -1716,7 +1716,7 @@ class CPXMPCPlannerBridge:
 
         if self._prediction_snapshot_transform_cached:
             return self._prediction_snapshot_transform_fn
-        from opencda.planning_module.pipeline.prediction_ablation import (
+        from opencda.planning_module.pipeline.interaction.prediction_ablation import (
             build_snapshot_transform,
         )
         self._prediction_snapshot_transform_fn = build_snapshot_transform(
@@ -2227,7 +2227,7 @@ class CPXMPCPlannerBridge:
         attach it, not resample it.
         """
 
-        from opencda.planning_module.pipeline.prediction import (
+        from opencda.planning_module.pipeline.interaction.prediction import (
             mpc_stage_trajectory,
             obstacle_track_id,
         )

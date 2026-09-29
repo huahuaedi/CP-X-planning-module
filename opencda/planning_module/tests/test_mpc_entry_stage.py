@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from pipeline.mpc_entry_stage import MPCEntryStage
+from pipeline.execution.mpc_entry_stage import MPCEntryStage
 
 
 def _behavior(maneuver="lane_follow", phase="LANE_KEEP", lane_id=7):

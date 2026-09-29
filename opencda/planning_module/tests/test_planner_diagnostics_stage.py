@@ -7,7 +7,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from opencda_bridge.cpx_mpc_planner import CPXMPCPlannerBridge  # noqa: E402
-from pipeline.planner_diagnostics_stage import _executed_reference_tracking  # noqa: E402
+from pipeline.diagnostics.planner_diagnostics_stage import _executed_reference_tracking  # noqa: E402
 
 
 class _FakeBridge:

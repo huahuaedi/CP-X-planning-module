@@ -1,6 +1,6 @@
 import pytest
 
-from pipeline.mpc_cost_profile_stage import (
+from pipeline.execution.mpc_cost_profile_stage import (
     MPCCostProfileStage,
     adaptive_target_horizon_s,
     select_profile_with_hysteresis,

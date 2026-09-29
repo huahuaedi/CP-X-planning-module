@@ -1,8 +1,8 @@
 import math
 
-from pipeline.cooperative_arbitration import ConflictAssignment
-from pipeline.mpc_corridor_constraints import corridor_rows, homotopy_keepout_rows
-from pipeline.spatiotemporal_corridor import Corridor
+from pipeline.interaction.cooperative_arbitration import ConflictAssignment
+from pipeline.execution.mpc_corridor_constraints import corridor_rows, homotopy_keepout_rows
+from pipeline.interaction.spatiotemporal_corridor import Corridor
 
 _BIG = 1.0e9
 # straight +x reference

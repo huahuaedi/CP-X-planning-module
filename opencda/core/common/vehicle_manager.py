@@ -35,7 +35,7 @@ from opencda.planning_module.opencda_bridge.cpx_mpc_planner import (
 )
 from opencda.planning_module.utility.cp_messages import load_cp_message_payload
 from opencda.planning_module.opencda_bridge.cp_provider import OpenCDACPProvider
-from opencda.planning_module.pipeline.actuator_mapper import CarlaActuatorMapper
+from opencda.planning_module.pipeline.execution.actuator_mapper import CarlaActuatorMapper
 from opencda.planning_module.utility.config_loader import load_yaml_file
 from opencda import data_transmitter
 from opencda.data_receiver import DataReceiver
@@ -317,7 +317,7 @@ class VehicleManager(object):
                 map_planner=carla_map,
             )
             if self.debug_time:
-                from opencda.planning_module.pipeline.performance_profiler import PlannerStageProfiler
+                from opencda.planning_module.pipeline.diagnostics.performance_profiler import PlannerStageProfiler
 
                 self._planner_stage_profiler = PlannerStageProfiler(enabled=True)
                 self._planner_stage_profiler.instrument_global_planner(getattr(self.cpx_planner, "global_planner", None))

@@ -1,7 +1,7 @@
 import math
 import unittest
 
-from opencda.planning_module.pipeline.tracker import CPXObstacleTracker
+from opencda.planning_module.pipeline.perception.tracker import CPXObstacleTracker
 
 
 class CPXObstacleTrackerTest(unittest.TestCase):
