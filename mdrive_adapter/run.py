@@ -70,13 +70,24 @@ def main():
              Path(env["CARLA_ROOT"]) / "PythonAPI/carla"]
     env["PYTHONPATH"] = os.pathsep.join(map(str, paths)) + os.pathsep + env.get("PYTHONPATH", "")
     # Fail before launching a simulator if the current planning backend is missing.
+    # `import carla` (pulled in transitively here) links against libstdc++ before
+    # any of our code runs; some conda envs bundle a libstdc++ older than what
+    # AD-map's compiled libraries need. This check subprocess never touches
+    # CarlaUE4 (it runs before the server starts), so LD_PRELOAD is safe here,
+    # scoped to a local env copy rather than the shared `env` that server_env
+    # is later built from.
+    check_env = env.copy()
+    preload_libstdcxx = Path("/usr/lib/x86_64-linux-gnu/libstdc++.so.6")
+    if preload_libstdcxx.exists():
+        check_env["LD_PRELOAD"] = str(preload_libstdcxx) + (
+            ":" + check_env["LD_PRELOAD"] if check_env.get("LD_PRELOAD") else "")
     subprocess.check_call([sys.executable, "-c",
         "import sys, yaml; "
         "from opencda.planning_module.opencda_bridge.cpx_mpc_planner import CPXMPCPlannerBridge; "
         "from opencda.planning_module.Global_Planner.global_planner.runtime import import_ad_map_access; "
         "config = yaml.safe_load(open(sys.argv[1])) or {}; "
         "import_ad_map_access(config.get('bridge', {}).get('ad_map_install_root'))",
-        str(config)], cwd=str(ROOT), env=env)
+        str(config)], cwd=str(ROOT), env=check_env)
     agent_args = ["--agent", str(ROOT / "mdrive_adapter/cpx_agent.py"),
                   "--agent-config", str(run_dir / "agent.yaml"), "--track", "MAP"]
     server_command = None
@@ -178,6 +189,17 @@ def main():
                 if time.monotonic() > deadline:
                     raise RuntimeError("CARLA startup timed out")
                 time.sleep(1)
+        # `import carla`'s compiled extension links against libstdc++ before any
+        # of our own code runs, so the AD-map backend's in-process preload (see
+        # cpx_mpc_planner.py) is too late once this env's older bundled
+        # libstdc++ has already been loaded. LD_PRELOAD fixes that for every
+        # python-only descendant (evaluator + parallel workers) without
+        # touching CarlaUE4's own env, which is built from `env` above and
+        # already launched by this point.
+        preload_libstdcxx = Path("/usr/lib/x86_64-linux-gnu/libstdc++.so.6")
+        if preload_libstdcxx.exists():
+            env["LD_PRELOAD"] = str(preload_libstdcxx) + (
+                ":" + env["LD_PRELOAD"] if env.get("LD_PRELOAD") else "")
         evaluation_started = time.perf_counter()
         returncode = subprocess.call(command, cwd=str(mdrive), env=env)
         if args.direct:

@@ -109,12 +109,35 @@ def _find_python_package_paths(install_root: Path) -> list[Path]:
     return package_paths
 
 
+def _preload_newer_system_libstdcxx() -> None:
+    """Preload the system's libstdc++ so AD-map's compiled libraries resolve
+    GLIBCXX symbols newer than the active conda env's bundled copy provides.
+
+    Some conda environments bundle a libstdc++.so.6 older than what the
+    AD-map build was compiled against; its baked-in RPATH otherwise wins
+    over a system copy already on LD_LIBRARY_PATH. Loading a newer system
+    copy into the process first (RTLD_GLOBAL) satisfies those symbol
+    versions without touching LD_PRELOAD, which is unsafe to export before
+    spawning CARLA as a child process.
+
+    input: none
+    output: none (`None`)
+    """
+    for candidate in ("/usr/lib/x86_64-linux-gnu/libstdc++.so.6", "libstdc++.so.6"):
+        try:
+            ctypes.CDLL(candidate, mode=getattr(ctypes, "RTLD_GLOBAL", 0))
+            return
+        except OSError:
+            continue
+
+
 def _preload_shared_libraries(install_root: Path) -> None:
     """Load the compiled shared libraries before importing Python bindings.
 
     input: `install_root` (`Path`)
     output: none (`None`)
     """
+    _preload_newer_system_libstdcxx()
     load_mode = getattr(ctypes, "RTLD_GLOBAL", 0)
     for library_relative_path in _REQUIRED_SHARED_LIBRARIES:
         library_path = install_root / library_relative_path
