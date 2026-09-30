@@ -443,20 +443,22 @@ def _core_config_and_behavior_stages(
 def _mtr_prediction_bridge(bridge, bridge_type):
     """Return the scenario-shared MTR bridge for this CAV world.
 
-    The external server owns one rolling scene history. Giving every CAV an
-    independent HTTP adapter sent the same world tick N times with a different
-    actor labelled as ego, corrupting that history as well as multiplying
-    inference load. The OpenCDA CAV world is already the lifecycle owner shared
-    by all VehicleManagers, so keep exactly one adapter on that object.
+    One predictor owns one rolling scene history regardless of whether it is
+    reached through HTTP or imported in-process. Giving every CAV an independent
+    adapter would send the same world tick N times with a different actor marked
+    as ego, corrupting history and multiplying inference load. The OpenCDA CAV
+    world is already shared by all VehicleManagers, so it owns one adapter.
     """
 
-    kwargs = dict(
-        server_url=str(bridge.config.get(
-            "mtr_prediction_server_url", "http://127.0.0.1:8765"
-        )),
-        timeout_s=float(bridge.config.get(
-            "mtr_prediction_server_timeout_s", 2.0
-        )),
+    transport = str(
+        bridge.config.get("mtr_prediction_transport", "http") or "http"
+    ).strip().lower().replace("-", "_")
+    if transport not in ("http", "in_process"):
+        raise ValueError(
+            "mtr_prediction_transport must be 'http' or 'in_process', got %r"
+            % transport
+        )
+    common_kwargs = dict(
         update_hz=float(bridge.config.get(
             "mtr_prediction_update_hz", 5.0
         )),
@@ -470,21 +472,72 @@ def _mtr_prediction_bridge(bridge, bridge_type):
             "mtr_prediction_async", True
         )),
     )
-    if not bool(bridge.config.get("mtr_prediction_shared", True)):
+    http_kwargs = dict(
+        server_url=str(bridge.config.get(
+            "mtr_prediction_server_url", "http://127.0.0.1:8765"
+        )),
+        timeout_s=float(bridge.config.get(
+            "mtr_prediction_server_timeout_s", 2.0
+        )),
+    )
+    raw_future_frames = bridge.config.get(
+        "mtr_prediction_num_future_frames", None
+    )
+    predictor_kwargs = dict(
+        python_path=str(bridge.config.get(
+            "mtr_prediction_python_path",
+            os.environ.get("CPX_MTR_LIVE_INFERENCE_PATH", ""),
+        ) or ""),
+        module_name=str(bridge.config.get(
+            "mtr_prediction_module", "mtr_live_predictor"
+        )),
+        class_name=str(bridge.config.get(
+            "mtr_prediction_class", "MTRLivePredictor"
+        )),
+        cfg_file=str(bridge.config.get("mtr_prediction_cfg_file", "") or ""),
+        ckpt_file=str(bridge.config.get("mtr_prediction_ckpt_file", "") or ""),
+        device=str(bridge.config.get("mtr_prediction_device", "") or ""),
+        history_len=int(bridge.config.get("mtr_prediction_history_len", 11)),
+        num_future_frames=(
+            None if raw_future_frames in (None, "")
+            else int(raw_future_frames)
+        ),
+        num_modes=int(bridge.config.get("mtr_prediction_num_modes", 6)),
+        dt_s=float(bridge.config.get("mtr_prediction_dt_s", 0.1)),
+    )
+
+    def build_bridge():
+        kwargs = dict(common_kwargs)
+        if transport == "http":
+            kwargs.update(http_kwargs)
+        else:
+            from opencda.planning_module.opencda_bridge.prediction_bridge import (
+                build_in_process_mtr_client,
+            )
+            kwargs["client"] = build_in_process_mtr_client(**predictor_kwargs)
         return bridge_type(**kwargs)
+
+    if not bool(bridge.config.get("mtr_prediction_shared", True)):
+        return build_bridge()
     v2x_manager = getattr(bridge.vehicle_manager, "v2x_manager", None)
     cav_world = getattr(v2x_manager, "cav_world", None)
     if cav_world is None:
-        return bridge_type(**kwargs)
+        return build_bridge()
     registry = getattr(cav_world, "_cpx_mtr_prediction_bridges", None)
     if registry is None:
         registry = {}
         setattr(cav_world, "_cpx_mtr_prediction_bridges", registry)
     group = str(bridge.config.get("mtr_prediction_shared_group", "default"))
-    key = (group,) + tuple(sorted(kwargs.items()))
+    backend_kwargs = http_kwargs if transport == "http" else predictor_kwargs
+    key = (
+        group,
+        transport,
+        tuple(sorted(common_kwargs.items())),
+        tuple(sorted(backend_kwargs.items())),
+    )
     prediction_bridge = registry.get(key)
     if prediction_bridge is None:
-        prediction_bridge = bridge_type(**kwargs)
+        prediction_bridge = build_bridge()
         prediction_bridge.shared_consumer_count = 0
         registry[key] = prediction_bridge
     prediction_bridge.shared_consumer_count = int(

@@ -10,6 +10,7 @@ from opencda.planning_module.opencda_bridge.planner_assembly import (
 )
 from opencda.planning_module.opencda_bridge.prediction_bridge import (
     MTRPredictionBridge,
+    build_in_process_mtr_client,
 )
 from opencda.planning_module.pipeline.interaction.prediction import mpc_stage_trajectory
 from opencda.planning_module.pipeline.perception.tracker import CPXObstacleTracker
@@ -137,6 +138,46 @@ class MTRPredictionBridgeTest(unittest.TestCase):
         self.assertIs(first, second)
         self.assertEqual(first.shared_consumer_count, 2)
         self.assertTrue(first.diagnostics["prediction_bridge_shared"])
+
+    def test_in_process_predictor_is_constructed_once_per_cav_world(self):
+        cav_world = SimpleNamespace()
+        client = _FakeClient({
+            "predictions": {}, "prediction_modes": {}, "inference_ran": True,
+        })
+        client.model_name = "mtr_in_process"
+
+        def planner_bridge():
+            return SimpleNamespace(
+                config={
+                    "mtr_prediction_transport": "in_process",
+                    "mtr_prediction_async": False,
+                    "mtr_prediction_num_modes": 6,
+                },
+                vehicle_manager=SimpleNamespace(
+                    v2x_manager=SimpleNamespace(cav_world=cav_world)
+                ),
+            )
+
+        with mock.patch(
+            "opencda.planning_module.opencda_bridge.prediction_bridge."
+            "build_in_process_mtr_client",
+            return_value=client,
+        ) as factory:
+            first = _mtr_prediction_bridge(planner_bridge(), MTRPredictionBridge)
+            second = _mtr_prediction_bridge(planner_bridge(), MTRPredictionBridge)
+
+        self.assertIs(first, second)
+        factory.assert_called_once()
+        self.assertEqual(first.model_name, "mtr_in_process")
+        self.assertEqual(first.shared_consumer_count, 2)
+
+    def test_invalid_prediction_transport_fails_at_assembly(self):
+        planner_bridge = SimpleNamespace(
+            config={"mtr_prediction_transport": "shared_memory"},
+            vehicle_manager=SimpleNamespace(v2x_manager=None),
+        )
+        with self.assertRaisesRegex(ValueError, "mtr_prediction_transport"):
+            _mtr_prediction_bridge(planner_bridge, MTRPredictionBridge)
 
     def test_rate_limit_rebases_cached_prediction(self):
         bridge = MTRPredictionBridge(update_hz=5.0, asynchronous=False)
@@ -429,8 +470,46 @@ class MTRPredictionBridgeClientSeamTest(unittest.TestCase):
 
 
 class InProcessMTRPredictorClientTest(unittest.TestCase):
-    """Locks the target shape for the not-yet-wired in-process backend so it
-    keeps matching ``mtr_prediction_server.py``'s HTTP handler."""
+    """Lock the direct backend to the HTTP handler's response contract."""
+
+    def test_loader_constructs_configured_predictor_without_importing_eagerly(self):
+        constructed = []
+
+        class _FakePredictor:
+            last_map_polyline_count = 0
+
+            def __init__(self, **kwargs):
+                constructed.append(kwargs)
+
+            def observe(self, **_kwargs):
+                pass
+
+            def predict_modes(self, **_kwargs):
+                return {}
+
+        fake_module = SimpleNamespace(CustomPredictor=_FakePredictor)
+        with mock.patch(
+            "opencda.planning_module.opencda_bridge.prediction_bridge."
+            "importlib.import_module",
+            return_value=fake_module,
+        ) as importer:
+            client = build_in_process_mtr_client(
+                module_name="fake_mtr",
+                class_name="CustomPredictor",
+                cfg_file="model.yaml",
+                ckpt_file="model.pth",
+                device="cuda:0",
+                history_len=11,
+                num_future_frames=80,
+                num_modes=6,
+                dt_s=0.1,
+            )
+
+        importer.assert_called_once_with("fake_mtr")
+        self.assertEqual(client.model_name, "mtr_in_process")
+        self.assertEqual(constructed[0]["num_modes"], 6)
+        self.assertEqual(constructed[0]["num_future_frames"], 80)
+        self.assertEqual(constructed[0]["ckpt_file"], "model.pth")
 
     def test_request_mirrors_the_http_servers_response_shape(self):
         from opencda.planning_module.opencda_bridge.prediction_bridge import (

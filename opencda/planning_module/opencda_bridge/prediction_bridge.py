@@ -8,19 +8,24 @@ risk, and the constant-acceleration fallback.
 ``MTRPredictionBridge`` itself never talks HTTP or CUDA directly -- it owns
 scheduling (rate limiting, time-rebasing between refreshes, the multi-
 consumer dedup lock) against a small ``client`` interface (one ``request()``
-method). ``_HttpMTRPredictorClient`` is the only backend wired up anywhere
-today; ``_InProcessMTRPredictorClient`` documents the other one for later
-(see its docstring for why it can't run yet).
+method). The request backend is selectable: ``_HttpMTRPredictorClient``
+preserves the cross-environment CARLA setup, while
+``_InProcessMTRPredictorClient`` calls the same ``MTRLivePredictor`` object
+directly when prediction and planning share a Python environment. Both return
+the same payload, so scheduling and policy do not depend on the transport.
 """
 
 from __future__ import annotations
 
+import importlib
 import json
 import math
 import queue
+import sys
 import threading
 import time
 import urllib.request
+from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 
@@ -35,17 +40,12 @@ def _track_id(snapshot: Mapping[str, Any]) -> str:
 class _HttpMTRPredictorClient:
     """Sends one scene to the external MTR server over localhost HTTP.
 
-    This is the only backend usable today: CARLA 0.9.12's Python client
-    only ships for Python 3.7 (this process's interpreter, env
-    ``opencda_planning``), while the real MTR model needs a torch build
-    matching this machine's GPU (RTX PRO 4000 Blackwell, sm_120) that only
-    exists for Python >=3.9 (env ``cpx-mtr-blackwell``) -- the two cannot
-    share an interpreter, so the model runs as a separate process and is
-    reached over this HTTP call. See ``MTRPredictionBridge``'s docstring and
-    ``_InProcessMTRPredictorClient`` below for the other side of that
-    boundary once it goes away (planning as a ROS 2 node, not tied to
-    CARLA 0.9.12's interpreter).
+    Use this backend when CARLA/OpenCDA and torch must run in different Python
+    environments. The planner-facing contract is identical to the in-process
+    backend below.
     """
+
+    model_name = "mtr_http"
 
     def __init__(self, *, server_url: str, timeout_s: float) -> None:
         self._url = str(server_url).rstrip("/") + "/predict"
@@ -76,20 +76,13 @@ class _HttpMTRPredictorClient:
 class _InProcessMTRPredictorClient:
     """Calls a local ``MTRLivePredictor`` directly -- no network hop.
 
-    Not wired up anywhere yet. ``MTRLivePredictor`` lives in the separate
-    CP-X-Prediction repo (``Intersection-Code/Intersection-MTR/Prediction/
-    MTR/live_inference/mtr_live_predictor.py``) and needs torch + the ``mtr``
-    package importable in this interpreter, which is exactly the Python
-    3.7-vs-3.9 conflict ``_HttpMTRPredictorClient`` documents -- unusable
-    until this planning module runs somewhere no longer tied to CARLA
-    0.9.12's interpreter (the ROS 2 node this repo is converting to). This
-    class exists so that day's change is "construct ``MTRPredictionBridge``
-    with a different ``client``," not a rewrite of its scheduling: it deliberately
-    mirrors ``mtr_prediction_server.py``'s HTTP handler (``observe()`` then
-    ``predict_modes()``, gated on ``run_inference``, wrapped in the exact
-    response shape ``_request()`` below already parses) so no format
-    translation is needed on either side once a real predictor is passed in.
+    This deliberately mirrors ``mtr_prediction_server.py``'s HTTP handler:
+    ``observe()`` updates history every scheduled history tick and
+    ``predict_modes()`` runs only when inference is due. It is therefore a
+    transport replacement, not a second prediction integration path.
     """
+
+    model_name = "mtr_in_process"
 
     def __init__(self, predictor: Any) -> None:
         self._predictor = predictor
@@ -121,6 +114,65 @@ class _InProcessMTRPredictorClient:
         }
 
 
+def build_in_process_mtr_client(
+    *,
+    python_path: str = "",
+    module_name: str = "mtr_live_predictor",
+    class_name: str = "MTRLivePredictor",
+    cfg_file: str = "",
+    ckpt_file: str = "",
+    device: str = "",
+    history_len: int = 11,
+    num_future_frames: Optional[int] = None,
+    num_modes: int = 6,
+    dt_s: float = 0.1,
+) -> _InProcessMTRPredictorClient:
+    """Load the real predictor lazily and expose the bridge client contract.
+
+    Importing is delayed until this backend is selected. Normal OpenCDA and
+    HTTP-backed tests therefore do not import torch or the external MTR
+    package. ``python_path`` is the directory containing the configured module;
+    it may be omitted when that module is installed in the environment.
+    """
+
+    module_name = str(module_name or "mtr_live_predictor").strip()
+    class_name = str(class_name or "MTRLivePredictor").strip()
+    raw_python_path = str(python_path or "").strip()
+    if raw_python_path:
+        resolved_path = Path(raw_python_path).expanduser().resolve()
+        if not resolved_path.is_dir():
+            raise FileNotFoundError(
+                "MTR prediction Python path is not a directory: %s"
+                % resolved_path
+            )
+        resolved_text = str(resolved_path)
+        if resolved_text not in sys.path:
+            sys.path.insert(0, resolved_text)
+    try:
+        predictor_module = importlib.import_module(module_name)
+        predictor_type = getattr(predictor_module, class_name)
+    except (ImportError, AttributeError) as exc:
+        raise RuntimeError(
+            "Cannot load in-process MTR predictor %s.%s. Ensure the MTR "
+            "repository and its torch dependencies are available in the "
+            "planner's Python environment, or use mtr_prediction_transport=http."
+            % (module_name, class_name)
+        ) from exc
+
+    predictor_kwargs = {
+        "cfg_file": str(cfg_file).strip() or None,
+        "ckpt_file": str(ckpt_file).strip() or None,
+        "device": str(device).strip() or None,
+        "history_len": int(history_len),
+        "num_future_frames": (
+            None if num_future_frames is None else int(num_future_frames)
+        ),
+        "num_modes": max(1, int(num_modes)),
+        "dt_s": float(dt_s),
+    }
+    return _InProcessMTRPredictorClient(predictor_type(**predictor_kwargs))
+
+
 class MTRPredictionBridge:
     """Fetch and attach MTR predictions without owning planner policy.
 
@@ -131,8 +183,6 @@ class MTRPredictionBridge:
     ``max_stale_s`` and then the caller naturally falls back to its internal
     prediction model.
     """
-
-    model_name = "mtr_http"
 
     def __init__(
         self,
@@ -148,10 +198,13 @@ class MTRPredictionBridge:
         # ``client`` owns only "send this scene, get a payload back" --
         # everything below (rate limiting, caching, time-rebasing, the
         # multi-consumer dedup lock) is backend-agnostic and stays exactly
-        # as it is regardless of which client this holds. Defaults to HTTP,
-        # the only backend usable today; see _InProcessMTRPredictorClient.
+        # as it is regardless of which client this holds. HTTP remains the
+        # backward-compatible default.
         self._client = client or _HttpMTRPredictorClient(
             server_url=server_url, timeout_s=timeout_s,
+        )
+        self.model_name = str(
+            getattr(self._client, "model_name", "mtr_external")
         )
         self._minimum_interval_s = 1.0 / max(0.1, float(update_hz))
         self._history_interval_s = 1.0 / max(
