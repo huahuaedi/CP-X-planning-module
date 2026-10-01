@@ -6,6 +6,7 @@ from pipeline.behavior.candidate_selection_stage import (
     CandidateSelectionStage,
 )
 from pipeline.behavior.candidate_evaluation import CandidateSelectionResult
+from pipeline.behavior.maneuver_manager import ManeuverManager
 from pipeline.interaction.cooperative_maneuver_proposal import CooperativeManeuverProposal
 from pipeline.behavior.speed_planner import SpeedPlan
 
@@ -200,9 +201,53 @@ def test_cooperative_conflict_keeps_executed_reference_without_request():
     assert result.samples[0]["x_ref_m"] == 2.0
 
 
+def test_retry_cooldown_filters_lane_change_intents_before_evaluation():
+    maneuver = ManeuverManager({"lane_change_recommit_cooldown_s": 2.0})
+    maneuver.observe_route_lane_change_edge("edge-a")
+    maneuver.observe_planning_time(1.0)
+    maneuver.begin_lane_change(
+        "lane_change_left", "executing", 1, 2, 5.0, []
+    )
+    maneuver.abandon_lane_change("stalled", suppress_recommit=True)
+    stage = CandidateSelectionStage(
+        evaluator=object(), provider=object(), maneuver_manager=maneuver,
+        reference_pipeline=object(), fallback_manager=object(),
+        static_obstacle_stage=SimpleNamespace(target_lane_id=None),
+        mpc=object(), config={}, map_epoch="admap",
+        normal_clearance_m=2.0, static_clearance_m=1.0,
+        risk_hysteresis_margin_m=0.2, strict_ownership=True,
+        target_speed_mps=8.0,
+    )
+    stage.set_lane_change_lifecycle(SimpleNamespace(
+        release_completed=lambda **_kwargs: ""
+    ))
+    request = CandidateSelectionRequest(
+        intents=(SimpleNamespace(decision="lane_change_left"),),
+        reference_context=SimpleNamespace(local_map=None),
+        baseline_lane_change_state="LANE_FOLLOW",
+        baseline_decision="lane_follow", baseline_target_lane_id=1,
+        baseline_speed_mps=5.0,
+        baseline_reference=({"x_ref_m": 1.0, "y_ref_m": 0.0},),
+        baseline_destination_state=(1.0, 0.0, 5.0, 0.0, 1),
+        current_state=(0.0, 0.0, 2.0, 0.0), current_lane_id=1,
+        ego_location=SimpleNamespace(x=0.0, y=0.0), ego_yaw_rad=0.0,
+        ego_speed_mps=2.0, object_snapshots=(), prediction_trajectories={},
+    )
+
+    result = stage.run(
+        request, sim_time_s=1.5, route_revision="route:1",
+        validate_contract=lambda **_kwargs: None,
+    )
+
+    assert result.decision == "lane_follow"
+    assert result.mutable_diagnostics()["candidate_pipeline_count"] == 0
+
+
 def test_no_candidates_returns_typed_baseline_and_runs_completion_release():
     maneuver = SimpleNamespace(
         route_lane_change_edge_completed=False,
+        observe_planning_time=lambda _time: None,
+        lane_change_recommit_blocked=lambda _time: False,
         lane_change=SimpleNamespace(
             phase="idle", option="", source_lane_id=1, target_lane_id=1,
             progress=0.0, stabilization_frames=0, completion_debug={},

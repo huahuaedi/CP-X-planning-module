@@ -277,6 +277,12 @@ class PlannerDiagnosticsStage:
             "route_lane_change_edge_completed": bool(
                 deps.maneuver_manager.route_lane_change_edge_completed
             ),
+            "lane_change_retry_edge_id": str(
+                deps.maneuver_manager.lane_change_retry_edge_id
+            ),
+            "lane_change_retry_not_before_s": float(
+                deps.maneuver_manager.lane_change_retry_not_before_s
+            ),
             "route_recovery_pending": bool(
                 deps.maneuver_manager.route_recovery_pending
             ),
@@ -1278,6 +1284,20 @@ class PlannerDiagnosticsStage:
             # guess. See Global_Planner.global_planner.admap_backend
             # .get_recent_query_failures / _record_query_failure.
             "admap_query_failures": _recent_admap_query_failures(),
+            # Live-verified (MDrive Interactive_Lane_Change/1, ego stuck
+            # ~30s in intersection_turn_left): admap_query_failures came back
+            # empty the whole time, ruling out an AD-map query exception as
+            # the cause of "no_corridor_geometry" -- it traces further
+            # upstream, to _ego_anchored_turn_reference_samples returning an
+            # empty reference. This surfaces which of that function's early
+            # returns actually fired, instead of guessing again.
+            "turn_reference_empty_reason": dict(getattr(
+                getattr(adapters.reference_line_provider, "builder", None),
+                "_last_turn_reference_empty_reason", {},
+            ) or {}),
+            "turn_stall_ticks": int(getattr(
+                adapters.maneuver_manager.turn, "stall_ticks", 0
+            )),
             # Section-level snapshot of which constraint groups were switched
             # on for the QP that just failed (road envelope/obstacle count,
             # corridor rows, terminal-stop constraint, etc.) -- captured by

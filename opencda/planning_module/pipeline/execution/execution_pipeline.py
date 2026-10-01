@@ -29,6 +29,7 @@ from ..behavior.behavior_reference_execution_stage import BehaviorReferenceReque
 from ..execution.control_finalization_stage import ControlFinalizationRequest
 from ..execution.mpc_execution_stage import MPCExecutionRequest
 from ..reference.turn_road_envelope import rolling_turn_envelope_payload_world
+from ..reference.reference_line_provider import TURN
 from ..diagnostics.planner_diagnostics_stage import PlannerDiagnosticsStage
 from ..core.output import BehaviorCommand, PlannerDiagnostics, PlannerOutput
 
@@ -775,6 +776,40 @@ class PlanningPipeline:
         )
         if fallback_reason:
             adapters.warn_fallback(fallback_reason)
+        # TurnLifecycle.phase is never actually driven to an "active" state
+        # anywhere in this codebase (it's only ever set to "post_turn", for
+        # exit bookkeeping) -- unlike lane_change, there is no persistent
+        # turn-commitment state machine here. The real per-tick "is this an
+        # intersection turn right now" signal is behavior_decision_normalized,
+        # already computed above. Confirmed via a live run with
+        # turn_lifecycle.active as the gate: it silently never fired (stayed
+        # at stall_ticks=0) for 438 consecutive hard-gated ticks.
+        turn_required = behavior_decision_normalized in {
+            "intersection_turn_left", "intersection_turn_right",
+        }
+        turn_stale_geometry = bool(
+            turn_required
+            and hard_gate_active
+            and (
+                "empty_reference" in fallback_reason
+                or "no_corridor_geometry" in fallback_reason
+                or "too_few_forward_samples" in fallback_reason
+            )
+            and "collision_risk" not in fallback_reason
+        )
+        release_turn_reference = (
+            adapters.maneuver_manager.observe_turn_reference_health(
+                turn_required=bool(turn_required),
+                stale_geometry=bool(turn_stale_geometry),
+                timeout_ticks=int(adapters.config.get(
+                    "intersection_turn_reference_stall_timeout_ticks", 100
+                )),
+            )
+        )
+        if release_turn_reference:
+            adapters.reference_line_provider.release(
+                TURN, event="turn_reference_stall_timeout"
+            )
         if adapters.cav_conflict_enabled and adapters.cav_intent_broadcast_enabled:
             adapters.publish_cav_intent(
                 ego_location=ego_location,

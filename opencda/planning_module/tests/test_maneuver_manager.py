@@ -107,6 +107,62 @@ class ManeuverManagerTests(unittest.TestCase):
         ))
         self.assertFalse(manager.route_recovery_pending)
 
+    def test_turn_reference_health_releases_only_after_sustained_stall(self):
+        manager = ManeuverManager()
+
+        self.assertFalse(manager.observe_turn_reference_health(
+            turn_required=True, stale_geometry=True, timeout_ticks=2
+        ))
+        self.assertTrue(manager.observe_turn_reference_health(
+            turn_required=True, stale_geometry=True, timeout_ticks=2
+        ))
+        self.assertEqual(
+            manager.last_release["outcome"], "turn_reference_rebuild"
+        )
+        self.assertEqual(manager.turn.stall_ticks, 0)
+
+    def test_turn_reference_health_resets_when_geometry_recovers(self):
+        manager = ManeuverManager()
+        manager.observe_turn_reference_health(
+            turn_required=True, stale_geometry=True, timeout_ticks=2
+        )
+
+        self.assertFalse(manager.observe_turn_reference_health(
+            turn_required=True, stale_geometry=False, timeout_ticks=2
+        ))
+        self.assertEqual(manager.turn.stall_ticks, 0)
+
+    def test_suppressed_abandonment_uses_timed_retry_block(self):
+        manager = ManeuverManager({"lane_change_recommit_cooldown_s": 2.0})
+        manager.observe_route_lane_change_edge("edge-a")
+        manager.observe_planning_time(10.0)
+        manager.begin_lane_change(
+            "lane_change_left", "executing", 1, 2, 7.0, [],
+            authorization_source="route",
+        )
+
+        self.assertTrue(manager.abandon_lane_change(
+            "no_progress_stall_timeout", suppress_recommit=True
+        ))
+        self.assertFalse(manager.route_lane_change_edge_completed)
+        self.assertEqual(manager.lane_change_retry_edge_id, "edge-a")
+        self.assertTrue(manager.lane_change_recommit_blocked(11.9))
+        self.assertFalse(manager.lane_change_recommit_blocked(12.0))
+
+    def test_route_edge_advance_clears_retry_block(self):
+        manager = ManeuverManager({"lane_change_recommit_cooldown_s": 5.0})
+        manager.observe_route_lane_change_edge("edge-a")
+        manager.observe_planning_time(1.0)
+        manager.begin_lane_change(
+            "lane_change_right", "executing", 1, 2, 7.0, []
+        )
+        manager.abandon_lane_change("stalled", suppress_recommit=True)
+
+        manager.observe_route_lane_change_edge("edge-b")
+
+        self.assertFalse(manager.lane_change_recommit_blocked(1.1))
+        self.assertEqual(manager.lane_change_retry_edge_id, "")
+
     def test_geometric_completion_is_latched_during_handoff(self):
         manager = ManeuverManager()
         manager.begin_lane_change(

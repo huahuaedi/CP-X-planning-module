@@ -30,6 +30,16 @@ class LaneChangeLifecycle:
     progress: float = 0.0
     progress_index: int = 0
     progress_s_m: float = 0.0
+    progress_stall_ticks: int = 0
+    # progress_s_m as of the last time release_completed() (exactly once per
+    # planning tick) checked it -- a separate snapshot from progress_s_m
+    # itself, which locked_lane_change_window() can update more than once in
+    # a tick (once on plain continuation, once more on the tick a candidate
+    # is first activated), so comparing there double-counted stall_ticks on
+    # that tick. Comparing here instead, against a value that only moves
+    # once per outer check, keeps the count tick-accurate regardless of how
+    # many times the window got rebuilt underneath it this tick.
+    progress_s_m_last_checked: float = 0.0
     stabilization_frames: int = 0
     completion_stable_frames: int = 0
     geometry_completion_latched: bool = False
@@ -58,6 +68,8 @@ class LaneChangeLifecycle:
         self.source_lane_id = self.target_lane_id = 0
         self.target_speed_mps = self.progress = self.progress_s_m = 0.0
         self.progress_index = self.stabilization_frames = 0
+        self.progress_stall_ticks = 0
+        self.progress_s_m_last_checked = 0.0
         self.completion_stable_frames = self.commitment_invalid_frames = 0
         self.geometry_completion_latched = False
         self.completion_reference, self.completion_debug = [], {}
@@ -76,6 +88,17 @@ class LaneChangeLifecycle:
 class TurnLifecycle:
     decision: str = ""
     phase: str = "idle"
+    # Consecutive ticks the committed turn's reference has hard-gated on
+    # empty_reference/no_corridor_geometry. The turn master is immutable
+    # persistent geometry (see ReferencePipeline._recover_once's
+    # "turn_geometry_recovery_forbidden") -- it must never be silently
+    # patched -- but nothing previously released it if the window it was
+    # built from went permanently stale (ego stopped mid-turn, window
+    # projects to fewer than 2 forward-of-ego samples every tick after).
+    # Confirmed via MDrive Interactive_Lane_Change/1: ego hard-gated for
+    # 608 consecutive ticks (30s) with mpc_feasibility_reason containing
+    # "empty_reference" and "no_corridor_geometry" the entire time.
+    stall_ticks: int = 0
 
     @property
     def active(self):
@@ -83,6 +106,7 @@ class TurnLifecycle:
 
     def reset(self):
         self.decision, self.phase = "", "idle"
+        self.stall_ticks = 0
 
 
 @dataclass(frozen=True)
@@ -103,6 +127,9 @@ class ManeuverManager:
         self._completed_route_lane_change_edge_id = ""
         self._route_recovery_pending = False
         self._route_recovery_target_lane_id = None
+        self._planning_time_s = 0.0
+        self._lane_change_retry_edge_id = ""
+        self._lane_change_retry_not_before_s = -float("inf")
 
     def reset(self, reason="reset"):
         self.last_release = {"reason": str(reason), "outcome": "reset"}
@@ -112,6 +139,45 @@ class ManeuverManager:
         self._completed_route_lane_change_edge_id = ""
         self._route_recovery_pending = False
         self._route_recovery_target_lane_id = None
+        self._planning_time_s = 0.0
+        self._clear_lane_change_retry_block()
+
+    def observe_planning_time(self, sim_time_s):
+        """Advance the maneuver clock used by time-based retry policies."""
+
+        if math.isfinite(float(sim_time_s)):
+            self._planning_time_s = max(
+                float(self._planning_time_s), float(sim_time_s)
+            )
+
+    def _clear_lane_change_retry_block(self):
+        self._lane_change_retry_edge_id = ""
+        self._lane_change_retry_not_before_s = -float("inf")
+
+    def lane_change_recommit_blocked(self, sim_time_s):
+        """Return whether an abandoned attempt is still cooling down.
+
+        Completion and retry suppression are deliberately separate states:
+        completion retires a route edge, while a retry block only delays a
+        fresh proposal for the same edge after an abandoned attempt.
+        """
+
+        self.observe_planning_time(sim_time_s)
+        if float(self._planning_time_s) >= float(
+            self._lane_change_retry_not_before_s
+        ):
+            self._clear_lane_change_retry_block()
+            return False
+        return True
+
+    @property
+    def lane_change_retry_not_before_s(self):
+        value = float(self._lane_change_retry_not_before_s)
+        return value if math.isfinite(value) else 0.0
+
+    @property
+    def lane_change_retry_edge_id(self):
+        return str(self._lane_change_retry_edge_id)
 
     def observe_route_lane_change_edge(self, edge_id):
         """Track one immutable route edge and retire completion on advance."""
@@ -129,6 +195,10 @@ class ManeuverManager:
         ):
             self._completed_route_lane_change_edge_id = ""
             self.lane_change.completed_option = ""
+        if self._lane_change_retry_edge_id and (
+            edge_id != self._lane_change_retry_edge_id
+        ):
+            self._clear_lane_change_retry_block()
         self._route_lane_change_edge_id = edge_id
         return edge_id
 
@@ -147,6 +217,33 @@ class ManeuverManager:
     @property
     def completed_route_lane_change_edge_id(self):
         return str(self._completed_route_lane_change_edge_id)
+
+    def observe_turn_reference_health(
+        self, *, turn_required, stale_geometry, timeout_ticks,
+    ):
+        """Consume one turn-reference health observation.
+
+        The execution stage reports facts; this lifecycle owner decides when
+        a persistent turn master must be released and rebuilt.
+        """
+
+        if not bool(turn_required):
+            self.turn.stall_ticks = 0
+            return False
+        if bool(stale_geometry):
+            self.turn.stall_ticks += 1
+        else:
+            self.turn.stall_ticks = 0
+        limit = int(timeout_ticks)
+        if limit <= 0 or self.turn.stall_ticks < limit:
+            return False
+        self.last_release = {
+            "reason": "turn_reference_stall_timeout",
+            "outcome": "turn_reference_rebuild",
+            "decision": str(self.turn.decision),
+        }
+        self.turn.reset()
+        return True
 
     def clear_turn(self, reason="turn_released"):
         if self.turn.active:
@@ -580,8 +677,31 @@ class ManeuverManager:
         recovery_target_lane_id = int(self.lane_change.source_lane_id)
         self.last_release = {"reason": str(reason), "outcome": str(outcome),
                              "option": str(self.lane_change.option)}
-        self.finish_lane_change_lifecycle(
-            completed=(outcome == "complete" or bool(preserve_completed_option)))
+        # `completed` must depend only on `outcome`, never on
+        # `preserve_completed_option` (== every abandon_lane_change caller's
+        # suppress_recommit=True, unconditionally, across all four call
+        # sites -- stabilization_timeout, lateral_ownership_transferred,
+        # mpc_infeasible_stall_timeout, no_progress_stall_timeout). The old
+        # `outcome == "complete" or bool(preserve_completed_option)` marked
+        # every single abandon as "complete" too, which
+        # finish_lane_change_lifecycle(completed=True) turns into
+        # _completed_route_lane_change_edge_id -- permanently telling
+        # candidate_selection_stage/behavior_stage this route's required
+        # lane change is done and to stop considering it, even though the
+        # car never actually changed lanes. abandoned != completed.
+        self.finish_lane_change_lifecycle(completed=(outcome == "complete"))
+        if str(outcome) == "abandoned" and bool(preserve_completed_option):
+            cooldown_s = max(0.0, float(self.config.get(
+                "lane_change_recommit_cooldown_s", 2.0
+            )))
+            self._lane_change_retry_edge_id = str(
+                self._route_lane_change_edge_id
+            )
+            self._lane_change_retry_not_before_s = (
+                float(self._planning_time_s) + float(cooldown_s)
+            )
+        elif str(outcome) == "complete":
+            self._clear_lane_change_retry_block()
         if str(outcome) == "complete":
             if returns_to_route:
                 self._route_recovery_pending = False

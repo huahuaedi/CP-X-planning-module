@@ -98,6 +98,9 @@ class ReferenceGenerator:
         self._map_waypoint_callback = map_waypoint_from_location
         self._lane_id_callback = lane_id_at_location
         self._body_frame_callback = body_frame_xy
+        # Diagnostic-only: why _ego_anchored_turn_reference_samples last
+        # returned an empty list, if it did. See planner_diagnostics_stage.py.
+        self._last_turn_reference_empty_reason: dict[str, object] = {}
         self.target_speed_mps = float(target_speed_mps)
         self.lookahead_m = float(lookahead_m)
         self._drivable_waypoint_callback = (
@@ -2202,6 +2205,10 @@ class ReferenceGenerator:
     ) -> list[dict[str, float]]:
         start_waypoint = self._map_waypoint_from_location(ego_location)
         if start_waypoint is None:
+            self._last_turn_reference_empty_reason = {
+                "reason": "no_start_waypoint",
+                "ego_x_m": float(ego_location.x), "ego_y_m": float(ego_location.y),
+            }
             return []
 
         from utility.global_planner import canonical_lane_id_for_waypoint, world_heading_rad
@@ -2225,9 +2232,11 @@ class ReferenceGenerator:
             step_m,
             float(self.config.get("turn_reference_first_waypoint_step_m", 1.5)),
         )
+        break_reason = None
         for index in range(max(2, int(horizon_steps) + 3)):
             candidates = list(current.next(first_step_m if index == 0 else step_m) or [])
             if not candidates:
+                break_reason = "no_next_candidates"
                 break
             selected = self._select_turn_next_waypoint(
                 current_waypoint=current,
@@ -2237,10 +2246,12 @@ class ReferenceGenerator:
                 route_points=route_points,
             )
             if selected is None:
+                break_reason = "select_turn_next_waypoint_none"
                 break
             current = selected
             xy_heading = self._waypoint_xy_heading(current)
             if xy_heading is None:
+                break_reason = "no_xy_heading"
                 break
             lane_width_m = self._waypoint_lane_width(current)
             raw_points.append((
@@ -2252,7 +2263,15 @@ class ReferenceGenerator:
             previous_heading = float(world_heading_rad(current) or xy_heading[2])
 
         if len(raw_points) < 2:
+            self._last_turn_reference_empty_reason = {
+                "reason": "raw_points_too_short",
+                "raw_point_count": int(len(raw_points)),
+                "loop_break_reason": break_reason,
+                "ego_x_m": float(ego_location.x), "ego_y_m": float(ego_location.y),
+                "turn_direction": str(turn_direction),
+            }
             return []
+        self._last_turn_reference_empty_reason = {}
         raw_samples = []
         for x_m, y_m, lane_id, lane_width_m in raw_points:
             raw_samples.append({
