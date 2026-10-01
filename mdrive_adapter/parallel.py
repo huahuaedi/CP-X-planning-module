@@ -90,6 +90,7 @@ def planner_worker(connection, cpu, settings):
             if actor.id != command["actor_id"]:
                 raise RuntimeError("Ego identity changed without resetting the planner")
             context.snapshots = command["snapshots"]
+            context.cav_intents = command.get("cav_intents") or {}
             try:
                 result = next(steps)
             except StopIteration:

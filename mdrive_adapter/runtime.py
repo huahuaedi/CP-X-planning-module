@@ -15,14 +15,46 @@ def merge_config(base, overrides):
     return result
 
 
-def collect_gt(world):
-    """Collect one current-state GT frame in the evaluator, shared by all egos."""
+def collect_gt(world, *, reference_points=(), max_static_range_m=None):
+    """Collect one current-state GT frame in the evaluator, shared by all egos.
+
+    ``reference_points`` (ego (x, y) locations) and ``max_static_range_m``
+    are optional and only ever narrow the ``static.*`` category (see below);
+    omitting either keeps the static category unfiltered; callers that need
+    town-scale collection can retain that behavior explicitly. Vehicles/walkers are never range-filtered
+    here -- they're always few enough to be cheap, and every ego's own
+    ``context.obstacles()`` already does its own gt_range_m cut downstream.
+    """
     snapshots = []
     for actor in world.get_actors():
         kind = actor.type_id
-        if not kind.startswith(("vehicle.", "walker.pedestrian.", "static.prop.")) or not actor.is_alive:
+        # "static." (not just "static.prop.") also covers CARLA's map-furniture
+        # actors -- e.g. static.pole -- which are real, queryable, collidable
+        # actors distinct from the static OpenDRIVE map mesh. Excluding them
+        # left the planner with zero perception of roadside poles/signs it can
+        # still physically hit; confirmed via a live collision report:
+        # "Agent collided against object with type=static.pole and id=0".
+        if not kind.startswith(("vehicle.", "walker.pedestrian.", "static.")) or not actor.is_alive:
             continue
         transform = actor.get_transform()
+        if (
+            kind.startswith("static.")
+            and reference_points
+            and max_static_range_m is not None
+        ):
+            # A whole town's worth of streetlights/signs is not something
+            # any ego needs to carry through Stage A/candidate evaluation
+            # just because it exists -- cut it here, before the more
+            # expensive per-actor velocity/bounding-box work below, rather
+            # than only at each ego's later gt_range_m filter (which still
+            # has to iterate every entry in this shared list to get there).
+            loc = transform.location
+            if not any(
+                math.hypot(float(loc.x) - float(rx), float(loc.y) - float(ry))
+                <= float(max_static_range_m)
+                for rx, ry in reference_points
+            ):
+                continue
         bbox = getattr(actor, "bounding_box", None)
         if bbox is None:
             continue
@@ -61,6 +93,12 @@ class ExternalContext:
         self.route = list(route)
         self.config = copy.deepcopy(config)
         self.snapshots = []
+        # Peer CavIntent payloads received from the evaluator's previous-tick
+        # broadcast, keyed by the peer's CARLA actor id (as a string, matching
+        # cav_intent_codec's own actor_id-keyed lookups). Empty unless the
+        # caller (parallel.py's planner_worker, or the serial CPXAgent loop)
+        # feeds it -- see collect_own_cav_intent()/inject_cav_intents() below.
+        self.cav_intents = {}
         self.bridge = None
 
     def obstacles(self):
@@ -132,16 +170,33 @@ def planning_steps(context, slot, world, output):
     def speed_kmh():
         velocity = actor.get_velocity()
         return 3.6 * math.hypot(velocity.x, velocity.y)
+    # cav_nearby is rebuilt every tick from context.cav_intents (see below);
+    # CPXMPCPlannerBridge._collect_cav_intents() only ever reads it through
+    # this SimpleNamespace chain, so it never needs to know this is an
+    # IPC-relayed payload rather than a same-process peer object.
+    v2x_manager = SimpleNamespace(cav_nearby={})
     manager = SimpleNamespace(vehicle=actor, carla_map=world_map, controller=controller,
         localizer=SimpleNamespace(get_ego_pos=actor.get_transform, get_ego_spd=speed_kmh),
-        perception_manager=SimpleNamespace(objects={}), v2x_manager=None,
+        perception_manager=SimpleNamespace(objects={}), v2x_manager=v2x_manager,
         _opencda_agent_finished=False)
     bridge = None
     try:
         bridge = CPXMPCPlannerBridge(manager, build_bridge_config(context.config, output, world_map))
         context.bridge = bridge
+        # last_cav_intent_payload/cpx_planner is the same in-process attribute
+        # chain _collect_cav_intents() reads for a same-process peer (see
+        # mdrive-cpx-convert-to-ros-adapter-fixes: self._vehicle_manager.
+        # cpx_planner = self._bridge). Setting it here lets a peer worker's
+        # relayed payload be wrapped in an identical-shaped stub below.
+        manager.cpx_planner = bridge
         install_route(bridge, context)
         while True:
+            v2x_manager.cav_nearby = {
+                str(peer_id): SimpleNamespace(
+                    cpx_planner=SimpleNamespace(last_cav_intent_payload=dict(payload))
+                )
+                for peer_id, payload in (context.cav_intents or {}).items()
+            }
             bridge.update_information(ego_transform=actor.get_transform(), ego_speed_kmh=speed_kmh(),
                                       detected_objects={"vehicles": context.obstacles()})
             # Use the full pipeline but propagate exceptions to the benchmark. Its normal
@@ -150,10 +205,12 @@ def planning_steps(context, slot, world, output):
             bridge.last_output = result
             bridge.last_debug = result.diagnostics_dict()
             bridge._record_debug(bridge.last_debug)
+            own_intent = getattr(bridge, "last_cav_intent_payload", None)
             yield {"done": bool(manager._opencda_agent_finished), "control": result.control,
                    "trajectory": [list(state) for state in result.planned_trajectory],
                    "status": dict(bridge.mpc.get_runtime_status()),
-                   "behavior": str(result.behavior_command.decision)}
+                   "behavior": str(result.behavior_command.decision),
+                   "cav_intent": dict(own_intent) if own_intent is not None else None}
     finally:
         if bridge is not None:
             bridge.destroy()

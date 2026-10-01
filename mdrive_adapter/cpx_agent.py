@@ -43,6 +43,16 @@ class CPXAgent(AutonomousAgent):
         self._last_controls = None
         self._video = None
         self._pool = None
+        # Each ego's most recently published CavIntent payload, keyed by
+        # actor id (string). One tick stale by construction: an ego's
+        # planning step this tick sees every OTHER active ego's intent from
+        # the previous tick, since all egos plan concurrently against the
+        # same GT frame and none can see a peer's not-yet-computed result.
+        # Only populated when a bridge actually publishes one (bridge config
+        # cav_conflict_enabled + cav_intent_broadcast_enabled); otherwise
+        # this stays empty and _collect_cav_intents() sees no peers, same as
+        # before this existed.
+        self._cav_intents_by_actor_id = {}
         self.execution = os.environ.get("CPX_EXECUTION", "serial")
         if self.execution not in ("serial", "parallel", "worker-serial"):
             raise ValueError("Unknown CP-X execution mode: " + self.execution)
@@ -101,11 +111,18 @@ class CPXAgent(AutonomousAgent):
             return self._last_controls
         if self._last_frame is not None and frame < self._last_frame:
             raise RuntimeError("Simulator frame moved backwards without resetting the route")
-        snapshots = collect_gt(world)
-        gt_ms = (time.perf_counter() - frame_started) * 1000
-        live_ids = {item["vehicle_id"] for item in snapshots}
         actors = {slot: CarlaDataProvider.get_hero_actor(hero_id=slot)
                   for slot in range(self.ego_vehicles_num)}
+        ego_reference_points = [
+            (actor.get_location().x, actor.get_location().y)
+            for actor in actors.values() if actor is not None
+        ]
+        snapshots = collect_gt(
+            world, reference_points=ego_reference_points,
+            max_static_range_m=float(self.config.get("gt_range_m", 70.0)),
+        )
+        gt_ms = (time.perf_counter() - frame_started) * 1000
+        live_ids = {item["vehicle_id"] for item in snapshots}
         live_actors = {slot: actor for slot, actor in actors.items()
                        if actor is not None and str(actor.id) in live_ids}
         if os.environ.get("CPX_RECORD_VIDEO") == "1":
@@ -115,12 +132,17 @@ class CPXAgent(AutonomousAgent):
             else:
                 self._video.capture(world, live_actors.items())
         active = {slot: actor for slot, actor in live_actors.items() if not self._done[slot]}
+        # Snapshot before this tick's results overwrite it: every active ego sees every
+        # OTHER ego's previous-tick intent (collect_cav_intents() filters the ego's own
+        # actor id out downstream, so passing the full dict to everyone is fine).
+        peer_intents = dict(self._cav_intents_by_actor_id)
         planning_started = time.perf_counter()
         results = {}
         if self.execution != "serial":
             if self._pool is None:
                 self._start_pool()
-            jobs = {slot: {"frame": frame, "actor_id": actor.id, "snapshots": snapshots}
+            jobs = {slot: {"frame": frame, "actor_id": actor.id, "snapshots": snapshots,
+                           "cav_intents": peer_intents}
                     for slot, actor in active.items()}
             results = self._pool.step(jobs, concurrent=self.execution == "parallel")
             for result in results.values():
@@ -133,6 +155,7 @@ class CPXAgent(AutonomousAgent):
                 if self._contexts[slot].vehicle.id != actor.id:
                     raise RuntimeError("Ego identity changed without resetting the planner")
                 self._contexts[slot].snapshots = snapshots
+                self._contexts[slot].cav_intents = peer_intents
                 try:
                     result = next(self._steps[slot])
                 except StopIteration:
@@ -141,6 +164,29 @@ class CPXAgent(AutonomousAgent):
                 result["planning_ms"] = (time.perf_counter() - started) * 1000
                 results[slot] = result
         planning_ms = (time.perf_counter() - planning_started) * 1000
+        # `done` must win over a same-tick intent: an ego's very last step can
+        # legitimately report both `done=True` and a fresh `cav_intent` in the
+        # same result, and the old if/intent-first-elif-done-second ordering
+        # stored that intent and never reached the clearing branch for it --
+        # nothing revisits a slot once it drops out of `active` next tick, so
+        # that payload stayed in this dict, and kept being broadcast to every
+        # other still-active ego, forever.
+        for slot, result in results.items():
+            actor_id = str(active[slot].id)
+            intent = result.pop("cav_intent", None)
+            if bool(result.get("done")):
+                self._cav_intents_by_actor_id.pop(actor_id, None)
+            elif intent is not None:
+                self._cav_intents_by_actor_id[actor_id] = intent
+        # Actors that vanish outright (destroyed mid-scenario, not merely
+        # `done`) never appear in `results` again either -- prune against the
+        # ground truth of who is still actually in the world this tick,
+        # rather than trying to enumerate every way an ego can disappear.
+        self._cav_intents_by_actor_id = {
+            actor_id: payload
+            for actor_id, payload in self._cav_intents_by_actor_id.items()
+            if actor_id in live_ids
+        }
         if world.get_snapshot().frame != frame:
             raise RuntimeError("World advanced before all ego controls were ready")
         controls = [carla.VehicleControl(brake=1.0) for _ in range(self.ego_vehicles_num)]
@@ -178,6 +224,10 @@ class CPXAgent(AutonomousAgent):
         self._steps = [None] * self.ego_vehicles_num
         self._contexts = [None] * self.ego_vehicles_num
         self._done = [False] * self.ego_vehicles_num
+        # Route installation is a scenario boundary. Previous-route plans
+        # must not be visible as peer intent on the first tick of the new
+        # route, even when CARLA reuses the same ego actor ids.
+        self._cav_intents_by_actor_id = {}
 
     def destroy(self):
         with ExitStack() as cleanup:

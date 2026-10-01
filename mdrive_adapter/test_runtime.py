@@ -40,6 +40,36 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual([o["vehicle_id"] for o in objects], ["1", "2", "3"])
         self.assertAlmostEqual(objects[-1]["psi"], math.pi / 2)
 
+    def test_gt_collects_nearby_static_furniture_without_townwide_scan(self):
+        def actor(identifier, kind, x):
+            transform = types.SimpleNamespace(
+                location=types.SimpleNamespace(x=x, y=0.0, z=0.0),
+                rotation=types.SimpleNamespace(yaw=0.0),
+                transform=lambda point: point,
+            )
+            return types.SimpleNamespace(
+                id=identifier, type_id=kind, is_alive=True,
+                get_transform=lambda: transform,
+                get_velocity=lambda: types.SimpleNamespace(x=0.0, y=0.0),
+                bounding_box=types.SimpleNamespace(
+                    location=types.SimpleNamespace(x=x, y=0.0, z=0.0),
+                    rotation=types.SimpleNamespace(yaw=0.0),
+                    extent=types.SimpleNamespace(x=0.5, y=0.5, z=1.0),
+                ),
+            )
+        world = types.SimpleNamespace(get_actors=lambda: [
+            actor(1, "static.pole", 5.0),
+            actor(2, "static.prop.trafficcone01", 25.0),
+            actor(3, "vehicle.test", 25.0),
+        ])
+
+        objects = collect_gt(
+            world, reference_points=((0.0, 0.0),), max_static_range_m=10.0
+        )
+
+        self.assertEqual([item["vehicle_id"] for item in objects], ["1", "3"])
+        self.assertEqual(objects[0]["object_type"], "static_object")
+
     def test_config_overrides_do_not_mutate_other_egos(self):
         base = {"a": {"b": 2, "c": [1]}}
         result = merge_config(base, {"a": {"b": 3}})
