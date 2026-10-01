@@ -38,34 +38,15 @@ class LaneChangeLifecycleStage:
         ego_speed_mps: float = 0.0, local_map: Any = None,
         stall_failure_count: int = 0,
     ) -> str:
-        lifecycle = self._maneuver.lane_change
-        if not lifecycle.active:
-            return ""
-        # Exactly once per planning tick (this stage's own per-tick call
-        # boundary), independent of how many times
-        # ManeuverManager.locked_lane_change_window() itself got invoked
-        # underneath since the last check (normally once, but twice on the
-        # tick a candidate is first activated) -- comparing there would
-        # double-count stall_ticks on that tick. progress_s_m only advances
-        # from that window-building, so it's stable here at tick-start.
-        if float(lifecycle.progress_s_m) > float(lifecycle.progress_s_m_last_checked) + 1.0e-3:
-            lifecycle.progress_stall_ticks = 0
-        else:
-            lifecycle.progress_stall_ticks += 1
-        lifecycle.progress_s_m_last_checked = float(lifecycle.progress_s_m)
-        target_lane_id = int(lifecycle.target_lane_id)
         snapshot = self._provider.snapshot(LANE_CHANGE)
-        reference_samples = snapshot.mutable_samples()
-        if not reference_samples:
-            return self._release_stalled_commitment(
-                current_lane_id=int(current_lane_id),
-                stall_failure_count=int(stall_failure_count),
-                reference_missing=True,
-            )
+        if not snapshot.mutable_samples():
+            return ""
+        lifecycle = self._maneuver.lane_change
+        target_lane_id = int(lifecycle.target_lane_id)
         contract = LaneChangeContract.from_config(self._config)
         completion_reference = [dict(x) for x in lifecycle.completion_reference]
         if not completion_reference:
-            completion_reference = reference_samples
+            completion_reference = snapshot.mutable_samples()
         alignment = self._provider.lane_change_completion_alignment(
             reference_samples=completion_reference,
             ego_x_m=float(ego_location.x),
@@ -190,23 +171,23 @@ class LaneChangeLifecycleStage:
                 # wall-clock bailout, gated on sustained MPC infeasibility
                 # instead of a stabilization-frame count since progress
                 # itself is what's frozen here.
-                # Sibling watchdog: the MPC can also keep *solving*
-                # successfully for a brake-and-wait candidate every tick
-                # (e.g. always judging the target-lane gap as unsafe next to
-                # a nearby vehicle) without ever failing and without ever
-                # advancing lifecycle.progress_s_m. stall_failure_count above
-                # stays 0 in that case, so it never fires. Confirmed via
-                # MDrive Interactive_Lane_Change/5: two egos each committed a
-                # lane change, then sat fully braked (throttle=0, brake=1.0,
-                # position frozen) for 30-37s of sim time with solver_status
-                # "solved" the whole time, until AgentBlockedTest fired.
-                stall_reason = self._release_stalled_commitment(
-                    current_lane_id=int(current_lane_id),
-                    stall_failure_count=int(stall_failure_count),
-                    reference_missing=False,
-                )
-                if stall_reason:
-                    return stall_reason
+                stall_timeout_failures = int(self._config.get(
+                    "lane_change_mpc_stall_timeout_failures", 100
+                ))
+                if (
+                    stall_timeout_failures > 0
+                    and int(stall_failure_count) >= stall_timeout_failures
+                ):
+                    self._maneuver.abandon_lane_change(
+                        "mpc_infeasible_stall_timeout", suppress_recommit=True,
+                    )
+                    self.reset_reference()
+                    return (
+                        "lane_change_mpc_stall_timeout_to_lane_follow_recovery:"
+                        f"target_lane={target_lane_id}:"
+                        f"map_lane={int(current_lane_id)}:"
+                        f"consecutive_mpc_failures={int(stall_failure_count)}"
+                    )
             return ""
         handoff_reason = self._install_lane_follow_handoff(
             local_map=local_map,
@@ -240,51 +221,6 @@ class LaneChangeLifecycleStage:
             f"{math.degrees(float(completion.target_heading_error_rad)):.2f}:"
             f"{handoff_reason}"
         )
-
-    def _release_stalled_commitment(
-        self, *, current_lane_id: int, stall_failure_count: int,
-        reference_missing: bool,
-    ) -> str:
-        """Release one non-progressing commitment through a single owner."""
-
-        lifecycle = self._maneuver.lane_change
-        target_lane_id = int(lifecycle.target_lane_id)
-        progress_stall_ticks = int(lifecycle.progress_stall_ticks)
-        failure_limit = int(self._config.get(
-            "lane_change_mpc_stall_timeout_failures", 100
-        ))
-        if failure_limit > 0 and int(stall_failure_count) >= failure_limit:
-            self._maneuver.abandon_lane_change(
-                "mpc_infeasible_stall_timeout", suppress_recommit=True,
-            )
-            self.reset_reference()
-            return (
-                "lane_change_mpc_stall_timeout_to_lane_follow_recovery:"
-                f"target_lane={target_lane_id}:map_lane={int(current_lane_id)}:"
-                f"consecutive_mpc_failures={int(stall_failure_count)}"
-            )
-
-        progress_limit = int(self._config.get(
-            "lane_change_no_progress_timeout_ticks", 100
-        ))
-        if (
-            progress_limit > 0
-            and progress_stall_ticks >= progress_limit
-        ):
-            reason = (
-                "missing_reference_stall_timeout"
-                if reference_missing else "no_progress_stall_timeout"
-            )
-            self._maneuver.abandon_lane_change(
-                reason, suppress_recommit=True,
-            )
-            self.reset_reference()
-            return (
-                "lane_change_" + reason + "_to_lane_follow_recovery:"
-                f"target_lane={target_lane_id}:map_lane={int(current_lane_id)}:"
-                f"progress_stall_ticks={progress_stall_ticks}"
-            )
-        return ""
 
     def _install_lane_follow_handoff(
         self, *, local_map: Any, target_lane_id: int, ego_location: Any,

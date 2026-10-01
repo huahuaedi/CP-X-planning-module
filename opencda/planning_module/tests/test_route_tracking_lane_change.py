@@ -416,22 +416,6 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
         self.assertEqual(probed, [])
         self.assertEqual(row.feasibility_status, "mpc_probe_skipped")
 
-    def test_missing_lane_change_reference_still_triggers_stall_recovery(self):
-        bridge = self._bridge()
-        bridge.config["lane_change_no_progress_timeout_ticks"] = 1
-
-        reason = bridge._release_completed_lane_change_commitment(
-            current_lane_id=1,
-            ego_location=bridge.carla.Location(x=5.0, y=0.0),
-            ego_yaw_rad=0.0,
-        )
-
-        self.assertIn("missing_reference_stall_timeout", reason)
-        self.assertFalse(bridge.maneuver_manager.lane_change.active)
-        self.assertEqual(
-            bridge.maneuver_manager.last_release["outcome"], "abandoned"
-        )
-
     def test_target_lane_entry_replaces_quintic_with_stabilization_reference(self):
         bridge = self._bridge()
         bridge.maneuver_manager.lane_change.progress = 0.95

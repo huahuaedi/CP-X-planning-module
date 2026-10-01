@@ -561,7 +561,6 @@ class CandidateSelectionStage:
     ) -> CandidateSelectionResult:
         if self._lane_change_lifecycle is None:
             raise RuntimeError("lane-change lifecycle is not configured")
-        self._maneuver.observe_planning_time(float(sim_time_s))
         release_reason = str(self._lane_change_lifecycle.release_completed(
             current_lane_id=int(request.current_lane_id),
             ego_location=request.ego_location,
@@ -571,10 +570,7 @@ class CandidateSelectionStage:
             stall_failure_count=int(request.lane_change_mpc_stall_failure_count),
         ) or "")
         intents = list(request.intents or ())
-        retry_blocked = self._maneuver.lane_change_recommit_blocked(
-            float(sim_time_s)
-        )
-        if self._maneuver.route_lane_change_edge_completed or retry_blocked:
+        if self._maneuver.route_lane_change_edge_completed:
             intents = [
                 intent for intent in intents
                 if str(getattr(intent, "decision", ""))
