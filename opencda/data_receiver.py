@@ -29,6 +29,9 @@ class DataReceiver(object):
     not block while a planner running at a lower rate computes its next plan.
     """
 
+    _shared_lock = threading.Lock()
+    _shared_instances = {}
+
     def __init__(self, host=ROS_HOST, port=ROS_OUTPUT_PORT):
         self.host = str(host)
         self.port = int(port)
@@ -40,6 +43,46 @@ class DataReceiver(object):
         self.planner_result_condition = threading.Condition()
         self.stop_event = threading.Event()
         self.receiver_thread = None
+        self._shared_reference_count = 0
+
+    @classmethod
+    def acquire_shared(cls, host=ROS_HOST, port=ROS_OUTPUT_PORT, start=True):
+        """Return the process-wide receiver for one ROS output endpoint.
+
+        A multi-CAV OpenCDA process owns several ``VehicleManager`` objects,
+        but only one process can bind the fixed ROS output port.  Share that
+        socket and keep each vehicle's controls separated by ``session_id``.
+        """
+        key = (str(host), int(port))
+        with cls._shared_lock:
+            receiver = cls._shared_instances.get(key)
+            if receiver is None:
+                receiver = cls(host=key[0], port=key[1])
+                cls._shared_instances[key] = receiver
+            receiver._shared_reference_count += 1
+        if start:
+            receiver.start()
+        return receiver
+
+    @classmethod
+    def release_shared(cls, receiver):
+        """Release a receiver acquired through :meth:`acquire_shared`."""
+        if receiver is None:
+            return
+        should_close = False
+        key = (str(receiver.host), int(receiver.port))
+        with cls._shared_lock:
+            shared = cls._shared_instances.get(key)
+            if shared is not receiver:
+                return
+            receiver._shared_reference_count = max(
+                0, int(receiver._shared_reference_count) - 1
+            )
+            if receiver._shared_reference_count == 0:
+                cls._shared_instances.pop(key, None)
+                should_close = True
+        if should_close:
+            receiver.close()
 
     def start(self):
         """Start the TCP receiver in the background without blocking OpenCDA."""
@@ -50,31 +93,39 @@ class DataReceiver(object):
         self.receiver_thread.start()
         return self
 
-    def get_planner_result(self, cycle_time_s, timeout=2.0):
+    def get_planner_result(self, cycle_time_s, timeout=2.0, session_id=None):
         """Wait for the ROS debug result belonging to one simulation cycle."""
-        key = _cycle_key(cycle_time_s)
+        cycle_key = _cycle_key(cycle_time_s)
         deadline = time.monotonic() + max(0.0, float(timeout))
         with self.planner_result_condition:
-            while key not in self.planner_results:
+            while True:
+                key = self._matching_message_key(
+                    self.planner_results, cycle_key, session_id
+                )
+                if key is not None:
+                    return self.planner_results.pop(key)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0.0:
                     return None
                 self.planner_result_condition.wait(remaining)
-            return self.planner_results.pop(key)
 
-    def get_planner_control(self, cycle_time_s, timeout=2.0):
+    def get_planner_control(self, cycle_time_s, timeout=2.0, session_id=None):
         """Wait for the numeric ROS control belonging to one simulation cycle."""
-        key = _cycle_key(cycle_time_s)
+        cycle_key = _cycle_key(cycle_time_s)
         deadline = time.monotonic() + max(0.0, float(timeout))
         with self.planner_control_condition:
-            while key not in self.planner_controls:
+            while True:
+                key = self._matching_message_key(
+                    self.planner_controls, cycle_key, session_id
+                )
+                if key is not None:
+                    return self.planner_controls.pop(key)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0.0:
                     return None
                 self.planner_control_condition.wait(remaining)
-            return self.planner_controls.pop(key)
 
-    def pop_latest_planner_control(self, cycle_time_s=None):
+    def pop_latest_planner_control(self, cycle_time_s=None, session_id=None):
         """Return the newest available control without blocking.
 
         When ``cycle_time_s`` is provided, controls stamped in the future are
@@ -86,12 +137,22 @@ class DataReceiver(object):
             if cycle_time_s is None
             else float(cycle_time_s) + 1.0e-6
         )
+        requested_session = (
+            None if session_id is None else str(session_id or "")
+        )
         with self.planner_control_condition:
             eligible = [
                 (key, control)
                 for key, control in self.planner_controls.items()
-                if upper_bound is None
-                or float(control.get("timestamp_s", 0.0)) <= upper_bound
+                if (
+                    requested_session is None
+                    or str(control.get("session_id", "") or "")
+                    == requested_session
+                )
+                and (
+                    upper_bound is None
+                    or float(control.get("timestamp_s", 0.0)) <= upper_bound
+                )
             ]
             if not eligible:
                 return None
@@ -106,6 +167,12 @@ class DataReceiver(object):
             selected_time_s = float(selected.get("timestamp_s", 0.0))
             for key, control in list(self.planner_controls.items()):
                 if (
+                    (
+                        requested_session is None
+                        or str(control.get("session_id", "") or "")
+                        == requested_session
+                    )
+                    and
                     float(control.get("timestamp_s", 0.0))
                     <= selected_time_s + 1.0e-9
                 ):
@@ -242,7 +309,10 @@ class DataReceiver(object):
             if not all(math.isfinite(planner_control[name]) for name in ("target_speed_mps", "acceleration_mps2", "steering_rad", "planning_cycle_time_ms")):
                 print("[ROS Data Receiver] Ignoring non-finite planner control.")
                 return
-            key = _cycle_key(planner_control["timestamp_s"])
+            key = self._message_key(
+                planner_control["timestamp_s"],
+                planner_control.get("session_id"),
+            )
             with self.planner_control_condition:
                 self.planner_controls[key] = planner_control
                 self._trim(self.planner_controls)
@@ -252,7 +322,10 @@ class DataReceiver(object):
             raw_payload = _as_dict(message.get("data")).get("data", "")
             try:
                 planner_result = json.loads(str(raw_payload))
-                key = _cycle_key(planner_result.get("cycle_time_s", 0.0))
+                key = self._message_key(
+                    planner_result.get("cycle_time_s", 0.0),
+                    planner_result.get("session_id"),
+                )
             except (TypeError, ValueError) as error:
                 print("[ROS Data Receiver] Invalid planner debug output: {}.".format(error))
                 return
@@ -260,6 +333,22 @@ class DataReceiver(object):
                 self.planner_results[key] = planner_result
                 self._trim(self.planner_results)
                 self.planner_result_condition.notify_all()
+
+    @staticmethod
+    def _message_key(timestamp_s, session_id=None):
+        """Key one result by both vehicle session and planning cycle."""
+        return (str(session_id or ""), _cycle_key(timestamp_s))
+
+    @staticmethod
+    def _matching_message_key(messages, cycle_key, session_id=None):
+        """Resolve an exact session key or preserve legacy unscoped lookup."""
+        if session_id is not None:
+            key = (str(session_id or ""), str(cycle_key))
+            return key if key in messages else None
+        return next(
+            (key for key in messages if key[1] == str(cycle_key)),
+            None,
+        )
 
     @staticmethod
     def _trim(messages, max_count=100):

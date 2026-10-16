@@ -3,7 +3,12 @@ import json
 from opencda.data_receiver import DataReceiver
 
 
-def _control_message(sequence, cycle_time_s, acceleration_mps2=0.0):
+def _control_message(
+    sequence,
+    cycle_time_s,
+    acceleration_mps2=0.0,
+    session_id="vehicle-42",
+):
     return json.dumps(
         {
             "message_type": "planner_control",
@@ -14,7 +19,7 @@ def _control_message(sequence, cycle_time_s, acceleration_mps2=0.0):
                 "stop_goal_active": True,
                 "mission_complete": True,
                 "emergency_stop": True,
-                "session_id": "vehicle-42",
+                "session_id": session_id,
                 "emergency_stop_reason": "hard_gate_stop_hazard",
                 "safety_supervisor_reason": "test_supervisor",
                 "emergency_brake_control_active": True,
@@ -92,3 +97,40 @@ def test_pop_latest_planner_control_prefers_sequence_for_equal_timestamp():
 
     assert selected["sequence"] == 5
     assert selected["acceleration_mps2"] == 0.5
+
+
+def test_pop_latest_planner_control_isolates_vehicle_sessions():
+    receiver = DataReceiver()
+    receiver._receive_message(
+        _control_message(6, 4.0, 0.6, session_id="vehicle-a")
+    )
+    receiver._receive_message(
+        _control_message(7, 4.0, 0.7, session_id="vehicle-b")
+    )
+
+    selected_a = receiver.pop_latest_planner_control(
+        4.0, session_id="vehicle-a"
+    )
+    selected_b = receiver.pop_latest_planner_control(
+        4.0, session_id="vehicle-b"
+    )
+
+    assert selected_a["sequence"] == 6
+    assert selected_a["acceleration_mps2"] == 0.6
+    assert selected_b["sequence"] == 7
+    assert selected_b["acceleration_mps2"] == 0.7
+
+
+def test_shared_receiver_uses_reference_counted_singleton():
+    first = DataReceiver.acquire_shared(port=65060, start=False)
+    second = DataReceiver.acquire_shared(port=65060, start=False)
+
+    assert first is second
+    assert first._shared_reference_count == 2
+
+    DataReceiver.release_shared(first)
+    assert second._shared_reference_count == 1
+    assert DataReceiver._shared_instances[("127.0.0.1", 65060)] is second
+
+    DataReceiver.release_shared(second)
+    assert ("127.0.0.1", 65060) not in DataReceiver._shared_instances

@@ -7,7 +7,7 @@ class _SingleControlReceiver(object):
     def __init__(self, control):
         self.control = dict(control)
 
-    def pop_latest_planner_control(self, _cycle_time_s):
+    def pop_latest_planner_control(self, _cycle_time_s, session_id=None):
         control, self.control = self.control, None
         return control
 
@@ -15,6 +15,7 @@ class _SingleControlReceiver(object):
 def _manager_with_control(control, max_age_s=0.5):
     manager = VehicleManager.__new__(VehicleManager)
     manager.ros_receiver = _SingleControlReceiver(control)
+    manager._ros_planner_session_id = "vehicle-test"
     manager._latest_ros_output = None
     manager._ros_control_max_age_s = float(max_age_s)
     return manager

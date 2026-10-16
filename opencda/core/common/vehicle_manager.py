@@ -450,7 +450,7 @@ class VehicleManager(object):
                 visibility_sensor_height_m=float(planner_config.get("cp_visibility_sensor_height_m", 1.6)),
                 visibility_target_tolerance_m=float(planner_config.get("cp_visibility_target_tolerance_m", 0.75)),
             )
-        self.ros_receiver = DataReceiver().start()
+        self.ros_receiver = DataReceiver.acquire_shared()
 
     def _set_ros_control_state(self, state, message):
         """Log ROS execution lifecycle transitions without per-tick spam."""
@@ -491,7 +491,10 @@ class VehicleManager(object):
 
     def _latest_valid_ros_control(self, cycle_time_s):
         """Consume a new ROS result if present and validate the cached result."""
-        received = self.ros_receiver.pop_latest_planner_control(cycle_time_s)
+        received = self.ros_receiver.pop_latest_planner_control(
+            cycle_time_s,
+            session_id=self._ros_planner_session_id,
+        )
         is_new = received is not None
         if is_new:
             self._latest_ros_output = received
@@ -1177,7 +1180,8 @@ class VehicleManager(object):
             if callable(destroy):
                 destroy()
         if getattr(self, 'ros_receiver', None) is not None:
-            self.ros_receiver.close()
+            DataReceiver.release_shared(self.ros_receiver)
+            self.ros_receiver = None
         if getattr(self, 'perception_manager', None):
             self.perception_manager.destroy()
         if getattr(self, 'localizer', None):
