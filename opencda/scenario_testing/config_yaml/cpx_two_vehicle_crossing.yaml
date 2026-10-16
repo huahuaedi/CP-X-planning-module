@@ -5,7 +5,11 @@ description: |-
   near x=-245 m at a controlled time; no background traffic is present.
 
 cpx_mature:
-  max_ticks: 700
+  # The previous 700-tick budget ended with the ego only 3.46 m from the
+  # destination, before the planner-owned terminal stop could complete.
+  # Keep the completion contract strict and give the fixture settling time
+  # instead of declaring success from distance alone.
+  max_ticks: 850
   destination_tolerance_m: 6.0
 
 carla_traffic_manager:

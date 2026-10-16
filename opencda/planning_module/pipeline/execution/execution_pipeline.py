@@ -28,6 +28,7 @@ from ..core.planning_context_stage import PlanningContextRequest, PlanningContex
 from ..behavior.behavior_reference_execution_stage import BehaviorReferenceRequest
 from ..execution.control_finalization_stage import ControlFinalizationRequest
 from ..execution.mpc_execution_stage import MPCExecutionRequest
+from ..execution.mpc_obstacle_relevance import split_relevant_mpc_obstacles
 from ..reference.turn_road_envelope import rolling_turn_envelope_payload_world
 from ..diagnostics.planner_diagnostics_stage import PlannerDiagnosticsStage
 from ..core.output import BehaviorCommand, PlannerDiagnostics, PlannerOutput
@@ -482,6 +483,14 @@ class PlanningPipeline:
         ego_yaw_rad = float(tick.ego_yaw_rad)
         measured_accel_mps2 = float(tick.measured_accel_mps2)
         cp_payload = dict(perception.cp_payload)
+        if bool(adapters.config.get("ignore_traffic_control", False)):
+            # One gate owns traffic-control disablement. The typed input
+            # adapter and BehaviorPlanner both consume this payload; merely
+            # replacing the typed signal with ``unknown`` left the raw CP
+            # control list available to the latter and could re-latch a
+            # permanent stop_at_intersection.
+            cp_payload["control"] = []
+            cp_payload["traffic_controls"] = []
         object_snapshots = [dict(item) for item in cycle.object_snapshots]
         mpc_object_snapshots = [dict(item) for item in cycle.mpc_object_snapshots]
         local_object_snapshots = [dict(item) for item in cycle.local_object_snapshots]
@@ -689,18 +698,59 @@ class PlanningPipeline:
         )
         adapters.accum_stage_ms("between_admission_and_mpc", time.monotonic() - _ts_stage)
         _ts_stage = time.monotonic()
+        mpc_objects_with_prediction = (
+            adapters.mpc_object_snapshots_with_prediction(
+                mpc_object_snapshots,
+                prediction_trajectories=reference_debug.get(
+                    "prediction_trajectories", {}
+                ),
+            )
+        )
+        ignored_mpc_objects = []
+        if bool(adapters.config.get(
+            "mpc_obstacle_relevance_filter_enabled", True
+        )):
+            mpc_objects_with_prediction, ignored_mpc_objects = (
+                split_relevant_mpc_obstacles(
+                    mpc_objects_with_prediction,
+                    lane_center_reference,
+                    lateral_gate_m=float(adapters.config.get(
+                        "mpc_obstacle_relevance_lateral_gate_m", 3.0
+                    )),
+                    longitudinal_gate_m=float(adapters.config.get(
+                        "mpc_obstacle_relevance_longitudinal_gate_m", 40.0
+                    )),
+                    keep_ids=(
+                        str(reference_debug.get("front_gap_actor_id", "")),
+                    ),
+                )
+            )
+        reference_debug["mpc_obstacle_input_count"] = int(
+            len(mpc_objects_with_prediction) + len(ignored_mpc_objects)
+        )
+        reference_debug["mpc_obstacle_relevant_count"] = int(
+            len(mpc_objects_with_prediction)
+        )
+        reference_debug["mpc_obstacle_ignored_count"] = int(
+            len(ignored_mpc_objects)
+        )
+        reference_debug["mpc_obstacle_ignored_ids"] = [
+            str(item.get(
+                "track_id", item.get(
+                    "object_id", item.get(
+                        "vehicle_id", item.get("id", "")
+                    )
+                )
+            ))
+            for item in ignored_mpc_objects
+        ]
         execution_result = self.execute_mpc(
             MPCExecutionRequest(
                 sim_time_s=float(sim_time_s),
                 current_state=current_state,
                 destination_state=destination_state,
                 reference_samples=lane_center_reference,
-                object_snapshots=adapters.mpc_object_snapshots_with_prediction(
-                    mpc_object_snapshots,
-                    prediction_trajectories=reference_debug.get(
-                        "prediction_trajectories", {}
-                    ),
-                ),
+                object_snapshots=mpc_objects_with_prediction,
                 current_acceleration_mps2=float(mpc_jerk_seed_accel_mps2),
                 current_steering_rad=float(adapters.last_steer_rad),
                 ego_speed_mps=float(ego_speed_mps),
@@ -821,6 +871,9 @@ class PlanningPipeline:
                 "emergency_brake_requested": emergency_brake_requested,
                 "fallback_reason": fallback_reason,
                 "front_gap_m": front_gap_m,
+                "proximity_emergency_gap_m": cycle.emergency_gap_m,
+                "proximity_front_actor_id": perception.front_actor_id,
+                "proximity_front_actor_snapshot": perception.front_actor_snapshot,
                 "hard_gate_active": hard_gate_active,
                 "lane_center_reference": lane_center_reference,
                 "local_object_snapshots": local_object_snapshots,

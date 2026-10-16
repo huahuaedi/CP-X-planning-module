@@ -119,3 +119,24 @@ def test_write_run_status_preserves_exception_and_partial_completion(tmp_path):
     assert status["completed_ticks"] == 8
     assert status["all_cavs_finished"] is False
     assert status["distance_to_destination_m"] == pytest.approx(4.0)
+
+
+def test_write_run_status_identifies_external_ros_planner(tmp_path):
+    manager = SimpleNamespace(
+        vehicle=_Vehicle(31, 1.0, 0.0, 2.0),
+        cpx_planner=None,
+        ros_planner_enabled=True,
+        _opencda_agent_finished=True,
+    )
+    path = write_run_status(
+        vehicle_managers=[manager],
+        vehicle_configs=[{"destination": [1.0, 0.0, 0.0]}],
+        termination_reason="route_destination_stopped",
+        completed_ticks=10,
+        scenario_name="ros_planner_test",
+        fallback_debug_output_dir=tmp_path,
+    )[0]
+
+    status = json.loads(Path(path).read_text(encoding="utf-8"))
+    assert status["all_cavs_finished"] is True
+    assert status["cav_states"][0]["planner"] == "cpx_mpc_ros"

@@ -138,6 +138,7 @@ class CandidatePlanningRequest:
     selected_decision: str
     selected_target_lane_id: int
     current_lane_id: int
+    route_physical_target_lane_id: int
     target_speed_mps: float
     candidate_lane_ids: Sequence[int]
     lane_safety_scores: Mapping[int, float]
@@ -193,6 +194,7 @@ class CandidatePlanningPreparationRequest:
     current_acceleration_mps2: float
     current_steering_rad: float
     route_required: bool
+    route_physical_target_lane_id: int
     traffic_stop_active: bool
     turn_prepare_speed_suppressed: bool
     lane_change_mpc_stall_failure_count: int
@@ -342,6 +344,9 @@ class ReferencePlanningStage:
             baseline_reference=request.baseline_reference,
             baseline_debug=request.baseline_debug,
             current_lane_id=int(request.current_lane_id),
+            route_physical_target_lane_id=int(
+                request.route_physical_target_lane_id
+            ),
             route_optimal_lane_id=int(baseline.route_optimal_lane_id),
             route_reference_allowed=bool(baseline.route_reference_allowed),
             route_reference_gate_reason=str(
@@ -466,6 +471,9 @@ class ReferencePlanningStage:
                 selected_decision=str(executable.decision),
                 selected_target_lane_id=int(executable.target_lane_id),
                 current_lane_id=int(planning.current_lane_id),
+                route_physical_target_lane_id=int(
+                    request.route_physical_target_lane_id
+                ),
                 target_speed_mps=float(speed.target_speed_mps),
                 candidate_lane_ids=tuple(executable.candidate_lane_ids),
                 lane_safety_scores=dict(

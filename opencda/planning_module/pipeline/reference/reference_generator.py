@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 import math
 from typing import Any, Callable, Mapping, Sequence
@@ -106,6 +107,47 @@ class ReferenceGenerator:
         self._last_corridor_projection_geometry: (
             tuple[float, float, float, float] | None
         ) = None
+        self._drivable_waypoint_cache_max_entries = max(
+            0,
+            int(self.config.get("drivable_waypoint_cache_max_entries", 4096)),
+        )
+        self._drivable_waypoint_cache = OrderedDict()
+        # Rolling candidate windows repeatedly validate the same vehicle pose.
+        # Cache the complete eight-point result without coordinate quantization.
+        self._drivable_footprint_cache_max_entries = max(
+            0,
+            int(self.config.get(
+                "drivable_footprint_cache_max_entries", 4096
+            )),
+        )
+        self._drivable_footprint_cache = OrderedDict()
+        self._drivable_footprint_cache_xy_resolution_m = max(
+            0.0,
+            float(self.config.get("drivable_footprint_cache_xy_resolution_m", 0.25)),
+        )
+        self._drivable_footprint_cache_heading_resolution_rad = max(
+            0.0,
+            math.radians(float(self.config.get("drivable_footprint_cache_heading_resolution_deg", 2.0))),
+        )
+        # Candidate variants commonly differ only in their speed profile.
+        # Swept-footprint validation depends on geometry, vehicle dimensions,
+        # and the static map -- not speed -- so cache the complete validation
+        # for an *exactly identical* geometric request.  The key deliberately
+        # performs no coordinate quantization: a changed path is always
+        # checked again and therefore receives exactly the same safety test as
+        # it did before this cache existed.
+        self._turn_footprint_cache_max_entries = max(
+            0,
+            int(self.config.get("turn_footprint_cache_max_entries", 256)),
+        )
+        self._turn_footprint_cache = OrderedDict()
+
+    def clear_static_map_caches(self) -> None:
+        """Discard results whose meaning depends on the active static map."""
+
+        self._drivable_waypoint_cache.clear()
+        self._drivable_footprint_cache.clear()
+        self._turn_footprint_cache.clear()
 
     def _map_waypoint_from_location(self, location: carla.Location):
         return self._map_waypoint_callback(location)
@@ -525,6 +567,96 @@ class ReferenceGenerator:
         ego_half_length_m: float,
         safety_margin_m: float = 0.0,
     ) -> DrivableFootprintOccupancy:
+        """Return a conservative, spatially cached driving-union check."""
+
+        cache = self._drivable_footprint_cache
+        cache_limit = int(self._drivable_footprint_cache_max_entries)
+        xy_resolution_m = float(self._drivable_footprint_cache_xy_resolution_m)
+        heading_resolution_rad = float(
+            self._drivable_footprint_cache_heading_resolution_rad
+        )
+        exact_arguments = {
+            "x_m": float(x_m),
+            "y_m": float(y_m),
+            "z_m": float(z_m),
+            "heading_rad": float(heading_rad),
+            "ego_half_width_m": float(ego_half_width_m),
+            "ego_half_length_m": float(ego_half_length_m),
+            "safety_margin_m": float(safety_margin_m),
+        }
+        if cache_limit <= 0:
+            return self._compute_drivable_footprint_occupancy(**exact_arguments)
+
+        if xy_resolution_m <= 0.0 or heading_resolution_rad <= 0.0:
+            cache_key = (
+                "exact",
+                float(x_m), float(y_m), float(z_m), float(heading_rad),
+                float(ego_half_width_m), float(ego_half_length_m),
+                float(safety_margin_m), id(self._drivable_waypoint_callback),
+                id(self.map_planner),
+            )
+            if cache_key in cache:
+                result = cache.pop(cache_key)
+                cache[cache_key] = result
+                return result
+            result = self._compute_drivable_footprint_occupancy(**exact_arguments)
+            cache[cache_key] = result
+            while len(cache) > cache_limit:
+                cache.popitem(last=False)
+            return result
+
+        x_bin = int(math.floor(float(x_m) / xy_resolution_m + 0.5))
+        y_bin = int(math.floor(float(y_m) / xy_resolution_m + 0.5))
+        wrapped_heading_rad = self._wrap_angle_static(float(heading_rad))
+        heading_bin = int(math.floor(
+            wrapped_heading_rad / heading_resolution_rad + 0.5
+        ))
+        cache_key = (
+            "conservative_cell_v1", x_bin, y_bin, heading_bin, float(z_m),
+            float(ego_half_width_m), float(ego_half_length_m),
+            float(safety_margin_m), id(self._drivable_waypoint_callback),
+            id(self.map_planner),
+        )
+        if cache_key in cache:
+            result = cache.pop(cache_key)
+            cache[cache_key] = result
+            return result
+
+        quantized_heading_rad = float(heading_bin) * heading_resolution_rad
+        footprint_radius_m = math.hypot(
+            float(ego_half_length_m), float(ego_half_width_m)
+        )
+        uncertainty_m = (
+            math.sqrt(0.5) * xy_resolution_m
+            + 0.5 * heading_resolution_rad * footprint_radius_m
+        )
+        conservative = self._compute_drivable_footprint_occupancy(
+            x_m=float(x_bin) * xy_resolution_m,
+            y_m=float(y_bin) * xy_resolution_m,
+            z_m=float(z_m),
+            heading_rad=float(quantized_heading_rad),
+            ego_half_width_m=float(ego_half_width_m) + uncertainty_m,
+            ego_half_length_m=float(ego_half_length_m) + uncertainty_m,
+            safety_margin_m=float(safety_margin_m),
+        )
+        if bool(conservative.valid) and bool(conservative.inside):
+            cache[cache_key] = conservative
+            while len(cache) > cache_limit:
+                cache.popitem(last=False)
+            return conservative
+        return self._compute_drivable_footprint_occupancy(**exact_arguments)
+
+    def _compute_drivable_footprint_occupancy(
+        self,
+        *,
+        x_m: float,
+        y_m: float,
+        z_m: float = 0.0,
+        heading_rad: float,
+        ego_half_width_m: float,
+        ego_half_length_m: float,
+        safety_margin_m: float = 0.0,
+    ) -> DrivableFootprintOccupancy:
         """Check the vehicle envelope against CARLA's driving-lane union.
 
         A single tangent strip is overly conservative in a junction because
@@ -578,16 +710,11 @@ class ReferenceGenerator:
                 + float(longitudinal_m) * float(sin_h)
                 + float(lateral_m) * float(cos_h)
             )
-            try:
-                waypoint = callback(
-                    _Location(
-                        x=float(point_x_m),
-                        y=float(point_y_m),
-                        z=float(z_m),
-                    )
-                )
-            except Exception:
-                waypoint = None
+            waypoint = self._cached_drivable_waypoint(
+                x_m=float(point_x_m),
+                y_m=float(point_y_m),
+                z_m=float(z_m),
+            )
             if waypoint is None:
                 return DrivableFootprintOccupancy(
                     valid=True,
@@ -600,14 +727,41 @@ class ReferenceGenerator:
                     reason="drivable_footprint:point_outside_driving_lane",
                 )
             try:
-                transform = waypoint.transform
-                center = transform.location
-                lane_heading_rad = math.radians(
-                    float(transform.rotation.yaw)
+                # The AD-map Waypoint already owns these values.  Reading
+                # them directly avoids allocating a CARLA-shaped transform
+                # view for every one of the eight footprint points.  CARLA
+                # waypoints and lightweight test doubles retain the original
+                # transform-based fallback.
+                position = getattr(waypoint, "position", None)
+                world_heading_rad = getattr(
+                    waypoint,
+                    "world_heading_rad",
+                    None,
                 )
-                lane_width_m = float(
-                    getattr(waypoint, "lane_width", 0.0) or 0.0
+                lane_width_value = getattr(
+                    waypoint,
+                    "lane_width_m",
+                    None,
                 )
+                if (
+                    isinstance(position, Mapping)
+                    and world_heading_rad is not None
+                    and lane_width_value is not None
+                ):
+                    center_x_m = float(position["x"])
+                    center_y_m = float(position["y"])
+                    lane_heading_rad = float(world_heading_rad)
+                    lane_width_m = float(lane_width_value)
+                else:
+                    transform = waypoint.transform
+                    center_x_m = float(transform.location.x)
+                    center_y_m = float(transform.location.y)
+                    lane_heading_rad = math.radians(
+                        float(transform.rotation.yaw)
+                    )
+                    lane_width_m = float(
+                        getattr(waypoint, "lane_width", 0.0) or 0.0
+                    )
             except Exception:
                 return DrivableFootprintOccupancy(
                     valid=False,
@@ -624,8 +778,8 @@ class ReferenceGenerator:
                     min_clearance_m=float("-inf"),
                     reason="drivable_footprint:invalid_lane_width",
                 )
-            dx_m = float(point_x_m) - float(center.x)
-            dy_m = float(point_y_m) - float(center.y)
+            dx_m = float(point_x_m) - float(center_x_m)
+            dy_m = float(point_y_m) - float(center_y_m)
             point_lateral_m = (
                 -math.sin(float(lane_heading_rad)) * float(dx_m)
                 + math.cos(float(lane_heading_rad)) * float(dy_m)
@@ -655,6 +809,28 @@ class ReferenceGenerator:
             min_clearance_m=float(min_clearance_m),
             reason="drivable_footprint:carla_driving_lane_union",
         )
+
+    def _cached_drivable_waypoint(self, *, x_m: float, y_m: float, z_m: float):
+        """Return an exact static-map lookup with bounded per-session reuse."""
+
+        callback = self._drivable_waypoint_callback
+        if not callable(callback):
+            return None
+        key = (float(x_m), float(y_m), float(z_m))
+        cache = self._drivable_waypoint_cache
+        if key in cache:
+            waypoint = cache.pop(key)
+            cache[key] = waypoint
+            return waypoint
+        try:
+            waypoint = callback(_Location(x=key[0], y=key[1], z=key[2]))
+        except Exception:
+            waypoint = None
+        if self._drivable_waypoint_cache_max_entries > 0:
+            cache[key] = waypoint
+            while len(cache) > self._drivable_waypoint_cache_max_entries:
+                cache.popitem(last=False)
+        return waypoint
 
     def _occupancy_from_corridor_geometry(
         self,
@@ -945,6 +1121,18 @@ class ReferenceGenerator:
         """Validate the oriented vehicle footprint along the full turn path."""
 
         samples = [dict(sample) for sample in list(reference_samples or [])]
+        cache_key = self._turn_footprint_validation_cache_key(
+            samples=samples,
+            ego_half_width_m=float(ego_half_width_m),
+            ego_half_length_m=float(ego_half_length_m),
+            safety_margin_m=float(safety_margin_m),
+            max_violations=int(max_violations),
+        )
+        cache = self._turn_footprint_cache
+        if cache_key is not None and cache_key in cache:
+            cached = cache.pop(cache_key)
+            cache[cache_key] = cached
+            return cached
         poses: list[
             tuple[
                 float,
@@ -1054,13 +1242,15 @@ class ReferenceGenerator:
                 violations += 1
 
         if checked == 0:
-            return SweptFootprintValidation(
+            result = SweptFootprintValidation(
                 valid=False,
                 checked_pose_count=0,
                 violation_count=0,
                 min_clearance_m=float("-inf"),
                 reason="turn_swept_footprint:no_corridor_geometry",
             )
+            self._cache_turn_footprint_validation(cache_key, result)
+            return result
         allowed_by_contract = bool(
             int(violations) <= max(0, int(max_violations))
         )
@@ -1096,7 +1286,7 @@ class ReferenceGenerator:
                 and float(violations) / float(checked) <= float(seam_max_ratio)
             )
         valid = bool(allowed_by_contract or union_seam_tolerated)
-        return SweptFootprintValidation(
+        result = SweptFootprintValidation(
             valid=bool(valid),
             checked_pose_count=int(checked),
             violation_count=int(violations),
@@ -1124,6 +1314,85 @@ class ReferenceGenerator:
                 + f"min_clearance={float(min_clearance_m):.3f}"
             ),
         )
+        self._cache_turn_footprint_validation(cache_key, result)
+        return result
+
+    def _turn_footprint_validation_cache_key(
+        self,
+        *,
+        samples: Sequence[Mapping[str, object]],
+        ego_half_width_m: float,
+        ego_half_length_m: float,
+        safety_margin_m: float,
+        max_violations: int,
+    ):
+        """Return an exact key for all inputs that affect turn validation."""
+
+        geometry = []
+        try:
+            for sample in samples:
+                x_m = float(sample.get("x_ref_m", sample.get("x", "")))
+                y_m = float(sample.get("y_ref_m", sample.get("y", "")))
+                heading_rad = float(
+                    sample.get("heading_rad", sample.get("psi_ref", ""))
+                )
+                explicit_corridor = None
+                lane_width_m = float(sample.get("lane_width_m", 0.0) or 0.0)
+                if lane_width_m > 0.0 and all(
+                    name in sample
+                    for name in (
+                        "corridor_center_x_m",
+                        "corridor_center_y_m",
+                        "corridor_heading_rad",
+                    )
+                ):
+                    explicit_corridor = (
+                        float(sample["corridor_center_x_m"]),
+                        float(sample["corridor_center_y_m"]),
+                        float(sample["corridor_heading_rad"]),
+                        float(lane_width_m),
+                    )
+                values = (x_m, y_m, heading_rad)
+                if not all(math.isfinite(value) for value in values):
+                    return None
+                if explicit_corridor is not None and not all(
+                    math.isfinite(value) for value in explicit_corridor
+                ):
+                    return None
+                geometry.append((x_m, y_m, heading_rad, explicit_corridor))
+        except (TypeError, ValueError):
+            # Preserve the pre-cache handling of malformed samples; they are
+            # filtered by the validator and are never memoized.
+            return None
+        return (
+            tuple(geometry),
+            float(ego_half_width_m),
+            float(ego_half_length_m),
+            float(safety_margin_m),
+            int(max_violations),
+            int(self.config.get(
+                "turn_drivable_union_seam_max_pose_violations", 3
+            )),
+            float(self.config.get(
+                "turn_drivable_union_seam_max_violation_ratio", 0.10
+            )),
+            id(self._map_waypoint_callback),
+            id(self._drivable_waypoint_callback),
+            id(self.map_planner),
+        )
+
+    def _cache_turn_footprint_validation(
+        self,
+        cache_key,
+        result: SweptFootprintValidation,
+    ) -> None:
+        if cache_key is None or self._turn_footprint_cache_max_entries <= 0:
+            return
+        cache = self._turn_footprint_cache
+        cache[cache_key] = result
+        cache.move_to_end(cache_key)
+        while len(cache) > self._turn_footprint_cache_max_entries:
+            cache.popitem(last=False)
 
     def ensure_turn_swept_footprint(
         self,

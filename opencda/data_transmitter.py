@@ -1,4 +1,4 @@
-"""Transmit OpenCDA localization, perception, V2X, and safety outputs to ROS 2."""
+"""Transmit the simulator-independent OpenCDA planning inputs to ROS 2."""
 
 import atexit
 import json
@@ -6,18 +6,21 @@ import math
 import socket
 import threading
 import time
+import uuid
+from collections.abc import Mapping, Sequence
 
 
 ROS_HOST = "127.0.0.1"
 
-# Each future ROS publisher node listens on a different TCP port.
+# Each ROS bridge input stream listens on a different TCP port. OpenCDA's
+# SafetyManager remains local simulation telemetry and is deliberately not a
+# planner input.
 STREAM_PORTS = {
     "localization": 5051,
     "perception": 5052,
     "traffic_light": 5053,
     "v2x": 5054,
     "cooperative": 5055,
-    "safety": 5056,
 }
 
 _connections = {
@@ -26,11 +29,66 @@ _connections = {
     "traffic_light": None,
     "v2x": None,
     "cooperative": None,
-    "safety": None,
 }
 
 _sequence = 0
 _connection_lock = threading.Lock()
+_PROCESS_SESSION_ID = uuid.uuid4().hex
+
+
+def _as_json_value(value):
+    """Recursively convert configuration containers to JSON-native values.
+
+    OmegaConf ``DictConfig`` behaves as a mapping, while ``ListConfig`` is a
+    generic sequence rather than a built-in ``list``.  A shallow ``dict()``
+    conversion therefore leaves nested ListConfig objects in the transport
+    envelope and ``json.dumps`` fails.  Keep this conversion at the TCP/JSON
+    boundary so callers can continue to use their native configuration types.
+    """
+
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    if isinstance(value, Mapping):
+        return {
+            str(key): _as_json_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray)
+    ):
+        return [_as_json_value(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        return [_as_json_value(item) for item in value]
+
+    # Support NumPy scalar/array values without making NumPy a dependency of
+    # this lightweight transport module.
+    item_method = getattr(value, "item", None)
+    if callable(item_method):
+        try:
+            return _as_json_value(item_method())
+        except (TypeError, ValueError):
+            pass
+    tolist_method = getattr(value, "tolist", None)
+    if callable(tolist_method):
+        try:
+            return _as_json_value(tolist_method())
+        except (TypeError, ValueError):
+            pass
+
+    # Leave unsupported values intact so json.dumps reports their concrete
+    # type instead of silently changing the wire contract.
+    return value
+
+
+def planner_session_id(actor_id):
+    """Return a planner lifecycle id unique to this simulator execution.
+
+    CARLA actor ids can be reused after the server or world restarts.  Prefix
+    the actor id with a per-process token so a persistent ROS planner can
+    distinguish two OpenCDA runs that happen to receive the same actor id.
+    """
+
+    return "{}:{}".format(_PROCESS_SESSION_ID, str(actor_id))
 
 
 def _cp_obstacle_as_perception_object(obstacle):
@@ -80,11 +138,17 @@ def send(
     cp_payload=None,
     cooperative_payload=None,
     timestamp_s=None,
+    session_id=None,
+    planner_config=None,
     timeout_s=1.0,
     raise_on_error=False,
+    atomic_cycle=True,
 ):
     """
     Send actual OpenCDA localization, perception, and V2X outputs to ROS.
+
+    ``safety_manager`` is accepted for caller compatibility but intentionally
+    remains on the OpenCDA side for simulation evaluation only.
 
     Parameters
     ----------
@@ -368,54 +432,108 @@ def send(
         ],
     }
 
-    safety_status = {}
-    status_queue = getattr(safety_manager, "status_queue", None)
-    if status_queue:
-        try:
-            _status_time, raw_safety_status = status_queue[-1]
-            if isinstance(raw_safety_status, dict):
-                safety_status = {str(key): bool(value) for key, value in raw_safety_status.items()}
-        except (IndexError, TypeError, ValueError):
-            safety_status = {}
-
-    safety_data = {"status": safety_status}
-
     stream_data = {
         "localization": localization_data,
         "perception": perception_data,
         "traffic_light": traffic_light_data,
         "v2x": v2x_data,
         "cooperative": cooperative_data,
-        "safety": safety_data,
     }
 
     results = {}
 
     # ------------------------------------------------------------------
-    # Send each OpenCDA output to its corresponding ROS publisher node.
+    # Send one complete OpenCDA cycle atomically by default. Keeping the
+    # legacy five-stream path makes older ROS bridges usable while removing
+    # cross-socket frame assembly from the normal path.
     # ------------------------------------------------------------------
     with _connection_lock:
         _sequence += 1
         current_sequence = int(_sequence)
 
+        cooperative_data = dict(stream_data["cooperative"])
+        cooperative_data["sequence"] = current_sequence
+        stream_data["cooperative"] = cooperative_data
+
+        if atomic_cycle:
+            message = {
+                "schema_version": 2,
+                "message_type": "planning_cycle",
+                "sequence": current_sequence,
+                "timestamp_s": float(timestamp_s),
+                "frame_id": "map",
+                "session_id": str(session_id or _PROCESS_SESSION_ID),
+                "planner_config": dict(planner_config or {}),
+                "cycle_send_started_wall_time_ns": int(
+                    cycle_send_started_wall_time_ns
+                ),
+                "data": {"streams": stream_data},
+            }
+            encoded_message = (
+                json.dumps(
+                    _as_json_value(message),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                )
+                + "\n"
+            ).encode("utf-8")
+            stream_name = "localization"
+            port = STREAM_PORTS[stream_name]
+            sent_successfully = False
+            last_error = None
+
+            for attempt in range(2):
+                try:
+                    if _connections[stream_name] is None:
+                        connection = socket.create_connection(
+                            (ROS_HOST, port), timeout=float(timeout_s)
+                        )
+                        connection.settimeout(float(timeout_s))
+                        _connections[stream_name] = connection
+                    _connections[stream_name].sendall(encoded_message)
+                    sent_successfully = True
+                    break
+                except OSError as error:
+                    last_error = error
+                    if _connections[stream_name] is not None:
+                        try:
+                            _connections[stream_name].close()
+                        except OSError:
+                            pass
+                    _connections[stream_name] = None
+
+            results = {
+                logical_stream: sent_successfully
+                for logical_stream in stream_data
+            }
+            if not sent_successfully:
+                error_message = (
+                    "Could not send atomic planning cycle to ROS at {}:{}: {}"
+                ).format(ROS_HOST, port, last_error)
+                if raise_on_error:
+                    raise ConnectionError(error_message)
+                print("[Data Transmitter] {}".format(error_message))
+            return results
+
         for stream_name, converted_data in stream_data.items():
-            if stream_name == "cooperative":
-                converted_data = dict(converted_data)
-                converted_data["sequence"] = current_sequence
-                
             message = {
                 "schema_version": 1,
                 "message_type": stream_name,
                 "sequence": current_sequence,
                 "timestamp_s": float(timestamp_s),
                 "frame_id": "map",
+                "session_id": str(session_id or _PROCESS_SESSION_ID),
+                "planner_config": (
+                    dict(planner_config or {})
+                    if stream_name == "localization" else {}
+                ),
                 "cycle_send_started_wall_time_ns": int(cycle_send_started_wall_time_ns),
                 "data": converted_data,
             }
 
             encoded_message = (
                 json.dumps(
-                    message,
+                    _as_json_value(message),
                     ensure_ascii=False,
                     allow_nan=False,
                 )

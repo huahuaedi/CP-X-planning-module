@@ -21,6 +21,49 @@ def _straight_reference(lane_id=1, terminal_speed=2.0):
 
 
 class FinalReferenceGateTests(unittest.TestCase):
+    def test_intersection_turn_uses_spatial_anchor_not_body_lateral_only(self):
+        reference = _straight_reference()
+        for sample in reference:
+            sample["y_ref_m"] = 1.5
+
+        result = FinalReferenceGate({}).validate(
+            reference_samples=reference,
+            destination_state=[4.0, 1.5, 2.0],
+            ego_state=[0.0, 0.0, 2.0, 0.0],
+            behavior_decision="intersection_turn_left",
+            behavior_fsm_state="INTERSECTION_TURN_LEFT",
+            current_lane_id=1,
+            target_lane_id=2,
+            stop_goal_active=False,
+            horizon_steps=4,
+            default_speed_mps=3.0,
+        )
+
+        self.assertTrue(result.accepted, result.reason)
+        self.assertEqual(result.mode, "intersection_turn")
+
+    def test_intersection_turn_rejects_distant_spatial_anchor(self):
+        reference = _straight_reference()
+        for sample in reference:
+            sample["y_ref_m"] = 3.2
+
+        result = FinalReferenceGate({}).validate(
+            reference_samples=reference,
+            destination_state=[4.0, 3.2, 2.0],
+            ego_state=[0.0, 0.0, 2.0, 0.0],
+            behavior_decision="intersection_turn_left",
+            behavior_fsm_state="INTERSECTION_TURN_LEFT",
+            current_lane_id=1,
+            target_lane_id=2,
+            stop_goal_active=False,
+            horizon_steps=4,
+            default_speed_mps=3.0,
+        )
+
+        self.assertFalse(result.accepted)
+        self.assertNotIn("first_lateral_out_of_contract", result.reason)
+        self.assertIn("first_distance_out_of_contract", result.reason)
+
     def test_lane_follow_body_lateral_check_is_disabled_for_curved_reference(self):
         gate = FinalReferenceGate({})
         curved = _straight_reference()

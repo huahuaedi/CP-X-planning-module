@@ -174,15 +174,47 @@ class PlanningContextStage:
         frame = adapter_output.frame
         route = frame.planning.route
         traffic = frame.planning.traffic_control
+        ignore_traffic_control = bool(
+            request.config.get("ignore_traffic_control", False)
+        )
+        if ignore_traffic_control:
+            # ``unknown`` normally means a temporary sensor dropout and the
+            # traffic owner deliberately holds a previous red/yellow. A
+            # disabled input is a lifecycle transition instead, so release
+            # both temporal owners explicitly while retaining turn state.
+            reset_memory = getattr(request.traffic_memory, "reset", None)
+            if callable(reset_memory):
+                reset_memory()
+            clear_scenario = getattr(
+                self._scenario, "clear_traffic_control_state", None
+            )
+            if callable(clear_scenario):
+                clear_scenario()
         raw_stop_target = (
-            traffic.stop_target.as_dict() if traffic.stop_target.active else None
+            traffic.stop_target.as_dict()
+            if traffic.stop_target.active and not ignore_traffic_control
+            else None
         )
         return self._scenario.observe_planning_context(
-            raw_traffic_state=str(traffic.signal_state),
+            raw_traffic_state=(
+                "unknown" if ignore_traffic_control
+                else str(traffic.signal_state)
+            ),
             raw_stop_target=raw_stop_target,
-            signal_context=dict(adapter_output.signal_context),
+            signal_context=(
+                {
+                    "signal_state": "unknown",
+                    "signal_source": "disabled_by_planner_config",
+                    "traffic_control_from_cp": False,
+                }
+                if ignore_traffic_control
+                else dict(adapter_output.signal_context)
+            ),
             traffic_memory=request.traffic_memory,
-            resolve_actor_state=resolve_actor_state,
+            resolve_actor_state=(
+                (lambda **_kwargs: ("unknown", "traffic_control_disabled"))
+                if ignore_traffic_control else resolve_actor_state
+            ),
             project_stop_target=lambda *, stop_target: (
                 request.reference_provider.stop_target_forward(
                     ego_location=request.ego_location,

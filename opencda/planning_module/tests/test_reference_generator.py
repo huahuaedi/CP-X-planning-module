@@ -364,6 +364,189 @@ class ReferenceGeneratorTests(unittest.TestCase):
         self.assertEqual(occupancy.checked_point_count, 8)
         self.assertAlmostEqual(occupancy.min_clearance_m, 1.85)
 
+    def test_drivable_footprint_reads_admap_waypoint_fields_directly(self):
+        generator = self._generator()
+
+        def waypoint(location):
+            return types.SimpleNamespace(
+                position={"x": location.x, "y": location.y, "z": 0.0},
+                world_heading_rad=0.0,
+                lane_width_m=4.0,
+            )
+
+        generator._drivable_waypoint_callback = waypoint
+        occupancy = generator.drivable_footprint_occupancy(
+            x_m=0.0,
+            y_m=0.0,
+            heading_rad=0.0,
+            ego_half_width_m=1.0,
+            ego_half_length_m=2.4,
+            safety_margin_m=0.15,
+        )
+
+        self.assertTrue(occupancy.valid)
+        self.assertTrue(occupancy.inside)
+        self.assertEqual(occupancy.checked_point_count, 8)
+        self.assertAlmostEqual(occupancy.min_clearance_m, 1.85)
+
+    def test_drivable_footprint_reuses_exact_static_map_queries(self):
+        generator = self._generator(config={
+            "drivable_waypoint_cache_max_entries": 0,
+            "drivable_footprint_cache_xy_resolution_m": 0.0,
+        })
+        callback_locations = []
+
+        def waypoint(location):
+            callback_locations.append((location.x, location.y, location.z))
+            return types.SimpleNamespace(
+                transform=types.SimpleNamespace(
+                    location=types.SimpleNamespace(x=location.x, y=location.y),
+                    rotation=types.SimpleNamespace(yaw=0.0),
+                ),
+                lane_width=4.0,
+            )
+
+        generator._drivable_waypoint_callback = waypoint
+        arguments = dict(
+            x_m=0.0,
+            y_m=0.0,
+            heading_rad=math.radians(35.0),
+            ego_half_width_m=1.0,
+            ego_half_length_m=2.4,
+            safety_margin_m=0.15,
+        )
+
+        first = generator.drivable_footprint_occupancy(**arguments)
+        second = generator.drivable_footprint_occupancy(**arguments)
+
+        self.assertEqual(first, second)
+        self.assertEqual(len(callback_locations), 8)
+
+        changed = dict(arguments, heading_rad=arguments["heading_rad"] + 0.001)
+        generator.drivable_footprint_occupancy(**changed)
+        self.assertEqual(len(callback_locations), 16)
+
+        generator.clear_static_map_caches()
+        generator.drivable_footprint_occupancy(**arguments)
+        self.assertEqual(len(callback_locations), 24)
+
+    def test_drivable_footprint_reuses_conservatively_in_same_pose_cell(self):
+        generator = self._generator()
+        callback_locations = []
+
+        def waypoint(location):
+            callback_locations.append((location.x, location.y, location.z))
+            return types.SimpleNamespace(
+                transform=types.SimpleNamespace(
+                    location=types.SimpleNamespace(x=location.x, y=location.y),
+                    rotation=types.SimpleNamespace(yaw=0.0),
+                ),
+                lane_width=6.0,
+            )
+
+        generator._drivable_waypoint_callback = waypoint
+        arguments = dict(
+            y_m=0.0,
+            heading_rad=0.0,
+            ego_half_width_m=1.0,
+            ego_half_length_m=2.4,
+            safety_margin_m=0.15,
+        )
+        first = generator.drivable_footprint_occupancy(
+            x_m=0.02, **arguments
+        )
+        query_count = len(callback_locations)
+        second = generator.drivable_footprint_occupancy(
+            x_m=0.08, **arguments
+        )
+
+        self.assertTrue(first.valid and first.inside)
+        self.assertEqual(first, second)
+        self.assertEqual(query_count, 8)
+        self.assertEqual(len(callback_locations), query_count)
+
+    def test_turn_footprint_validation_reuses_exact_geometry(self):
+        generator = self._generator(
+            config={"drivable_footprint_cache_xy_resolution_m": 0.0},
+            horizon_steps=6,
+        )
+        callback_locations = []
+
+        def waypoint(location):
+            callback_locations.append((location.x, location.y, location.z))
+            return types.SimpleNamespace(
+                transform=types.SimpleNamespace(
+                    location=types.SimpleNamespace(x=location.x, y=location.y),
+                    rotation=types.SimpleNamespace(yaw=0.0),
+                ),
+                lane_width=4.0,
+            )
+
+        generator._drivable_waypoint_callback = waypoint
+        reference = [
+            {
+                "x_ref_m": float(index),
+                "y_ref_m": 0.0,
+                "heading_rad": 0.0,
+            }
+            for index in range(6)
+        ]
+        arguments = dict(
+            reference_samples=reference,
+            ego_half_width_m=1.0,
+            ego_half_length_m=2.4,
+            safety_margin_m=0.15,
+            max_violations=0,
+        )
+
+        first = generator.validate_turn_swept_footprint(**arguments)
+        first_query_count = len(callback_locations)
+        second = generator.validate_turn_swept_footprint(**arguments)
+
+        self.assertEqual(first, second)
+        self.assertGreater(first_query_count, 0)
+        self.assertEqual(len(callback_locations), first_query_count)
+
+        changed_reference = [dict(sample) for sample in reference]
+        changed_reference[-1]["y_ref_m"] = 0.01
+        generator.validate_turn_swept_footprint(
+            **dict(arguments, reference_samples=changed_reference)
+        )
+        self.assertGreater(len(callback_locations), first_query_count)
+
+    def test_static_map_cache_reset_forces_turn_revalidation(self):
+        generator = self._generator(horizon_steps=3)
+        callback_locations = []
+
+        def waypoint(location):
+            callback_locations.append((location.x, location.y, location.z))
+            return types.SimpleNamespace(
+                transform=types.SimpleNamespace(
+                    location=types.SimpleNamespace(x=location.x, y=location.y),
+                    rotation=types.SimpleNamespace(yaw=0.0),
+                ),
+                lane_width=4.0,
+            )
+
+        generator._drivable_waypoint_callback = waypoint
+        arguments = dict(
+            reference_samples=[
+                {"x_ref_m": 0.0, "y_ref_m": 0.0, "heading_rad": 0.0},
+                {"x_ref_m": 1.0, "y_ref_m": 0.0, "heading_rad": 0.0},
+                {"x_ref_m": 2.0, "y_ref_m": 0.0, "heading_rad": 0.0},
+            ],
+            ego_half_width_m=1.0,
+            ego_half_length_m=2.4,
+            safety_margin_m=0.15,
+        )
+
+        generator.validate_turn_swept_footprint(**arguments)
+        first_query_count = len(callback_locations)
+        generator.clear_static_map_caches()
+        generator.validate_turn_swept_footprint(**arguments)
+
+        self.assertGreater(len(callback_locations), first_query_count)
+
     def test_drivable_footprint_rejects_an_outside_corner(self):
         generator = self._generator()
 

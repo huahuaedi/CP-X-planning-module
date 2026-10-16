@@ -572,6 +572,7 @@ class RuleBasedBehaviorPlanner:
         local_avoidance_target_lane_id: int | None = None,
         lane_change_completion_allowed: bool = True,
         static_obstacle_stop_active: bool = False,
+        available_lane_ids: Sequence[int] | None = None,
     ) -> BehaviorCommand:
         """
         Run one planning cycle.
@@ -637,9 +638,21 @@ class RuleBasedBehaviorPlanner:
         if self._state_enter_time_s is None and self._current_update_time_s is not None:
             self._state_enter_time_s = float(self._current_update_time_s)
 
-        if len(lane_safety_scores) == 0:
+        supplied_available = [
+            int(lane_id)
+            for lane_id in list(available_lane_ids or [])
+            if int(lane_id) != 0
+        ]
+        if supplied_available:
+            # AD-map lane ids are opaque. Their numeric ordering says nothing
+            # about left/right adjacency, so preserve the rightmost-to-leftmost
+            # order owned by the immutable local-map frame.
+            available = list(dict.fromkeys(supplied_available))
+        elif len(lane_safety_scores) == 0:
             available = [int(ego_lane_id)] if int(ego_lane_id) != 0 else []
         else:
+            # Backwards-compatible path for direct users that have not yet
+            # adopted the explicit lateral-order contract.
             available = sorted(
                 {
                     int(lane_id)

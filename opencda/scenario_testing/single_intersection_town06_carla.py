@@ -521,9 +521,16 @@ def run_scenario(opt, scenario_params):
                 pass
 
         for v in single_cav_list:
-            v.destroy()
+            try:
+                v.destroy()
+            except (RuntimeError, AttributeError):
+                pass
         for v in bg_veh_list:
-            v.destroy()
+            try:
+                if bool(getattr(v, "is_alive", True)):
+                    v.destroy()
+            except (RuntimeError, AttributeError):
+                pass
         for walker in scripted_walkers:
             try:
                 walker.destroy()

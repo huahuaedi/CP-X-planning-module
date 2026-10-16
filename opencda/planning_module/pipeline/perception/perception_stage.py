@@ -24,6 +24,7 @@ class PerceptionStageResult:
     front_gap_m: Optional[float]
     front_actor_id: str
     front_actor_speed_mps: Optional[float]
+    front_actor_snapshot: Mapping[str, Any]
 
 
 class PerceptionStage:
@@ -92,6 +93,7 @@ class PerceptionStage:
         )
         actor_id = str(actor_id or "")
         actor_speed_mps = None
+        front = None
         if actor_id:
             front = next(
                 (
@@ -113,6 +115,7 @@ class PerceptionStage:
             front_gap_m=None if gap_m is None else float(gap_m),
             front_actor_id=actor_id,
             front_actor_speed_mps=actor_speed_mps,
+            front_actor_snapshot=dict(front or {}),
         )
 
     @classmethod

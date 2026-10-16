@@ -219,6 +219,7 @@ class CandidateReferenceBuildContext:
     baseline_reference: Sequence[Mapping[str, object]]
     baseline_debug: Mapping[str, object]
     current_lane_id: int
+    route_physical_target_lane_id: int
     route_optimal_lane_id: int
     route_reference_allowed: bool
     route_reference_gate_reason: str
@@ -254,6 +255,11 @@ class ReferenceLineProvider(StableReferenceLineProvider):
         self._snapshots = {
             mode: ReferenceLineSnapshot(mode=mode) for mode in _MODES
         }
+        # Candidate evaluation can request the same persistent mode several
+        # times for one ego pose.  Those reads must be idempotent: otherwise
+        # each candidate advances the shared cursor by another bounded step
+        # and can consume an entire turn master in a few planning ticks.
+        self._window_pose_lower_s = {}
         # Candidate variants share one target corridor within a planning
         # tick.  Keep this cache deliberately tick-local: it removes repeated
         # route/reference construction without becoming another persistent
@@ -274,6 +280,9 @@ class ReferenceLineProvider(StableReferenceLineProvider):
         """Point the builder at a different map (route backend switch)."""
 
         self.builder.map_planner = map_planner
+        clear_caches = getattr(self.builder, "clear_static_map_caches", None)
+        if callable(clear_caches):
+            clear_caches()
 
     def stop_target_forward(self, **kwargs: Any) -> tuple[float, bool]:
         """Forward distance to a stop target in the ego body frame."""
@@ -1119,6 +1128,30 @@ class ReferenceLineProvider(StableReferenceLineProvider):
         )
         return [dict(sample) for sample in reference], list(destination), str(reason)
 
+    def preview_turn_master(self, request: TurnReferenceRequest) -> str:
+        """Build distant turn preview geometry without freezing a master.
+
+        PREPARE_TURN opens before the controller starts tracking the turn.
+        Its rolling local-map snapshot may not contain the complete junction
+        yet, so locking that early geometry creates a short immutable master
+        which ends before ego reaches the turn.  The persistent master is
+        installed only when the connector transition is actually published.
+        """
+
+        _master, reason = self._turn_master_geometry(
+            local_map=request.local_map,
+            config=request.config,
+            ego_location=request.ego_location,
+            current_lane_id=int(request.current_lane_id),
+            target_lane_id=int(request.target_lane_id),
+            turn_speed_mps=max(0.4, float(request.target_speed_mps)),
+            lock_master=False,
+            turn_direction=str(request.turn_direction),
+            route_revision=str(request.route_revision),
+            map_epoch=str(request.map_epoch),
+        )
+        return str(reason)
+
     def _turn_master_geometry(
         self, *, local_map: Any, config: Mapping[str, Any], ego_location: Any,
         current_lane_id: int, target_lane_id: int, turn_speed_mps: float,
@@ -1135,6 +1168,29 @@ class ReferenceLineProvider(StableReferenceLineProvider):
         reason = ""
         turn_snapshot = self.snapshot(TURN)
         master = turn_snapshot.mutable_samples()
+        master_lane_ids = {
+            int(sample.get("lane_id", 0) or 0)
+            for sample in master
+            if int(sample.get("lane_id", 0) or 0)
+        }
+        master_arc_m = sum(
+            math.hypot(
+                float(second.get("x_ref_m", second.get("x", 0.0)))
+                - float(first.get("x_ref_m", first.get("x", 0.0))),
+                float(second.get("y_ref_m", second.get("y", 0.0)))
+                - float(first.get("y_ref_m", first.get("y", 0.0))),
+            )
+            for first, second in zip(master, master[1:])
+        )
+        lane_boundary_handoff = bool(
+            turn_snapshot.active
+            and int(current_lane_id) != 0
+            and int(current_lane_id) not in master_lane_ids
+            and float(master_arc_m) - float(turn_snapshot.progress_s_m)
+            <= max(0.0, float(config.get(
+                "turn_master_lane_handoff_remaining_m", 2.5
+            )))
+        )
         lifecycle_changed = bool(
             turn_snapshot.active
             and (
@@ -1145,6 +1201,7 @@ class ReferenceLineProvider(StableReferenceLineProvider):
                     and str(turn_snapshot.maneuver_direction).strip().lower()
                     != str(turn_direction).strip().lower()
                 )
+                or lane_boundary_handoff
             )
         )
         local_map_route_revision = str(
@@ -1164,6 +1221,7 @@ class ReferenceLineProvider(StableReferenceLineProvider):
                 candidate_master, reason = self.reference_from_local_map(
                     local_map,
                     start_lane_id=int(current_lane_id),
+                    target_lane_id=int(target_lane_id),
                     target_speed_mps=float(turn_speed_mps),
                     maximum_join_distance_m=float(
                         config.get("local_map_maximum_join_distance_m", 5.0)
@@ -1428,13 +1486,20 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             snapshot = self.snapshot(TURN)
             if snapshot.active and str(snapshot.maneuver_direction) != direction:
                 self.release(TURN, event="reset")
-            preview_reference, preview_destination, preview_reason = (
-                self.turn_reference(replace(
-                    request,
-                    lock_master=True,
-                    turn_direction=direction,
-                ))
+            preview_request = replace(
+                request,
+                # Candidate preview is a rolling read of the local map.  It
+                # must not freeze a short incoming-lane tail as the TURN
+                # master before ego is actually on the connector.
+                lock_master=False,
+                turn_direction=direction,
             )
+            if float(upcoming_turn_distance_m) <= float(transition_arc_m):
+                preview_reference, preview_destination, preview_reason = (
+                    self.turn_reference(preview_request)
+                )
+            else:
+                preview_reason = self.preview_turn_master(preview_request)
             diagnostics.update({
                 "turn_master_preview_reason": str(preview_reason),
                 "turn_master_preview_distance_m": float(
@@ -1448,12 +1513,15 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             transition_reason = str(preview_reason)
             if not transition_reference:
                 transition_reference, transition_destination, transition_reason = (
-                    self.turn_reference(replace(
-                        request,
-                        lock_master=True,
-                        turn_direction=direction,
-                    ))
+                    self.turn_reference(preview_request)
                 )
+            if len(transition_reference) < max(2, int(request.horizon_steps)):
+                transition_reference = []
+                transition_destination = []
+                transition_reason = ";".join(item for item in (
+                    str(transition_reason),
+                    "preturn_connector_deferred:incomplete_horizon",
+                ) if item)
             # PREPARE_TURN remains longitudinally owned by SpeedPlanner.
             for sample in transition_reference:
                 sample["v_ref_mps"] = float(request.target_speed_mps)
@@ -1819,6 +1887,21 @@ class ReferenceLineProvider(StableReferenceLineProvider):
                 reference = override.mutable_samples()
             diagnostics.update(dict(override.diagnostics))
 
+        turn_current_lane_id = int(context.current_lane_id)
+        if decision in {"intersection_turn_left", "intersection_turn_right"}:
+            authoritative_lane_id = int(
+                getattr(context.authoritative_ego_waypoint, "ad_lane_id", 0)
+                or 0
+            )
+            if authoritative_lane_id:
+                turn_current_lane_id = authoritative_lane_id
+        turn_target_lane_id = int(target_lane_id)
+        if decision in {"intersection_turn_left", "intersection_turn_right"}:
+            physical_target_lane_id = int(
+                context.route_physical_target_lane_id or 0
+            )
+            if physical_target_lane_id:
+                turn_target_lane_id = physical_target_lane_id
         turn_request = TurnReferenceRequest(
             local_map=context.local_map,
             config=context.planner_config,
@@ -1827,8 +1910,8 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             ego_location=context.ego_location,
             ego_yaw_rad=float(context.ego_yaw_rad),
             current_state=context.current_state,
-            current_lane_id=int(context.current_lane_id),
-            target_lane_id=target_lane_id,
+            current_lane_id=int(turn_current_lane_id),
+            target_lane_id=int(turn_target_lane_id),
             target_speed_mps=target_speed_mps,
             destination_state=destination,
             lock_master=decision in {
@@ -2240,6 +2323,7 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             install_event=normalized_event,
             build_reason=str(build_reason or normalized_event),
         )
+        self._window_pose_lower_s.pop(normalized_mode, None)
         return True, "reference_installed:%s:%s" % (
             normalized_mode, normalized_event
         )
@@ -2261,11 +2345,24 @@ class ReferenceLineProvider(StableReferenceLineProvider):
         current = self.snapshot(normalized_mode)
         if not current.active:
             return StableReferenceWindow((), 0.0, 0.0, "reference_inactive")
+        pose_key = (
+            int(current.geometry_revision),
+            float(ego_x_m),
+            float(ego_y_m),
+        )
+        prior_pose = self._window_pose_lower_s.get(normalized_mode)
+        if prior_pose is not None and prior_pose[:3] == pose_key:
+            lower_s_m = float(prior_pose[3])
+        else:
+            lower_s_m = float(current.progress_s_m)
+            self._window_pose_lower_s[normalized_mode] = (
+                pose_key[0], pose_key[1], pose_key[2], lower_s_m,
+            )
         result = self.window_from_reference(
             current.mutable_samples(),
             ego_x_m=float(ego_x_m),
             ego_y_m=float(ego_y_m),
-            lower_s_m=float(current.progress_s_m),
+            lower_s_m=float(lower_s_m),
             first_forward_m=float(first_forward_m),
             spacing_m=float(spacing_m),
             count=int(count),
@@ -2362,6 +2459,7 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             geometry_revision=current.geometry_revision,
             build_reason="released:" + normalized_event,
         )
+        self._window_pose_lower_s.pop(normalized_mode, None)
         return True, "reference_released:%s:%s" % (
             normalized_mode, normalized_event
         )

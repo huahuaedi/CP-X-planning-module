@@ -33,6 +33,7 @@ from pipeline.behavior.static_obstacle_stage import (
     select_local_avoidance_lane as _select_static_obstacle_local_avoidance_lane,
 )
 from opencda_bridge.cp_provider import OpenCDACPProvider
+from opencda_bridge.planner_input_adapter import _lateral_lane_frame
 from pipeline.behavior.traffic_light_memory import TrafficLightMemory
 from pipeline.reference.reference_gate import FinalReferenceGate
 from pipeline.reference.reference_generator import GeneratedReference, ReferenceGenerator
@@ -56,6 +57,27 @@ from pipeline.perception.perception_stage import PerceptionStage
 
 
 class OpenCDABridgeInputFusionTests(unittest.TestCase):
+    def test_local_corridors_are_not_flattened_into_lateral_lane_order(self):
+        corridors = (
+            SimpleNamespace(offset=-1, lane_ids=(900, 901, 902)),
+            SimpleNamespace(offset=0, lane_ids=(100, 101, 102)),
+        )
+        snapshot = SimpleNamespace(
+            frame_id=7,
+            corridors=corridors,
+            lane_at_ego_station=lambda offset: {-1: 900, 0: 100}.get(offset),
+        )
+
+        lanes, segment_to_lane = _lateral_lane_frame(
+            local_map=snapshot,
+            fallback_lane_ids=(100, 900),
+            current_lane_id=100,
+        )
+
+        self.assertEqual(lanes, [900, 100])
+        self.assertEqual(segment_to_lane[902], 900)
+        self.assertEqual(segment_to_lane[102], 100)
+
     def test_route_context_reuses_immutable_lane_geometry_by_planner(self):
         stage = RouteContextStage()
         waypoint = SimpleNamespace(
@@ -1481,6 +1503,34 @@ class OpenCDABridgeInputFusionTests(unittest.TestCase):
         self.assertEqual(state, "red")
         self.assertEqual(stop_target["x_m"], 10.0)
         self.assertEqual(reason, "traffic_memory_hold_red")
+
+    def test_traffic_memory_reset_releases_temporal_and_world_stop_latches(self):
+        memory = TrafficLightMemory(
+            hold_unknown_s=0.8,
+            hold_stop_unknown_until_green=True,
+        )
+        stop_target = {"x_m": 10.0, "y_m": 0.0}
+        memory.update(state="red", stop_target=stop_target, sim_time_s=1.0)
+        memory.latch_stop_target(
+            traffic_state="red",
+            stop_target=stop_target,
+            ego_x_m=0.0,
+            ego_y_m=0.0,
+            ego_yaw_rad=0.0,
+            current_lane_id=7,
+            virtual_stop_distance_m=12.0,
+        )
+
+        memory.reset()
+        state, target, reason = memory.update(
+            state="unknown", stop_target=None, sim_time_s=1.1,
+        )
+
+        self.assertEqual(state, "unknown")
+        self.assertIsNone(target)
+        self.assertEqual(reason, "")
+        self.assertIsNone(memory.latched_stop_target)
+        self.assertEqual(memory.latched_stop_state, "unknown")
 
     def test_traffic_memory_uses_asymmetric_unknown_hold_and_green_confirm(self):
         memory = TrafficLightMemory(

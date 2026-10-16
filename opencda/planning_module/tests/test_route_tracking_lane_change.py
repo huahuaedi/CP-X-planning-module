@@ -425,6 +425,10 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
                 "y_ref_m": 3.5,
                 "heading_rad": 0.0,
                 "lane_change_progress": 1.0,
+                "road_center_offset_m": -1.75,
+                "road_left_width_m": 3.5,
+                "road_right_width_m": 3.5,
+                "road_boundary_source": "authorized_lane_change_union",
             }
             for index in range(30)
         ])
@@ -460,6 +464,15 @@ class RouteTrackingLaneChangeTests(unittest.TestCase):
         self.assertTrue(
             all(
                 float(row["lane_change_progress"]) == 1.0
+                for row in self._lane_change_reference(bridge)
+            )
+        )
+        self.assertTrue(
+            all(
+                float(row["road_left_width_m"]) == 3.5
+                and float(row["road_right_width_m"]) == 3.5
+                and row["road_boundary_source"]
+                == "authorized_lane_change_union_stabilization"
                 for row in self._lane_change_reference(bridge)
             )
         )

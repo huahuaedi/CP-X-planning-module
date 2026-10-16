@@ -35,3 +35,18 @@ vehicle_base:
 
 scenario:
   max_ticks: 2400
+  single_cav_list:
+    - name: cav1
+      spawn_position: [-10.75, 162.52, 0.3, 0, 89.47, 0]
+      destination: [64.38, 248.05, 0.3]
+      v2x:
+        communication_range: 60
+      behavior:
+        local_planner:
+          debug_trajectory: true
+          debug: true
+      planner:
+        debug_output_dir: artifacts/debug/single_left_lane_turn_isolated
+        global_planner_mode: dij
+        global_planner_xodr_path: Global_Planner/maps/Town06.xodr
+        global_planner_strict: true

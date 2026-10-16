@@ -39,6 +39,8 @@ def test_perception_stage_builds_one_fused_obstacle_view():
     )
     assert result.front_actor_id == "remote"
     assert result.front_actor_speed_mps == 4.5
+    assert result.front_actor_snapshot["vehicle_id"] == "remote"
+    assert result.front_actor_snapshot["source"] == "opencda_cp"
 
 
 def test_ignore_dynamic_objects_is_applied_before_mpc_and_gap():

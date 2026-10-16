@@ -66,6 +66,7 @@ if "carla" not in sys.modules:
     sys.modules["carla"] = fake_carla
 
 from opencda_bridge.cpx_mpc_planner import CPXMPCPlannerBridge  # noqa: E402
+from opencda_bridge.planner_assembly import _is_reusable_admap_planner
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 MAPS_DIR = REPO_ROOT / "opencda" / "planning_module" / "Global_Planner" / "maps"
@@ -208,3 +209,19 @@ def test_cav_conflict_governor_starts_at_the_configured_ceiling(bridge):
     governor = bridge.pipeline.cooperative.governor
     assert governor.current_max_relevant_agents == 6
     assert governor.current_max_modes_per_agent == 6
+
+def test_injected_admap_planner_is_reused_as_the_single_owner(bridge):
+    shared_planner = bridge.global_planner
+    reused = CPXMPCPlannerBridge(
+        _VehicleManager(),
+        dict(bridge.config),
+        map_planner=shared_planner,
+    )
+
+    assert _is_reusable_admap_planner(shared_planner)
+    assert reused.global_planner is shared_planner
+    assert reused.topology_map is shared_planner
+    assert reused.waypoint_map_planner is shared_planner
+    assert reused.route_manager.global_planner is shared_planner
+    assert reused.global_planner_owned_by_bridge is False
+    assert bridge.global_planner_owned_by_bridge is True

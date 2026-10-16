@@ -19,7 +19,7 @@ from omegaconf.listconfig import ListConfig
 import carla
 import numpy as np
 
-from opencda.core.common.vehicle_manager import VehicleManager
+from opencda.core.common.vehicle_manager import VehicleManager, USE_ROS_COMMAND
 from opencda.core.application.platooning.platooning_manager import \
     PlatooningManager
 from opencda.core.common.rsu_manager import RSUManager
@@ -28,6 +28,7 @@ from opencda.scenario_testing.utils.customized_map_api import \
     load_customized_world, bcolors
 from opencda.scenario_testing.utils.destination_extension import \
     resolve_destination_extension
+from opencda.scenario_testing.utils.tick_pacing import WorldTickPacer
 
 
 def _resolve_traffic_manager_port(traffic_config):
@@ -186,6 +187,26 @@ class ScenarioManager:
         self.carla_version = carla_version
 
         simulation_config = scenario_params['world']
+
+        # CARLA synchronous mode fixes simulation time per tick but does not
+        # pace ticks against wall time.  Without one global pacer a 0.05 s
+        # simulation step can run at 50+ wall-clock Hz, overfeeding ROS and
+        # prediction.  Enable real-time pacing by default at the ROS planner
+        # boundary; scenarios may explicitly override it.
+        realtime_pacing = simulation_config.get('realtime_pacing', None)
+        if realtime_pacing is None:
+            realtime_pacing = bool(USE_ROS_COMMAND)
+        realtime_factor = max(
+            1.0e-6,
+            float(simulation_config.get('realtime_factor', 1.0)),
+        )
+        self._world_tick_pacer = WorldTickPacer(
+            period_s=(
+                float(simulation_config['fixed_delta_seconds'])
+                / realtime_factor
+            ),
+            enabled=bool(realtime_pacing),
+        )
 
         # set random seed if stated
         if 'seed' in simulation_config:
@@ -895,6 +916,7 @@ class ScenarioManager:
         """
         Tick the server.
         """
+        self._world_tick_pacer.wait()
         self.world.tick()
 
     def destroyActors(self):

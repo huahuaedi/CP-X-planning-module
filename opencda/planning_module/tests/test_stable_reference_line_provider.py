@@ -173,6 +173,35 @@ def test_reference_master_does_not_bridge_disconnected_successor():
     assert reason == "local_map_snapshot_route:10"
 
 
+def test_reference_master_appends_connected_physical_target_when_cursor_stale():
+    snapshot = _snapshot()
+    object.__setattr__(snapshot, "route_lane_sequence", (10,))
+
+    reference, reason = StableReferenceLineProvider().reference_from_local_map(
+        snapshot,
+        start_lane_id=10,
+        target_lane_id=11,
+        target_speed_mps=3.0,
+    )
+
+    assert [sample["lane_id"] for sample in reference] == [10, 10, 11]
+    assert reason == "local_map_snapshot_route:10>11"
+
+
+def test_reference_master_rejects_disconnected_physical_target():
+    snapshot = _snapshot(second_lane_start_x=20.0)
+    object.__setattr__(snapshot, "route_lane_sequence", (10,))
+
+    reference, reason = StableReferenceLineProvider().reference_from_local_map(
+        snapshot,
+        start_lane_id=10,
+        target_lane_id=11,
+    )
+
+    assert {sample["lane_id"] for sample in reference} == {10}
+    assert reason == "local_map_snapshot_route:10"
+
+
 def test_reference_master_conditions_lane_join_to_continuous_tangent():
     snapshot = build_local_map_snapshot(
         frame_id=1,

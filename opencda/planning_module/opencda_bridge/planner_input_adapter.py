@@ -31,6 +31,69 @@ from utility.global_planner import (
 )
 
 
+def _lateral_lane_frame(
+    local_map: Any,
+    fallback_lane_ids: Sequence[int],
+    current_lane_id: int,
+) -> tuple[list[int], dict[int, int]]:
+    """Return one physical lane id per lateral corridor at ego station.
+
+    An AD-map corridor contains several consecutive *longitudinal* segment
+    ids. BehaviorPlanner's ``available_lane_ids`` contract is different: it
+    is an ordered, rightmost-to-leftmost list of physical lanes beside ego.
+    Flattening corridor segment ids into that list makes a longitudinal
+    successor look like an adjacent lane and can postpone a required lane
+    change until the route is no longer reachable.
+
+    The returned lookup maps every segment in a corridor to the single lane
+    id representing that corridor at the current ego station. Perception,
+    lane safety and prediction can therefore use the same lateral identity.
+    """
+
+    representatives: list[int] = []
+    segment_to_representative: dict[int, int] = {}
+    if local_map is not None and int(getattr(local_map, "frame_id", 0) or 0) > 0:
+        corridors = sorted(
+            tuple(getattr(local_map, "corridors", ()) or ()),
+            key=lambda corridor: int(corridor.offset),
+        )
+        for corridor in corridors:
+            representative = getattr(local_map, "lane_at_ego_station", lambda _offset: None)(
+                int(corridor.offset)
+            )
+            representative_id = int(representative or 0)
+            if representative_id == 0:
+                continue
+            if representative_id not in representatives:
+                representatives.append(representative_id)
+            for lane_id in tuple(getattr(corridor, "lane_ids", ()) or ()):
+                normalized_lane_id = int(lane_id or 0)
+                if normalized_lane_id != 0:
+                    segment_to_representative[normalized_lane_id] = representative_id
+
+    normalized_current = int(current_lane_id or 0)
+    if normalized_current != 0:
+        # The matched ego segment is authoritative for offset zero.
+        previous_current_representative = segment_to_representative.get(normalized_current)
+        if previous_current_representative in representatives:
+            representatives[
+                representatives.index(previous_current_representative)
+            ] = normalized_current
+            for segment_id, representative_id in tuple(segment_to_representative.items()):
+                if int(representative_id) == int(previous_current_representative):
+                    segment_to_representative[int(segment_id)] = normalized_current
+        elif normalized_current not in representatives:
+            representatives.append(normalized_current)
+        segment_to_representative[normalized_current] = normalized_current
+
+    if not representatives:
+        representatives = list(dict.fromkeys(
+            int(lane_id) for lane_id in list(fallback_lane_ids or [])
+            if int(lane_id or 0) != 0
+        ))
+    return representatives, segment_to_representative
+
+
 @dataclass(frozen=True)
 class PlannerInputAdapterOutput:
     """Planner-facing input and reusable per-tick adapter products."""
@@ -173,7 +236,7 @@ class OpenCDAPlanningAdapter:
             current_lane_id = int(authoritative_lane_id)
         if authoritative_waypoint is not None:
             ego_waypoint = authoritative_waypoint
-        lane_ids = [
+        fallback_lane_ids = [
             int(canonical_lane_id_for_waypoint(wp))
             for wp in list(canonical_lane_waypoints(ego_waypoint) or [])
             if int(canonical_lane_id_for_waypoint(wp)) != 0
@@ -204,13 +267,11 @@ class OpenCDAPlanningAdapter:
             for lane_id in list(corridor_lane_ids or []):
                 if int(lane_id or 0) != 0:
                     lane_to_offset[int(lane_id)] = int(offset)
-        for corridor_lane_ids in local_corridors.values():
-            for lane_id in list(corridor_lane_ids or []):
-                if int(lane_id or 0) != 0:
-                    lane_ids.append(int(lane_id))
-        lane_ids = list(dict.fromkeys(lane_ids))
-        if not lane_ids:
-            lane_ids = [int(current_lane_id)] if current_lane_id != 0 else []
+        lane_ids, segment_to_lateral_lane = _lateral_lane_frame(
+            local_map=local_map,
+            fallback_lane_ids=fallback_lane_ids,
+            current_lane_id=int(current_lane_id),
+        )
         snapshot_target_lane_id = int(
             getattr(local_map, "route_target_lane_id", 0) or 0
         )
@@ -284,11 +345,17 @@ class OpenCDAPlanningAdapter:
         # tracked snapshot as the single per-tick map-query owner so each
         # obstacle is projected onto the CARLA reference map only once.
         _ts = time.monotonic()
-        lane_assignments = bridge.assign_obstacles_to_lanes(
+        raw_lane_assignments = bridge.assign_obstacles_to_lanes(
             tracked_obstacles,
             ego_waypoint=ego_waypoint,
             ego_lane_id=int(current_lane_id),
         )
+        lane_assignments = {
+            str(track_id): int(
+                segment_to_lateral_lane.get(int(lane_id), int(lane_id))
+            )
+            for track_id, lane_id in raw_lane_assignments.items()
+        }
         bridge._accum_stage_ms("adapter_assign_obstacles_to_lanes", time.monotonic() - _ts)
         _ts = time.monotonic()
         lane_safety_scores = bridge.lane_safety_scorer.compute_lane_scores(

@@ -412,6 +412,25 @@ class CPXMPCPlannerBridge:
 
         return self._run_full_cpx_pipeline_step()
 
+    def _resolve_ego_runtime_input(self, latest_update):
+        """Use explicit platform input before the native OpenCDA fallback."""
+        ego_transform = latest_update.get("ego_transform")
+        ego_speed_kmh = latest_update.get("ego_speed_kmh")
+        if ego_transform is not None and ego_speed_kmh is not None:
+            return ego_transform, float(ego_speed_kmh)
+
+        localizer = getattr(self.vehicle_manager, "localizer", None)
+        if localizer is None:
+            raise RuntimeError(
+                "Planner input is missing ego pose/speed and no OpenCDA "
+                "localizer fallback is available."
+            )
+        if ego_transform is None:
+            ego_transform = localizer.get_ego_pos()
+        if ego_speed_kmh is None:
+            ego_speed_kmh = localizer.get_ego_spd()
+        return ego_transform, float(ego_speed_kmh)
+
     def _run_full_cpx_pipeline_step(self):
         """Gather this tick's CARLA/OpenCDA input, then run PlanningPipeline.plan().
 
@@ -441,15 +460,13 @@ class CPXMPCPlannerBridge:
                     print(f"[CP-X OpenCDA Bridge] native CP publish failed: {exc}")
         self._accum_stage_ms("cp_publish", time.monotonic() - _ts_stage)
         _ts_stage = time.monotonic()
+        ego_transform, ego_speed_kmh = self._resolve_ego_runtime_input(
+            latest_update
+        )
         cycle = self.pipeline.begin_cycle(
             timestamp_s=float(self._sim_time_s()),
-            ego_transform=(
-                latest_update.get("ego_transform")
-                or self.vehicle_manager.localizer.get_ego_pos()
-            ),
-            ego_speed_kmh=float(latest_update.get(
-                "ego_speed_kmh", self.vehicle_manager.localizer.get_ego_spd()
-            )),
+            ego_transform=ego_transform,
+            ego_speed_kmh=ego_speed_kmh,
             detected_objects=(
                 latest_update.get("detected_objects")
                 if latest_update.get("detected_objects") is not None
@@ -1248,6 +1265,10 @@ class CPXMPCPlannerBridge:
                 current_acceleration_mps2=float(self._last_accel_mps2),
                 current_steering_rad=float(self._last_steer_rad),
                 route_required=bool(route_lane_change_required),
+                route_physical_target_lane_id=int(
+                    planning_context.behavior_context.route_behavior.context
+                    .physical_target_lane_id
+                ),
                 traffic_stop_active=bool(scenario_decision.stop_goal_active),
                 turn_prepare_speed_suppressed=bool(
                     turn_prepare_speed_suppressed_by_lane_change
@@ -2498,7 +2519,7 @@ class CPXMPCPlannerBridge:
 
         from opencda.planning_module.opencda_bridge.platform_ports import MapLookupPort
         port = getattr(self, "map_lookup_port", None) or MapLookupPort.from_owner(self)
-        return port.drivable_waypoint(location) or port.waypoint(location)
+        return port.drivable_waypoint(location)
 
     def _lane_id_at_location(self, location: carla.Location) -> int:
         from opencda.planning_module.opencda_bridge.platform_ports import MapLookupPort

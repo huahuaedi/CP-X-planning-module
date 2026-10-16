@@ -199,6 +199,57 @@ class GlobalPlanner:
             })
         return result
 
+    def get_drivable_waypoint(
+        self,
+        position,
+        search_radius_m: float | None = None,
+    ) -> Waypoint | None:
+        """Return the best map match only when the query is inside a lane.
+
+        This preserves the ordering used by :meth:`get_waypoint_candidates`,
+        but constructs only the selected waypoint.  Footprint validation needs
+        one in-lane match, not waypoint objects for every nearby projection.
+        """
+        self._ensure_loaded()
+        enu_point = backend.create_enu_point(self.to_enu(position))
+        matches = backend.get_map_matches(
+            enu_point,
+            search_radius_m
+            if search_radius_m is not None
+            else self.default_search_radius_m,
+        )
+        raw_point = backend.enu_point_to_tuple(enu_point)
+        best_match = None
+        for match in matches:
+            if not backend.match_is_in_lane(match):
+                continue
+            lane_id = backend.get_match_lane_id(match)
+            parametric_offset = backend.get_match_parametric_offset(match)
+            center_point = backend.sample_lane_center_at_offset(
+                lane_id,
+                parametric_offset,
+            )
+            sort_key = (
+                euclidean_distance(raw_point, center_point),
+                -backend.get_match_probability(match),
+                lane_id,
+            )
+            if best_match is None or sort_key < best_match[0]:
+                best_match = (
+                    sort_key,
+                    lane_id,
+                    parametric_offset,
+                    center_point,
+                )
+        if best_match is None:
+            return None
+        return self._make_waypoint_from_lane_offset(
+            best_match[1],
+            best_match[2],
+            enu_position=best_match[3],
+            include_boundaries=False,
+        )
+
     def get_lane_centerline(self, lane_id: int) -> list[Waypoint]:
         """Return cached lane-center waypoints for one AD lane id.
 
@@ -524,9 +575,20 @@ class GlobalPlanner:
         input: `lane_id` (`int`), `forward` (`bool`)
         output: connected lane ids (`list[int]`)
         """
-        if forward:
-            return list(self._lane_cache[lane_id]["forward_lane_ids"])
-        return list(self._lane_cache[lane_id]["backward_lane_ids"])
+        lane_data = self._lane_cache.get(int(lane_id))
+        if lane_data is None:
+            return []
+        key = "forward_lane_ids" if forward else "backward_lane_ids"
+        # AD-map connectivity can contain non-routeable boundary/connector
+        # lane ids that are intentionally absent from our drivable-lane
+        # cache.  They are not valid Waypoint.next()/previous() targets.  A
+        # raw subscript here used to raise KeyError at junction exits and
+        # stopped the ROS planner from publishing control altogether.
+        return [
+            int(neighbor_id)
+            for neighbor_id in list(lane_data.get(key, []) or [])
+            if int(neighbor_id) in self._lane_cache
+        ]
 
     def _advance_offset(self, lane_id: int, start_offset: float, distance_m: float, forward: bool) -> float:
         """Advance one lane offset by a physical distance.
@@ -561,6 +623,8 @@ class GlobalPlanner:
         lane_id: int,
         parametric_offset: float,
         enu_position: tuple[float, float, float] | None = None,
+        *,
+        include_boundaries: bool = True,
     ) -> Waypoint:
         """Create one waypoint from a known lane id and parametric offset.
 
@@ -570,7 +634,15 @@ class GlobalPlanner:
         lane_id = int(lane_id)
         lane_data = self._lane_cache[lane_id]
         point_enu = enu_position or backend.sample_lane_center_at_offset(lane_id, parametric_offset)
-        boundaries = backend.get_lane_boundaries_enu(lane_id, parametric_offset)
+        # Footprint occupancy only consumes the centre, heading, and width.
+        # Avoid two additional native border queries for that high-frequency
+        # path while preserving full Waypoint geometry for every normal route
+        # and lane-topology query.
+        boundaries = (
+            backend.get_lane_boundaries_enu(lane_id, parametric_offset)
+            if bool(include_boundaries)
+            else None
+        )
         return Waypoint(
             position=to_carla_dict(point_enu),
             enu_position=point_enu,

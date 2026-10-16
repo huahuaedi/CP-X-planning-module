@@ -36,13 +36,15 @@ from opencda.planning_module.opencda_bridge.cpx_mpc_planner import (
 from opencda.planning_module.utility.cp_messages import load_cp_message_payload
 from opencda.planning_module.opencda_bridge.cp_provider import OpenCDACPProvider
 from opencda.planning_module.pipeline.execution.actuator_mapper import CarlaActuatorMapper
+from opencda.planning_module.opencda_bridge.platform_ports import VehicleDynamics
 from opencda.planning_module.utility.config_loader import load_yaml_file
 from opencda import data_transmitter
 from opencda.data_receiver import DataReceiver
 
 
-# Run exactly one planner. True selects the ROS planner; False selects the local CP-X planner.
-USE_ROS_COMMAND = False
+# Planner functional baseline: run CP-X in-process. Keep the ROS boundary
+# dormant until the single- and multi-vehicle planner regressions are frozen.
+USE_ROS_COMMAND = True
 
 # Save the large planner input/debug records only when an input-frame comparison is needed.
 store_input_frame = False
@@ -229,6 +231,7 @@ class VehicleManager(object):
         control_config = config_yaml['controller']
         v2x_config = config_yaml['v2x']
         planner_config = dict(config_yaml.get('planner', {}) or {})
+        self._ros_planner_config = dict(planner_config)
         self.store_input_frame = bool(store_input_frame)
         self.debug_time = bool(debug_time)
         # `store_input_frame` force-enables the heavy records; it must not
@@ -258,7 +261,24 @@ class VehicleManager(object):
         self._shadow_cycle_time_s = None
         self._ros_cycle_sent = False
         self._ros_retry_after_monotonic = 0.0
+        self._ros_send_timeout_s = max(
+            0.05,
+            float(planner_config.get("ros_send_timeout_s", 0.20)),
+        )
+        self._ros_send_retry_s = max(
+            0.0,
+            float(planner_config.get("ros_send_retry_s", 0.05)),
+        )
         self._latest_ros_output = None
+        self._ros_control_state = None
+        self._ros_source_pacing_enabled = bool(
+            planner_config.get("ros_source_wall_clock_pacing_enabled", True)
+        )
+        self._ros_source_period_s = 1.0 / max(
+            1.0,
+            float(planner_config.get("ros_source_rate_hz", 20.0)),
+        )
+        self._ros_next_source_wall_time_s = None
         self.selected_planner_visualization_enabled = False
         self.selected_planner_trajectory_life_time_s = max(0.05, float(planner_config.get("selected_planner_trajectory_life_time_s", 0.20)))
         self.selected_planner_route_refresh_s = max(0.05, float(planner_config.get("selected_planner_route_refresh_s", 0.50)))
@@ -330,6 +350,9 @@ class VehicleManager(object):
                 f"for vehicle {self.vehicle.id}."
             )
         elif bool(self.ros_planner_enabled):
+            # ROS supplies the finalized MPC acceleration and physical
+            # steering command. The boundary below only maps those physical
+            # values to this CARLA vehicle's normalized actuators.
             self._initialize_ros_planner_boundary(planner_config)
             print("[OpenCDA VehicleManager] ROS CP-X planner boundary enabled for vehicle {}.".format(self.vehicle.id))
         elif 'platooning' in application:
@@ -368,16 +391,47 @@ class VehicleManager(object):
     def _initialize_ros_planner_boundary(self, planner_config):
         """Create only the OpenCDA-to-ROS boundary objects, not a local planner."""
         planning_module_root = Path(__file__).resolve().parents[2] / "planning_module"
+        self._ros_planner_session_id = data_transmitter.planner_session_id(
+            self.vehicle.id
+        )
         mpc_path = Path(str(planner_config.get("mpc_config_path", planning_module_root / "MPC" / "mpc.yaml"))).expanduser()
         if not mpc_path.is_absolute():
             mpc_path = planning_module_root / mpc_path
         mpc_payload = load_yaml_file(str(mpc_path))
         mpc_config = dict(mpc_payload.get("mpc", mpc_payload) or {})
         constraints = dict(mpc_config.get("constraints", {}) or {})
+        replan_frequency_hz = max(
+            1.0e-6,
+            float(mpc_config.get("trajectory_generation_frequency_hz", 5.0)),
+        )
+        replan_period_s = 1.0 / replan_frequency_hz
+        self._ros_control_max_age_s = max(
+            replan_period_s,
+            float(
+                planner_config.get(
+                    "ros_control_max_age_s",
+                    2.5 * replan_period_s,
+                )
+            ),
+        )
         self._ros_max_acceleration_mps2 = float(constraints.get("max_acceleration_mps2", 3.0))
         self._ros_min_acceleration_mps2 = float(constraints.get("min_acceleration_mps2", -3.0))
         self._ros_max_steer_rad = max(1.0e-6, float(constraints.get("max_steer_rad", 0.6)))
         self.ros_actuator_mapper = CarlaActuatorMapper(planner_config)
+        vehicle_dynamics = VehicleDynamics.from_carla_vehicle(
+            self.vehicle,
+            fallback_wheelbase_m=float(
+                planner_config.get("platform_wheelbase_m", 2.7)
+            ),
+            fallback_actuator_max_steer_rad=float(
+                planner_config.get(
+                    "platform_actuator_max_steer_rad", math.radians(70.0)
+                )
+            ),
+        )
+        self._ros_actuator_max_steer_rad = float(
+            vehicle_dynamics.actuator_max_steer_rad
+        )
         cp_path = Path(str(planner_config.get("cp_message_path", planning_module_root / "behavior_planner" / "cp_message.json"))).expanduser()
         if not cp_path.is_absolute():
             cp_path = planning_module_root / cp_path
@@ -397,6 +451,89 @@ class VehicleManager(object):
                 visibility_target_tolerance_m=float(planner_config.get("cp_visibility_target_tolerance_m", 0.75)),
             )
         self.ros_receiver = DataReceiver().start()
+
+    def _set_ros_control_state(self, state, message):
+        """Log ROS execution lifecycle transitions without per-tick spam."""
+        state = str(state)
+        if state == self._ros_control_state:
+            return
+        self._ros_control_state = state
+        print("[OpenCDA VehicleManager] {}".format(message))
+
+    def _pace_ros_source_tick(self):
+        """Keep accelerated synchronous CARLA aligned with the ROS source rate.
+
+        The in-process planner naturally blocks each simulation tick.  Once
+        planning moves to an asynchronous ROS worker, CARLA can otherwise
+        advance simulated time much faster than wall time and make a fresh
+        5--10 Hz MPC plan appear stale after only a few milliseconds.  Pace
+        only the ROS boundary; native OpenCDA/CP-X execution is unchanged.
+        """
+
+        if not bool(self._ros_source_pacing_enabled):
+            return
+        period_s = max(1.0e-3, float(self._ros_source_period_s))
+        now_s = time.monotonic()
+        deadline_s = self._ros_next_source_wall_time_s
+        if deadline_s is None:
+            self._ros_next_source_wall_time_s = now_s + period_s
+            return
+        if now_s < float(deadline_s):
+            time.sleep(float(deadline_s) - now_s)
+            now_s = time.monotonic()
+        # Never accumulate a backlog after a slow planning/simulator cycle.
+        # The next deadline is one source period after the later of the old
+        # deadline and the actual wake-up time.
+        self._ros_next_source_wall_time_s = max(
+            float(deadline_s) + period_s,
+            now_s + period_s,
+        )
+
+    def _latest_valid_ros_control(self, cycle_time_s):
+        """Consume a new ROS result if present and validate the cached result."""
+        received = self.ros_receiver.pop_latest_planner_control(cycle_time_s)
+        is_new = received is not None
+        if is_new:
+            self._latest_ros_output = received
+
+        control = self._latest_ros_output
+        if not isinstance(control, dict):
+            return None, False, None
+
+        source_time_s = float(control.get("timestamp_s", 0.0) or 0.0)
+        simulation_age_s = max(0.0, float(cycle_time_s) - source_time_s)
+
+        # Execution freshness is a real-time property at the asynchronous ROS
+        # boundary.  Comparing CARLA simulation stamps made a valid 5--10 Hz
+        # MPC result appear stale when the 20 Hz simulator advanced or skipped
+        # synchronized input frames.  Prefer age since the source frame was
+        # sent, which includes planning and transport latency plus reuse time.
+        source_send_wall_time_ns = int(
+            control.get("source_send_wall_time_ns", 0) or 0
+        )
+        if source_send_wall_time_ns > 0:
+            wall_age_s = max(
+                0.0,
+                (time.time_ns() - source_send_wall_time_ns) / 1.0e9,
+            )
+        else:
+            received_perf_counter_ns = int(
+                control.get("opencda_output_received_perf_counter_ns", 0) or 0
+            )
+            wall_age_s = (
+                max(
+                    0.0,
+                    (time.perf_counter_ns() - received_perf_counter_ns)
+                    / 1.0e9,
+                )
+                if received_perf_counter_ns > 0
+                else simulation_age_s
+            )
+        control["ros_control_simulation_age_s"] = float(simulation_age_s)
+        control["ros_control_wall_age_s"] = float(wall_age_s)
+        if wall_age_s > float(self._ros_control_max_age_s) + 1.0e-9:
+            return None, is_new, wall_age_s
+        return control, is_new, wall_age_s
 
     def set_destination(
             self,
@@ -578,12 +715,20 @@ class VehicleManager(object):
             cp_payload=cp_payload,
             cooperative_payload=cp_payload,
             timestamp_s=float(snapshot["sim_time_s"]),
-            timeout_s=0.05,
+            session_id=str(self._ros_planner_session_id),
+            planner_config=self._ros_planner_config,
+            timeout_s=float(self._ros_send_timeout_s),
         )
         self._shadow_cycle_time_s = float(snapshot["sim_time_s"])
         self._ros_cycle_sent = bool(results) and all(bool(value) for value in results.values())
         if not self._ros_cycle_sent:
-            self._ros_retry_after_monotonic = time.monotonic() + 2.0
+            # The unified bridge receives one atomic planning-cycle packet.
+            # A transient socket reconnect must drop at most one 20 Hz frame;
+            # the legacy two-second global backoff created deterministic
+            # stale-control windows even though planner execution was healthy.
+            self._ros_retry_after_monotonic = (
+                time.monotonic() + float(self._ros_send_retry_s)
+            )
         return bool(self._ros_cycle_sent)
 
     def _write_planner_input_adapter_output(self, adapter_output, cycle_time_s):
@@ -724,22 +869,154 @@ class VehicleManager(object):
         self._last_visualized_planner_source = source
 
     def _control_from_ros_planner(self, ros_control):
-        """Convert the ROS planner's numeric output at the CARLA boundary only."""
+        """Map the ROS MPC command to CARLA pedals and physical steering.
+
+        The ROS planner publishes a physical longitudinal acceleration. Keep
+        that value authoritative at this boundary, as it is for the embedded
+        planner. Running a second velocity PID here discards the MPC command
+        and can alternate between throttle and coast when the preview speed
+        changes, which makes low-speed junction maneuvers stall.
+        """
         target_speed_mps = max(0.0, float(ros_control.get("target_speed_mps", 0.0) or 0.0))
         acceleration_mps2 = float(ros_control["acceleration_mps2"])
         steering_rad = float(ros_control["steering_rad"])
         ego_speed_mps = float(dict(self._latest_ros_input_snapshot or {}).get("ego_spd", 0.0)) / 3.6
-        stop_goal_active = bool(target_speed_mps <= 1.0e-6)
-        pedals = self.ros_actuator_mapper.map_acceleration(acceleration_mps2=acceleration_mps2, max_acceleration_mps2=float(self._ros_max_acceleration_mps2), min_acceleration_mps2=float(self._ros_min_acceleration_mps2), ego_speed_mps=ego_speed_mps, target_speed_mps=target_speed_mps, stop_goal_active=stop_goal_active)
-        steer = min(1.0, max(-1.0, steering_rad / float(self._ros_max_steer_rad)))
-        return carla.VehicleControl(throttle=float(pedals.throttle), brake=float(pedals.brake), steer=float(steer))
+        stop_goal_active = bool(
+            ros_control.get("stop_goal_active", target_speed_mps <= 1.0e-6)
+        )
+        emergency_stop = bool(ros_control.get("emergency_stop", False))
+        if emergency_stop:
+            control = carla.VehicleControl(
+                throttle=0.0,
+                brake=1.0,
+                steer=0.0,
+            )
+            return control, "mpc_emergency_stop"
 
-    def _write_selected_planner_output(self, source, cycle_time_s, acceleration_mps2, steering_rad, planning_cycle_time_ms, input_to_output_time_ms):
+        pedals = self.ros_actuator_mapper.map_acceleration(
+            acceleration_mps2=acceleration_mps2,
+            max_acceleration_mps2=float(self._ros_max_acceleration_mps2),
+            min_acceleration_mps2=float(self._ros_min_acceleration_mps2),
+            ego_speed_mps=ego_speed_mps,
+            target_speed_mps=target_speed_mps,
+            stop_goal_active=stop_goal_active,
+            timestamp_s=float(self._shadow_cycle_time_s or 0.0),
+        )
+        steer = min(
+            1.0,
+            max(
+                -1.0,
+                steering_rad / float(self._ros_actuator_max_steer_rad),
+            ),
+        )
+        control = carla.VehicleControl(
+            throttle=float(pedals.throttle),
+            brake=float(pedals.brake),
+            steer=float(steer),
+        )
+        return control, "mpc_acceleration_mapper"
+
+    def _write_selected_planner_output(
+            self,
+            source,
+            cycle_time_s,
+            acceleration_mps2,
+            steering_rad,
+            planning_cycle_time_ms,
+            input_to_output_time_ms,
+            planner_cycle_time_s=None,
+            control_age_s=None,
+            control_reused=False,
+            planner_diagnostics=None):
         """Store the current mode's control values for a later offline comparison."""
         output_path = self.ros_planner_control_output_path if str(source) == "ros" else self.opencda_planner_control_output_path
         velocity = self.vehicle.get_velocity()
         velocity_mps = math.sqrt(float(velocity.x) ** 2 + float(velocity.y) ** 2 + float(velocity.z) ** 2)
-        record = {"cycle_time_s": float(cycle_time_s), "source": str(source), "acceleration_mps2": float(acceleration_mps2), "steering_rad": float(steering_rad), "velocity_mps": float(velocity_mps), "planning_cycle_time_ms": float(planning_cycle_time_ms), "input_to_output_time_ms": float(input_to_output_time_ms)}
+        record = {"cycle_time_s": float(cycle_time_s), "source": str(source), "acceleration_mps2": float(acceleration_mps2), "steering_rad": float(steering_rad), "velocity_mps": float(velocity_mps), "planning_cycle_time_ms": float(planning_cycle_time_ms), "input_to_output_time_ms": float(input_to_output_time_ms), "control_application_wall_time_ns": int(time.time_ns())}
+        if planner_cycle_time_s is not None:
+            record["planner_cycle_time_s"] = float(planner_cycle_time_s)
+        if control_age_s is not None:
+            record["control_age_s"] = float(control_age_s)
+        record["control_reused"] = bool(control_reused)
+        diagnostics = dict(planner_diagnostics or {})
+        for key in (
+                "compact_schema_revision",
+                "session_id", "target_speed_mps", "stop_goal_active",
+                "mission_complete",
+                "emergency_stop", "emergency_stop_reason",
+                "safety_supervisor_reason", "front_gap_m",
+                "front_gap_actor_id", "emergency_brake_control_active",
+                "ego_x_m", "ego_y_m", "ego_heading_rad",
+                "behavior_decision", "behavior_fsm_state", "mpc_status",
+                "behavior_target_lane_id",
+                "route_tracking_lane_change_target_lane_id",
+                "mpc_fallback_reason", "mpc_replan_executed",
+                "mpc_obstacle_input_count",
+                "mpc_obstacle_relevant_count",
+                "mpc_obstacle_ignored_count",
+                "mpc_obstacle_ignored_ids",
+                "mpc_infeasibility_diagnostic",
+                "reference_source",
+                "route_sync_reason", "route_progress_index",
+                "route_upcoming_turn_direction",
+                "route_upcoming_turn_distance_m",
+                "route_remaining_distance_m", "current_lane_id",
+                "route_physical_target_lane_id",
+                "planner_output_reference_count",
+                "final_reference_gate_valid",
+                "final_reference_gate_reason",
+                "reference_pipeline_conditioning_reason",
+                "persistent_reference_active",
+                "persistent_reference_state",
+                "persistent_reference_progress_s_m",
+                "persistent_reference_geometry_revision",
+                "persistent_reference_build_reason",
+                "persistent_reference_last_rejected_trigger",
+                "candidate_lane_change_lock_reason",
+                "candidate_lane_change_window_reason",
+                "lane_change_authorization_reason",
+                "lane_change_authorization_direction",
+                "lane_change_authorization_distance_m",
+                "route_geometry_lane_change_direction",
+                "route_geometry_lane_change_distance_m",
+                "route_geometry_lane_change_reason",
+                "route_current_road_option",
+                "route_next_macro_maneuver",
+                "route_lane_change_edge_id",
+                "lane_change_phase",
+                "lane_change_completion_reason",
+                "maneuver_commitment_progress",
+                "map_match_ad_lane_id",
+                "route_turn_reference_reason",
+                "prediction_bridge_request_count",
+                "prediction_bridge_success_count",
+                "prediction_bridge_dropped_request_count",
+                "prediction_bridge_attached_count",
+                "prediction_bridge_attached_mode_count",
+                "prediction_bridge_latency_ms",
+                "prediction_bridge_error", "prediction_ros_revision",
+                "prediction_ros_cached_object_count",
+                "prediction_ros_cached_mode_count",
+                "prediction_ros_frame_object_count",
+                "prediction_ros_frame_mode_count",
+                "prediction_ros_frame_age_s",
+                "prediction_ros_scene_input_count",
+                "prediction_ros_scene_object_count",
+                "prediction_ros_scene_duplicate_count",
+                "prediction_ros_scene_track_ids",
+                "ros_control_state", "ros_input_sent",
+                "ros_control_max_age_s",
+                "ros_control_simulation_age_s",
+                "ros_control_wall_age_s",
+                "source_send_wall_time_ns",
+                "ros_output_created_wall_time_ns",
+                "ros_output_subscriber_received_wall_time_ns",
+                "ros_output_tcp_send_started_wall_time_ns",
+                "opencda_output_received_wall_time_ns",
+                "applied_throttle", "applied_brake", "applied_steer",
+                "control_execution_reason"):
+            if key in diagnostics:
+                record[key] = diagnostics[key]
         with output_path.open("a", encoding="utf-8") as output_file:
             output_file.write(json.dumps(record, allow_nan=False, separators=(",", ":")) + "\n")
 
@@ -747,27 +1024,110 @@ class VehicleManager(object):
         """
         Execute one step of navigation.
         """
+        if bool(self.ros_planner_enabled):
+            self._pace_ros_source_tick()
         # visualize the bev map if needed
         #print('=============================================running steps==========================================================')
         self.map_manager.run_step()
         if bool(self.ros_planner_enabled):
-            if not self._send_current_cycle_to_ros():
-                print("[OpenCDA VehicleManager] ROS input boundary is unavailable; applying emergency brake.")
-                return carla.VehicleControl(throttle=0.0, brake=1.0, steer=0.0)
-            ros_control = self.ros_receiver.get_planner_control(self._shadow_cycle_time_s, timeout=self.shadow_comparison_timeout_s)
+            input_sent = self._send_current_cycle_to_ros()
+            cycle_time_s = float(self._shadow_cycle_time_s or 0.0)
+            ros_control, is_new_control, control_age_s = (
+                self._latest_valid_ros_control(cycle_time_s)
+            )
             if ros_control is None:
-                print("[OpenCDA VehicleManager] No same-cycle ROS planner control received; applying emergency brake.")
+                if control_age_s is None:
+                    reason = (
+                        "ROS input boundary is unavailable"
+                        if not input_sent
+                        else "Waiting for the first ROS planner control"
+                    )
+                    state = "waiting_for_first_control"
+                else:
+                    reason = (
+                        "ROS planner control is stale ({:.3f}s > {:.3f}s)"
+                    ).format(control_age_s, self._ros_control_max_age_s)
+                    state = "stale_control"
+                self._set_ros_control_state(
+                    state,
+                    "{}; applying emergency brake.".format(reason),
+                )
+                latest = (
+                    dict(self._latest_ros_output)
+                    if isinstance(self._latest_ros_output, dict) else {}
+                )
+                unavailable_diagnostics = dict(latest)
+                unavailable_diagnostics.update({
+                        "ros_control_simulation_age_s": latest.get(
+                            "ros_control_simulation_age_s"
+                        ),
+                        "ros_control_wall_age_s": latest.get(
+                            "ros_control_wall_age_s", control_age_s
+                        ),
+                        "emergency_stop": True,
+                        "emergency_stop_reason": str(reason),
+                        "emergency_brake_control_active": True,
+                        "ros_control_state": str(state),
+                        "ros_input_sent": bool(input_sent),
+                        "ros_control_max_age_s": float(
+                            self._ros_control_max_age_s
+                        ),
+                        "applied_throttle": 0.0,
+                        "applied_brake": 1.0,
+                        "applied_steer": 0.0,
+                        "control_execution_reason": (
+                            "ros_control_unavailable_emergency_brake"
+                        ),
+                    })
+                self._write_selected_planner_output(
+                    "ros",
+                    cycle_time_s,
+                    float(self._ros_min_acceleration_mps2),
+                    0.0,
+                    0.0,
+                    0.0,
+                    planner_cycle_time_s=latest.get("timestamp_s"),
+                    control_age_s=control_age_s,
+                    control_reused=True,
+                    planner_diagnostics=unavailable_diagnostics,
+                )
                 return carla.VehicleControl(throttle=0.0, brake=1.0, steer=0.0)
-            output_ready_monotonic = time.perf_counter()
-            input_ready_monotonic = self._planner_input_ready_monotonic if self._planner_input_ready_monotonic is not None else output_ready_monotonic
-            local_wait_input_to_output_ms = (output_ready_monotonic - float(input_ready_monotonic)) * 1000.0
+            self._set_ros_control_state(
+                "active",
+                "ROS planner control active; executing the latest fresh plan asynchronously.",
+            )
             input_to_output_time_ms = float(ros_control.get("input_to_output_time_ms", 0.0) or 0.0)
-            if input_to_output_time_ms <= 0.0:
-                input_to_output_time_ms = local_wait_input_to_output_ms
             planning_cycle_time_ms = float(ros_control.get("planning_cycle_time_ms", 0.0) or 0.0)
-            self._write_selected_planner_output("ros", self._shadow_cycle_time_s, ros_control["acceleration_mps2"], ros_control["steering_rad"], planning_cycle_time_ms, input_to_output_time_ms)
-            self._record_timing_summary("ros", planning_cycle_time_ms, input_to_output_time_ms)
-            return self._control_from_ros_planner(ros_control)
+            control, execution_reason = self._control_from_ros_planner(
+                ros_control
+            )
+            output_diagnostics = dict(ros_control)
+            output_diagnostics.update({
+                "ros_control_state": "active",
+                "ros_input_sent": bool(input_sent),
+                "ros_control_max_age_s": float(self._ros_control_max_age_s),
+                "applied_throttle": float(control.throttle),
+                "applied_brake": float(control.brake),
+                "applied_steer": float(control.steer),
+                "control_execution_reason": str(execution_reason),
+            })
+            if bool(ros_control.get("mission_complete", False)):
+                self._opencda_agent_finished = True
+            self._write_selected_planner_output(
+                "ros",
+                cycle_time_s,
+                ros_control["acceleration_mps2"],
+                ros_control["steering_rad"],
+                planning_cycle_time_ms,
+                input_to_output_time_ms,
+                planner_cycle_time_s=ros_control.get("timestamp_s"),
+                control_age_s=control_age_s,
+                control_reused=not is_new_control,
+                planner_diagnostics=output_diagnostics,
+            )
+            if is_new_control:
+                self._record_timing_summary("ros", planning_cycle_time_ms, input_to_output_time_ms)
+            return control
         if self.cpx_planner is not None:
             planning_started_monotonic = time.perf_counter()
             try:

@@ -396,6 +396,7 @@ def frenet_lane_change_path(
             "lane_change_progress": p,
             "lane_change_source_x_m": reference_line.points[i].x_m,
             "lane_change_source_y_m": reference_line.points[i].y_m,
+            "lane_change_source_width_m": reference_line.points[i].lane_width_m,
             "lane_change_target_x_m": (
                 target_points[min(i, len(target_points) - 1)].x_m
                 if target_points else point.x_m
@@ -403,6 +404,10 @@ def frenet_lane_change_path(
             "lane_change_target_y_m": (
                 target_points[min(i, len(target_points) - 1)].y_m
                 if target_points else point.y_m
+            ),
+            "lane_change_target_width_m": (
+                target_points[min(i, len(target_points) - 1)].lane_width_m
+                if target_points else point.lane_width_m
             ),
             "lane_change_target_heading_rad": (
                 target_points[min(i, len(target_points) - 1)].heading_rad
@@ -456,8 +461,10 @@ def frenet_lane_change_path(
                 "lane_change_progress": 1.0,
                 "lane_change_source_x_m": virtual_source_x,
                 "lane_change_source_y_m": virtual_source_y,
+                "lane_change_source_width_m": target_point.lane_width_m,
                 "lane_change_target_x_m": target_point.x_m,
                 "lane_change_target_y_m": target_point.y_m,
+                "lane_change_target_width_m": target_point.lane_width_m,
                 "lane_change_target_heading_rad": target_point.heading_rad,
                 "lane_change_target_curvature_1pm": target_point.curvature_1pm,
                 "lane_transition_kind": "lateral_lane_change",
@@ -471,7 +478,59 @@ def frenet_lane_change_path(
                 "speed_mps": max(0.0, float(target_speed_mps)),
             })
             previous = target_point
+    _annotate_lane_change_drivable_union(out)
     return out
+
+
+def _annotate_lane_change_drivable_union(samples: List[dict]) -> None:
+    """Keep the authorized source/target lanes as one MPC road corridor.
+
+    During a committed lateral maneuver the shared lane marking is not a
+    road boundary.  Constraining the Frenet blend to either lane's individual
+    half width creates an artificial forbidden strip exactly where the
+    vehicle must cross.  Every immutable maneuver-master sample already owns
+    station-aligned source and target centre points, so project both lane
+    extents into the sample normal and store their outer union as the road
+    boundary metadata consumed by MPC.  The metadata then survives reference
+    interpolation and locked-window padding without relaxing any outer road
+    edge.
+    """
+
+    for sample in samples:
+        required = (
+            "lane_change_source_x_m", "lane_change_source_y_m",
+            "lane_change_target_x_m", "lane_change_target_y_m",
+        )
+        if not all(key in sample for key in required):
+            continue
+        center_x = float(sample.get("x_ref_m", sample.get("x", 0.0)))
+        center_y = float(sample.get("y_ref_m", sample.get("y", 0.0)))
+        heading = float(sample.get("heading_rad", 0.0))
+        normal_x, normal_y = -math.sin(heading), math.cos(heading)
+        default_width = max(0.1, float(sample.get("lane_width_m", 3.5)))
+        bounds = []
+        for prefix in ("source", "target"):
+            lane_x = float(sample["lane_change_%s_x_m" % prefix])
+            lane_y = float(sample["lane_change_%s_y_m" % prefix])
+            lane_width = max(
+                0.1,
+                float(sample.get(
+                    "lane_change_%s_width_m" % prefix,
+                    default_width,
+                )),
+            )
+            lane_offset = (
+                (lane_x - center_x) * normal_x
+                + (lane_y - center_y) * normal_y
+            )
+            half_width = 0.5 * lane_width
+            bounds.append((lane_offset - half_width, lane_offset + half_width))
+        lower = min(bound[0] for bound in bounds)
+        upper = max(bound[1] for bound in bounds)
+        sample["road_center_offset_m"] = 0.5 * (lower + upper)
+        sample["road_left_width_m"] = 0.5 * (upper - lower)
+        sample["road_right_width_m"] = 0.5 * (upper - lower)
+        sample["road_boundary_source"] = "authorized_lane_change_union"
 
 
 def _xy(sample: object) -> Point | None:

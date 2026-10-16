@@ -763,6 +763,7 @@ class BehaviorStage:
                 if local_avoidance and local_target is not None else None
             ),
             lane_change_completion_allowed=not bool(lane_change_reference_active),
+            available_lane_ids=tuple(available_lane_ids),
         )
         decision = str(command.get("decision", "lane_follow"))
         static_obstacle_stage.observe_behavior(decision, traffic_stop)

@@ -233,6 +233,17 @@ def test_runner_uses_cpx_terminal_stop_completion_contract():
     assert _manager_reached_destination(manager, [100.0, 0.0], 3.0)
 
 
+def test_runner_uses_ros_cpx_terminal_stop_completion_contract():
+    manager = type("Manager", (), {})()
+    manager.vehicle = _LocationVehicle(0.1, 0.0)
+    manager.cpx_planner = None
+    manager.ros_planner_enabled = True
+
+    assert not _manager_reached_destination(manager, [0.0, 0.0], 3.0)
+    manager._opencda_agent_finished = True
+    assert _manager_reached_destination(manager, [100.0, 0.0], 3.0)
+
+
 def test_runner_keeps_euclidean_completion_for_non_cpx_manager():
     manager = type("Manager", (), {})()
     manager.vehicle = _LocationVehicle(1.0, 0.0)

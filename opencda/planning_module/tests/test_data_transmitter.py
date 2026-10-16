@@ -10,6 +10,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from omegaconf import OmegaConf
+
 from opencda import data_transmitter
 
 
@@ -32,6 +34,8 @@ def _decode_stream(connection, stream_name):
         message = json.loads(raw.decode("utf-8"))
         if message.get("message_type") == stream_name:
             return message["data"]
+        if message.get("message_type") == "planning_cycle":
+            return message["data"]["streams"].get(stream_name)
     return None
 
 
@@ -41,6 +45,14 @@ class DataTransmitterCooperativeStreamTests(unittest.TestCase):
 
     def tearDown(self):
         data_transmitter.close()
+
+    def test_planner_session_id_is_process_scoped_and_actor_specific(self):
+        first = data_transmitter.planner_session_id(17)
+        second = data_transmitter.planner_session_id(18)
+
+        self.assertEqual(first, data_transmitter.planner_session_id(17))
+        self.assertNotEqual(first, second)
+        self.assertTrue(first.endswith(":17"))
 
     def test_send_forwards_traffic_controls_alongside_lane_events(self):
         connection = _FakeConnection()
@@ -104,10 +116,105 @@ class DataTransmitterCooperativeStreamTests(unittest.TestCase):
                 cp_payload=None,
                 cooperative_payload=None,
                 timestamp_s=1.0,
+                session_id="vehicle-17",
+                planner_config={
+                    "functional_test_ignore_dynamic_objects": True,
+                    "target_speed_mps": 12.0,
+                },
             )
 
         cooperative_data = _decode_stream(connection, "cooperative")
         self.assertEqual(cooperative_data["traffic_controls"], [])
+        envelopes = [
+            json.loads(raw.decode("utf-8")) for raw in connection.sent
+        ]
+        self.assertEqual(len(envelopes), 1)
+        cycle_envelope = envelopes[0]
+        self.assertEqual(cycle_envelope["message_type"], "planning_cycle")
+        self.assertEqual(
+            {message["session_id"] for message in envelopes},
+            {"vehicle-17"},
+        )
+        self.assertTrue(cycle_envelope["planner_config"][
+            "functional_test_ignore_dynamic_objects"
+        ])
+        self.assertEqual(
+            cycle_envelope["planner_config"]["target_speed_mps"],
+            12.0,
+        )
+        self.assertEqual(
+            set(cycle_envelope["data"]["streams"]),
+            {"localization", "perception", "traffic_light", "v2x", "cooperative"},
+        )
+        self.assertNotIn("safety", data_transmitter.STREAM_PORTS)
+
+    def test_send_recursively_serializes_omegaconf_planner_config(self):
+        connection = _FakeConnection()
+        localization_transform = SimpleNamespace(
+            location=SimpleNamespace(x=0.0, y=0.0, z=0.0),
+            rotation=SimpleNamespace(yaw=0.0),
+        )
+        planner_config = OmegaConf.create({
+            "prediction": {
+                "mode_ids": ["mode_0", "mode_1", "mode_2"],
+                "nested_weights": [[1.0, 0.5], [0.25, 0.125]],
+            },
+        })
+
+        with patch.object(
+            data_transmitter.socket, "create_connection",
+            return_value=connection,
+        ):
+            results = data_transmitter.send(
+                localization_transform=localization_transform,
+                localization_speed_kmh=0.0,
+                perception_objects={"vehicles": [], "traffic_lights": []},
+                timestamp_s=1.0,
+                planner_config=planner_config,
+            )
+
+        self.assertTrue(all(results.values()))
+        envelopes = [
+            json.loads(raw.decode("utf-8")) for raw in connection.sent
+        ]
+        self.assertEqual(len(envelopes), 1)
+        localization_envelope = envelopes[0]
+        self.assertEqual(
+            localization_envelope["planner_config"]["prediction"]["mode_ids"],
+            ["mode_0", "mode_1", "mode_2"],
+        )
+        self.assertEqual(
+            localization_envelope["planner_config"]["prediction"]
+            ["nested_weights"],
+            [[1.0, 0.5], [0.25, 0.125]],
+        )
+
+    def test_legacy_five_stream_transport_remains_available(self):
+        connection = _FakeConnection()
+        localization_transform = SimpleNamespace(
+            location=SimpleNamespace(x=0.0, y=0.0, z=0.0),
+            rotation=SimpleNamespace(yaw=0.0),
+        )
+
+        with patch.object(
+            data_transmitter.socket, "create_connection",
+            return_value=connection,
+        ):
+            results = data_transmitter.send(
+                localization_transform=localization_transform,
+                localization_speed_kmh=0.0,
+                perception_objects={"vehicles": [], "traffic_lights": []},
+                timestamp_s=1.0,
+                atomic_cycle=False,
+            )
+
+        self.assertTrue(all(results.values()))
+        messages = [json.loads(raw.decode("utf-8")) for raw in connection.sent]
+        self.assertEqual(len(messages), 5)
+        self.assertEqual(
+            {message["message_type"] for message in messages},
+            set(data_transmitter.STREAM_PORTS),
+        )
 
 
 if __name__ == "__main__":

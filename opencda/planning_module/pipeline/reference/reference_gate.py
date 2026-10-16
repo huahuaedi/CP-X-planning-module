@@ -13,6 +13,10 @@ from ..reference.reference_contract import (
 )
 
 
+# Keep aligned with the ROS package copy for reproducible diagnostics.
+REFERENCE_GATE_POLICY_REVISION = 2
+
+
 @dataclass(frozen=True)
 class FinalReferenceGateResult:
     accepted: bool
@@ -102,10 +106,32 @@ class FinalReferenceGate:
             # check when a continuous source-to-target road envelope is also
             # active; curvature, ordering, lane and speed checks stay hard.
             check_first_lateral=not bool(
-                committed_lane_change_tracking_active
-                and mode in {"lane_change", "lane_change_direct"}
+                mode == "intersection_turn"
+                or (
+                    committed_lane_change_tracking_active
+                    and mode in {"lane_change", "lane_change_direct"}
+                )
             ),
         )
+        if str(mode) == "intersection_turn":
+            first_distance_m = math.hypot(
+                float(validation.first_forward_m),
+                float(validation.first_lateral_m),
+            )
+            max_first_distance_m = max(
+                0.0,
+                float(self.config.get(
+                    "reference_contract_intersection_turn_max_first_distance_m",
+                    3.0,
+                )),
+            )
+            if float(first_distance_m) > float(max_first_distance_m):
+                validation.violations = list(dict.fromkeys(
+                    list(validation.violations)
+                    + ["first_distance_out_of_contract"]
+                ))
+                validation.valid = False
+
         return FinalReferenceGateResult(
             accepted=bool(validation.valid),
             mode=str(mode),

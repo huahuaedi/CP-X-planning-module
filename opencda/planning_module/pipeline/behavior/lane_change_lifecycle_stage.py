@@ -247,6 +247,7 @@ class LaneChangeLifecycleStage:
 
     def _start_stabilization(self, *, ego_location: Any, ego_yaw_rad: float) -> str:
         lifecycle = self._maneuver.lane_change
+        crossing_master = self._provider.snapshot(LANE_CHANGE).mutable_samples()
         target_lane_id = int(lifecycle.target_lane_id)
         committed_speed = float(lifecycle.target_speed_mps or self._target_speed_mps)
         speed_mps = max(0.5, min(self._target_speed_mps, committed_speed))
@@ -281,6 +282,10 @@ class LaneChangeLifecycleStage:
         )
         if len(reference) < int(self._mpc.horizon_steps):
             return f"target_lane_stabilization_failed:short_reference={len(reference)}"
+        self._preserve_authorized_lane_change_union(
+            crossing_master=crossing_master,
+            stabilization_reference=reference,
+        )
         installed, reason = self._provider.install(
             LANE_CHANGE,
             reference,
@@ -306,3 +311,100 @@ class LaneChangeLifecycleStage:
             f"transition_arc_m={transition_arc_m:.2f}:speed={speed_mps:.2f}:"
             f"curvature_conditioning={str(curvature_reason or 'not_required')}"
         )
+
+    @staticmethod
+    def _preserve_authorized_lane_change_union(
+        *, crossing_master: Any, stabilization_reference: Any,
+    ) -> None:
+        """Keep the authorized outer road edges until commitment release.
+
+        Target-lane stabilization begins before the vehicle is necessarily
+        centred in that lane.  Replacing the crossing master with a target
+        centreline must therefore not simultaneously shrink the MPC road
+        boundary to a single lane: that can place the current vehicle body
+        outside the new hard constraint and make convergence impossible.
+        The crossing master already contains the AD-map-derived union of the
+        authorized source and target lanes; normal lane-follow geometry
+        restores the target lane's individual bounds when the commitment is
+        geometrically complete and released.
+
+        ``road_center_offset_m`` is measured from each sample's own centre
+        point along its own normal, and the crossing centre lies between the
+        two lanes while the stabilization centre lies on the target lane.
+        Copying the offset verbatim would shift the whole envelope by that
+        lateral gap and push one edge past the real road.  Each row's union
+        edges are therefore converted to world points and re-projected into
+        the stabilization row's frame.
+        """
+
+        union_rows = []
+        for row in list(crossing_master or []):
+            if str(row.get("road_boundary_source", "")) != (
+                "authorized_lane_change_union"
+            ):
+                continue
+            edges = _world_road_edges(row)
+            if edges is not None:
+                union_rows.append(edges)
+        if not union_rows:
+            return
+        for row in list(stabilization_reference or []):
+            frame = _sample_frame(row)
+            if frame is None:
+                continue
+            x_m, y_m, normal_x, normal_y = frame
+            _, _, lower_xy, upper_xy = min(
+                union_rows,
+                key=lambda edges: math.hypot(
+                    edges[0] - x_m, edges[1] - y_m
+                ),
+            )
+            lower_m, upper_m = sorted(
+                (point[0] - x_m) * normal_x + (point[1] - y_m) * normal_y
+                for point in (lower_xy, upper_xy)
+            )
+            row["road_center_offset_m"] = 0.5 * (lower_m + upper_m)
+            row["road_left_width_m"] = upper_m - row["road_center_offset_m"]
+            row["road_right_width_m"] = row["road_center_offset_m"] - lower_m
+            row["road_boundary_source"] = (
+                "authorized_lane_change_union_stabilization"
+            )
+
+
+def _sample_frame(row: Mapping[str, Any]):
+    """Return (x, y, left_normal_x, left_normal_y) for a reference sample."""
+
+    try:
+        x_m = float(row.get("x_ref_m", row.get("x")))
+        y_m = float(row.get("y_ref_m", row.get("y")))
+        heading = float(row.get("heading_rad", 0.0))
+    except (TypeError, ValueError):
+        return None
+    return x_m, y_m, -math.sin(heading), math.cos(heading)
+
+
+def _world_road_edges(row: Mapping[str, Any]):
+    """Return (center_x, center_y, lower_edge_xy, upper_edge_xy) in world.
+
+    Uses the same left-positive normal as the union builder in
+    ``reference_geometry``: upper = offset + left width, lower = offset -
+    right width.
+    """
+
+    frame = _sample_frame(row)
+    if frame is None:
+        return None
+    try:
+        offset_m = float(row["road_center_offset_m"])
+        left_m = float(row["road_left_width_m"])
+        right_m = float(row["road_right_width_m"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    x_m, y_m, normal_x, normal_y = frame
+    lower_m = offset_m - right_m
+    upper_m = offset_m + left_m
+    return (
+        x_m, y_m,
+        (x_m + lower_m * normal_x, y_m + lower_m * normal_y),
+        (x_m + upper_m * normal_x, y_m + upper_m * normal_y),
+    )

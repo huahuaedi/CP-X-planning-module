@@ -49,3 +49,19 @@ def test_native_input_does_not_latch_external_clock():
 
     assert bridge._latest_opencda_update["external_runtime"] is False
     assert bridge._latest_opencda_update["sim_time_s"] == pytest.approx(7.25)
+
+
+def test_complete_external_ego_input_does_not_require_native_localizer():
+    bridge = _bridge_without_assembly()
+    bridge.vehicle_manager = SimpleNamespace()
+    transform = object()
+
+    resolved_transform, resolved_speed_kmh = (
+        bridge._resolve_ego_runtime_input({
+            "ego_transform": transform,
+            "ego_speed_kmh": 0.0,
+        })
+    )
+
+    assert resolved_transform is transform
+    assert resolved_speed_kmh == 0.0

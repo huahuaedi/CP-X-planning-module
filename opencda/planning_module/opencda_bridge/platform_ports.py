@@ -101,7 +101,17 @@ class MapLookupPort:
             return None
 
     def drivable_waypoint(self, location: Any):
-        get_drivable = getattr(self._waypoint_map, "get_drivable_waypoint", None)
+        get_drivable = getattr(
+            self._waypoint_map,
+            "get_drivable_occupancy_waypoint",
+            None,
+        )
+        if not callable(get_drivable):
+            get_drivable = getattr(
+                self._waypoint_map,
+                "get_drivable_waypoint",
+                None,
+            )
         if callable(get_drivable):
             try:
                 return get_drivable(self.location_to_point(location))

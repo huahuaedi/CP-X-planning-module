@@ -22,7 +22,12 @@ def _as_dict(value):
 
 
 class DataReceiver(object):
-    """Receive same-cycle ROS debug data and numeric planner controls."""
+    """Receive ROS debug data and numeric planner controls.
+
+    Exact-cycle waits remain available for offline equivalence checks. The
+    runtime control path uses :meth:`pop_latest_planner_control` so CARLA does
+    not block while a planner running at a lower rate computes its next plan.
+    """
 
     def __init__(self, host=ROS_HOST, port=ROS_OUTPUT_PORT):
         self.host = str(host)
@@ -68,6 +73,44 @@ class DataReceiver(object):
                     return None
                 self.planner_control_condition.wait(remaining)
             return self.planner_controls.pop(key)
+
+    def pop_latest_planner_control(self, cycle_time_s=None):
+        """Return the newest available control without blocking.
+
+        When ``cycle_time_s`` is provided, controls stamped in the future are
+        retained for a later simulator tick. Older controls up to the chosen
+        result are discarded because execution only needs the latest plan.
+        """
+        upper_bound = (
+            None
+            if cycle_time_s is None
+            else float(cycle_time_s) + 1.0e-6
+        )
+        with self.planner_control_condition:
+            eligible = [
+                (key, control)
+                for key, control in self.planner_controls.items()
+                if upper_bound is None
+                or float(control.get("timestamp_s", 0.0)) <= upper_bound
+            ]
+            if not eligible:
+                return None
+
+            _selected_key, selected = max(
+                eligible,
+                key=lambda item: (
+                    float(item[1].get("timestamp_s", 0.0)),
+                    int(item[1].get("sequence", 0)),
+                ),
+            )
+            selected_time_s = float(selected.get("timestamp_s", 0.0))
+            for key, control in list(self.planner_controls.items()):
+                if (
+                    float(control.get("timestamp_s", 0.0))
+                    <= selected_time_s + 1.0e-9
+                ):
+                    self.planner_controls.pop(key, None)
+            return dict(selected)
 
     def run(self):
         """Accept ROS connections until the receiver is closed."""
@@ -132,6 +175,48 @@ class DataReceiver(object):
                     "sequence": int(message.get("sequence", 0) or 0),
                     "timestamp_s": float(control_data.get("cycle_time_s", message.get("timestamp_s", 0.0)) or 0.0),
                     "target_speed_mps": float(control_data.get("target_speed_mps", 0.0) or 0.0),
+                    "stop_goal_active": bool(control_data.get("stop_goal_active", False)),
+                    "mission_complete": bool(control_data.get("mission_complete", False)),
+                    "emergency_stop": bool(control_data.get("emergency_stop", False)),
+                    "session_id": str(control_data.get("session_id", "") or ""),
+                    "emergency_stop_reason": str(control_data.get("emergency_stop_reason", "") or ""),
+                    "safety_supervisor_reason": str(control_data.get("safety_supervisor_reason", "") or ""),
+                    "emergency_brake_control_active": bool(control_data.get("emergency_brake_control_active", False)),
+                    "front_gap_m": control_data.get("front_gap_m", ""),
+                    "front_gap_actor_id": str(control_data.get("front_gap_actor_id", "") or ""),
+                    "ego_x_m": control_data.get("ego_x_m", ""),
+                    "ego_y_m": control_data.get("ego_y_m", ""),
+                    "ego_heading_rad": control_data.get("ego_heading_rad", ""),
+                    "behavior_decision": str(control_data.get("behavior_decision", "") or ""),
+                    "behavior_fsm_state": str(control_data.get("behavior_fsm_state", "") or ""),
+                    "mpc_status": str(control_data.get("mpc_status", "") or ""),
+                    "mpc_fallback_reason": str(control_data.get("mpc_fallback_reason", "") or ""),
+                    "mpc_replan_executed": bool(control_data.get("mpc_replan_executed", False)),
+                    "reference_source": str(control_data.get("reference_source", "") or ""),
+                    "route_sync_reason": str(control_data.get("route_sync_reason", "") or ""),
+                    "route_progress_index": control_data.get("route_progress_index", ""),
+                    "route_upcoming_turn_direction": str(control_data.get("route_upcoming_turn_direction", "") or ""),
+                    "route_upcoming_turn_distance_m": control_data.get("route_upcoming_turn_distance_m", ""),
+                    "route_remaining_distance_m": control_data.get("route_remaining_distance_m", ""),
+                    "current_lane_id": control_data.get("current_lane_id", ""),
+                    "route_physical_target_lane_id": control_data.get("route_physical_target_lane_id", ""),
+                    "prediction_bridge_request_count": int(control_data.get("prediction_bridge_request_count", 0) or 0),
+                    "prediction_bridge_success_count": int(control_data.get("prediction_bridge_success_count", 0) or 0),
+                    "prediction_bridge_dropped_request_count": int(control_data.get("prediction_bridge_dropped_request_count", 0) or 0),
+                    "prediction_bridge_attached_count": int(control_data.get("prediction_bridge_attached_count", 0) or 0),
+                    "prediction_bridge_attached_mode_count": int(control_data.get("prediction_bridge_attached_mode_count", 0) or 0),
+                    "prediction_bridge_latency_ms": float(control_data.get("prediction_bridge_latency_ms", 0.0) or 0.0),
+                    "prediction_bridge_error": str(control_data.get("prediction_bridge_error", "") or ""),
+                    "prediction_ros_revision": int(control_data.get("prediction_ros_revision", -1) or -1),
+                    "prediction_ros_cached_object_count": int(control_data.get("prediction_ros_cached_object_count", 0) or 0),
+                    "prediction_ros_cached_mode_count": int(control_data.get("prediction_ros_cached_mode_count", 0) or 0),
+                    "prediction_ros_frame_object_count": int(control_data.get("prediction_ros_frame_object_count", 0) or 0),
+                    "prediction_ros_frame_mode_count": int(control_data.get("prediction_ros_frame_mode_count", 0) or 0),
+                    "prediction_ros_frame_age_s": control_data.get("prediction_ros_frame_age_s"),
+                    "prediction_ros_scene_input_count": int(control_data.get("prediction_ros_scene_input_count", 0) or 0),
+                    "prediction_ros_scene_object_count": int(control_data.get("prediction_ros_scene_object_count", 0) or 0),
+                    "prediction_ros_scene_duplicate_count": int(control_data.get("prediction_ros_scene_duplicate_count", 0) or 0),
+                    "prediction_ros_scene_track_ids": str(control_data.get("prediction_ros_scene_track_ids", "") or ""),
                     "acceleration_mps2": float(control_data["acceleration_mps2"]),
                     "steering_rad": float(control_data["steering_rad"]),
                     "planning_cycle_time_ms": float(control_data.get("planning_cycle_time_ms", 0.0) or 0.0),
@@ -144,6 +229,13 @@ class DataReceiver(object):
                     "opencda_output_received_perf_counter_ns": int(output_received_perf_counter_ns),
                     "input_to_output_time_ms": (output_received_wall_time_ns - source_send_wall_time_ns) / 1000000.0 if source_send_wall_time_ns > 0 else 0.0,
                 }
+                # Keep the compact planner-control contract forward compatible.
+                # The fields above normalize values required by execution, but
+                # diagnostics must not disappear merely because a newer planner
+                # schema added them before this receiver was updated.
+                for name, value in control_data.items():
+                    if name not in planner_control:
+                        planner_control[name] = value
             except (KeyError, TypeError, ValueError) as error:
                 print("[ROS Data Receiver] Invalid planner control: {}.".format(error))
                 return

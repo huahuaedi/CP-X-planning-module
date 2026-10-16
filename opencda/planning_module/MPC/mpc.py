@@ -1046,6 +1046,26 @@ class MPC:
             )
         return float(max(float(self.constraints.min_velocity_mps), floor_mps))
 
+    @staticmethod
+    def _road_boundary_physical_edge_slack_upper_m(
+        *,
+        configured_upper_m: float,
+        margin_m: float,
+    ) -> float:
+        """Soften the inner margin while retaining the physical road edge.
+
+        The boundary rows constrain the vehicle centre to ``margin_m`` inside
+        the road. A slack upper bound equal to that margin can relax the
+        preferred inner margin, but can never move the centre beyond the
+        actual road edge. The quadratic slack cost still makes the configured
+        inner margin the normal optimum. A smaller finite cap is not a truly
+        soft constraint: steering-rate-limited turn entry can make the first
+        SQP subproblem infeasible before a recovery iterate is available.
+        """
+
+        del configured_upper_m
+        return max(0.0, float(margin_m))
+
     def blend_toward_horizon_s(
         self, target_horizon_s: float, *, blend_alpha: float | None = None
     ) -> float:
@@ -3720,6 +3740,13 @@ class MPC:
                         if math.isfinite(float(road_max_slack_m)) and float(road_max_slack_m) > 0.0
                         else np.inf
                     )
+                    if not corridor_stage_active:
+                        road_slack_upper = (
+                            self._road_boundary_physical_edge_slack_upper_m(
+                                configured_upper_m=float(road_slack_upper),
+                                margin_m=float(road_margin_m),
+                            )
+                        )
                     add_constraint({left_slack_idx: 1.0}, 0.0, road_slack_upper)
                     add_constraint({right_slack_idx: 1.0}, 0.0, road_slack_upper)
 

@@ -359,6 +359,9 @@ class CustomGlobalPlannerAdapter:
         self._waypoint_query_cache: OrderedDict[
             Tuple[float, float, float, float | None], Waypoint | None
         ] = OrderedDict()
+        self._drivable_waypoint_cache: OrderedDict[
+            Tuple[float, float, float, float | None], Waypoint | None
+        ] = OrderedDict()
         self._waypoint_candidates_cache: OrderedDict[
             Tuple[float, float, float, float | None],
             Tuple[Dict[str, object], ...],
@@ -400,6 +403,7 @@ class CustomGlobalPlannerAdapter:
             return
         with lock:
             self._waypoint_query_cache.clear()
+            self._drivable_waypoint_cache.clear()
             self._waypoint_candidates_cache.clear()
 
     @staticmethod
@@ -463,12 +467,28 @@ class CustomGlobalPlannerAdapter:
         search_radius_m: float | None = None,
     ) -> Waypoint | None:
         """Return a waypoint only when the requested point is inside a driving lane."""
+        key = self._waypoint_query_key(position, search_radius_m)
+        with self._waypoint_query_lock:
+            if key in self._drivable_waypoint_cache:
+                waypoint = self._drivable_waypoint_cache[key]
+                self._drivable_waypoint_cache.move_to_end(key)
+                return waypoint
+        direct_query = getattr(self.core, "get_drivable_waypoint", None)
+        if callable(direct_query):
+            waypoint = direct_query(position, search_radius_m=search_radius_m)
+            with self._waypoint_query_lock:
+                self._cache_put(self._drivable_waypoint_cache, key, waypoint)
+            return waypoint
         candidates = self.get_waypoint_candidates(position, search_radius_m=search_radius_m)
         for candidate in candidates:
             if bool(candidate.get("is_in_lane", False)):
                 waypoint = candidate.get("waypoint")
-                return waypoint if waypoint is not None else None
-        return None
+                break
+        else:
+            waypoint = None
+        with self._waypoint_query_lock:
+            self._cache_put(self._drivable_waypoint_cache, key, waypoint)
+        return waypoint
 
     @staticmethod
     def world_heading_rad(waypoint: Waypoint | None) -> float | None:

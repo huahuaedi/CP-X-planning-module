@@ -181,6 +181,39 @@ class StableReferenceLineTests(unittest.TestCase):
         self.assertAlmostEqual(path[-1]["x_ref_m"], 40.0, delta=1e-6)
         self.assertAlmostEqual(path[-1]["y_ref_m"], 3.5, delta=1e-6)
         self.assertEqual(path[-1]["lane_change_progress"], 1.0)
+        self.assertGreater(path[-1]["road_left_width_m"], 3.4)
+        self.assertEqual(
+            path[-1]["road_boundary_source"],
+            "authorized_lane_change_union",
+        )
+
+    def test_frenet_lane_change_uses_two_lane_union_for_full_master(self):
+        source = [{"x_ref_m": float(i), "y_ref_m": 0.0,
+                   "lane_id": 101, "lane_width_m": 3.5}
+                  for i in range(41)]
+        target = [{"x_ref_m": float(i), "y_ref_m": 3.5,
+                   "lane_id": 202, "lane_width_m": 3.5}
+                  for i in range(41)]
+
+        path = rg.frenet_lane_change_path(
+            rg.build_reference_line(source, spacing_m=1.0),
+            lateral_offset_m=3.5,
+            transition_length_m=20.0,
+            target_lane_id=202,
+            target_speed_mps=8.0,
+            target_reference_line=rg.build_reference_line(
+                target, spacing_m=1.0
+            ),
+        )
+
+        assert path
+        assert all(
+            sample["road_left_width_m"] > 3.4
+            and sample["road_right_width_m"] > 3.4
+            and sample["road_boundary_source"]
+            == "authorized_lane_change_union"
+            for sample in path
+        )
 
     def test_frenet_lane_change_accepts_target_shorter_than_source(self):
         source = [{"x_ref_m": float(i), "y_ref_m": 0.0, "lane_id": 101}

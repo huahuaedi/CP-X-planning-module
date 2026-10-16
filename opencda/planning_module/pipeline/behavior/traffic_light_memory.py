@@ -62,6 +62,25 @@ class TrafficLightMemory:
     def latched_stop_state(self) -> str:
         return str(self._latched_stop_state)
 
+    def reset(self) -> None:
+        """Release every temporal and world-fixed traffic-light latch.
+
+        Traffic control can be disabled at a runtime/session boundary. An
+        ``unknown`` observation is not sufficient for that transition: by
+        design, ``update`` retains a previous red/yellow through temporary
+        dropouts. The owner therefore needs an explicit lifecycle reset so
+        disabled traffic control cannot inherit a stop from an earlier
+        configuration or frame.
+        """
+
+        self._last_stop_state = "unknown"
+        self._last_stop_target = None
+        self._hold_until_s = -float("inf")
+        self._fail_safe_hold_until_s = -float("inf")
+        self._green_since_s = None
+        self._latched_stop_target = None
+        self._latched_stop_state = "unknown"
+
     def latch_stop_target(
         self,
         *,

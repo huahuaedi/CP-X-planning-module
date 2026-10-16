@@ -126,11 +126,12 @@ actor_id -> [{probability, trajectory[(t,x,y,v)]}, ...]
 PredictionContext / predicted_modes -> Stage A/C -> Stage D -> MPC
 ```
 
-Supported simulation transports are localhost HTTP and direct in-process
-import. Both share rate limiting, caching, staleness checks, world-tick
-deduplication, and time rebasing. A future ROS adapter translates ROS messages
-into the same normalized contract; it must not copy planning policy into the
-ROS node.
+Supported simulation transports are localhost HTTP, direct in-process import,
+and typed ROS 2 topics. The ROS adapter publishes `PredictionScene`, caches
+asynchronous `PredictionFrame` results, and translates all modes into the same
+normalized planner contract. Rate limiting, staleness checks, time rebasing,
+mode probabilities, and risk policy remain outside the transport boundary;
+the ROS node does not copy planning policy.
 
 ### Runtime cadence
 

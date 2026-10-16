@@ -20,7 +20,10 @@ from opencda.planning_module.utility.cp_messages import (
 )
 from opencda.scenario_testing.evaluations.evaluate_manager import EvaluationManager
 from opencda.scenario_testing.scripted_actor import spawn_scripted_actors
-from opencda.scenario_testing.run_status import write_run_status
+from opencda.scenario_testing.run_status import (
+    mark_destination_finished,
+    write_run_status,
+)
 from opencda.scenario_testing.utils.yaml_utils import add_current_time
 
 
@@ -207,8 +210,11 @@ def _manager_reached_destination(manager, destination, tolerance_m):
     manager. Non-CP-X managers keep the ordinary Euclidean completion rule.
     """
 
-    planner = getattr(manager, "cpx_planner", None)
-    if planner is not None:
+    owns_terminal_stop = bool(
+        getattr(manager, "cpx_planner", None) is not None
+        or getattr(manager, "ros_planner_enabled", False)
+    )
+    if owns_terminal_stop:
         return bool(getattr(manager, "_opencda_agent_finished", False))
     return _distance_to_destination(
         manager.vehicle, destination
@@ -712,6 +718,7 @@ def run_mature_scenario(opt, scenario_params, *, script_name):
                     destination_tolerance_m,
                 )
             if reached_destination:
+                mark_destination_finished(single_cav_list, completion_mode)
                 termination_reason = "route_destination_stopped"
                 print("CP-X mature scenario reached the configured destination.")
                 break

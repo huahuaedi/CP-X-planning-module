@@ -8,6 +8,24 @@ from behavior_planner.planner import (
 
 
 class RuleBasedBehaviorPlannerIntersectionTests(unittest.TestCase):
+    def test_explicit_lateral_order_handles_opaque_ad_map_lane_ids(self):
+        planner = RuleBasedBehaviorPlanner(lane_keep_min_hold_s=0.0)
+
+        result = planner.update(
+            lane_safety_scores={100: 1.0, 900: 1.0},
+            ego_lane_id=100,
+            selected_lane_id=100,
+            mode="NORMAL",
+            route_optimal_lane_id=900,
+            preferred_target_lane_id=900,
+            available_lane_ids=[900, 100],
+            lane_prediction_risks={900: {"risk": False}},
+        )
+
+        self.assertEqual(result["decision"], "lane_follow")
+        self.assertEqual(result["lc_state"], "PREPARE_LANE_CHANGE_RIGHT")
+        self.assertEqual(result["lane_change_target_lane_id"], 900)
+
     def test_confirmed_static_obstacle_local_avoidance_enters_execute_immediately(self):
         planner = RuleBasedBehaviorPlanner(
             lane_keep_min_hold_s=10.0,

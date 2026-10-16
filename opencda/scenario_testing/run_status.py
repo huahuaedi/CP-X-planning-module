@@ -40,6 +40,16 @@ def _planner_metrics(vehicle_manager):
     return dict(summary())
 
 
+def mark_destination_finished(vehicle_managers, completion_mode):
+    """Close the run-status lifecycle after the runner detects completion."""
+
+    managers = list(vehicle_managers or [])
+    if str(completion_mode) != "all_cavs":
+        managers = managers[:1]
+    for manager in managers:
+        manager._opencda_agent_finished = True
+
+
 def build_cav_run_state(index, vehicle_manager, destination=None):
     """Capture one CAV's terminal simulator and planner-metric state."""
 
@@ -48,14 +58,16 @@ def build_cav_run_state(index, vehicle_manager, destination=None):
     velocity = vehicle.get_velocity()
     metrics = _planner_metrics(vehicle_manager)
     distance = _distance_to_destination(vehicle, destination)
+    if bool(getattr(vehicle_manager, "ros_planner_enabled", False)):
+        planner_name = "cpx_mpc_ros"
+    elif getattr(vehicle_manager, "cpx_planner", None) is not None:
+        planner_name = "cpx_mpc"
+    else:
+        planner_name = "opencda_behavior_agent"
     return {
         "index": int(index),
         "vehicle_id": int(getattr(vehicle, "id", -1)),
-        "planner": (
-            "cpx_mpc"
-            if getattr(vehicle_manager, "cpx_planner", None) is not None
-            else "opencda_behavior_agent"
-        ),
+        "planner": planner_name,
         "x_m": float(transform.location.x),
         "y_m": float(transform.location.y),
         "speed_mps": float(math.sqrt(

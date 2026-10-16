@@ -397,6 +397,38 @@ def test_completed_lane_change_padding_follows_target_lane_tangent():
     assert result[-1]["lane_change_target_y_m"] == pytest.approx(0.8)
 
 
+def test_lane_change_padding_preserves_authorized_two_lane_union():
+    samples = [
+        {
+            "x_ref_m": float(index),
+            "y_ref_m": 3.5,
+            "heading_rad": 0.0,
+            "lane_change_progress": 1.0,
+            "lane_change_target_heading_rad": 0.0,
+            "road_center_offset_m": -1.75,
+            "road_left_width_m": 3.5,
+            "road_right_width_m": 3.5,
+            "road_boundary_source": "authorized_lane_change_union",
+        }
+        for index in range(2)
+    ]
+
+    result = ReferenceLineProvider._complete_lane_change_window(
+        samples,
+        count=6,
+        spacing_m=1.0,
+        target_lane_id=11,
+    )
+
+    assert len(result) == 6
+    assert all(row["road_left_width_m"] == pytest.approx(3.5)
+               for row in result)
+    assert all(row["road_right_width_m"] == pytest.approx(3.5)
+               for row in result)
+    assert all(row["road_boundary_source"]
+               == "authorized_lane_change_union" for row in result)
+
+
 def test_provider_owns_transient_lane_fallback_generation():
     calls = []
     generated = SimpleNamespace(samples=_line(), destination_state=[1, 2, 3, 4])
@@ -454,10 +486,11 @@ def test_preturn_candidate_keeps_current_lane_outside_transition_arc():
         _line(1.0)[:8], "current_lane"
     )
     preview_requests = []
-    provider.turn_reference = lambda request: (
-        preview_requests.append(request) or _line(-1.0)[:8],
-        [8.0, -1.0, 5.0, 0.0, 20],
-        "turn_master_previewed",
+    provider.preview_turn_master = lambda request: (
+        preview_requests.append(request) or "turn_master_previewed"
+    )
+    provider.turn_reference = lambda _request: pytest.fail(
+        "a far turn preview must not consume the TURN window"
     )
     request = TurnReferenceRequest(
         local_map=SimpleNamespace(valid=True),
@@ -484,10 +517,200 @@ def test_preturn_candidate_keeps_current_lane_outside_transition_arc():
     )
     assert "lane_follow_turn_geometry_hold_reason" not in result.diagnostics
     assert len(preview_requests) == 1
-    assert preview_requests[0].lock_master is True
+    assert preview_requests[0].lock_master is False
     assert result.diagnostics["turn_master_preview_reason"] == (
         "turn_master_previewed"
     )
+
+
+def test_far_preturn_preview_does_not_freeze_or_advance_turn_master():
+    provider = ReferenceLineProvider()
+    provider.attach_builder(SimpleNamespace(
+        curvature_feasible_turn_samples=lambda **kwargs: (
+            list(kwargs["reference_samples"]), ""
+        ),
+    ))
+    provider.reference_from_local_map = lambda *_args, **_kwargs: (
+        [
+            {
+                "x_ref_m": float(index),
+                "y_ref_m": 0.0,
+                "heading_rad": 0.0,
+                "lane_id": 20,
+                "lane_width_m": 3.5,
+            }
+            for index in range(80)
+        ],
+        "turn_master_previewed",
+    )
+    provider.preturn_lane_reference = lambda *_args, **_kwargs: (
+        _line(1.0)[:8], "current_lane"
+    )
+    request = TurnReferenceRequest(
+        local_map=SimpleNamespace(valid=True, route_revision="route-1"),
+        config={
+            "lane_follow_to_turn_reference_transition_arc_m": 12.0,
+            "full_intersection_turn_lateral_accel_comfort_mps2": 2.5,
+        },
+        horizon_steps=8,
+        dt_s=0.1,
+        ego_location=SimpleNamespace(x=0.0, y=0.0),
+        ego_yaw_rad=0.0,
+        current_state=[0.0, 0.0, 5.0, 0.0],
+        current_lane_id=10,
+        target_lane_id=20,
+        target_speed_mps=5.0,
+        destination_state=[8.0, 1.0, 5.0, 0.0, 10],
+        turn_direction="right",
+        route_revision="route-1",
+    )
+
+    for _ in range(100):
+        result = provider.preturn_candidate(
+            request,
+            upcoming_turn_distance_m=20.0,
+            first_forward_m=0.5,
+        )
+
+    snapshot = provider.snapshot(TURN)
+    assert result.diagnostics["reference_source"] == (
+        "admap_current_lane_center_preturn"
+    )
+    assert snapshot.active is False
+    assert len(snapshot.samples) == 0
+    assert snapshot.progress_s_m == pytest.approx(snapshot.activation_s_m)
+
+
+def test_repeated_candidate_window_at_same_pose_advances_cursor_once():
+    provider = ReferenceLineProvider()
+    installed, _ = provider.install(
+        TURN,
+        [
+            {
+                "x_ref_m": float(index),
+                "y_ref_m": 0.0,
+                "heading_rad": 0.0,
+            }
+            for index in range(80)
+        ],
+        route_revision="route-1",
+        map_epoch="town06",
+        event="maneuver_started",
+    )
+    assert installed is True
+
+    first = provider.window(
+        TURN,
+        ego_x_m=30.0,
+        ego_y_m=20.0,
+        first_forward_m=0.2,
+        spacing_m=1.0,
+        count=8,
+        max_projection_advance_m=2.0,
+    )
+    first_progress = provider.snapshot(TURN).progress_s_m
+    for _ in range(20):
+        repeated = provider.window(
+            TURN,
+            ego_x_m=30.0,
+            ego_y_m=20.0,
+            first_forward_m=0.2,
+            spacing_m=1.0,
+            count=8,
+            max_projection_advance_m=2.0,
+        )
+
+    assert repeated.samples == first.samples
+    assert provider.snapshot(TURN).progress_s_m == pytest.approx(first_progress)
+
+
+def test_exhausted_turn_master_hands_off_at_authoritative_lane_boundary():
+    provider = ReferenceLineProvider()
+    installed, _ = provider.install(
+        TURN,
+        [
+            {"x_ref_m": float(index), "y_ref_m": 0.0, "lane_id": 10}
+            for index in range(11)
+        ],
+        route_revision="route-1",
+        map_epoch="town06",
+        event="maneuver_started",
+        source_lane_id=10,
+        target_lane_id=30,
+        maneuver_direction="left",
+        ego_x_m=0.0,
+        ego_y_m=0.0,
+    )
+    assert installed is True
+    provider.window(
+        TURN,
+        ego_x_m=9.0,
+        ego_y_m=0.0,
+        first_forward_m=0.0,
+        spacing_m=1.0,
+        count=2,
+        max_projection_advance_m=20.0,
+    )
+    provider.reference_from_local_map = lambda *_args, **_kwargs: (
+        [
+            {"x_ref_m": float(index), "y_ref_m": 0.0, "lane_id": 20}
+            for index in range(9, 31)
+        ],
+        "local_map_snapshot_route:20",
+    )
+
+    master, reason = provider._turn_master_geometry(
+        local_map=SimpleNamespace(valid=True, route_revision="route-1"),
+        config={"turn_master_lane_handoff_remaining_m": 2.5},
+        ego_location=SimpleNamespace(x=10.0, y=0.0),
+        current_lane_id=20,
+        target_lane_id=30,
+        turn_speed_mps=3.0,
+        lock_master=True,
+        turn_direction="left",
+        route_revision="route-1",
+        map_epoch="town06",
+    )
+
+    assert {sample["lane_id"] for sample in master} == {20}
+    assert provider.snapshot(TURN).geometry_revision == 2
+    assert "turn_master_locked" in reason
+
+
+def test_turn_master_does_not_handoff_before_near_end_lane_boundary():
+    provider = ReferenceLineProvider()
+    provider.install(
+        TURN,
+        [
+            {"x_ref_m": float(index), "y_ref_m": 0.0, "lane_id": 10}
+            for index in range(11)
+        ],
+        route_revision="route-1",
+        map_epoch="town06",
+        event="maneuver_started",
+        source_lane_id=10,
+        target_lane_id=30,
+        maneuver_direction="left",
+    )
+    provider.reference_from_local_map = lambda *_args, **_kwargs: pytest.fail(
+        "an early map-match change must not replace the active turn master"
+    )
+
+    master, _reason = provider._turn_master_geometry(
+        local_map=SimpleNamespace(valid=True, route_revision="route-1"),
+        config={"turn_master_lane_handoff_remaining_m": 2.5},
+        ego_location=SimpleNamespace(x=0.0, y=0.0),
+        current_lane_id=20,
+        target_lane_id=30,
+        turn_speed_mps=3.0,
+        lock_master=True,
+        turn_direction="left",
+        route_revision="route-1",
+        map_epoch="town06",
+    )
+
+    assert {sample["lane_id"] for sample in master} == {10}
+    assert provider.snapshot(TURN).geometry_revision == 1
 
 
 def test_preturn_candidate_locks_connector_and_preserves_speed_owner():
@@ -496,7 +719,7 @@ def test_preturn_candidate_locks_connector_and_preserves_speed_owner():
         _line(1.0)[:8], "current_lane"
     )
     provider.turn_reference = lambda request: (
-        _line(-1.0)[:8], [8.0, -1.0, 2.2, 0.0, 20], "turn_locked"
+        _line(-1.0)[:8], [8.0, -1.0, 2.2, 0.0, 20], "turn_preview"
     )
     request = TurnReferenceRequest(
         local_map=SimpleNamespace(valid=True),
@@ -527,6 +750,39 @@ def test_preturn_candidate_locks_connector_and_preserves_speed_owner():
     assert result.destination_state[2] == pytest.approx(5.0)
     assert result.destination_state[3] == pytest.approx(0.0)
     assert result.destination_state[4] == 20
+
+
+def test_preturn_defers_incomplete_connector_horizon():
+    provider = ReferenceLineProvider()
+    provider.preturn_lane_reference = lambda *_args, **_kwargs: (
+        _line(1.0)[:8], "current_lane"
+    )
+    provider.turn_reference = lambda _request: (
+        _line(-1.0)[:3], [3.0, -1.0, 2.0, 0.0, 20], "short_preview"
+    )
+    request = TurnReferenceRequest(
+        local_map=SimpleNamespace(valid=True),
+        config={"lane_follow_to_turn_reference_transition_arc_m": 12.0},
+        horizon_steps=8,
+        dt_s=0.1,
+        ego_location=SimpleNamespace(x=0.0, y=0.0),
+        ego_yaw_rad=0.0,
+        current_state=[0.0, 0.0, 5.0, 0.0],
+        current_lane_id=10,
+        target_lane_id=20,
+        target_speed_mps=5.0,
+        destination_state=[8.0, 1.0, 5.0, 0.0, 10],
+        turn_direction="right",
+    )
+
+    result = provider.preturn_candidate(
+        request, upcoming_turn_distance_m=8.0, first_forward_m=0.5
+    )
+
+    assert result.samples[0]["y_ref_m"] == pytest.approx(1.0)
+    assert result.diagnostics["reference_source"] == (
+        "admap_current_lane_center_preturn"
+    )
 
 
 def test_preturn_geometry_selects_turn_tracking_profile_before_behavior_switch():
@@ -567,6 +823,7 @@ def test_candidate_intent_propagates_preturn_connector_destination():
         baseline_reference=_line(1.0)[:8],
         baseline_debug={},
         current_lane_id=10,
+        route_physical_target_lane_id=20,
         route_optimal_lane_id=20,
         route_reference_allowed=True,
         route_reference_gate_reason="",

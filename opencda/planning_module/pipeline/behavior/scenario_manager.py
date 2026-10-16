@@ -198,6 +198,12 @@ class CPXScenarioManager:
         self._boundary_recovery_stable_frames = 0
         self._turn_exit_stable_frames = 0
 
+    def clear_traffic_control_state(self) -> None:
+        """Release only traffic-light ownership, preserving turn progress."""
+
+        if self._state in {TRAFFIC_LIGHT_APPROACH, TRAFFIC_LIGHT_STOP}:
+            self._state = LANE_FOLLOW
+
     def observe_planning_context(
         self, *, raw_traffic_state: str,
         raw_stop_target: Optional[Mapping[str, object]],

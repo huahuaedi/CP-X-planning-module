@@ -87,6 +87,31 @@ class _DummyCarla:
 
 
 class LaneKeepingMathTests(unittest.TestCase):
+    @staticmethod
+    def _physical_edge_slack_m(*, configured_upper_m=0.07, margin_m=0.60):
+        return MPC._road_boundary_physical_edge_slack_upper_m(
+            configured_upper_m=float(configured_upper_m),
+            margin_m=float(margin_m),
+        )
+
+    def test_road_boundary_slack_can_consume_the_full_inner_margin(self):
+        self.assertAlmostEqual(
+            self._physical_edge_slack_m(),
+            0.60,
+        )
+
+    def test_road_boundary_slack_is_not_limited_by_smaller_profile_cap(self):
+        self.assertAlmostEqual(
+            self._physical_edge_slack_m(configured_upper_m=0.10),
+            0.60,
+        )
+
+    def test_zero_margin_keeps_boundary_hard(self):
+        self.assertAlmostEqual(
+            self._physical_edge_slack_m(margin_m=0.0),
+            0.0,
+        )
+
     def test_signed_lateral_offset_matches_lane_frame_formula(self):
         reference = LaneKeepingStageReference(
             x_center_m=10.0,

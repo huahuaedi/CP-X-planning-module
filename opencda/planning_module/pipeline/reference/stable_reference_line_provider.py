@@ -262,6 +262,7 @@ class StableReferenceLineProvider:
 
     def reference_from_local_map(
             self, snapshot, *, start_lane_id, target_speed_mps=0.0,
+            target_lane_id=0,
             maximum_join_distance_m=5.0,
             maximum_join_curvature_1pm=0.20,
             minimum_join_transition_arc_m=3.0):
@@ -281,6 +282,15 @@ class StableReferenceLineProvider:
             # sequence with only the incoming lane produced a straight turn
             # reference whose first point was tens of metres behind ego.
             route_sequence = [start_lane_id] + route_sequence
+        # RouteCursor can be stale while ego traverses a junction connector.
+        # The physical route target is resolved independently from that
+        # cursor and names the intended outgoing lane.  Preserve it as a
+        # terminal continuation candidate; the normal join-distance check
+        # below still rejects any geometrically disconnected lane, so this
+        # cannot create an arbitrary lateral shortcut.
+        target_lane_id = int(target_lane_id or 0)
+        if target_lane_id and target_lane_id not in route_sequence:
+            route_sequence.append(target_lane_id)
         samples = []
         accepted_lanes = []
         join_indices = []

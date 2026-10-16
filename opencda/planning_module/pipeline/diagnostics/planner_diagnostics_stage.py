@@ -29,6 +29,26 @@ def _recent_admap_query_failures() -> list[dict[str, object]]:
         return []
 
 
+def _mpc_infeasibility_snapshot(mpc: Any) -> dict[str, object]:
+    """Attach the exact boundary geometry used by a failed MPC solve."""
+
+    diagnostic = dict(
+        getattr(mpc, "_last_infeasibility_diagnostic", {}) or {}
+    )
+    if not diagnostic:
+        return {}
+    diagnostic["road_boundary_margin_m"] = float(
+        getattr(mpc, "road_boundary_margin_m", 0.0)
+    )
+    diagnostic["road_boundary_max_slack_m"] = float(
+        getattr(mpc, "road_boundary_max_slack_m", 0.0)
+    )
+    peak = dict(mpc.get_last_road_boundary_peak_diagnostic() or {})
+    if peak:
+        diagnostic["road_boundary_peak"] = peak
+    return diagnostic
+
+
 def _cav_conflict_summary(diag: Mapping[str, Any]) -> str:
     """One-line CSV field: per-agent tag + per-cav role + corridor status."""
 
@@ -383,6 +403,11 @@ class PlannerDiagnosticsStage:
         emergency_brake_requested = context["emergency_brake_requested"]
         fallback_reason = context["fallback_reason"]
         front_gap_m = context["front_gap_m"]
+        proximity_emergency_gap_m = context["proximity_emergency_gap_m"]
+        proximity_front_actor_id = context["proximity_front_actor_id"]
+        proximity_front_actor = dict(
+            context.get("proximity_front_actor_snapshot", {}) or {}
+        )
         hard_gate_active = context["hard_gate_active"]
         lane_center_reference = context["lane_center_reference"]
         local_object_snapshots = context["local_object_snapshots"]
@@ -433,6 +458,18 @@ class PlannerDiagnosticsStage:
             **platform_adapter_debug,
             "object_count": len(object_snapshots),
             "mpc_object_count": len(mpc_object_snapshots),
+            "mpc_obstacle_input_count": int(reference_debug.get(
+                "mpc_obstacle_input_count", len(mpc_object_snapshots)
+            )),
+            "mpc_obstacle_relevant_count": int(reference_debug.get(
+                "mpc_obstacle_relevant_count", len(mpc_object_snapshots)
+            )),
+            "mpc_obstacle_ignored_count": int(reference_debug.get(
+                "mpc_obstacle_ignored_count", 0
+            )),
+            "mpc_obstacle_ignored_ids": list(reference_debug.get(
+                "mpc_obstacle_ignored_ids", []
+            ) or []),
             "local_object_count": len(local_object_snapshots),
             "prediction_mode": str(adapters.prediction_mode),
             "cav_conflict_summary": _cav_conflict_summary(cav_diag),
@@ -600,6 +637,30 @@ class PlannerDiagnosticsStage:
                 cp_summary.get("visibility_backend", "")
             ),
             "front_gap_m": "" if front_gap_m is None else float(front_gap_m),
+            "proximity_emergency_gap_m": float(proximity_emergency_gap_m),
+            "proximity_front_actor_id": str(proximity_front_actor_id or ""),
+            "proximity_front_actor_source": str(
+                proximity_front_actor.get("source", "") or ""
+            ),
+            "proximity_front_actor_provider_source": str(
+                proximity_front_actor.get("provider_source", "") or ""
+            ),
+            "proximity_front_actor_type": str(
+                proximity_front_actor.get(
+                    "object_type", proximity_front_actor.get("type", "")
+                ) or ""
+            ),
+            "proximity_front_actor_x_m": proximity_front_actor.get("x", ""),
+            "proximity_front_actor_y_m": proximity_front_actor.get("y", ""),
+            "proximity_front_actor_speed_mps": proximity_front_actor.get(
+                "v", proximity_front_actor.get("speed_mps", "")
+            ),
+            "proximity_front_actor_length_m": proximity_front_actor.get(
+                "length_m", ""
+            ),
+            "proximity_front_actor_width_m": proximity_front_actor.get(
+                "width_m", ""
+            ),
             "stop_goal_active": bool(mpc_stop_goal_active),
             "normal_stop_requested": bool(normal_stop_requested),
             "emergency_brake_requested": bool(emergency_brake_requested),
@@ -1284,8 +1345,8 @@ class PlannerDiagnosticsStage:
             # MPC._build_qp/_solve_qp only when the solve is infeasible, so
             # this stays empty on every normally-solved tick. See mpc.py's
             # _last_qp_diagnostic / _last_infeasibility_diagnostic.
-            "mpc_infeasibility_diagnostic": dict(
-                getattr(adapters.mpc, "_last_infeasibility_diagnostic", {}) or {}
+            "mpc_infeasibility_diagnostic": _mpc_infeasibility_snapshot(
+                adapters.mpc
             ),
             "mpc_solve_time_ms": float(getattr(adapters.mpc, "_last_solve_time_ms", 0.0)),
             **{

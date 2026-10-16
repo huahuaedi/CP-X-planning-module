@@ -162,6 +162,26 @@ def resolve_global_planner_xodr_path(config, map_planner) -> Path:
     )
 
 
+def _is_reusable_admap_planner(candidate: Any) -> bool:
+    """Return whether an injected planner satisfies the bridge map contract."""
+
+    required_methods = (
+        "get_waypoint",
+        "get_waypoint_candidates",
+        "get_drivable_waypoint",
+        "get_lane_centerline",
+        "trace_route",
+        "plan_route_from_locations",
+        "get_current_route_info",
+        "block_ad_lane_id",
+        "block_lane_at_position",
+    )
+    return candidate is not None and all(
+        callable(getattr(candidate, method_name, None))
+        for method_name in required_methods
+    )
+
+
 def assemble_planner(
     bridge: Any,
     vehicle_manager: Any,
@@ -866,30 +886,46 @@ def _pipeline_route_and_finalization(bridge, parts: SimpleNamespace) -> None:
         "custom", "custom_admap", "admap", "opendrive", "dijkstra", "dij"
     }:
         raise ValueError("global_planner_mode must select the AD-map backend")
-    xodr_path = resolve_global_planner_xodr_path(bridge.config, bridge.map_planner)
-    bridge.global_planner = CustomGlobalPlannerAdapter(
-        xodr_path=str(xodr_path),
-        cache_root=str(
-            bridge.config.get(
-                "global_planner_cache_root",
-                Path(__file__).resolve().parents[1] / "Global_Planner" / "cache",
+    if _is_reusable_admap_planner(bridge.map_planner):
+        bridge.global_planner = bridge.map_planner
+        bridge.global_planner_owned_by_bridge = False
+        print(
+            "[CP-X OpenCDA Bridge] Reusing externally owned AD-map "
+            "global planner."
+        )
+    else:
+        xodr_path = resolve_global_planner_xodr_path(
+            bridge.config, bridge.map_planner
+        )
+        bridge.global_planner = CustomGlobalPlannerAdapter(
+            xodr_path=str(xodr_path),
+            cache_root=str(
+                bridge.config.get(
+                    "global_planner_cache_root",
+                    Path(__file__).resolve().parents[1]
+                    / "Global_Planner"
+                    / "cache",
+                )
+            ),
+            route_sample_distance_m=float(route_sample_distance_m),
+            lane_change_penalty_m=(
+                float(bridge.config["global_planner_lane_change_penalty_m"])
+                if bridge.config.get("global_planner_lane_change_penalty_m")
+                is not None
+                else None
+            ),
+            ad_map_install_root=bridge.config.get("ad_map_install_root"),
+        )
+        bridge.global_planner.load(
+            force_rebuild=bool(
+                bridge.config.get("global_planner_force_rebuild", False)
             )
-        ),
-        route_sample_distance_m=float(route_sample_distance_m),
-        lane_change_penalty_m=(
-            float(bridge.config["global_planner_lane_change_penalty_m"])
-            if bridge.config.get("global_planner_lane_change_penalty_m") is not None
-            else None
-        ),
-        ad_map_install_root=bridge.config.get("ad_map_install_root"),
-    )
-    bridge.global_planner.load(
-        force_rebuild=bool(bridge.config.get("global_planner_force_rebuild", False))
-    )
-    print(
-        "[CP-X OpenCDA Bridge] Using AD-map Dijkstra global planner: "
-        f"{xodr_path}"
-    )
+        )
+        bridge.global_planner_owned_by_bridge = True
+        print(
+            "[CP-X OpenCDA Bridge] Using AD-map Dijkstra global planner: "
+            f"{xodr_path}"
+        )
     bridge.topology_map = bridge.global_planner
     # CARLA remains available to the simulation adapter, but every route,
     # lane and reference waypoint query is owned by AD-map.
