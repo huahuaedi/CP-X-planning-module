@@ -7,7 +7,11 @@ description: |-
   becomes CUT_IN and activates the credible-mode corridor veto.
 
 cpx_mature:
-  max_ticks: 850
+  # ROS inference and control are asynchronous.  Leave enough deterministic
+  # budget for the destination-speed stage to stop after a conservative
+  # six-mode cut-in response; 850 ticks could expire 4--5 m before the goal
+  # even though the ego was still following a fresh, feasible plan.
+  max_ticks: 950
 
 vehicle_base:
   planner:

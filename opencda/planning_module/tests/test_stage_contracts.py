@@ -107,9 +107,55 @@ class LaneChangeCompletionTests(unittest.TestCase):
         ))
         self.assertFalse(contract.stabilization_handoff_ready(
             progress=0.98,
-            lateral_error_m=1.4,
+            lateral_error_m=1.8,
             heading_error_rad=math.radians(9.0),
             lane_width_m=3.5,
+        ))
+
+    def test_target_lane_entry_hands_off_before_crossing_reference_expires(self):
+        contract = LaneChangeContract()
+
+        # Regression from Town06 isolated left turn: the ego was already in
+        # the target lane and the crossing was 98% complete, but the old
+        # 35%-lane/12-degree window was missed by one control cycle.  The
+        # stabilization phase must own this recoverable residual error.
+        self.assertTrue(contract.stabilization_handoff_ready(
+            progress=0.98,
+            lateral_error_m=1.69,
+            heading_error_rad=math.radians(13.9),
+            lane_width_m=3.5,
+            target_lane_matches=True,
+            footprint_clearance_m=-0.7,
+        ))
+        # A vehicle still turning sharply does not receive the handoff merely
+        # because its map-match changed lanes.
+        self.assertFalse(contract.stabilization_handoff_ready(
+            progress=0.98,
+            lateral_error_m=1.69,
+            heading_error_rad=math.radians(30.0),
+            lane_width_m=3.5,
+            target_lane_matches=True,
+            footprint_clearance_m=-0.7,
+        ))
+
+    def test_target_lane_match_owns_handoff_after_finite_curve_projection_drifts(self):
+        contract = LaneChangeContract()
+
+        self.assertTrue(contract.stabilization_handoff_ready(
+            progress=0.98,
+            lateral_error_m=2.51,
+            heading_error_rad=math.radians(11.9),
+            lane_width_m=3.5,
+            target_lane_matches=True,
+            footprint_clearance_m=-1.2,
+        ))
+        self.assertFalse(contract.stabilization_handoff_ready(
+            progress=0.98,
+            lateral_error_m=2.51,
+            heading_error_rad=math.radians(11.9),
+            lane_width_m=3.5,
+            target_lane_matches=False,
+            footprint_clearance_m=-1.2,
         ))
 
     def test_target_corridor_evidence_can_replace_stale_progress(self):

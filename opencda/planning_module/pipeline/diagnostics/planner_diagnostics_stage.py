@@ -1000,8 +1000,20 @@ class PlannerDiagnosticsStage:
             "lane_change_stabilization_entry_lateral_error_m": reference_debug.get(
                 "lane_change_stabilization_entry_lateral_error_m", ""
             ),
+            "lane_change_stabilization_entry_heading_error_deg": reference_debug.get(
+                "lane_change_stabilization_entry_heading_error_deg", ""
+            ),
             "lane_change_stabilization_geometry_ready": reference_debug.get(
                 "lane_change_stabilization_geometry_ready", ""
+            ),
+            "lane_change_geometry_completion_latched": reference_debug.get(
+                "lane_change_geometry_completion_latched", ""
+            ),
+            "lane_change_to_turn_transition_arc_m": reference_debug.get(
+                "lane_change_to_turn_transition_arc_m", ""
+            ),
+            "lane_change_to_turn_transition_progress_m": reference_debug.get(
+                "lane_change_to_turn_transition_progress_m", ""
             ),
             "behavior_lane_lateral_error_m": reference_debug.get(
                 "behavior_lane_lateral_error_m", ""

@@ -383,6 +383,51 @@ def test_corridor_follows_connected_successor_from_current_segment():
     assert reason == "local_map_snapshot_lane_chain:10>11"
 
 
+def test_completion_corridor_prefers_straight_successor_at_shared_junction():
+    snapshot = build_local_map_snapshot(
+        frame_id=1,
+        timestamp_s=1.0,
+        match={"valid": True, "ad_lane_id": 20},
+        local_graph={
+            "corridors": {1: [20, 21, 22]},
+            "lane_to_offset": {20: 1, 21: 1, 22: 1},
+            "route_lane_sequence": [20],
+            "lane_centerlines": {
+                20: [
+                    {"x_m": 0.0, "y_m": 0.0},
+                    {"x_m": 10.0, "y_m": 0.0},
+                ],
+                # Both candidates share the same contact point.  Lane 21 is
+                # the lower-id turning branch that the former distance-only
+                # tie break selected; lane 22 is the longitudinal target
+                # corridor required for lane-change completion.
+                21: [
+                    {"x_m": 10.0, "y_m": 0.0},
+                    {"x_m": 12.0, "y_m": 0.0},
+                    {"x_m": 14.0, "y_m": 2.0},
+                    {"x_m": 14.0, "y_m": 8.0},
+                ],
+                22: [
+                    {"x_m": 10.0, "y_m": 0.0},
+                    {"x_m": 20.0, "y_m": 0.0},
+                ],
+            },
+        },
+        route_target_lane_id=20,
+    )
+
+    reference, reason = (
+        StableReferenceLineProvider().lane_change_completion_reference(
+            snapshot,
+            target_lane_id=20,
+            target_speed_mps=6.0,
+        )
+    )
+
+    assert [sample["lane_id"] for sample in reference] == [20, 20, 22]
+    assert reason == "local_map_snapshot_lane_chain:20>22"
+
+
 def test_lane_change_nominal_is_owned_by_provider_and_uses_frenet_progress():
     snapshot = build_local_map_snapshot(
         frame_id=1,

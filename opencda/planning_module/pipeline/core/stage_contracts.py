@@ -172,18 +172,50 @@ class LaneChangeContract:
         # the remaining centerline and heading error.  Requiring the final
         # tolerances here makes the phases circular and can exhaust the finite
         # lane-change master before stabilization is ever allowed to start.
+        # Crossing owns the lateral transfer only until the ego centre has
+        # entered the target lane.  From there, the target-lane stabilization
+        # reference is the component designed to remove the remaining
+        # centreline and heading error.  Restricting this handoff to 35% of a
+        # lane created a narrow, timing-dependent window: the heading could
+        # become acceptable just after the lateral error crossed that bound,
+        # leaving the finite crossing reference active forever.  Half a lane
+        # is the geometric target-lane membership boundary; final completion
+        # still uses the much tighter convergence contract below.
         handoff_lateral_m = max(
             float(self.max_lateral_error_m),
-            0.35 * max(0.1, float(lane_width_m)),
+            0.50 * max(0.1, float(lane_width_m)),
         )
         handoff_heading_rad = max(
-            float(self.max_heading_error_rad), math.radians(12.0)
+            float(self.max_heading_error_rad), math.radians(15.0)
+        )
+        recoverable_heading = bool(
+            abs(float(heading_error_rad)) <= float(handoff_heading_rad)
         )
         loose_alignment = bool(
             abs(float(lateral_error_m)) <= float(handoff_lateral_m)
-            and abs(float(heading_error_rad)) <= float(handoff_heading_rad)
+            and recoverable_heading
         )
         progress_evidence = float(progress) >= float(self.min_progress)
+        # Once AD-map continuously maps the ego centre to the committed
+        # target lane, the finite crossing curve must no longer veto the
+        # ownership transfer with its own projection error.  That curve is
+        # allowed to end behind the ego and its nearest-point lateral error
+        # then grows even while the physical lane match is correct.  The
+        # stabilization reference is explicitly generated from the current
+        # pose and is therefore the correct owner of the residual error.
+        progressed_target_lane_entry = bool(
+            progress_evidence
+            and target_lane_matches
+            and recoverable_heading
+            # A lane-id transition alone is insufficient near a shared lane
+            # boundary.  Retain a broad geometric sanity bound while no
+            # longer requiring the expired crossing curve's tight handoff
+            # tolerance.
+            and abs(float(lateral_error_m)) <= max(
+                float(handoff_lateral_m),
+                0.75 * max(0.1, float(lane_width_m)),
+            )
+        )
         # Projection progress can stop short when the finite lane-change
         # master has moved behind the ego.  In that case the continuous map
         # match plus tight target-reference alignment and positive footprint
@@ -204,8 +236,9 @@ class LaneChangeContract:
             and float(footprint_clearance_m) >= 0.0
         )
         return bool(
-            loose_alignment
-            and (progress_evidence or target_corridor_evidence)
+            progressed_target_lane_entry
+            or (loose_alignment and progress_evidence)
+            or target_corridor_evidence
         )
 
     def as_debug_fields(self) -> dict[str, object]:

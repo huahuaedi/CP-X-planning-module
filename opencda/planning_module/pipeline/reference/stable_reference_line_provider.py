@@ -23,6 +23,10 @@ def _xy(sample: Mapping[str, object]) -> tuple[float, float]:
             float(sample.get("y_ref_m", sample.get("y", 0.0))))
 
 
+def _wrap_angle(angle_rad: float) -> float:
+    return math.atan2(math.sin(float(angle_rad)), math.cos(float(angle_rad)))
+
+
 def _arc(samples: Sequence[Mapping[str, object]]) -> list[float]:
     arc = [0.0]
     for first, second in zip(samples[:-1], samples[1:]):
@@ -225,8 +229,20 @@ class StableReferenceLineProvider:
 
     def reference_for_corridor(
             self, snapshot, *, offset, start_lane_id, target_speed_mps=0.0,
-            maximum_join_distance_m=5.0):
-        """Follow connected longitudinal segments inside one local corridor."""
+            maximum_join_distance_m=5.0,
+            near_join_tolerance_m=0.50):
+        """Follow the straightest connected continuation of one corridor.
+
+        ``LocalLaneCorridor.lane_geometries`` is deliberately a set-like
+        collection, not a topology sequence.  At a junction, several
+        successor geometries can share the exact same contact point.  A
+        distance-only greedy walk therefore resolves ties by lane id and can
+        append a turning connector to a lane-change completion corridor.  A
+        completion corridor owns only target-lane stabilization; the later
+        intersection-turn reference owns route turns.  Among geometrically
+        connected candidates, preserve the current tangent and prefer the
+        candidate whose terminal tangent remains closest to it.
+        """
         if snapshot is None or not bool(getattr(snapshot, "valid", False)):
             return [], "local_map_snapshot_invalid"
         corridor = next((item for item in snapshot.corridors
@@ -247,10 +263,36 @@ class StableReferenceLineProvider:
                     float(start.x_m) - float(end.x_m),
                     float(start.y_m) - float(end.y_m),
                 )
-                choices.append((distance, lane_id, geometry))
-            distance, lane_id, geometry = min(choices, key=lambda row: row[0])
-            if distance > max(0.0, float(maximum_join_distance_m)):
+                entry_heading_error = abs(_wrap_angle(
+                    float(start.heading_rad) - float(end.heading_rad)
+                ))
+                terminal_heading_error = abs(_wrap_angle(
+                    float(geometry.centerline[-1].heading_rad)
+                    - float(end.heading_rad)
+                ))
+                choices.append((
+                    float(distance), float(entry_heading_error),
+                    float(terminal_heading_error), int(lane_id), geometry,
+                ))
+            minimum_distance_m = min(row[0] for row in choices)
+            if minimum_distance_m > max(0.0, float(maximum_join_distance_m)):
                 break
+            near_choices = [
+                row for row in choices
+                if row[0] <= minimum_distance_m
+                + max(0.0, float(near_join_tolerance_m))
+            ]
+            distance, _, _, lane_id, geometry = min(
+                near_choices,
+                # Do not let sub-microradian noise in two nominally equal
+                # entry tangents outrank the branch's full heading change.
+                # The sum preserves a smooth contact while selecting the
+                # longitudinal continuation over a connector that begins
+                # tangent and then turns sharply.
+                key=lambda row: (
+                    row[1] + row[2], row[1], row[2], row[0], row[3]
+                ),
+            )
             ordered.append(int(lane_id))
             current = remaining.pop(int(lane_id))
         return self.reference_for_lane_chain(
