@@ -4,6 +4,19 @@ from pipeline.behavior.maneuver_manager import ManeuverManager
 
 
 class ManeuverManagerTests(unittest.TestCase):
+    def test_committed_tracking_includes_target_lane_stabilization(self):
+        manager = ManeuverManager()
+        state = manager.begin_lane_change(
+            "lane_change_left", "executing", 1, 2, 8.0, [],
+        )
+        self.assertTrue(state.committed_tracking_active)
+
+        state.phase = "target_lane_stabilization"
+        self.assertTrue(state.committed_tracking_active)
+
+        state.phase = "idle"
+        self.assertFalse(state.committed_tracking_active)
+
     def test_begin_lane_change_owns_station_aligned_progress_pairs(self):
         manager = ManeuverManager()
         pairs = [

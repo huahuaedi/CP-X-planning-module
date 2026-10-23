@@ -18,6 +18,9 @@ from opencda.planning_module.utility.cp_messages import (
     reset_cp_message_payload,
     upsert_cp_item,
 )
+from opencda.planning_module.utility.evaluation_metrics import (
+    EvaluationMetricsRecorder,
+)
 from opencda.scenario_testing.evaluations.evaluate_manager import EvaluationManager
 from opencda.scenario_testing.scripted_actor import spawn_scripted_actors
 from opencda.scenario_testing.run_status import (
@@ -154,9 +157,27 @@ def _spawn_collision_sensor(world, vehicle, recorder):
         attach_to=vehicle,
         attachment_type=carla.AttachmentType.Rigid,
     )
+    # CARLA emits one sensor callback per physics frame while two bodies stay
+    # in contact.  Count a contiguous contact as one collision episode rather
+    # than reporting a curb scrape as dozens of independent collisions.
+    last_frame_by_actor = {}
+    episode_by_actor = {}
 
     def _on_collision(event) -> None:
         other_actor = getattr(event, "other_actor", None)
+        other_actor_id = int(getattr(other_actor, "id", -1))
+        frame = int(getattr(event, "frame", -1))
+        previous_frame = last_frame_by_actor.get(other_actor_id)
+        last_frame_by_actor[other_actor_id] = frame
+        if (
+            previous_frame is not None
+            and frame >= previous_frame
+            and frame - previous_frame <= 5
+        ):
+            return
+        episode_by_actor[other_actor_id] = (
+            int(episode_by_actor.get(other_actor_id, 0)) + 1
+        )
         type_id = str(getattr(other_actor, "type_id", "unknown"))
         if "vehicle" in type_id:
             actor_type = "vehicle"
@@ -168,9 +189,15 @@ def _spawn_collision_sensor(world, vehicle, recorder):
             actor_type = type_id[:40]
 
         ts = getattr(event, "timestamp", None)
-        sim_time_s = (
-            float(getattr(ts, "elapsed_seconds", 0.0)) if ts is not None else None
-        )
+        if hasattr(ts, "elapsed_seconds"):
+            sim_time_s = float(ts.elapsed_seconds)
+        elif isinstance(ts, (int, float)):
+            sim_time_s = float(ts)
+        else:
+            try:
+                sim_time_s = float(world.get_snapshot().timestamp.elapsed_seconds)
+            except Exception:
+                sim_time_s = None
         try:
             loc = vehicle.get_location()
             vel = vehicle.get_velocity()
@@ -187,7 +214,7 @@ def _spawn_collision_sensor(world, vehicle, recorder):
         )
         recorder.record_collision(
             event_id="%s:%s" % (
-                getattr(event, "frame", ""), getattr(other_actor, "id", ""),
+                other_actor_id, episode_by_actor[other_actor_id],
             ),
             sim_time_s=sim_time_s,
             ego_x=ego_x,
@@ -614,14 +641,26 @@ def run_mature_scenario(opt, scenario_params, *, script_name):
             application=["single"],
             map_helper=map_helper,
         )
+        record_evaluation_metrics = bool(
+            scenario_params.get("cpx_mature", {}).get(
+                "record_evaluation_metrics", True
+            )
+        )
         for manager in single_cav_list:
             planner = getattr(manager, "cpx_planner", None)
-            if planner is None:
-                continue
-            if not bool(planner.config.get("record_evaluation_metrics", True)):
+            recorder = getattr(planner, "evaluation_metrics", None)
+            if recorder is None and bool(
+                getattr(manager, "ros_planner_enabled", False)
+            ):
+                # Evaluation truth remains in the simulator process.  The
+                # recorder is never serialized into the seven planning input
+                # channels and therefore cannot influence ROS decisions.
+                recorder = EvaluationMetricsRecorder()
+                manager._scenario_evaluation_metrics = recorder
+            if recorder is None or not record_evaluation_metrics:
                 continue
             collision_sensors.append(_spawn_collision_sensor(
-                scenario_manager.world, manager.vehicle, planner.evaluation_metrics,
+                scenario_manager.world, manager.vehicle, recorder,
             ))
         if bool(
             scenario_params.get("cpx_mature", {}).get(

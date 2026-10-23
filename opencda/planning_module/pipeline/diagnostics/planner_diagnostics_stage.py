@@ -923,6 +923,18 @@ class PlannerDiagnosticsStage:
             "candidate_selected_lane_change_planning_average_speed_mps": reference_debug.get(
                 "lane_change_planning_average_speed_mps", ""
             ),
+            "candidate_selected_lane_change_geometry_design_speed_mps": reference_debug.get(
+                "lane_change_geometry_design_speed_mps", ""
+            ),
+            "candidate_selected_lane_change_geometry_speed_mps": reference_debug.get(
+                "lane_change_geometry_speed_mps", ""
+            ),
+            "candidate_selected_lane_change_geometry_length_m": reference_debug.get(
+                "lane_change_geometry_length_m", ""
+            ),
+            "candidate_selected_lane_change_geometry_step_m": reference_debug.get(
+                "lane_change_geometry_step_m", ""
+            ),
             "candidate_selected_lane_change_authorization_source": reference_debug.get(
                 "lane_change_authorization_source", ""
             ),

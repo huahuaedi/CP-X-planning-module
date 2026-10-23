@@ -5,7 +5,10 @@ from pipeline.behavior.candidate_selection_stage import (
     CandidateSelectionRequest,
     CandidateSelectionStage,
 )
-from pipeline.behavior.candidate_evaluation import CandidateSelectionResult
+from pipeline.behavior.candidate_evaluation import (
+    CandidateSelectionResult,
+    CandidateTrajectoryEvaluator,
+)
 from pipeline.interaction.cooperative_maneuver_proposal import CooperativeManeuverProposal
 from pipeline.behavior.speed_planner import SpeedPlan
 
@@ -25,6 +28,26 @@ def _post_selection_stage(config=None):
         risk_hysteresis_margin_m=0.2, strict_ownership=True,
         target_speed_mps=8.0,
     )
+
+
+def test_lane_change_geometry_uses_cruise_speed_above_temporary_cap():
+    geometry = CandidateTrajectoryEvaluator.geometry_plan(
+        decision="lane_change_right",
+        ego_speed_mps=5.0,
+        target_speed_mps=5.2,
+        lane_change_duration_s=4.0,
+        dt_s=0.1,
+        lane_width_m=3.5,
+        config={
+            "target_speed_mps": 8.0,
+            "route_tracking_lane_change_lateral_accel_limit_mps2": 1.3,
+            "reference_vehicle_max_curvature_1pm": 0.35,
+        },
+    )
+
+    assert geometry.design_speed_mps == 8.0
+    assert geometry.operational_curvature_limit_1pm == 1.3 / 64.0
+    assert geometry.geometry_length_m > 31.0
 
 
 def test_post_selection_normalizes_lane_change_without_speed_override():

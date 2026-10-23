@@ -70,6 +70,7 @@ class CandidateGeometryPlan:
     """Single source for candidate sampling and lane-change geometry limits."""
 
     step_m: float
+    design_speed_mps: float = 0.0
     geometry_speed_mps: float = 0.0
     geometry_length_m: float = 0.0
     operational_curvature_limit_1pm: float = 0.0
@@ -105,6 +106,7 @@ class CandidateTrajectoryEvaluator:
         """Resolve sampling once; generation and commitment consume it."""
 
         from ..behavior.candidate_pipeline import (
+            lane_change_geometry_design_speed_mps,
             lane_change_geometry_requirements,
             lane_change_operational_curvature_limit_1pm,
         )
@@ -120,8 +122,24 @@ class CandidateTrajectoryEvaluator:
             _DECISION_CHANGE_RIGHT,
         }:
             return CandidateGeometryPlan(step_m=float(step_m))
+        # The behavior speed can be temporarily capped by a lead vehicle at
+        # the exact tick on which a lane change is committed.  The geometric
+        # master outlives that cap and may subsequently be driven at the
+        # configured cruise speed, so designing it from the transient lower
+        # speed can lock in a short, sharp transition.  Size the immutable
+        # lateral geometry for the highest speed it can see; longitudinal
+        # speed planning remains free to keep the current lower command.
+        design_speed_mps = lane_change_geometry_design_speed_mps(
+            target_speed_mps=float(target_speed_mps),
+            cruise_speed_mps=float(
+                config.get(
+                    "lane_change_design_speed_mps",
+                    config.get("target_speed_mps", target_speed_mps),
+                )
+            ),
+        )
         curvature_limit = lane_change_operational_curvature_limit_1pm(
-            planning_speed_mps=float(target_speed_mps),
+            planning_speed_mps=float(design_speed_mps),
             lateral_accel_limit_mps2=float(
                 config.get(
                     "route_tracking_lane_change_lateral_accel_limit_mps2",
@@ -138,7 +156,7 @@ class CandidateTrajectoryEvaluator:
         geometry_speed_mps, geometry_length_m, geometry_step_m = (
             lane_change_geometry_requirements(
                 ego_speed_mps=float(ego_speed_mps),
-                target_speed_mps=float(target_speed_mps),
+                target_speed_mps=float(design_speed_mps),
                 duration_s=float(lane_change_duration_s or 4.0),
                 dt_s=float(dt_s),
                 lane_width_m=float(lane_width_m),
@@ -158,6 +176,7 @@ class CandidateTrajectoryEvaluator:
         )
         return CandidateGeometryPlan(
             step_m=max(float(step_m), float(geometry_step_m)),
+            design_speed_mps=float(design_speed_mps),
             geometry_speed_mps=float(geometry_speed_mps),
             geometry_length_m=float(geometry_length_m),
             operational_curvature_limit_1pm=float(curvature_limit),
@@ -363,7 +382,7 @@ class CandidateTrajectoryEvaluator:
             destination_state=destination,
             lane_center_reference=reference,
             committed_lane_change_tracking_active=bool(
-                phase == "executing"
+                lifecycle.committed_tracking_active
             ),
         )
         intent = CandidateBehaviorIntent(
@@ -598,6 +617,9 @@ class CandidateTrajectoryEvaluator:
             ),
             "lane_change_geometry_speed_mps": float(
                 geometry.geometry_speed_mps
+            ),
+            "lane_change_geometry_design_speed_mps": float(
+                geometry.design_speed_mps
             ),
             "lane_change_geometry_length_m": float(
                 geometry.geometry_length_m

@@ -17,7 +17,9 @@ description: |-
 
 
 cpx_mature:
-  max_ticks: 1200
+  # Both CAVs must finish.  Cooperative yielding can intentionally delay the
+  # second maneuver, so retain enough simulation time for its remaining route.
+  max_ticks: 1800
   destination_tolerance_m: 6.0
   # Preserve both trajectories through the complete experiment.
   completion_mode: all_cavs
@@ -37,6 +39,12 @@ vehicle_base:
     full_allow_opportunistic_lane_change: false
     full_candidate_pipeline_enabled: true
     candidate_mpc_probe_enabled: true
+    # Dynamic mode currently emits a curvature-speed advisory only; it does
+    # not yet return that advisory to SpeedPlanner.  Use the existing explicit
+    # maneuver-speed owner for this narrow two-lane exchange so the platform
+    # can track the 31.5 m quintic without overshooting the outside road edge.
+    full_lane_change_dynamic_speed_cap_enabled: false
+    full_lane_change_speed_cap_mps: 4.0
     # master switch: peer intents -> classify -> assign -> corridor -> QP row.
     # Also flips MPC.corridor_constraint_enabled on at bridge construction.
     cav_conflict_enabled: true

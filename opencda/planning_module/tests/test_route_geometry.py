@@ -316,6 +316,23 @@ class RouteGeometrySegmentationTests(unittest.TestCase):
         self.assertIsNotNone(turn)
         self.assertEqual(turn[0], "right")
 
+    def test_turn_segment_exposes_authoritative_outgoing_lane(self):
+        spec = (
+            [(2.0, 0.0, "LANEFOLLOW")] * 4
+            + [(1.4, 1.4, "LEFT")] * 5
+            + [(0.0, 2.0, "LANEFOLLOW")] * 4
+        )
+        entries = self._entries(spec)
+        for index, (waypoint, _) in enumerate(entries):
+            waypoint.ad_lane_id = 100 if index < 4 else 200
+        geometry = RouteGeometry.from_entries(entries)
+
+        segment = geometry.next_turn_segment(0.0, 100.0)
+
+        self.assertIsNotNone(segment)
+        self.assertEqual(segment.direction, "left")
+        self.assertEqual(segment.target_lane_id, 200)
+
     def test_sample_spacing_is_fixed_regardless_of_node_density(self):
         spec = [(0.7, 0.0, "LANEFOLLOW")] * 60   # dense nodes
         geom = RouteGeometry.from_entries(self._entries(spec))

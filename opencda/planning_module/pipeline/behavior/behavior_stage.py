@@ -256,6 +256,7 @@ class BehaviorCommandFrameRequest:
     max_deceleration_mps2: float
     config: Mapping[str, object]
     runtime_config: Mapping[str, object]
+    destination_remaining_distance_m: float = float("inf")
     route_recovery_requested: bool = False
     static_obstacle_mpc_stall_failure_count: int = 0
 
@@ -574,6 +575,9 @@ class BehaviorStage:
             current_lane_id=int(request.current_lane_id),
             route_optimal_lane_id=int(request.route_optimal_lane_id),
             next_macro_maneuver=str(request.route_next_macro_maneuver),
+            route_remaining_distance_m=float(
+                request.destination_remaining_distance_m
+            ),
             in_junction=bool(frame.map_lane.in_junction),
             sim_time_s=float(request.sim_time_s),
             target_speed_mps=float(request.target_speed_mps),
@@ -627,7 +631,8 @@ class BehaviorStage:
         map_lane_context: Any = None,
         ego_yaw_rad: float, ego_speed_mps: float, max_deceleration_mps2: float,
         current_lane_id: int, route_optimal_lane_id: int,
-        next_macro_maneuver: str, in_junction: bool, sim_time_s: float,
+        next_macro_maneuver: str, route_remaining_distance_m: float,
+        in_junction: bool, sim_time_s: float,
         target_speed_mps: float, lane_safety_scores: Mapping[int, float],
         lane_prediction_risks: Mapping[int, Mapping[str, object]],
         front_distance_by_lane: Mapping[int, float], route_points: Sequence,
@@ -685,6 +690,25 @@ class BehaviorStage:
             runtime_config=runtime_config,
             cooperative_actor_ids=cooperative_actor_ids,
         )
+        if self._blockage_is_beyond_route_destination(
+            semantic_response=semantic_response,
+            route_remaining_distance_m=float(route_remaining_distance_m),
+            destination_clearance_m=float(config.get(
+                "full_stop_guard_destination_forward_m", 6.0
+            )),
+        ):
+            # A vehicle parked beyond ego's final route destination is not a
+            # blockage that ego must pass.  Starting a local lane borrow here
+            # creates a second, unnecessary return-to-route maneuver close to
+            # the terminal stop.  Keep ordinary obstacle avoidance unchanged
+            # whenever the obstacle is before, at, or too close beyond the
+            # destination to preserve the configured stop clearance.
+            semantic_response = replace(
+                semantic_response,
+                risk_kind="NONE",
+                action="NONE",
+                reason="lane_blockage_beyond_route_destination",
+            )
         # Recomputing purely from the current ego speed lets the dynamic
         # stopping envelope shrink as the ego brakes, which can flip
         # YIELD_STOP back to NONE before the pedestrian has actually
@@ -778,6 +802,33 @@ class BehaviorStage:
             opportunistic_lane_change_allowed=opportunistic_allowed,
             preferred_target_lane_id=int(preferred_lane),
             semantic_response=semantic_response,
+        )
+
+    @staticmethod
+    def _blockage_is_beyond_route_destination(
+        *, semantic_response: SemanticBehaviorResponse,
+        route_remaining_distance_m: float,
+        destination_clearance_m: float,
+    ) -> bool:
+        """Return whether a blockage lies safely beyond the final stop.
+
+        Both distances use the ego-forward route direction.  Non-finite route
+        state deliberately fails closed so map uncertainty can never suppress
+        obstacle handling.
+        """
+
+        obstacle_distance_m = float(semantic_response.distance_m)
+        remaining_distance_m = float(route_remaining_distance_m)
+        if str(semantic_response.action) != "LANE_BLOCKAGE":
+            return False
+        if not (
+            math.isfinite(obstacle_distance_m)
+            and math.isfinite(remaining_distance_m)
+        ):
+            return False
+        return obstacle_distance_m >= (
+            max(0.0, remaining_distance_m)
+            + max(0.0, float(destination_clearance_m))
         )
 
     @staticmethod
@@ -974,6 +1025,13 @@ class BehaviorStage:
                 authorization_offset = adjacent_offset
                 direction = normalized_geometry_direction
                 adjacent_directions[adjacent_lane_id] = direction
+                # The route topology may name the final lane of a multi-lane
+                # change, which can legitimately be outside the local frame.
+                # Execution is nevertheless possible when this immutable map
+                # snapshot resolves the next physically adjacent lane.  Treat
+                # that adjacent step as in-frame while retaining the raw final
+                # target in RouteLaneChangeContext for completion tracking.
+                target_in_frame = True
 
         request = RouteLaneChangeRequest(
             route_lane_change_allowed=bool(route_found),
@@ -1287,15 +1345,35 @@ class BehaviorStage:
         missed-maneuver invalidation, and required-target memory.
         """
 
-        maneuver_manager.observe_route_lane_change_edge(context.edge_id)
+        execution_edge_id = str(context.edge_id or "")
+        if execution_edge_id and int(context.physical_target_lane_id or 0) != 0:
+            # One AD route edge may encode multiple same-direction lane
+            # changes.  Lifecycle completion belongs to the executable
+            # adjacent step, not to that whole macro edge; otherwise finishing
+            # the first step suppresses every remaining adjacent transition.
+            execution_edge_id += ":adjacent-target-" + str(
+                int(context.physical_target_lane_id)
+            )
+        maneuver_manager.observe_route_lane_change_edge(execution_edge_id)
         authorization = self.authorize_route_lane_change(
             context.request,
             maneuver_manager=maneuver_manager,
             execution_active=bool(execution_active),
         )
         replan_reason = ""
-        if bool(getattr(route_cursor, "missed_maneuver", False)) and not bool(
-            execution_active
+        adjacent_route_step_available = bool(
+            authorization.allowed
+            and authorization.required_by_route
+            and context.topology_target_in_local_frame
+            and int(context.physical_target_lane_id or 0) != 0
+            and int(context.physical_target_lane_id) != int(current_lane_id)
+            and str(context.geometry_direction or "").strip().lower()
+            in {"left", "right"}
+        )
+        if (
+            bool(getattr(route_cursor, "missed_maneuver", False))
+            and not bool(execution_active)
+            and not adjacent_route_step_available
         ):
             missed_reason = (
                 "route_cursor_missed_lane_change:"

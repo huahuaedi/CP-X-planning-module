@@ -787,6 +787,46 @@ class CandidatePipelineTest(unittest.TestCase):
         )
         self.assertGreater(length_m, 45.0)
 
+    def test_lane_change_geometry_design_speed_ignores_temporary_speed_cap(self):
+        design_speed = candidate_pipeline.lane_change_geometry_design_speed_mps(
+            target_speed_mps=5.2,
+            cruise_speed_mps=8.0,
+        )
+        self.assertEqual(design_speed, 8.0)
+
+        low_speed_limit = (
+            candidate_pipeline.lane_change_operational_curvature_limit_1pm(
+                planning_speed_mps=5.2,
+                lateral_accel_limit_mps2=1.3,
+                vehicle_max_curvature_1pm=0.35,
+            )
+        )
+        design_speed_limit = (
+            candidate_pipeline.lane_change_operational_curvature_limit_1pm(
+                planning_speed_mps=design_speed,
+                lateral_accel_limit_mps2=1.3,
+                vehicle_max_curvature_1pm=0.35,
+            )
+        )
+        _, capped_length_m, _ = candidate_pipeline.lane_change_geometry_requirements(
+            ego_speed_mps=5.0,
+            target_speed_mps=5.2,
+            duration_s=4.0,
+            dt_s=0.1,
+            lane_width_m=3.5,
+            max_curvature_1pm=low_speed_limit,
+        )
+        _, design_length_m, _ = candidate_pipeline.lane_change_geometry_requirements(
+            ego_speed_mps=5.0,
+            target_speed_mps=design_speed,
+            duration_s=4.0,
+            dt_s=0.1,
+            lane_width_m=3.5,
+            max_curvature_1pm=design_speed_limit,
+        )
+        self.assertGreater(design_length_m, capped_length_m + 8.0)
+        self.assertGreater(design_length_m, 31.0)
+
     def test_stopped_lane_change_geometry_keeps_minimum_spatial_length(self):
         geometry_speed, length_m, step_m = (
             candidate_pipeline.lane_change_geometry_requirements(

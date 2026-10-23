@@ -28,12 +28,28 @@ def _debug_output_dir(vehicle_manager, fallback_dir):
     resolve = getattr(planner, "_resolved_debug_output_dir", None)
     if callable(resolve):
         return Path(resolve())
+    # In ROS mode the planner lives in another process, but VehicleManager
+    # retains the exact per-CAV planner configuration used to construct the
+    # transport boundary.  Keep scenario truth beside that CAV's ROS log
+    # instead of collapsing every external-planner run into cpx_default.
+    if bool(getattr(vehicle_manager, "ros_planner_enabled", False)):
+        config = getattr(vehicle_manager, "_ros_planner_config", {}) or {}
+        output_dir = config.get("debug_output_dir")
+        if output_dir:
+            return Path(str(output_dir))
     return Path(str(fallback_dir))
 
 
 def _planner_metrics(vehicle_manager):
     planner = getattr(vehicle_manager, "cpx_planner", None)
     recorder = getattr(planner, "evaluation_metrics", None)
+    if recorder is None:
+        # The simulator-side recorder is deliberately separate from the ROS
+        # planner.  It supplies CARLA ground truth (not a planning input) when
+        # the selected planner executes in another Python process.
+        recorder = getattr(
+            vehicle_manager, "_scenario_evaluation_metrics", None
+        )
     summary = getattr(recorder, "summary", None)
     if not callable(summary):
         return {}
@@ -57,6 +73,12 @@ def build_cav_run_state(index, vehicle_manager, destination=None):
     transform = vehicle.get_transform()
     velocity = vehicle.get_velocity()
     metrics = _planner_metrics(vehicle_manager)
+    scenario_recorder = getattr(
+        vehicle_manager, "_scenario_evaluation_metrics", None
+    )
+    collision_events = list(
+        getattr(scenario_recorder, "collision_events", []) or []
+    )
     distance = _distance_to_destination(vehicle, destination)
     if bool(getattr(vehicle_manager, "ros_planner_enabled", False)):
         planner_name = "cpx_mpc_ros"
@@ -75,6 +97,7 @@ def build_cav_run_state(index, vehicle_manager, destination=None):
         )),
         "distance_to_destination_m": distance,
         "collision_count": int(metrics.get("collision_count", 0) or 0),
+        "collision_events": collision_events,
         "road_boundary_breach_count": int(
             metrics.get("road_boundary_breach_count", 0) or 0
         ),

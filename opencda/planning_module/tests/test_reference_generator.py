@@ -662,6 +662,39 @@ class ReferenceGeneratorTests(unittest.TestCase):
         )
         self.assertGreaterEqual(first_forward_m, 0.79)
 
+    def test_target_lane_stabilization_keeps_independent_lane_center_error(self):
+        generator = self._generator(horizon_steps=10)
+        ego = types.SimpleNamespace(x=0.0, y=-0.4, z=0.0)
+        lane_samples = [
+            {
+                "x_ref_m": 0.8 + 0.4 * index,
+                "y_ref_m": 0.0,
+                "heading_rad": 0.0,
+                "lane_width_m": 3.5,
+                "lane_id": 7,
+            }
+            for index in range(10)
+        ]
+        generator._current_lane_center_reference_samples = (
+            lambda **_kwargs: [dict(row) for row in lane_samples]
+        )
+
+        reference = generator.target_lane_stabilization_samples(
+            ego_location=ego,
+            ego_yaw_rad=-0.2,
+            target_lane_id=7,
+            horizon_steps=10,
+            step_distance_m=0.4,
+            route_points=[],
+        )
+
+        # Stabilization must not copy the measured ego y/heading into the
+        # reference; MPC must continue to see the residual centerline error.
+        self.assertAlmostEqual(reference[0]["y_ref_m"], 0.0)
+        self.assertAlmostEqual(reference[0]["heading_rad"], 0.0)
+        self.assertNotAlmostEqual(reference[0]["y_ref_m"], ego.y)
+        self.assertTrue(all(row["lane_id"] == 7 for row in reference))
+
     def test_turn_conditioner_limits_curvature_to_vehicle_contract(self):
         generator = self._generator(horizon_steps=8)
         ego = types.SimpleNamespace(x=0.0, y=0.0, z=0.0)

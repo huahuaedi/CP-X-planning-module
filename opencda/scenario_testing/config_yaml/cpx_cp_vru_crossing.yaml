@@ -13,7 +13,9 @@ description: |-
 
 cpx_mature:
   map_mode: 2lane_freeway_simplified
-  max_ticks: 850
+  # CP-on yields to the pedestrian and therefore needs several seconds more
+  # than the no-awareness control arm to complete the same route.
+  max_ticks: 1000
   destination_tolerance_m: 3.0
   completion_mode: first_cav
   run_opencda_evaluation: false

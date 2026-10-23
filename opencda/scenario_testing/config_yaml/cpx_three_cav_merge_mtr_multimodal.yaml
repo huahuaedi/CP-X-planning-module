@@ -10,6 +10,12 @@ description: |-
   budget is 6, mode budget is 3/agent -- three real CAVs plus each other's
   broadcast intents is still comfortably inside both).
 
+# Three cooperative vehicles can spend substantially longer opening and
+# accepting safe merge gaps than the inherited two-CAV experiment.  Keep the
+# planner configuration identical and extend only the observation window.
+cpx_mature:
+  max_ticks: 3200
+
 vehicle_base:
   planner:
     use_mtr_prediction_bridge: true

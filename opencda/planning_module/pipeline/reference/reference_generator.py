@@ -221,16 +221,26 @@ class ReferenceGenerator:
         step_distance_m: float,
         route_points: Sequence[Sequence[float]] | None = None,
     ) -> list[dict[str, object]]:
-        """Build a short ego-anchored handoff to the target lane center."""
+        """Build a target-centreline reference without hiding tracking error.
 
-        reference = self._ego_anchored_lane_recovery_reference_samples(
-            ego_location=ego_location,
-            ego_yaw_rad=float(ego_yaw_rad),
+        The preceding lane-change master already provides the continuous
+        source-to-target transition.  Re-anchoring the stabilization reference
+        to the *measured* ego pose copies any residual lateral/heading error
+        into the command and temporarily makes that error appear to be zero.
+        A vehicle that is still moving laterally can then overshoot the target
+        lane before MPC sees enough error to recover.  Stabilization must
+        therefore track the independent target-lane centreline.
+        """
+
+        reference = self._current_lane_center_reference_samples(
             start_waypoint=self._map_waypoint_from_location(ego_location),
             current_lane_id=int(target_lane_id),
             horizon_steps=int(horizon_steps),
             step_distance_m=float(step_distance_m),
             route_points=route_points,
+            minimum_step_m=0.05,
+            first_point_distance_m=max(0.5, float(step_distance_m)),
+            restrict_to_ad_lane_id=int(target_lane_id),
         )
         for sample in reference:
             sample["lane_id"] = int(target_lane_id)

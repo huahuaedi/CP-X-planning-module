@@ -843,6 +843,27 @@ def predicted_lane_change_average_speed_mps(
     )
 
 
+def lane_change_geometry_design_speed_mps(
+    *,
+    target_speed_mps: float,
+    cruise_speed_mps: float,
+) -> float:
+    """Return the speed used to size an immutable lane-change path.
+
+    ``target_speed_mps`` is allowed to be a short-lived following or gap-
+    creation cap.  Once the target lane clears, SpeedPlanner can restore the
+    vehicle's configured cruise speed while the same locked geometry is still
+    active.  Designing for the larger value prevents that speed restoration
+    from turning a low-speed path into an overly aggressive maneuver.
+    """
+
+    return max(
+        0.0,
+        abs(float(target_speed_mps)),
+        abs(float(cruise_speed_mps)),
+    )
+
+
 def lane_change_geometry_requirements(
     *,
     ego_speed_mps: float,

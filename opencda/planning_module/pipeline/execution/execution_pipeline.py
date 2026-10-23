@@ -602,7 +602,7 @@ class PlanningPipeline:
                     else float("nan")
                 ),
                 "committed_lane_change_tracking_active": bool(
-                    str(adapters.maneuver_manager.lane_change.phase) == "executing"
+                    adapters.maneuver_manager.lane_change.committed_tracking_active
                 ),
             },
             behavior=behavior_decision,
@@ -1112,6 +1112,11 @@ class PlanningPipeline:
                     ),
                     config=request.config,
                     runtime_config=request.runtime_config,
+                    destination_remaining_distance_m=float(
+                        adapter.route_summary.get(
+                            "remaining_distance_m", float("inf")
+                        )
+                    ),
                     route_recovery_requested=bool(
                         request.route_recovery_requested
                     ),

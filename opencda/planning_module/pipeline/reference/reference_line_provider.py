@@ -346,6 +346,43 @@ class ReferenceLineProvider(StableReferenceLineProvider):
                 - float(ego_y_m)
             ) ** 2,
         )
+        terminal_sample = dict(terminal[-1])
+        terminal_x_m = float(terminal_sample.get(
+            "x_ref_m", terminal_sample.get("x", ego_x_m)
+        ))
+        terminal_y_m = float(terminal_sample.get(
+            "y_ref_m", terminal_sample.get("y", ego_y_m)
+        ))
+        terminal_heading_rad = float(terminal_sample.get(
+            "heading_rad", ego_heading_rad
+        ))
+        beyond_terminal_m = (
+            (float(ego_x_m) - terminal_x_m) * math.cos(terminal_heading_rad)
+            + (float(ego_y_m) - terminal_y_m) * math.sin(terminal_heading_rad)
+        )
+        if beyond_terminal_m > 0.0:
+            # A completion corridor is a finite local-map product. Evaluate
+            # alignment and footprint occupancy at ego's station on its
+            # terminal tangent instead of at a stale point behind the car.
+            target = terminal_sample
+            projected_x_m = (
+                terminal_x_m
+                + beyond_terminal_m * math.cos(terminal_heading_rad)
+            )
+            projected_y_m = (
+                terminal_y_m
+                + beyond_terminal_m * math.sin(terminal_heading_rad)
+            )
+            target.update({
+                "x_ref_m": projected_x_m,
+                "y_ref_m": projected_y_m,
+                "x": projected_x_m,
+                "y": projected_y_m,
+                "corridor_center_x_m": projected_x_m,
+                "corridor_center_y_m": projected_y_m,
+                "lane_change_target_x_m": projected_x_m,
+                "lane_change_target_y_m": projected_y_m,
+            })
         target_x_m = float(target.get("x_ref_m", target.get("x", ego_x_m)))
         target_y_m = float(target.get("y_ref_m", target.get("y", ego_y_m)))
         target_heading_rad = float(target.get("heading_rad", ego_heading_rad))
@@ -630,15 +667,18 @@ class ReferenceLineProvider(StableReferenceLineProvider):
         step_m = max(0.05, float(spacing_m))
         while len(rows) < max(2, int(count)):
             previous = dict(rows[-1])
-            transition_complete = float(
+            terminal_target_geometry = float(
                 previous.get("lane_change_progress", 0.0) or 0.0
-            ) >= 1.0 - 1.0e-6
+            ) >= 0.90
             target_heading = previous.get("lane_change_target_heading_rad")
-            if transition_complete and target_heading is not None:
-                # Once d(s) reaches its target, the target corridor owns the
-                # continuation geometry.  Extending the final transition
-                # chord instead makes a completed lane change drift through
-                # the outer road boundary when the AD-map window ends.
+            if terminal_target_geometry and target_heading is not None:
+                # Completion alignment and lifecycle evaluation already
+                # define progress >= 0.90 as terminal target-corridor
+                # geometry.  Use that same ownership boundary here.  A
+                # finite local-map master can legitimately end at 0.98; if
+                # padding waits for an exact 1.0 it repeatedly extrapolates
+                # the last diagonal transition chord and steers a vehicle
+                # that is already in the target lane away from its heading.
                 heading_rad = float(target_heading)
             elif len(rows) >= 2:
                 before = rows[-2]
@@ -672,7 +712,7 @@ class ReferenceLineProvider(StableReferenceLineProvider):
                 "lane_id": int(target_lane_id),
                 "lane_change_progress": 1.0,
             })
-            if transition_complete:
+            if terminal_target_geometry:
                 # A post-transition sample is target-lane geometry, not a
                 # virtual continuation of the source-to-target blend.
                 padded.update({
@@ -2358,8 +2398,26 @@ class ReferenceLineProvider(StableReferenceLineProvider):
             self._window_pose_lower_s[normalized_mode] = (
                 pose_key[0], pose_key[1], pose_key[2], lower_s_m,
             )
+        projection_samples = current.mutable_samples()
+        if normalized_mode == LANE_CHANGE and projection_samples:
+            # Project on the same target-tangent continuation that will be
+            # published.  Extending only after projection pins progress to a
+            # finite transition master's terminal point; once ego passes it,
+            # the first published sample moves behind the vehicle and MPC
+            # starts chasing obsolete lane-change geometry.
+            extension_count = max(
+                len(projection_samples) + int(count),
+                int(float(current.progress_s_m) / max(0.05, float(spacing_m)))
+                + int(count) + 2,
+            )
+            projection_samples = self._complete_lane_change_window(
+                projection_samples,
+                count=int(extension_count),
+                spacing_m=float(spacing_m),
+                target_lane_id=int(current.target_lane_id),
+            )
         result = self.window_from_reference(
-            current.mutable_samples(),
+            projection_samples,
             ego_x_m=float(ego_x_m),
             ego_y_m=float(ego_y_m),
             lower_s_m=float(lower_s_m),

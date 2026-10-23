@@ -9,7 +9,9 @@ description: |-
 
 cpx_mature:
   map_mode: 2lane_freeway_simplified
-  max_ticks: 700
+  # The topology reroute is valid, but its longer route needs more than the
+  # original 35 s evaluation window to reach the common destination.
+  max_ticks: 900
   destination_tolerance_m: 3.0
   completion_mode: first_cav
   run_opencda_evaluation: false

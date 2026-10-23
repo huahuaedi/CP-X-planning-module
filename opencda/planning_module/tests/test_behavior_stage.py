@@ -150,6 +150,26 @@ def test_prepare_route_lane_change_resolves_physical_adjacent_target():
     assert context.edge_id == "edge-7"
 
 
+def test_adjacent_physical_step_is_in_frame_when_final_target_is_not():
+    context = _prepare(
+        local_map_snapshot=_FakeSnapshot(
+            frame_id=5, ego_lane_id=340156, target_lane_id=340154, offset=2,
+            in_frame=False, lane_by_offset={1: 340155},
+        ),
+        current_lane_id=340156,
+        route_manager=_FakeRouteManager(
+            direction="left", distance_m=0.0,
+            reason="route_geometry_lane_change_now", edge_id="edge-multi-left",
+        ),
+    )
+
+    assert context.topology_target_lane_id == 340154
+    assert context.physical_target_lane_id == 340155
+    assert context.topology_target_in_local_frame
+    assert context.request.topology_target_in_local_frame
+    assert context.request.topology_lane_offset == 1
+
+
 def test_prepare_route_lane_change_drops_non_finite_geometry_distance():
     context = _prepare(
         route_manager=_FakeRouteManager(
@@ -218,7 +238,7 @@ def test_route_intent_proposal_rejects_out_of_frame_or_distant_topology():
     out_of_frame = _prepare(
         local_map_snapshot=_FakeSnapshot(
             frame_id=5, ego_lane_id=100, target_lane_id=340154, offset=-1,
-            in_frame=False, lane_by_offset={-1: 340155},
+            in_frame=False, lane_by_offset={},
         ),
     )
 
@@ -415,7 +435,12 @@ def test_route_lane_change_stage_invalidates_missed_cursor_once():
     manager = ManeuverManager()
 
     result = stage.resolve_route_lane_change(
-        _prepare(),
+        _prepare(
+            local_map_snapshot=_FakeSnapshot(
+                frame_id=5, ego_lane_id=100, target_lane_id=340154,
+                offset=-1, in_frame=False, lane_by_offset={},
+            ),
+        ),
         maneuver_manager=manager,
         route_cursor=SimpleNamespace(
             missed_maneuver=True, route_s_m=31.5, stalled_motion_m=9.0
@@ -432,6 +457,106 @@ def test_route_lane_change_stage_invalidates_missed_cursor_once():
     )
     assert result.replan_reason == "turn_missed_lane_change_route_unreachable"
     assert manager.lane_change.required_target_lane_id is None
+
+
+def test_missed_cursor_keeps_valid_next_adjacent_route_step():
+    stage = BehaviorStage()
+    manager = ManeuverManager()
+    context = _prepare(
+        local_map_snapshot=_FakeSnapshot(
+            frame_id=5, ego_lane_id=340156, target_lane_id=340154, offset=2,
+            in_frame=False, lane_by_offset={1: 340155},
+        ),
+        current_lane_id=340156,
+        route_manager=_FakeRouteManager(
+            direction="left", distance_m=0.0,
+            reason="route_geometry_lane_change_now", edge_id="edge-multi-left",
+        ),
+        next_macro_maneuver="LANE-CHANGE-LEFT",
+        current_road_option="CHANGELANELEFT",
+        available_lane_ids=(340156, 340155),
+    )
+
+    result = stage.resolve_route_lane_change(
+        context,
+        maneuver_manager=manager,
+        route_cursor=SimpleNamespace(
+            missed_maneuver=True, route_s_m=31.5, stalled_motion_m=9.0
+        ),
+        current_lane_id=340156,
+        execution_active=False,
+        replan_missed_lane_change=True,
+    )
+
+    assert result.authorization.allowed
+    assert result.authorization.target_lane_id == 340155
+    assert result.replan_reason == ""
+    assert manager.lane_change.required_target_lane_id == 340155
+    assert manager.lane_change.required_target_ad_lane_id == 340154
+
+
+def test_multi_lane_route_edge_completes_each_adjacent_step_independently():
+    stage = BehaviorStage()
+    manager = ManeuverManager()
+    first = _prepare(
+        local_map_snapshot=_FakeSnapshot(
+            frame_id=5, ego_lane_id=340156, target_lane_id=340154, offset=2,
+            in_frame=False, lane_by_offset={1: 340155},
+        ),
+        current_lane_id=340156,
+        route_manager=_FakeRouteManager(
+            direction="left", distance_m=0.0,
+            reason="route_geometry_lane_change_now", edge_id="edge-multi-left",
+        ),
+        next_macro_maneuver="LANE-CHANGE-LEFT",
+        current_road_option="CHANGELANELEFT",
+        available_lane_ids=(340156, 340155),
+    )
+    first_result = stage.resolve_route_lane_change(
+        first,
+        maneuver_manager=manager,
+        route_cursor=SimpleNamespace(
+            missed_maneuver=False, route_s_m=8.0, stalled_motion_m=0.0
+        ),
+        current_lane_id=340156,
+        execution_active=False,
+        replan_missed_lane_change=True,
+    )
+    assert first_result.authorization.allowed
+    assert manager.route_lane_change_edge_id.endswith("adjacent-target-340155")
+    manager.begin_lane_change(
+        "lane_change_left", "executing", 340156, 340155, 3.0, []
+    )
+    manager.complete_lane_change("first_adjacent_step_complete")
+
+    second = _prepare(
+        local_map_snapshot=_FakeSnapshot(
+            frame_id=6, ego_lane_id=340155, target_lane_id=340154, offset=1,
+            in_frame=True, lane_by_offset={1: 340154},
+        ),
+        current_lane_id=340155,
+        route_manager=_FakeRouteManager(
+            direction="left", distance_m=0.0,
+            reason="route_geometry_lane_change_now", edge_id="edge-multi-left",
+        ),
+        next_macro_maneuver="LANE-CHANGE-LEFT",
+        current_road_option="CHANGELANELEFT",
+        available_lane_ids=(340155, 340154),
+    )
+    second_result = stage.resolve_route_lane_change(
+        second,
+        maneuver_manager=manager,
+        route_cursor=SimpleNamespace(
+            missed_maneuver=False, route_s_m=20.0, stalled_motion_m=0.0
+        ),
+        current_lane_id=340155,
+        execution_active=False,
+        replan_missed_lane_change=True,
+    )
+
+    assert second_result.authorization.allowed
+    assert "edge_already_completed" not in second_result.authorization.reason
+    assert manager.route_lane_change_edge_id.endswith("adjacent-target-340154")
 
 
 def test_active_lane_change_is_not_invalidated_by_missed_cursor():
@@ -792,6 +917,49 @@ def test_moving_vehicle_does_not_enter_static_obstacle_lifecycle():
 
     assert response.risk_kind == "NONE"
     assert response.action == "NONE"
+
+
+def test_lane_blockage_beyond_final_destination_does_not_require_bypass():
+    response = SemanticBehaviorResponse(
+        risk_kind="LANE_BLOCKAGE",
+        action="LANE_BLOCKAGE",
+        object_type="vehicle",
+        obstacle_id="parked-after-goal",
+        distance_m=71.0,
+        reason="stationary_lead_blockage_confirmed_after_stall",
+    )
+
+    assert BehaviorStage._blockage_is_beyond_route_destination(
+        semantic_response=response,
+        route_remaining_distance_m=61.0,
+        destination_clearance_m=6.0,
+    )
+    assert not BehaviorStage._blockage_is_beyond_route_destination(
+        semantic_response=response,
+        route_remaining_distance_m=68.0,
+        destination_clearance_m=6.0,
+    )
+
+
+def test_destination_guard_never_suppresses_non_blockage_or_unknown_geometry():
+    no_risk = SemanticBehaviorResponse(
+        action="NONE", distance_m=100.0,
+    )
+    blockage = SemanticBehaviorResponse(
+        risk_kind="LANE_BLOCKAGE", action="LANE_BLOCKAGE",
+        distance_m=100.0,
+    )
+
+    assert not BehaviorStage._blockage_is_beyond_route_destination(
+        semantic_response=no_risk,
+        route_remaining_distance_m=20.0,
+        destination_clearance_m=6.0,
+    )
+    assert not BehaviorStage._blockage_is_beyond_route_destination(
+        semantic_response=blockage,
+        route_remaining_distance_m=float("inf"),
+        destination_clearance_m=6.0,
+    )
 
 
 def _stopped_vehicle_obstacle(vehicle_id="lead-parked-1", front_distance_m=15.0):

@@ -122,10 +122,13 @@ def test_write_run_status_preserves_exception_and_partial_completion(tmp_path):
 
 
 def test_write_run_status_identifies_external_ros_planner(tmp_path):
+    ros_output_dir = tmp_path / "ros_ego"
     manager = SimpleNamespace(
         vehicle=_Vehicle(31, 1.0, 0.0, 2.0),
         cpx_planner=None,
         ros_planner_enabled=True,
+        _ros_planner_config={"debug_output_dir": str(ros_output_dir)},
+        _scenario_evaluation_metrics=_Recorder(2, 0, 10, 1, 1),
         _opencda_agent_finished=True,
     )
     path = write_run_status(
@@ -138,5 +141,36 @@ def test_write_run_status_identifies_external_ros_planner(tmp_path):
     )[0]
 
     status = json.loads(Path(path).read_text(encoding="utf-8"))
+    assert path == str(ros_output_dir / "run_status.json")
     assert status["all_cavs_finished"] is True
     assert status["cav_states"][0]["planner"] == "cpx_mpc_ros"
+    assert status["collision_count"] == 2
+
+
+def test_ros_run_status_preserves_simulator_collision_event_details(tmp_path):
+    recorder = _Recorder(1, 0, 10, 1, 1)
+    recorder.collision_events = [{
+        "event_id": "42:99",
+        "sim_time_s": 12.5,
+        "other_actor_type": "vehicle",
+        "impulse_magnitude": 321.0,
+    }]
+    manager = SimpleNamespace(
+        vehicle=_Vehicle(42, 1.0, 0.0, 0.0),
+        cpx_planner=None,
+        ros_planner_enabled=True,
+        _ros_planner_config={"debug_output_dir": str(tmp_path / "ros")},
+        _scenario_evaluation_metrics=recorder,
+        _opencda_agent_finished=False,
+    )
+
+    path = write_run_status(
+        vehicle_managers=[manager],
+        vehicle_configs=[{"destination": [5.0, 0.0, 0.0]}],
+        termination_reason="max_ticks_reached",
+        completed_ticks=20,
+        scenario_name="collision_detail_test",
+    )[0]
+
+    state = json.loads(Path(path).read_text(encoding="utf-8"))["cav_states"][0]
+    assert state["collision_events"] == recorder.collision_events

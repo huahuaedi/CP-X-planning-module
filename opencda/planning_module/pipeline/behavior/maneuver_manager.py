@@ -52,6 +52,22 @@ class LaneChangeLifecycle:
     def active(self):
         return bool(self.option and self.phase != "idle")
 
+    @property
+    def committed_tracking_active(self):
+        """Whether lateral offset is state inside an accepted maneuver.
+
+        Target-lane stabilization is the second phase of the same committed
+        lane change, not a new candidate admission. Its reference tracks the
+        target corridor while the vehicle finishes converging, so the rolling
+        first-point lateral separation remains tracking state in both phases.
+        All other reference-contract checks remain active.
+        """
+
+        return bool(
+            self.option
+            and self.phase in {"executing", "target_lane_stabilization"}
+        )
+
     def reset(self, preserve_completed_option=True):
         completed = str(self.completed_option) if preserve_completed_option else ""
         self.option, self.phase = "", "idle"

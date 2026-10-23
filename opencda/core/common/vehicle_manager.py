@@ -289,11 +289,19 @@ class VehicleManager(object):
         self._timing_statistics = {}
         self._planner_stage_profiler = None
         self.shadow_comparison_output_path.parent.mkdir(parents=True, exist_ok=True)
-        if bool(USE_ROS_COMMAND):
+        # Auxiliary OpenCDA-only actors inherit vehicle_base.planner solely
+        # for configuration compatibility.  They must not truncate the
+        # subject CAV's ROS evidence file when they do not own CP-X planning.
+        # This was especially visible in ON/OFF CP pairs: constructing the
+        # observer in the OFF arm erased the immediately preceding ON log.
+        selected_planner_recording_enabled = bool(
+            cpx_planner_enabled(config_yaml)
+        )
+        if selected_planner_recording_enabled and bool(USE_ROS_COMMAND):
             self.ros_planner_control_output_path.write_text("", encoding="utf-8")
-        else:
+        elif selected_planner_recording_enabled:
             self.opencda_planner_control_output_path.write_text("", encoding="utf-8")
-        if self.debug_time:
+        if self.debug_time and selected_planner_recording_enabled:
             active_timing_path = self.ros_command_timing_summary_path if bool(USE_ROS_COMMAND) else self.opencda_planner_timing_summary_path
             active_timing_path.write_text("{}\n", encoding="utf-8")
 
@@ -977,6 +985,18 @@ class VehicleManager(object):
                 "persistent_reference_last_rejected_trigger",
                 "candidate_lane_change_lock_reason",
                 "candidate_lane_change_window_reason",
+                "candidate_selected_lane_change_duration_s",
+                "candidate_selected_lane_change_initial_progress",
+                "candidate_selected_lane_change_terminal_progress",
+                "candidate_selected_lane_change_geometry_design_speed_mps",
+                "candidate_selected_lane_change_geometry_speed_mps",
+                "candidate_selected_lane_change_geometry_length_m",
+                "candidate_selected_lane_change_geometry_step_m",
+                "reference_max_curvature_1pm",
+                "reference_first_forward_m",
+                "reference_first_lateral_m",
+                "destination_forward_m",
+                "destination_lateral_m",
                 "lane_change_authorization_reason",
                 "lane_change_authorization_direction",
                 "lane_change_authorization_distance_m",
@@ -991,6 +1011,19 @@ class VehicleManager(object):
                 "maneuver_commitment_progress",
                 "map_match_ad_lane_id",
                 "route_turn_reference_reason",
+                "cav_conflict_summary",
+                "cav_conflict_tags",
+                "cav_conflict_tag_reasons",
+                "cav_conflict_roles",
+                "cav_arbitration",
+                "cav_ego_claim",
+                "cav_peer_claims",
+                "cav_shared_plan_count",
+                "cav_intent_count",
+                "cav_total_qp_row_count",
+                "cav_anticipatory_speed_cap_mps",
+                "cav_anticipatory_speed_constraint_owner",
+                "cav_anticipatory_speed_constraint_reason",
                 "prediction_bridge_request_count",
                 "prediction_bridge_success_count",
                 "prediction_bridge_dropped_request_count",
@@ -1125,10 +1158,15 @@ class VehicleManager(object):
                 input_to_output_time_ms,
                 planner_cycle_time_s=ros_control.get("timestamp_s"),
                 control_age_s=control_age_s,
-                control_reused=not is_new_control,
+                control_reused=bool(
+                    ros_control.get("control_reused", False)
+                    or not is_new_control
+                ),
                 planner_diagnostics=output_diagnostics,
             )
-            if is_new_control:
+            if is_new_control and bool(
+                ros_control.get("planner_cycle_executed", True)
+            ):
                 self._record_timing_summary("ros", planning_cycle_time_ms, input_to_output_time_ms)
             return control
         if self.cpx_planner is not None:

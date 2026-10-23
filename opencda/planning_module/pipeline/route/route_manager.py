@@ -728,6 +728,24 @@ class CPXRouteManager:
             )
         return "", float("inf"), "route_no_turn_in_lookahead"
 
+    def upcoming_turn_target_lane_id(self, *, lookahead_m: float) -> int:
+        """Return the outgoing AD lane owned by the next route turn.
+
+        Lane-change authorization resolves a *physically adjacent* target
+        lane.  That is intentionally different from the outgoing lane of an
+        intersection turn and must not be reused by turn-reference geometry.
+        RouteGeometry retains the latter directly on its junction-turn
+        segment, so this query keeps the two topology concepts separate.
+        """
+
+        geometry = self._route_geometry
+        if geometry is None or not geometry.valid:
+            return 0
+        segment = geometry.next_turn_segment(
+            float(self._route_s_m), max(0.0, float(lookahead_m))
+        )
+        return int(segment.target_lane_id or 0) if segment is not None else 0
+
     def upcoming_lane_change(
         self,
         *,

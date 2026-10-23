@@ -361,6 +361,67 @@ def test_locked_lane_change_window_owns_padding_and_speed_tags():
     assert all(row["speed_ref_mps"] == 6.0 for row in result.samples)
 
 
+def test_consumed_lane_change_projects_on_target_tangent_extension():
+    provider = ReferenceLineProvider()
+    provider.install(
+        LANE_CHANGE,
+        [
+            {
+                "x_ref_m": 0.0, "y_ref_m": 0.0, "s_ref_m": 0.0,
+                "heading_rad": 0.0, "lane_change_progress": 0.9,
+                "lane_change_target_heading_rad": 0.0,
+            },
+            {
+                "x_ref_m": 1.0, "y_ref_m": 0.0, "s_ref_m": 1.0,
+                "heading_rad": 0.0, "lane_change_progress": 0.98,
+                "lane_change_target_heading_rad": 0.0,
+                "lane_change_target_curvature_1pm": 0.0,
+            },
+        ],
+        route_revision="route-1",
+        map_epoch="town06",
+        event="maneuver_started",
+        source_lane_id=10,
+        target_lane_id=11,
+        ego_x_m=0.0,
+        ego_y_m=0.0,
+    )
+
+    result = provider.locked_lane_change_window(
+        ego_x_m=4.0,
+        ego_y_m=0.0,
+        ego_heading_rad=0.0,
+        target_lane_id=11,
+        target_speed_mps=3.0,
+        spacing_m=0.5,
+        count=8,
+        min_first_forward_m=0.2,
+    )
+
+    assert result.projection_s_m == pytest.approx(4.0)
+    assert result.samples[0]["x_ref_m"] > 4.0
+    assert all(sample["lane_id"] == 11 for sample in result.samples)
+
+
+def test_completion_alignment_projects_finite_corridor_to_ego_station():
+    provider = ReferenceLineProvider()
+    alignment = provider.lane_change_completion_alignment(
+        reference_samples=[
+            {"x_ref_m": 0.0, "y_ref_m": 0.0, "heading_rad": 0.0},
+            {"x_ref_m": 1.0, "y_ref_m": 0.0, "heading_rad": 0.0},
+        ],
+        ego_x_m=5.0,
+        ego_y_m=0.15,
+        ego_heading_rad=0.05,
+    )
+
+    assert alignment.available
+    assert alignment.lateral_error_m == pytest.approx(0.15)
+    assert alignment.heading_error_rad == pytest.approx(0.05)
+    assert alignment.target_sample["x_ref_m"] == pytest.approx(5.0)
+    assert alignment.target_sample["corridor_center_x_m"] == pytest.approx(5.0)
+
+
 def test_completed_lane_change_padding_follows_target_lane_tangent():
     # The transition's final chord still points downwards, while the target
     # lane is straight.  Padding must follow the target lane; otherwise a
@@ -395,6 +456,43 @@ def test_completed_lane_change_padding_follows_target_lane_tangent():
     )
     assert result[-1]["x_ref_m"] == pytest.approx(4.0)
     assert result[-1]["lane_change_target_y_m"] == pytest.approx(0.8)
+
+
+def test_near_complete_finite_lane_change_padding_uses_target_tangent():
+    # A local-map master may end just short of numerical progress 1.0.  The
+    # lifecycle already treats >= 0.90 as terminal target-corridor geometry;
+    # padding must use the same definition instead of extending the final
+    # diagonal chord forever.
+    samples = [
+        {
+            "x_ref_m": 0.0,
+            "y_ref_m": 0.0,
+            "heading_rad": 0.3,
+            "lane_change_progress": 0.95,
+            "lane_change_target_heading_rad": 0.0,
+        },
+        {
+            "x_ref_m": 1.0,
+            "y_ref_m": 0.3,
+            "heading_rad": 0.3,
+            "lane_change_progress": 0.98,
+            "lane_change_target_heading_rad": 0.0,
+            "lane_change_target_curvature_1pm": 0.0,
+        },
+    ]
+
+    result = ReferenceLineProvider._complete_lane_change_window(
+        samples,
+        count=5,
+        spacing_m=1.0,
+        target_lane_id=11,
+    )
+
+    assert [row["y_ref_m"] for row in result[1:]] == pytest.approx(
+        [0.3, 0.3, 0.3, 0.3]
+    )
+    assert result[-1]["x_ref_m"] == pytest.approx(4.0)
+    assert all(row["lane_id"] == 11 for row in result[2:])
 
 
 def test_lane_change_padding_preserves_authorized_two_lane_union():

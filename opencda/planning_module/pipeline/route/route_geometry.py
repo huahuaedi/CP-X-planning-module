@@ -422,6 +422,31 @@ class RouteGeometry:
         direction, dist_to_onset_m, _onset_s, _zone_end_s = zone
         return (direction, dist_to_onset_m)
 
+    def next_turn_segment(
+        self, s_m: float, lookahead_m: float
+    ) -> Optional[RouteSegment]:
+        """Return the topology segment that owns the next turn zone.
+
+        A turn zone can begin on one or more connector segments before the
+        explicitly annotated ``junction_turn`` span.  Consequently this
+        query cannot be implemented with ``next_segment_of`` alone: that
+        would miss a turn whose connector onset is inside the lookahead while
+        its sharp span is just beyond it.  Keep the selection identical to
+        :meth:`turn_zone` and expose the segment's authoritative outgoing
+        lane id to downstream reference generation.
+        """
+
+        limit = float(s_m) + max(0.0, float(lookahead_m))
+        for index, segment in enumerate(self._segments):
+            if segment.kind != JUNCTION_TURN:
+                continue
+            if segment.s_end_m < float(s_m) - 1.0e-6:
+                continue
+            if self._turn_zone_onset_s(index) > limit:
+                break
+            return segment
+        return None
+
     def next_lane_change(self, s_m: float, lookahead_m: float) -> Optional[Tuple[str, float]]:
         hit = self.next_segment_of(
             LANE_CHANGE, s_m, lookahead_m, not_past=(JUNCTION_TURN,)

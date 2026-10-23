@@ -1245,6 +1245,26 @@ class CPXMPCPlannerBridge:
                 cav_intents=cav_intents,
             )
         )
+        route_reference_target_lane_id = int(
+            planning_context.behavior_context.route_behavior.context
+            .physical_target_lane_id
+        )
+        if str(executable_behavior.decision) in {
+            "intersection_turn_left", "intersection_turn_right",
+        }:
+            turn_target_lane_id = int(
+                self.route_manager.upcoming_turn_target_lane_id(
+                    lookahead_m=max(
+                        float(self.lookahead_m),
+                        float(upcoming_turn_distance_m)
+                        if math.isfinite(float(upcoming_turn_distance_m))
+                        else 0.0,
+                    )
+                )
+            )
+            if turn_target_lane_id:
+                route_reference_target_lane_id = int(turn_target_lane_id)
+
         selected_reference = self.pipeline.select_candidate_reference(
             CandidatePlanningPreparationRequest(
                 enabled=bool(self.full_candidate_pipeline_enabled),
@@ -1266,8 +1286,7 @@ class CPXMPCPlannerBridge:
                 current_steering_rad=float(self._last_steer_rad),
                 route_required=bool(route_lane_change_required),
                 route_physical_target_lane_id=int(
-                    planning_context.behavior_context.route_behavior.context
-                    .physical_target_lane_id
+                    route_reference_target_lane_id
                 ),
                 traffic_stop_active=bool(scenario_decision.stop_goal_active),
                 turn_prepare_speed_suppressed=bool(
