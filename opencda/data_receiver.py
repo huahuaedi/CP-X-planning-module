@@ -37,6 +37,7 @@ class DataReceiver(object):
         self.port = int(port)
         self.server_socket = None
         self.connection = None
+        self._socket_lock = threading.Lock()
         self.planner_controls = {}
         self.planner_control_condition = threading.Condition()
         self.planner_results = {}
@@ -186,27 +187,43 @@ class DataReceiver(object):
         server.bind((self.host, self.port))
         server.listen(1)
         server.settimeout(1.0)
-        self.server_socket = server
+        with self._socket_lock:
+            self.server_socket = server
         print("[ROS Data Receiver] Waiting on {}:{}.".format(self.host, self.port))
-        while not self.stop_event.is_set():
+        try:
+            while not self.stop_event.is_set():
+                try:
+                    connection, address = server.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    if self.stop_event.is_set():
+                        break
+                    raise
+                with self._socket_lock:
+                    self.connection = connection
+                connection.settimeout(1.0)
+                print("[ROS Data Receiver] ROS connected from {}:{}.".format(address[0], address[1]))
+                try:
+                    self._read_connection(connection)
+                except (ConnectionResetError, OSError):
+                    pass
+                finally:
+                    try:
+                        connection.close()
+                    except OSError:
+                        pass
+                    with self._socket_lock:
+                        if self.connection is connection:
+                            self.connection = None
+        finally:
             try:
-                connection, address = server.accept()
-            except socket.timeout:
-                continue
+                server.close()
             except OSError:
-                if self.stop_event.is_set():
-                    break
-                raise
-            self.connection = connection
-            connection.settimeout(1.0)
-            print("[ROS Data Receiver] ROS connected from {}:{}.".format(address[0], address[1]))
-            try:
-                self._read_connection(connection)
-            except (ConnectionResetError, OSError):
                 pass
-            finally:
-                connection.close()
-                self.connection = None
+            with self._socket_lock:
+                if self.server_socket is server:
+                    self.server_socket = None
 
     def _read_connection(self, connection):
         """Split the TCP byte stream into newline-delimited JSON messages."""
@@ -359,22 +376,28 @@ class DataReceiver(object):
     def close(self):
         """Stop the receiver and close its sockets."""
         self.stop_event.set()
-        if self.connection is not None:
-            try:
-                self.connection.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            try:
-                self.connection.close()
-            except OSError:
-                pass
+        # Detach both sockets atomically. The receiver thread may finish a
+        # connection at the same time, so closing through ``self.connection``
+        # after a separate None check is racy.
+        with self._socket_lock:
+            connection = self.connection
             self.connection = None
-        if self.server_socket is not None:
+            server_socket = self.server_socket
+            self.server_socket = None
+        if connection is not None:
             try:
-                self.server_socket.close()
+                connection.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
-            self.server_socket = None
+            try:
+                connection.close()
+            except OSError:
+                pass
+        if server_socket is not None:
+            try:
+                server_socket.close()
+            except OSError:
+                pass
         if self.receiver_thread is not None and self.receiver_thread.is_alive() and self.receiver_thread is not threading.current_thread():
             self.receiver_thread.join(timeout=2.0)
 

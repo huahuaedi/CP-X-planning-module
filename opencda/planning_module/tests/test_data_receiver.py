@@ -1,6 +1,19 @@
 import json
+import socket
 
 from opencda.data_receiver import DataReceiver
+
+
+class _FakeSocket(object):
+    def __init__(self):
+        self.shutdown_calls = []
+        self.close_count = 0
+
+    def shutdown(self, how):
+        self.shutdown_calls.append(how)
+
+    def close(self):
+        self.close_count += 1
 
 
 def _control_message(
@@ -134,3 +147,24 @@ def test_shared_receiver_uses_reference_counted_singleton():
 
     DataReceiver.release_shared(second)
     assert ("127.0.0.1", 65060) not in DataReceiver._shared_instances
+
+
+def test_close_atomically_detaches_sockets_and_is_idempotent():
+    receiver = DataReceiver()
+    connection = _FakeSocket()
+    server_socket = _FakeSocket()
+    receiver.connection = connection
+    receiver.server_socket = server_socket
+
+    receiver.close()
+
+    assert receiver.connection is None
+    assert receiver.server_socket is None
+    assert connection.shutdown_calls == [socket.SHUT_RDWR]
+    assert connection.close_count == 1
+    assert server_socket.close_count == 1
+
+    receiver.close()
+
+    assert connection.close_count == 1
+    assert server_socket.close_count == 1
