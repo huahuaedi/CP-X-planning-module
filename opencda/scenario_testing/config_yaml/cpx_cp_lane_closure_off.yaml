@@ -1,0 +1,29 @@
+base_config: cpx_cp_lane_closure.yaml
+
+description: |-
+  CP-off control arm for use case F. Map, route endpoints and ego dynamics
+  match the ON arm, while only the remote lane-closure event is disabled.
+  The planner retains the same reroute capability and the same physical
+  work-zone vehicle is present in both arms.
+
+cpx_mature:
+  cp_lane_closure:
+    enabled: false
+
+scenario:
+  single_cav_list:
+    - name: ego
+      spawn_position: [-290.0, 8.3, 0.3, 0, 0, 0]
+      destination: [-80.0, 8.3, 0.3]
+      v2x:
+        enabled: true
+        communication_range: 80
+      planner:
+        debug_output_dir: artifacts/debug/cp_lane_closure_off
+  scripted_actors:
+    - blueprint: vehicle.carlamotors.carlacola
+      path:
+        - [-180.0, 8.3]
+        - [-179.9, 8.3]
+      speed_mps: 0.0
+      z: 0.3

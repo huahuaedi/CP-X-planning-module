@@ -11,12 +11,20 @@ description: |-
   plus each other's broadcast intents stays inside both, but this is the
   first run that actually reaches that count).
 
-  Both through vehicles' destinations are short of the merging CAV that
-  parks in their own lane (cav3 short of cav1's stop point, cav4 short of
-  cav2's), the same fix cpx_three_cav_merge_mtr_multimodal needed: with
-  opportunistic lane change disabled for this experiment, a destination past
-  a parked lead in the same lane is a physically blocked route, not a
-  planner question.
+  Terminal positions follow the longitudinal order produced by the merge.
+  Cav3 remains behind cav1 in lane 4.8 and therefore stops first. Cav4 passes
+  cav2 while cav2 performs the lane exchange, so cav4 continues beyond cav2's
+  terminal position in lane 8.3. This prevents a vehicle that has already
+  completed the test from becoming a permanent parked roadblock for another
+  route; no planner or controller thresholds are changed.
+
+# Four cooperative vehicles need a longer observation window than the
+# inherited two-CAV experiment.  At the former 1800-tick limit, cav3 and cav4
+# were still moving normally with 51 m and 40 m remaining; this is a test
+# truncation, not a stuck-planner condition.  Match the validated three-CAV
+# window while leaving every planner and vehicle parameter unchanged.
+cpx_mature:
+  max_ticks: 3200
 
 vehicle_base:
   planner:
@@ -76,11 +84,11 @@ scenario:
         debug_output_dir: artifacts/debug/four_cav_merge_mtr_cav3
 
     - name: cav4
-      # Through vehicle in lane 8.3, destination short of cav2's stop point
-      # in the same lane (x=-76). Staggered spawn from cav1/cav3 so all four
-      # are not aligned on the same starting line.
+      # Through vehicle in lane 8.3. It naturally passes cav2 while cav2
+      # performs the lane exchange, so its terminal point must remain ahead
+      # of cav2's x=-76 stop rather than parking in cav2's route.
       spawn_position: [-312.0, 8.3, 0.3, 0, 0, 0]
-      destination: [-88.0, 8.3, 0.3]
+      destination: [-64.0, 8.3, 0.3]
       v2x:
         enabled: true
         communication_range: 80

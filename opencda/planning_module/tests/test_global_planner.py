@@ -166,6 +166,32 @@ def test_static_waypoint_queries_are_reused_until_cache_invalidation():
     assert core.candidate_calls == 2
 
 
+def test_dynamic_state_reset_clears_closures_without_reloading_static_map():
+    core = SimpleNamespace(blocked_lanes=[630148])
+    adapter = _adapter_with_query_core(core)
+    adapter._stored_route_summary = object()
+    adapter._stored_route_xy = object()
+    adapter._stored_route_cum_dists = object()
+    adapter._stored_route_options = ["LANEFOLLOW"]
+    adapter._stored_route_lane_ids = [630148]
+    adapter._stored_route_waypoints = [object()]
+    adapter._lane_context_cache = (1.0, 2.0, 0.0, {})
+    adapter._local_lane_graph_cache = (1.0, 2.0, 0.0, 1, {})
+    adapter._waypoint_query_cache["point"] = object()
+
+    adapter.reset_dynamic_state()
+
+    assert core.blocked_lanes == []
+    assert adapter._stored_route_summary is None
+    assert adapter._stored_route_xy is None
+    assert adapter._stored_route_options == []
+    assert adapter._stored_route_lane_ids == []
+    assert adapter._stored_route_waypoints == []
+    assert adapter._lane_context_cache is None
+    assert adapter._local_lane_graph_cache is None
+    assert adapter._waypoint_query_cache == {}
+
+
 def test_drivable_waypoint_reuses_cached_candidate_projection():
     waypoint = object()
     core = SimpleNamespace(candidate_calls=0)

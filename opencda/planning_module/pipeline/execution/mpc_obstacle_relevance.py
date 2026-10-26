@@ -25,6 +25,11 @@ from typing import Any, List, Mapping, Sequence, Tuple
 
 import numpy as np
 
+try:
+    from scipy.spatial import cKDTree
+except ImportError:  # pragma: no cover - NumPy fallback remains authoritative.
+    cKDTree = None
+
 Snapshot = Mapping[str, Any]
 XY = Tuple[float, float]
 
@@ -42,7 +47,9 @@ def _f(m: Mapping[str, Any], *keys: str, default: float = 0.0) -> float:
     return default
 
 
-def _obstacle_track_xy(snapshot: Snapshot) -> List[XY]:
+def _obstacle_track_xy(
+    snapshot: Snapshot, max_points: int = 0,
+) -> List[XY]:
     """Predicted (x, y) samples for one obstacle, or its current position.
 
     Order of preference: the highest-probability entry of a multi-modal
@@ -55,9 +62,11 @@ def _obstacle_track_xy(snapshot: Snapshot) -> List[XY]:
         primary_mode,
     )
 
+    limit = max(0, int(max_points or 0))
     mode = primary_mode(snapshot.get("predicted_modes"))
     if mode is not None:
-        pts = mode_xy(mode.path)
+        mode_path = mode.path[:limit] if limit else mode.path
+        pts = mode_xy(mode_path)
         if pts:
             return pts
 
@@ -70,6 +79,8 @@ def _obstacle_track_xy(snapshot: Snapshot) -> List[XY]:
                     pts.append((float(st["x"]), float(st["y"])))
                 elif isinstance(st, Sequence) and not isinstance(st, (str, bytes)) and len(st) >= 2:
                     pts.append((float(st[0]), float(st[1])))
+                if limit and len(pts) >= limit:
+                    break
             if pts:
                 return pts
     return [(_f(snapshot, "x", "x_m"), _f(snapshot, "y", "y_m"))]
@@ -200,16 +211,25 @@ def project_points_to_extended_polyline(
     projector's finite-polyline and infinite-endpoint-tangent semantics.
     """
 
-    point_rows = [] if points is None else list(points)
-    poly_rows = [] if poly is None else list(poly)
-    if not point_rows:
-        return [], []
-    if len(poly_rows) < 2:
-        # Match the scalar helper: with no valid segment, perpendicular
-        # distance remains infinite and station remains at the origin.
-        return [math.inf] * len(point_rows), [0.0] * len(point_rows)
+    prepared = prepare_extended_polyline(poly)
+    return project_points_to_prepared_extended_polyline(points, prepared)
 
-    point_xy = np.asarray(point_rows, dtype=float).reshape((-1, 2))
+
+def prepare_extended_polyline(poly: Sequence[XY]):
+    """Precompute immutable segment geometry for repeated point batches.
+
+    Stage A evaluates one small future-point batch for every retained MTR
+    mode against the same ego reference.  Keeping this preparation separate
+    avoids rebuilding the reference arrays, segment lengths and cumulative
+    arc 6--18 times in one conflict-resolution call, while deliberately
+    retaining the smaller per-mode distance matrices that benchmark better
+    than one oversized all-mode matrix.
+    """
+
+    poly_rows = [] if poly is None else list(poly)
+    if len(poly_rows) < 2:
+        return {"poly_rows": poly_rows}
+
     poly_xy = np.asarray(poly_rows, dtype=float).reshape((-1, 2))
     starts = poly_xy[:-1]
     deltas = poly_xy[1:] - starts
@@ -218,27 +238,129 @@ def project_points_to_extended_polyline(
     lengths = np.zeros_like(length_sq)
     lengths[valid] = np.sqrt(length_sq[valid])
     arc_start = np.concatenate((np.zeros(1), np.cumsum(lengths[:-1])))
+    return {
+        "poly_count": len(poly_rows),
+        "poly_xy": poly_xy,
+        "starts": starts,
+        "deltas": deltas,
+        "length_sq": length_sq,
+        "valid": valid,
+        "lengths": lengths,
+        "arc_start": arc_start,
+        "total_arc": float(np.sum(lengths)),
+        "vertex_tree": (
+            # Below roughly 500 dense reference vertices, NumPy's contiguous
+            # full matrix is faster than tree queries.  Keep the exact same
+            # projector and select only the measured faster implementation.
+            cKDTree(poly_xy) if cKDTree is not None and len(poly_xy) >= 512
+            else None
+        ),
+        "max_segment_length": float(np.max(lengths)) if len(lengths) else 0.0,
+    }
 
-    relative = point_xy[:, None, :] - starts[None, :, :]
-    numerators = np.einsum("nsi,si->ns", relative, deltas)
-    raw_t = np.zeros_like(numerators)
-    np.divide(
-        numerators, length_sq[None, :], out=raw_t,
-        where=valid[None, :],
-    )
-    clamped_t = np.clip(raw_t, 0.0, 1.0)
-    closest = starts[None, :, :] + clamped_t[:, :, None] * deltas[None, :, :]
-    residual = point_xy[:, None, :] - closest
-    distance_sq = np.einsum("nsi,nsi->ns", residual, residual)
-    distance_sq[:, ~valid] = np.inf
-    best_segment = np.argmin(distance_sq, axis=1)
-    row_index = np.arange(point_xy.shape[0])
-    lateral = np.sqrt(distance_sq[row_index, best_segment])
-    station = (
-        arc_start[best_segment]
-        + clamped_t[row_index, best_segment] * lengths[best_segment]
-    )
-    total_arc = float(np.sum(lengths))
+
+def _project_points_with_vertex_tree(point_xy, prepared):
+    """Exact nearest-segment projection using a vertex-tree candidate bound.
+
+    Let ``d`` be the distance to the nearest reference vertex and ``L`` the
+    longest segment.  The nearest vertex itself is already a feasible
+    projection with distance ``d``.  Any segment capable of improving that
+    result must therefore have an endpoint no farther than ``d + L`` (triangle
+    inequality).  Querying all vertices inside that radius and checking their
+    adjacent segments is consequently exact, not a heuristic local window.
+    """
+
+    tree = prepared.get("vertex_tree")
+    if tree is None:
+        return None
+    starts = prepared["starts"]
+    deltas = prepared["deltas"]
+    length_sq = prepared["length_sq"]
+    valid = prepared["valid"]
+    lengths = prepared["lengths"]
+    arc_start = prepared["arc_start"]
+    segment_count = len(starts)
+    nearest_distance, _ = tree.query(point_xy, k=1)
+    radii = np.asarray(nearest_distance, dtype=float) + float(
+        prepared.get("max_segment_length", 0.0)
+    ) + 1.0e-9
+    nearby_vertices = tree.query_ball_point(point_xy, radii)
+
+    lateral = np.empty(point_xy.shape[0], dtype=float)
+    station = np.empty(point_xy.shape[0], dtype=float)
+    for row, vertices in enumerate(nearby_vertices):
+        candidates = sorted({
+            segment
+            for vertex in vertices
+            for segment in (int(vertex) - 1, int(vertex))
+            if 0 <= segment < segment_count and bool(valid[segment])
+        })
+        if not candidates:
+            return None
+        indices = np.asarray(candidates, dtype=int)
+        relative = point_xy[row] - starts[indices]
+        raw_t = np.einsum("ij,ij->i", relative, deltas[indices]) / length_sq[indices]
+        clamped_t = np.clip(raw_t, 0.0, 1.0)
+        closest = starts[indices] + clamped_t[:, None] * deltas[indices]
+        residual = point_xy[row] - closest
+        distance_sq = np.einsum("ij,ij->i", residual, residual)
+        best_local = int(np.argmin(distance_sq))
+        best_segment = int(indices[best_local])
+        lateral[row] = math.sqrt(float(distance_sq[best_local]))
+        station[row] = (
+            float(arc_start[best_segment])
+            + float(clamped_t[best_local]) * float(lengths[best_segment])
+        )
+    return lateral, station
+
+
+def project_points_to_prepared_extended_polyline(
+    points: Sequence[XY], prepared,
+) -> Tuple[List[float], List[float]]:
+    """Project points using :func:`prepare_extended_polyline` output."""
+
+    point_rows = [] if points is None else list(points)
+    if not point_rows:
+        return [], []
+    prepared = prepared or {}
+    if int(prepared.get("poly_count", 0) or 0) < 2:
+        # Match the scalar helper: with no valid segment, perpendicular
+        # distance remains infinite and station remains at the origin.
+        return [math.inf] * len(point_rows), [0.0] * len(point_rows)
+
+    point_xy = np.asarray(point_rows, dtype=float).reshape((-1, 2))
+    poly_xy = prepared["poly_xy"]
+    starts = prepared["starts"]
+    deltas = prepared["deltas"]
+    length_sq = prepared["length_sq"]
+    valid = prepared["valid"]
+    lengths = prepared["lengths"]
+    arc_start = prepared["arc_start"]
+
+    tree_result = _project_points_with_vertex_tree(point_xy, prepared)
+    if tree_result is not None:
+        lateral, station = tree_result
+    else:
+        relative = point_xy[:, None, :] - starts[None, :, :]
+        numerators = np.einsum("nsi,si->ns", relative, deltas)
+        raw_t = np.zeros_like(numerators)
+        np.divide(
+            numerators, length_sq[None, :], out=raw_t,
+            where=valid[None, :],
+        )
+        clamped_t = np.clip(raw_t, 0.0, 1.0)
+        closest = starts[None, :, :] + clamped_t[:, :, None] * deltas[None, :, :]
+        residual = point_xy[:, None, :] - closest
+        distance_sq = np.einsum("nsi,nsi->ns", residual, residual)
+        distance_sq[:, ~valid] = np.inf
+        best_segment = np.argmin(distance_sq, axis=1)
+        row_index = np.arange(point_xy.shape[0])
+        lateral = np.sqrt(distance_sq[row_index, best_segment])
+        station = (
+            arc_start[best_segment]
+            + clamped_t[row_index, best_segment] * lengths[best_segment]
+        )
+    total_arc = float(prepared["total_arc"])
 
     # Preserve the scalar helper's infinite extension of the first and last
     # segment tangents.  Only points whose closest finite projection is the

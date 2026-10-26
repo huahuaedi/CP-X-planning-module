@@ -506,6 +506,9 @@ class PlannerDiagnosticsStage:
             "cav_conflict_agent_count": int(
                 cav_diag.get("conflict_agent_count", 0) or 0
             ),
+            "cav_conflict_reference_sample_count": int(
+                cav_diag.get("conflict_reference_sample_count", 0) or 0
+            ),
             "cav_non_ignore_count": int(cav_diag.get("non_ignore_count", 0) or 0),
             "cav_deduplicated_agent_count": int(
                 cav_diag.get("deduplicated_agent_count", 0) or 0

@@ -22,6 +22,7 @@ MPC constraint builder.
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -709,6 +710,8 @@ def resolve_conflicts(
     max_relevant_agents: int = 6,
     max_modes_per_agent: int = 6,
 ) -> ConflictResolution:
+    timing_ms: Dict[str, float] = {}
+    stage_started = time.perf_counter()
     cavs = list(cav_intents or [])
     expanded = _build_physical_agents_with_modes(
         cavs=cavs,
@@ -726,6 +729,9 @@ def resolve_conflicts(
     mode_capped_agent_count = expanded.mode_capped_agent_count
     raw_obstacle_count = expanded.raw_obstacle_count
     cav_agent_count = expanded.cav_agent_count
+    timing_ms["expand_modes"] = (
+        time.perf_counter() - stage_started
+    ) * 1000.0
 
     # Stage A -----------------------------------------------------------------
     # Every agent is classified before any count budget applies: a crossing
@@ -733,10 +739,20 @@ def resolve_conflicts(
     # ego's path) is exactly the case a pre-classification position filter
     # would misjudge as irrelevant, and classify_conflicts already reasons
     # over the full predicted track, not current position.
+    stage_started = time.perf_counter()
+    classifier_timing_ms: Dict[str, float] = {}
     tags = classify_conflicts(
         reference_samples, ego_snapshot, all_agents, classifier_params,
         previous_tags=tag_state,
+        timing_ms=classifier_timing_ms,
     )
+    timing_ms["classify"] = (
+        time.perf_counter() - stage_started
+    ) * 1000.0
+    for timing_name, elapsed_ms in classifier_timing_ms.items():
+        if timing_name != "reference_sample_count":
+            timing_ms["classify_%s" % timing_name] = float(elapsed_ms)
+    stage_started = time.perf_counter()
     all_agents, tags, mode_groups, dropped_agent_count = _cap_agents_by_severity(
         all_agents=all_agents, tags=tags, mode_groups=mode_groups,
         max_agents=int(max_relevant_agents),
@@ -750,8 +766,12 @@ def resolve_conflicts(
     corridor_tag_by_id = _tags_on_corridor_reference(
         tags, reference_samples, corridor_reference
     )
+    timing_ms["severity_and_reference"] = (
+        time.perf_counter() - stage_started
+    ) * 1000.0
 
     # Stage B (only cooperative cavs, only when ego holds an active claim) ---
+    stage_started = time.perf_counter()
     assignments: List[ConflictAssignment] = []
     arbitration_diagnostics: Dict[str, Any] = {}
     current_tag_state = {tag.agent_id: tag.tag for tag in tags}
@@ -804,8 +824,12 @@ def resolve_conflicts(
     elif roles_refreshed:
         arbitration_diagnostics["reason"] = "ego_claim_inactive"
     assign_by_id = {str(a.cav_actor_id): a for a in assignments}
+    timing_ms["arbitration"] = (
+        time.perf_counter() - stage_started
+    ) * 1000.0
 
     # Stage C ---------------------------------------------------------------
+    stage_started = time.perf_counter()
     corridor_rebuilt = bool(
         rebuild_corridor or tag_changed or roles_refreshed
     )
@@ -874,6 +898,9 @@ def resolve_conflicts(
         # Carry the veto latch unchanged while the cache is reused so a
         # later rebuild resumes from the last real state.
         new_veto_state = incoming_veto_state
+    timing_ms["corridor"] = (
+        time.perf_counter() - stage_started
+    ) * 1000.0
 
     def _source(agent: Mapping[str, Any]) -> str:
         src = str(agent.get("trajectory_source", "") or "")
@@ -966,6 +993,13 @@ def resolve_conflicts(
         ),
         "corridor_rebuilt": bool(corridor_rebuilt),
         "released_actor_ids": tuple(sorted(cleared_actor_ids)),
+        "conflict_stage_timing_ms": {
+            str(name): round(float(value), 6)
+            for name, value in timing_ms.items()
+        },
+        "conflict_reference_sample_count": int(
+            classifier_timing_ms.get("reference_sample_count", 0.0)
+        ),
     }
     return ConflictResolution(
         tags=tags, assignments=assignments, corridor=corridor,

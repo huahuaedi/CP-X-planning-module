@@ -4,8 +4,9 @@ description: |-
   CP-F high-level planning validation. A remote lane-closure event becomes
   available while the ego is still upstream. RouteManager maps the event to
   AD-map lane 630148 and atomically replaces the route with the open adjacent
-  lane 630149. No local obstacle is spawned: success therefore demonstrates
-  CP lane-event transport and topology rerouting, not reactive avoidance.
+  lane 630149. A stationary work-zone vehicle physically occupies the closed
+  lane in both experiment arms; CP ON can reroute before local sensing sees
+  it, while CP OFF receives no remote event.
 
 cpx_mature:
   map_mode: 2lane_freeway_simplified
@@ -35,6 +36,7 @@ vehicle_base:
   sensing:
     perception:
       activate: false
+      deactivated_detection_range_m: 25.0
     localization:
       activate: false
       debug_helper:
@@ -57,3 +59,10 @@ scenario:
       v2x:
         enabled: true
         communication_range: 80
+  scripted_actors:
+    - blueprint: vehicle.carlamotors.carlacola
+      path:
+        - [-180.0, 8.3]
+        - [-179.9, 8.3]
+      speed_mps: 0.0
+      z: 0.3

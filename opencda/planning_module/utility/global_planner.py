@@ -375,7 +375,25 @@ class CustomGlobalPlannerAdapter:
 
     def load(self, force_rebuild: bool = False) -> None:
         self.core.load(force_rebuild=bool(force_rebuild))
+        self.reset_dynamic_state()
+
+    def reset_dynamic_state(self) -> None:
+        """Clear run-scoped state while keeping the loaded static AD-map.
+
+        Lane closures are scenario inputs, not properties of the OpenDRIVE
+        map.  A long-running ROS process may reuse the same map across CARLA
+        runs, so retaining this state would leak one scenario into the next.
+        """
+
         self.core.blocked_lanes.clear()
+        self._stored_route_summary = None
+        self._stored_route_xy = None
+        self._stored_route_cum_dists = None
+        self._stored_route_options = []
+        self._stored_route_lane_ids = []
+        self._stored_route_waypoints = []
+        self._lane_context_cache = None
+        self._local_lane_graph_cache = None
         self._clear_waypoint_query_caches()
 
     def close(self) -> None:

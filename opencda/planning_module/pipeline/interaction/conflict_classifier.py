@@ -20,13 +20,15 @@ minimum gap over the horizon, for Stage B (who yields) and Stage C
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass
 from typing import Any, List, Mapping, Optional, Sequence, Tuple
 
 from ..execution.mpc_obstacle_relevance import (
     _obstacle_track_xy,
     _polyline_xy,
-    project_points_to_extended_polyline,
+    prepare_extended_polyline,
+    project_points_to_prepared_extended_polyline,
     project_to_extended_polyline,
 )
 
@@ -182,10 +184,12 @@ def classify_conflicts(
     agent_snapshots: Sequence[Mapping[str, Any]],
     p: ClassifierParams = ClassifierParams(),
     previous_tags: Optional[Mapping[str, str]] = None,
+    timing_ms: Optional[dict] = None,
 ) -> List[ConflictTag]:
     """Tag every agent. ``ego_snapshot`` needs x/y/v(/psi); each agent needs
     x/y/v(/psi) and optionally ``predicted_trajectory``."""
 
+    function_started = time.perf_counter()
     poly = _polyline_xy(reference_samples)
     out: List[ConflictTag] = []
     if len(poly) < 2:
@@ -205,17 +209,70 @@ def classify_conflicts(
     ego_s0 = _ego_arc_at((_f(ego_snapshot, "x", "x_m"), _f(ego_snapshot, "y", "y_m")), poly)
     ego_v = max(0.0, _f(ego_snapshot, "v", "speed", "speed_mps"))
     poly_len = _poly_length(poly)
+    prepared_poly = prepare_extended_polyline(poly)
+    reference_prepared_at = time.perf_counter()
+    track_parse_s = 0.0
+    projection_s = 0.0
 
-    for a in list(agent_snapshots or []):
+    agents = list(agent_snapshots or [])
+    prepared_tracks = []
+    prepared_projections = []
+    # Submit one projection batch when the reference is either tree-backed or
+    # short.  Multi-CAV MTR runs normally use a 31--74 sample maneuver
+    # reference and retain up to 18 mode snapshots.  Projecting every mode in
+    # a separate NumPy call repeats array allocation and BLAS dispatch under
+    # load; one exact batch preserves every point and mode while amortizing
+    # that fixed work.  Medium full-matrix references remain per-agent because
+    # their larger temporary arrays benchmark better in small batches.
+    batch_projection = (
+        prepared_poly.get("vertex_tree") is not None
+        or int(prepared_poly.get("poly_count", 0) or 0) <= 128
+    )
+    if batch_projection:
+        section_started = time.perf_counter()
+        flat_points = []
+        offsets = []
+        for agent in agents:
+            track = [
+                (float(x), float(y))
+                for (x, y) in _obstacle_track_xy(agent, max_points=n)
+            ]
+            if len(track) < n:
+                track = _cv_track(agent, n, dt)
+            track = track[:min(n, len(track))]
+            start = len(flat_points)
+            flat_points.extend(track)
+            offsets.append((start, len(flat_points)))
+            prepared_tracks.append(track)
+        track_parse_s += time.perf_counter() - section_started
+        section_started = time.perf_counter()
+        flat_lateral, flat_station = (
+            project_points_to_prepared_extended_polyline(
+                flat_points, prepared_poly,
+            )
+        )
+        projection_s += time.perf_counter() - section_started
+        prepared_projections = [
+            (flat_lateral[start:stop], flat_station[start:stop])
+            for start, stop in offsets
+        ]
+
+    for agent_index, a in enumerate(agents):
         aid = _agent_id(a)
         object_type = str(a.get("object_type", "unknown") or "unknown")
         previous_tag = str((previous_tags or {}).get(aid, ""))
         coop = bool(a.get("cooperative", False))
-        track = [
-            (float(x), float(y)) for (x, y) in _obstacle_track_xy(a)
-        ]
-        if len(track) < n:
-            track = _cv_track(a, n, dt)
+        if prepared_tracks:
+            track = prepared_tracks[agent_index]
+        else:
+            section_started = time.perf_counter()
+            track = [
+                (float(x), float(y))
+                for (x, y) in _obstacle_track_xy(a, max_points=n)
+            ]
+            if len(track) < n:
+                track = _cv_track(a, n, dt)
+            track_parse_s += time.perf_counter() - section_started
         a_h = _agent_heading(a, low_speed_fallback=ego_h)
         d_head = abs(math.atan2(math.sin(a_h - ego_h), math.cos(a_h - ego_h)))
         a_accel = _f(a, "a", "acceleration", "acceleration_mps2")
@@ -226,9 +283,16 @@ def classify_conflicts(
         lat_series: List[float] = []
         signed_lat: List[float] = []
         projected_track = track[:min(n, len(track))]
-        lateral_values, station_values = project_points_to_extended_polyline(
-            projected_track, poly,
-        )
+        if prepared_projections:
+            lateral_values, station_values = prepared_projections[agent_index]
+        else:
+            section_started = time.perf_counter()
+            lateral_values, station_values = (
+                project_points_to_prepared_extended_polyline(
+                    projected_track, prepared_poly,
+                )
+            )
+            projection_s += time.perf_counter() - section_started
         for k, ((px, py), perp, along) in enumerate(zip(
             projected_track, lateral_values, station_values,
         )):
@@ -330,4 +394,17 @@ def classify_conflicts(
                 observation_source=_observation_source(a),
             )
         )
+    if timing_ms is not None:
+        total_s = time.perf_counter() - function_started
+        reference_s = reference_prepared_at - function_started
+        timing_ms.update({
+            "reference_prepare": reference_s * 1000.0,
+            "track_parse": track_parse_s * 1000.0,
+            "projection": projection_s * 1000.0,
+            "classification_logic": max(
+                0.0,
+                total_s - reference_s - track_parse_s - projection_s,
+            ) * 1000.0,
+            "reference_sample_count": float(len(poly)),
+        })
     return out

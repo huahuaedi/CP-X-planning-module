@@ -259,6 +259,13 @@ class CooperativeArbitrationStage:
         self._record_stage_ms(
             "sub_resolve_cav_interaction", _cav_interaction_elapsed_s
         )
+        for _name, _elapsed_ms in dict(
+            cav_result.diagnostics.get("conflict_stage_timing_ms", {}) or {}
+        ).items():
+            self._record_stage_ms(
+                "sub_conflict_%s" % str(_name),
+                max(0.0, float(_elapsed_ms)) / 1000.0,
+            )
         # Feeds next tick's budget, not this one: this tick already ran
         # at whatever budget was decided last tick, so retroactively
         # shrinking its own inputs here would just make the measurement

@@ -934,9 +934,52 @@ def build_speed_plan(
         and math.isfinite(float(upcoming_turn_distance_m))
     ):
         finite_turn_distance_m = max(0.0, float(upcoming_turn_distance_m))
-    # This stage deliberately does not guess turn curvature with a fixed
-    # speed. Once ReferenceLineProvider installs the immutable turn master,
-    # SpeedTargetPlanner.turn_curvature_constraint owns that ceiling.
+    if (
+        finite_turn_distance_m is not None
+        and decision not in {"intersection_turn_left", "intersection_turn_right"}
+        and not stop_goal
+        and not bool(lane_change_commitment_active)
+    ):
+        # The immutable turn master normally supplies the exact curvature
+        # ceiling.  Route topology can, however, expose the approaching turn
+        # before that reference is installed (notably immediately after a
+        # route-required lane change).  Use the vehicle's validated curvature
+        # envelope as a conservative physical fallback so speed preparation
+        # cannot disappear during that hand-off.
+        lateral_accel_mps2 = max(
+            0.1,
+            float(config.get(
+                "full_intersection_turn_lateral_accel_comfort_mps2", 2.5
+            )),
+        )
+        vehicle_max_curvature_1pm = max(
+            1.0e-3,
+            float(config.get("reference_vehicle_max_curvature_1pm", 0.20)),
+        )
+        fallback_entry_speed_mps = math.sqrt(
+            lateral_accel_mps2 / vehicle_max_curvature_1pm
+        )
+        comfortable_decel_mps2 = max(
+            0.1,
+            float(config.get("turn_approach_comfort_decel_mps2", 2.5)),
+        )
+        entry_buffer_m = max(
+            0.0,
+            float(config.get("turn_approach_entry_buffer_m", 5.0)),
+        )
+        braking_distance_m = max(
+            0.0,
+            float(finite_turn_distance_m) - float(entry_buffer_m),
+        )
+        turn_approach_cap_mps = math.sqrt(
+            fallback_entry_speed_mps * fallback_entry_speed_mps
+            + 2.0 * comfortable_decel_mps2 * braking_distance_m
+        )
+        active_constraints.append("turn_approach_cap")
+        previous_cap = float(cap)
+        cap = min(float(cap), float(turn_approach_cap_mps))
+        if float(cap) < previous_cap:
+            limiting_owner = "turn_approach_cap"
     lane_change_cap_mps = None
     if decision in {"lane_change_left", "lane_change_right"}:
         # A route-required lane change can start immediately after ego is

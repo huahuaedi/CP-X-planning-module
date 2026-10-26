@@ -814,7 +814,7 @@ class SpeedPlannerTest(unittest.TestCase):
         self.assertAlmostEqual(plan.target_speed_mps, 15.6464)
         self.assertNotEqual(plan.limiting_owner, "turn_approach_cap")
 
-    def test_upcoming_turn_waits_for_persistent_reference_curvature(self):
+    def test_upcoming_turn_uses_physical_fallback_before_turn_master(self):
         plan = build_speed_plan(
             scenario_decision=SimpleNamespace(
                 speed_cap_mps=None,
@@ -832,8 +832,13 @@ class SpeedPlannerTest(unittest.TestCase):
             upcoming_turn_direction="right",
             upcoming_turn_distance_m=35.0,
         )
-        self.assertAlmostEqual(plan.target_speed_mps, 15.6464)
-        self.assertNotEqual(plan.limiting_owner, "turn_approach_cap")
+        expected_entry_speed = math.sqrt(2.5 / 0.20)
+        expected_cap = math.sqrt(
+            expected_entry_speed ** 2 + 2.0 * 2.5 * (35.0 - 5.0)
+        )
+        self.assertAlmostEqual(plan.target_speed_mps, expected_cap)
+        self.assertEqual(plan.limiting_owner, "turn_approach_cap")
+        self.assertIn("turn_approach_cap", plan.active_constraints)
         self.assertEqual(plan.upcoming_turn_distance_m, 35.0)
 
     def test_stop_overrides_turn_approach_cap(self):

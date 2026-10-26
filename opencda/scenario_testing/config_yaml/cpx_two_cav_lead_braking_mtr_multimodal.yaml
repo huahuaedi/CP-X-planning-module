@@ -17,11 +17,19 @@ vehicle_base:
     overtake_allowed: false
   planner:
     full_allow_opportunistic_lane_change: false
+    # This is a longitudinal prediction experiment.  Do not let the static
+    # obstacle recovery inherited from the merge base configuration turn a
+    # stopped/slow peer into an unrelated lane-borrow maneuver.
+    static_obstacle_local_avoidance_enabled: false
+    static_obstacle_global_replan_enabled: false
 
 cpx_mature:
-  max_ticks: 1200
+  # The lead vehicle owns experiment completion.  Ending when it reaches its
+  # goal avoids manufacturing a stationary obstacle from an auxiliary CAV
+  # whose shorter route happened to finish first.
+  max_ticks: 1800
   destination_tolerance_m: 4.0
-  completion_mode: all_cavs
+  completion_mode: first_cav
   scripted_target_brake:
     enabled: true
     target_cav_index: 0
@@ -42,9 +50,8 @@ scenario:
       # the interaction exercises FOLLOW/LEAD_BRAKE constraints rather than
       # an out-of-range no-op.
       spawn_position: [-300.0, 8.3, 0.3, 0, 0, 0]
-      # Continue beyond the ego goal after the brake event. Giving both
-      # same-lane vehicles the same destination makes all_cavs completion
-      # physically impossible because ego must stop a safe gap behind.
+      # This primary (index-zero) CAV ends the experiment after the braking
+      # interaction and recovery have both been observed.
       destination: [-100.0, 8.3, 0.3]
       v2x:
         enabled: true
@@ -59,7 +66,9 @@ scenario:
 
     - name: following_ego
       spawn_position: [-325.0, 8.3, 0.3, 0, 0, 0]
-      destination: [-140.0, 8.3, 0.3]
+      # Keep the follower's route beyond the lead goal so it cannot become a
+      # stopped obstacle in front of the lead before the experiment ends.
+      destination: [-80.0, 8.3, 0.3]
       v2x:
         enabled: true
         communication_range: 80
