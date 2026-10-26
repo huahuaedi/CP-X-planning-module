@@ -11,12 +11,12 @@ description: |-
   plus each other's broadcast intents stays inside both, but this is the
   first run that actually reaches that count).
 
-  Terminal positions follow the longitudinal order produced by the merge.
-  Cav3 remains behind cav1 in lane 4.8 and therefore stops first. Cav4 passes
-  cav2 while cav2 performs the lane exchange, so cav4 continues beyond cav2's
-  terminal position in lane 8.3. This prevents a vehicle that has already
-  completed the test from becoming a permanent parked roadblock for another
-  route; no planner or controller thresholds are changed.
+  Experiment completion is separated from the planner's final stopping point.
+  Each CAV must cross its configured completion_destination, while its actual
+  route continues to x=100 m. This keeps every participant moving until all
+  four have cleared the merge and prevents a completed vehicle from becoming
+  a parked roadblock when the valid merge order changes between trials. No
+  planner or controller thresholds are changed.
 
 # Four cooperative vehicles need a longer observation window than the
 # inherited two-CAV experiment.  At the former 1800-tick limit, cav3 and cav4
@@ -41,7 +41,8 @@ scenario:
   single_cav_list:
     - name: cav1
       spawn_position: [-300.0, 8.3, 0.3, 0, 0, 0]
-      destination: [-70.0, 4.8, 0.3]
+      destination: [100.0, 4.8, 0.3]
+      completion_destination: [-70.0, 4.8, 0.3]
       v2x:
         enabled: true
         communication_range: 80
@@ -55,7 +56,8 @@ scenario:
 
     - name: cav2
       spawn_position: [-306.0, 4.8, 0.3, 0, 0, 0]
-      destination: [-76.0, 8.3, 0.3]
+      destination: [100.0, 8.3, 0.3]
+      completion_destination: [-76.0, 8.3, 0.3]
       v2x:
         enabled: true
         communication_range: 80
@@ -68,10 +70,11 @@ scenario:
         debug_output_dir: artifacts/debug/four_cav_merge_mtr_cav2
 
     - name: cav3
-      # Through vehicle in lane 4.8, destination short of cav1's stop point
-      # in the same lane (x=-70).
+      # Through vehicle in lane 4.8. The actual route continues beyond its
+      # experiment-completion checkpoint.
       spawn_position: [-318.0, 4.8, 0.3, 0, 0, 0]
-      destination: [-82.0, 4.8, 0.3]
+      destination: [100.0, 4.8, 0.3]
+      completion_destination: [-82.0, 4.8, 0.3]
       v2x:
         enabled: true
         communication_range: 80
@@ -84,11 +87,11 @@ scenario:
         debug_output_dir: artifacts/debug/four_cav_merge_mtr_cav3
 
     - name: cav4
-      # Through vehicle in lane 8.3. It naturally passes cav2 while cav2
-      # performs the lane exchange, so its terminal point must remain ahead
-      # of cav2's x=-76 stop rather than parking in cav2's route.
+      # Through vehicle in lane 8.3. Its planner destination remains farther
+      # downstream so it never parks in cav2's route during the experiment.
       spawn_position: [-312.0, 8.3, 0.3, 0, 0, 0]
-      destination: [-64.0, 8.3, 0.3]
+      destination: [100.0, 8.3, 0.3]
+      completion_destination: [-64.0, 8.3, 0.3]
       v2x:
         enabled: true
         communication_range: 80

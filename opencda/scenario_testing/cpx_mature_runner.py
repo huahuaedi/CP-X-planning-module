@@ -261,6 +261,44 @@ def _destinations_reached(vehicle_managers, vehicle_configs, tolerance_m):
     )
 
 
+def _update_completion_checkpoints(
+        vehicle_managers, vehicle_configs, tolerance_m, reached_indices):
+    """Latch optional experiment checkpoints independently of route stops.
+
+    A multi-vehicle interaction run should end after every participant clears
+    the interaction region. Reusing planner terminal stops for this purpose
+    can make a completed vehicle a permanent roadblock whose location depends
+    on the valid merge order. Scenarios may therefore provide a
+    ``completion_destination`` for every CAV and keep a farther ``destination``
+    as the actual route goal.
+    """
+
+    managers = list(vehicle_managers or [])
+    configs = list(vehicle_configs or [])
+    checkpoints = [
+        config.get("completion_destination") for config in configs
+    ]
+    configured_count = sum(checkpoint is not None for checkpoint in checkpoints)
+    if configured_count == 0:
+        return None
+    if len(managers) != len(configs) or configured_count != len(configs):
+        raise ValueError(
+            "completion_destination must be configured for every CAV"
+        )
+    for index, (manager, checkpoint) in enumerate(zip(managers, checkpoints)):
+        if index in reached_indices:
+            continue
+        checkpoint_distance_m = _distance_to_destination(
+            manager.vehicle, checkpoint
+        )
+        if checkpoint_distance_m <= float(tolerance_m):
+            reached_indices.add(index)
+            manager._opencda_completion_checkpoint_distance_m = float(
+                checkpoint_distance_m
+            )
+    return len(reached_indices) == len(managers)
+
+
 def _enable_mature_evaluation_metrics(scenario_params):
     """Make simulator-ground-truth evaluation part of the mature-run contract.
 
@@ -721,6 +759,7 @@ def run_mature_scenario(opt, scenario_params, *, script_name):
         )
         spectator = scenario_manager.world.get_spectator()
         completed_auxiliary_indices = set()
+        completed_checkpoint_indices = set()
         ego_finished = False
         for tick_index in range(max(1, max_ticks)):
             scenario_manager.tick()
@@ -747,9 +786,18 @@ def run_mature_scenario(opt, scenario_params, *, script_name):
                     )
             _set_spectator_transform(spectator, ego_vehicle)
             if completion_mode == "all_cavs":
-                reached_destination = _destinations_reached(
-                    single_cav_list, vehicle_configs, destination_tolerance_m
+                reached_destination = _update_completion_checkpoints(
+                    single_cav_list,
+                    vehicle_configs,
+                    destination_tolerance_m,
+                    completed_checkpoint_indices,
                 )
+                if reached_destination is None:
+                    reached_destination = _destinations_reached(
+                        single_cav_list,
+                        vehicle_configs,
+                        destination_tolerance_m,
+                    )
             else:
                 reached_destination = _manager_reached_destination(
                     single_cav_list[0],

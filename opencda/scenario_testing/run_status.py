@@ -80,6 +80,13 @@ def build_cav_run_state(index, vehicle_manager, destination=None):
         getattr(scenario_recorder, "collision_events", []) or []
     )
     distance = _distance_to_destination(vehicle, destination)
+    checkpoint_distance = getattr(
+        vehicle_manager,
+        "_opencda_completion_checkpoint_distance_m",
+        None,
+    )
+    if checkpoint_distance is not None:
+        distance = float(checkpoint_distance)
     if bool(getattr(vehicle_manager, "ros_planner_enabled", False)):
         planner_name = "cpx_mpc_ros"
     elif getattr(vehicle_manager, "cpx_planner", None) is not None:
@@ -96,6 +103,7 @@ def build_cav_run_state(index, vehicle_manager, destination=None):
             velocity.x ** 2 + velocity.y ** 2 + velocity.z ** 2
         )),
         "distance_to_destination_m": distance,
+        "completion_checkpoint_reached": checkpoint_distance is not None,
         "collision_count": int(metrics.get("collision_count", 0) or 0),
         "collision_events": collision_events,
         "road_boundary_breach_count": int(
@@ -140,9 +148,12 @@ def write_run_status(
     configs = list(vehicle_configs or [])
     cav_states = []
     for index, manager in enumerate(managers):
-        destination = (
-            configs[index].get("destination") if index < len(configs) else None
-        )
+        destination = None
+        if index < len(configs):
+            destination = configs[index].get(
+                "completion_destination",
+                configs[index].get("destination"),
+            )
         cav_states.append(build_cav_run_state(index, manager, destination))
 
     payload = {

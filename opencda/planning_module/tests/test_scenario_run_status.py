@@ -121,6 +121,25 @@ def test_write_run_status_preserves_exception_and_partial_completion(tmp_path):
     assert status["distance_to_destination_m"] == pytest.approx(4.0)
 
 
+def test_run_status_uses_experiment_checkpoint_when_route_continues(tmp_path):
+    manager = _manager(tmp_path / "ego", 8, -69.0, 4.8, 0, True)
+    manager._opencda_completion_checkpoint_distance_m = 0.4
+    path = write_run_status(
+        vehicle_managers=[manager],
+        vehicle_configs=[{
+            "destination": [-20.0, 4.8, 0.3],
+            "completion_destination": [-70.0, 4.8, 0.3],
+        }],
+        termination_reason="route_destination_stopped",
+        completed_ticks=100,
+        scenario_name="checkpoint_test",
+    )[0]
+
+    status = json.loads(Path(path).read_text(encoding="utf-8"))
+    assert status["distance_to_destination_m"] == pytest.approx(0.4)
+    assert status["cav_states"][0]["completion_checkpoint_reached"] is True
+
+
 def test_write_run_status_identifies_external_ros_planner(tmp_path):
     ros_output_dir = tmp_path / "ros_ego"
     manager = SimpleNamespace(
