@@ -125,6 +125,34 @@ def test_multi_cav_tracker_contract_reports_reused_execution_rate(tmp_path):
     assert log["lateral_tracker_rate"] == 1.0
 
 
+def test_stale_control_fallback_is_counted_and_rejected(tmp_path):
+    rows = [_row() for _ in range(49)]
+    rows.append(
+        _row(
+            ros_control_state="stale_control",
+            emergency_brake_control_active=True,
+        )
+    )
+    rows.append(
+        _row(
+            ros_control_state="stale_control",
+            emergency_brake_control_active=True,
+        )
+    )
+    _write_case(tmp_path, "ego", rows)
+
+    result = analyze_case(
+        "stale_control",
+        {"scenario": "test", "dirs": ["ego"], "completion": True},
+        tmp_path,
+    )
+
+    log = result["logs"][0]
+    assert log["stale_frames"] == 2
+    assert log["stale_rate"] == 2.0 / 51.0
+    assert "ego:stale_control_rate_above_2_percent" in result["failures"]
+
+
 def test_prediction_contract_rejects_stale_attached_frame(tmp_path):
     _write_case(
         tmp_path,

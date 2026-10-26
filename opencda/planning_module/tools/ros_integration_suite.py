@@ -151,7 +151,13 @@ def _analyze_log(directory):
 
     states = [str(row.get("ros_control_state", "")) for row in rows]
     non_ros_frames = sum(str(row.get("source", "")) != "ros" for row in rows)
-    stale_frames = sum(state == "stale" for state in states)
+    # VehicleManager records the executable fallback state as
+    # ``stale_control``.  Older archived logs used ``stale``.  Accept both so
+    # the regression report reflects the emergency-brake ticks that actually
+    # occurred instead of silently reporting 0.00%.
+    stale_frames = sum(
+        state in {"stale", "stale_control"} for state in states
+    )
     active_frames = sum(state == "active" for state in states)
     reused_active_frames = sum(
         state == "active" and bool(row.get("control_reused", False))
