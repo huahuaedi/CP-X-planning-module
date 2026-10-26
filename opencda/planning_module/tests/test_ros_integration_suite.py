@@ -1,6 +1,7 @@
 import json
 
 from tools.ros_integration_suite import analyze_case
+from tools.ros_integration_suite import _apply_pairwise_contracts
 from tools.ros_integration_suite import _is_complete
 from tools.ros_integration_suite import _subject_cav_state
 
@@ -239,3 +240,76 @@ def test_lane_closure_off_rejects_state_leak_from_on_run(tmp_path):
     )
 
     assert "forbidden_target_lane_present" in result["failures"]
+
+
+def test_pairwise_cp_contract_accepts_earlier_relevant_response(monkeypatch):
+    from tools import ros_integration_suite
+
+    monkeypatch.setitem(
+        ros_integration_suite.CASES,
+        "test_on",
+        {
+            "scenario": "test",
+            "dirs": ["on"],
+            "paired_baseline": "test_off",
+            "min_relevant_response_lead_s": 5.0,
+        },
+    )
+    results = [
+        {
+            "case": "test_on",
+            "contract_pass": True,
+            "failures": [],
+            "logs": [{"first_relevant_obstacle_cycle_s": 10.0}],
+        },
+        {
+            "case": "test_off",
+            "contract_pass": True,
+            "failures": [],
+            "logs": [{"first_relevant_obstacle_cycle_s": 18.0}],
+        },
+    ]
+
+    _apply_pairwise_contracts(results)
+
+    assert results[0]["contract_pass"] is True
+    assert results[0]["paired_effect"][
+        "observed_relevant_response_lead_s"
+    ] == 8.0
+
+
+def test_pairwise_cp_contract_rejects_insufficient_response_lead(monkeypatch):
+    from tools import ros_integration_suite
+
+    monkeypatch.setitem(
+        ros_integration_suite.CASES,
+        "test_on",
+        {
+            "scenario": "test",
+            "dirs": ["on"],
+            "paired_baseline": "test_off",
+            "min_relevant_response_lead_s": 5.0,
+        },
+    )
+    results = [
+        {
+            "case": "test_on",
+            "contract_pass": True,
+            "failures": [],
+            "logs": [{"first_relevant_obstacle_cycle_s": 10.0}],
+        },
+        {
+            "case": "test_off",
+            "contract_pass": True,
+            "failures": [],
+            "logs": [{"first_relevant_obstacle_cycle_s": 12.0}],
+        },
+    ]
+
+    _apply_pairwise_contracts(results)
+
+    assert results[0]["contract_pass"] is False
+    assert (
+        "paired_relevant_response_lead_below_threshold"
+        in results[0]["failures"]
+    )

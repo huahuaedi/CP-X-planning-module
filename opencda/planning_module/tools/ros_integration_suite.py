@@ -49,14 +49,26 @@ CASES = OrderedDict(
         ("smoke_lane_change", dict(scenario="cpx_lane_change_speed_12", dirs=["cpx_lane_change_speed_12"], completion=True)),
         ("A_on", dict(scenario="cpx_cp_red_light_violator", dirs=["cp_red_light_on"], completion=True)),
         ("A_off", dict(scenario="cpx_cp_red_light_violator_off", dirs=["cp_red_light_off"], completion=True)),
-        ("B_on", dict(scenario="cpx_cp_bend_oncoming", dirs=["cp_bend_oncoming_on"], completion=True)),
-        # The OFF arm is an effect-size baseline.  Its unsafe/non-completing
-        # result is reported, never described as a safety pass.
-        ("B_off", dict(scenario="cpx_cp_bend_oncoming_off", dirs=["cp_bend_oncoming_off"], completion=False, baseline_unsafe=True)),
+        ("B_on", dict(
+            scenario="cpx_cp_bend_oncoming",
+            dirs=["cp_bend_oncoming_on"],
+            completion=True,
+            paired_baseline="B_off",
+            min_relevant_response_lead_s=30.0,
+        )),
+        # The OFF arm is an effect-size baseline. It still runs to completion;
+        # any collision is reported explicitly as an unsafe baseline outcome.
+        ("B_off", dict(scenario="cpx_cp_bend_oncoming_off", dirs=["cp_bend_oncoming_off"], completion=True, baseline_unsafe=True)),
         ("C_on", dict(scenario="cpx_cp_vru_crossing", dirs=["cp_vru_crossing_on"], completion=True)),
         ("C_off", dict(scenario="cpx_cp_vru_crossing_off", dirs=["cp_vru_crossing_off"], completion=True)),
-        ("D_on", dict(scenario="cpx_cp_roadway_object", dirs=["cp_roadway_object_on"], completion=True)),
-        ("D_off", dict(scenario="cpx_cp_roadway_object_off", dirs=["cp_roadway_object_off"], completion=False)),
+        ("D_on", dict(
+            scenario="cpx_cp_roadway_object",
+            dirs=["cp_roadway_object_on"],
+            completion=True,
+            paired_baseline="D_off",
+            min_relevant_response_lead_s=5.0,
+        )),
+        ("D_off", dict(scenario="cpx_cp_roadway_object_off", dirs=["cp_roadway_object_off"], completion=True)),
         ("E_on", dict(scenario="cpx_two_cav_merge_conflict", dirs=["two_cav_merge_cav1", "two_cav_merge_cav2"], completion=True, require_conflict=True)),
         ("E_off", dict(scenario="cpx_two_cav_merge_conflict_baseline", dirs=["two_cav_merge_off_cav1", "two_cav_merge_off_cav2"], completion=True, forbid_conflict=True)),
         ("F_on", dict(scenario="cpx_cp_lane_closure", dirs=["cp_lane_closure"], completion=True, required_lane=630149)),
@@ -107,6 +119,10 @@ def _read_jsonl(path):
 
 def _mean(values):
     return sum(values) / float(len(values)) if values else None
+
+
+def _seconds(value):
+    return "missing" if value is None else "%.2f s" % float(value)
 
 
 def _first_cycle(rows, predicate):
@@ -311,6 +327,59 @@ def analyze_case(case_name, contract, case_root):
     }
 
 
+def _earliest_metric(result, name):
+    """Return the earliest available per-CAV metric for one case result."""
+    values = [
+        float(log[name])
+        for log in result.get("logs", [])
+        if log.get(name) is not None
+    ]
+    return min(values) if values else None
+
+
+def _apply_pairwise_contracts(results):
+    """Validate CP benefit against the matching OFF arm in the same trial.
+
+    OFF scenarios are valid experiments even when local perception eventually
+    lets them finish safely. Their contract therefore checks completion on its
+    own, while this paired contract measures the intended CP effect: earlier
+    delivery of an interaction-relevant obstacle to the planner.
+    """
+    by_name = {result["case"]: result for result in results}
+    for result in results:
+        contract = CASES.get(result["case"], {})
+        baseline_name = contract.get("paired_baseline")
+        if not baseline_name or baseline_name not in by_name:
+            continue
+        baseline = by_name[baseline_name]
+        on_time = _earliest_metric(result, "first_relevant_obstacle_cycle_s")
+        off_time = _earliest_metric(
+            baseline, "first_relevant_obstacle_cycle_s"
+        )
+        required_lead_s = float(
+            contract.get("min_relevant_response_lead_s", 0.0) or 0.0
+        )
+        observed_lead_s = (
+            None if on_time is None or off_time is None else off_time - on_time
+        )
+        result["paired_effect"] = {
+            "baseline": baseline_name,
+            "on_first_relevant_obstacle_cycle_s": on_time,
+            "off_first_relevant_obstacle_cycle_s": off_time,
+            "observed_relevant_response_lead_s": observed_lead_s,
+            "required_relevant_response_lead_s": required_lead_s,
+        }
+        if observed_lead_s is None:
+            result["failures"].append(
+                "paired_relevant_response_time_missing"
+            )
+        elif observed_lead_s + 1.0e-9 < required_lead_s:
+            result["failures"].append(
+                "paired_relevant_response_lead_below_threshold"
+            )
+        result["contract_pass"] = not result["failures"]
+
+
 def _selected_cases(args):
     names = list(SUITES[args.suite])
     if getattr(args, "cases", None):
@@ -424,7 +493,15 @@ def _write_reports(report, output_base):
                     trial["trial"],
                     result["case"],
                     "PASS" if result["contract_pass"] else "FAIL",
-                    "PASS" if result["safety_pass"] else "UNSAFE BASELINE",
+                    (
+                        "PASS"
+                        if result["safety_pass"]
+                        else (
+                            "UNSAFE BASELINE"
+                            if result.get("baseline_unsafe_by_design")
+                            else "FAIL"
+                        )
+                    ),
                     completion,
                     collisions,
                     stale_rate * 100.0,
@@ -434,6 +511,34 @@ def _write_reports(report, output_base):
                     modes,
                     sessions,
                     ", ".join(result["failures"]) or "none",
+                )
+            )
+    paired_rows = [
+        (trial["trial"], result)
+        for trial in report["trials"]
+        for result in trial["results"]
+        if result.get("paired_effect")
+    ]
+    if paired_rows:
+        lines.extend([
+            "",
+            "## Paired CP response evidence",
+            "",
+            "| Trial | CP Case | Baseline | ON response | OFF response | Lead | Required |",
+            "|---:|---|---|---:|---:|---:|---:|",
+        ])
+        for trial_number, result in paired_rows:
+            effect = result["paired_effect"]
+            lines.append(
+                "| %d | %s | %s | %s | %s | %s | %s |"
+                % (
+                    trial_number,
+                    result["case"],
+                    effect["baseline"],
+                    _seconds(effect["on_first_relevant_obstacle_cycle_s"]),
+                    _seconds(effect["off_first_relevant_obstacle_cycle_s"]),
+                    _seconds(effect["observed_relevant_response_lead_s"]),
+                    _seconds(effect["required_relevant_response_lead_s"]),
                 )
             )
     (output_base / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -463,7 +568,9 @@ def command_analyze(args, root=None):
             case_root = trial_root if getattr(args, "live", False) else trial_root / name
             result = analyze_case(name, CASES[name], case_root)
             results.append(result)
-            print("trial=%d %-18s contract=%s safety=%s %s" % (number, name, "PASS" if result["contract_pass"] else "FAIL", "PASS" if result["safety_pass"] else "FAIL", ",".join(result["failures"]) or "none"))
+        _apply_pairwise_contracts(results)
+        for result in results:
+            print("trial=%d %-18s contract=%s safety=%s %s" % (number, result["case"], "PASS" if result["contract_pass"] else "FAIL", "PASS" if result["safety_pass"] else "FAIL", ",".join(result["failures"]) or "none"))
         trials.append({"trial": number, "results": results})
     report = {"suite": args.suite, "passed": all(item["contract_pass"] for trial in trials for item in trial["results"]), "trials": trials}
     _write_reports(report, output_base)
