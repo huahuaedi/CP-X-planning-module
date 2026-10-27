@@ -604,6 +604,7 @@ class PlanningPipeline:
                 "committed_lane_change_tracking_active": bool(
                     adapters.maneuver_manager.lane_change.committed_tracking_active
                 ),
+                "observe_stage_duration": adapters.accum_stage_ms,
             },
             behavior=behavior_decision,
             stop_goal_active=bool(mpc_stop_goal_active),
@@ -616,6 +617,7 @@ class PlanningPipeline:
             candidate_name=candidate_name,
             candidate_reason=candidate_reason,
             reset_control_buffer=adapters.reset_control_buffer,
+            observe_stage_duration=adapters.accum_stage_ms,
         )
         adapters.accum_stage_ms("prepare_trajectory_execution", time.monotonic() - _ts_stage)
         mode_transition_guard_reason = str(admission.mode_transition_reason)
@@ -824,13 +826,22 @@ class PlanningPipeline:
             execution_result.failed_replan_buffer_reused
         )
         if fallback_reason:
+            _ts_post = time.monotonic()
             adapters.warn_fallback(fallback_reason)
+            adapters.accum_stage_ms(
+                "post_finalize.warn_fallback", time.monotonic() - _ts_post
+            )
         if adapters.cav_conflict_enabled and adapters.cav_intent_broadcast_enabled:
+            _ts_post = time.monotonic()
             adapters.publish_cav_intent(
                 ego_location=ego_location,
                 ego_yaw_rad=float(ego_yaw_rad),
                 ego_speed_mps=float(ego_speed_mps),
                 sim_time_s=float(sim_time_s),
+            )
+            adapters.accum_stage_ms(
+                "post_finalize.publish_cav_intent",
+                time.monotonic() - _ts_post,
             )
         control = finalized_control.control
         accel_mps2 = float(finalized_control.acceleration_mps2)
@@ -849,6 +860,7 @@ class PlanningPipeline:
         safety_supervisor_reason = str(finalized_control.supervisor_reason)
         platform_adapter_debug = dict(finalized_control.platform_debug)
         mpc_feedback_record_reason = str(finalized_control.feedback_reason)
+        _ts_post = time.monotonic()
         diagnostics = PlannerDiagnosticsStage.build(
             adapters,
             self,
@@ -903,11 +915,22 @@ class PlanningPipeline:
                 "stop_target_forward_m_debug": stop_target_forward_m_debug,
             },
         )
+        adapters.accum_stage_ms(
+            "post_finalize.diagnostics_build", time.monotonic() - _ts_post
+        )
+        _ts_post = time.monotonic()
         decision_record = self.explain_decision(diagnostics)
         diagnostics.update(decision_record.as_debug_fields())
+        adapters.accum_stage_ms(
+            "post_finalize.explain_decision", time.monotonic() - _ts_post
+        )
+        _ts_post = time.monotonic()
         adapters.draw_world_debug_primitives(
             destination_state=destination_state,
             lane_center_reference=lane_center_reference,
+        )
+        adapters.accum_stage_ms(
+            "post_finalize.draw_world_debug", time.monotonic() - _ts_post
         )
         adapters.accum_stage_ms("post_finalize_control", time.monotonic() - _ts_stage)
         return PlannerOutput(
@@ -1301,13 +1324,27 @@ class PlanningPipeline:
         candidate_name,
         candidate_reason,
         reset_control_buffer=None,
+        observe_stage_duration=None,
     ) -> TrajectoryAdmission:
+        stage_started = time.monotonic()
         publication = self.reference_publication.run(**publication_kwargs)
+        if callable(observe_stage_duration):
+            observe_stage_duration(
+                "trajectory_admission.reference_publication",
+                time.monotonic() - stage_started,
+            )
+        stage_started = time.monotonic()
         mode_transition_reason = self.mpc_entry.apply_behavior_mode_transition(
             behavior=behavior,
             stop_goal_active=bool(stop_goal_active),
             reset_control_buffer=reset_control_buffer,
         )
+        if callable(observe_stage_duration):
+            observe_stage_duration(
+                "trajectory_admission.mode_transition",
+                time.monotonic() - stage_started,
+            )
+        stage_started = time.monotonic()
         entry = self.mpc_entry.evaluate(
             candidate_status=candidate_status,
             candidate_name=candidate_name,
@@ -1318,6 +1355,12 @@ class PlanningPipeline:
             stop_goal_active=bool(stop_goal_active),
             ego_speed_mps=float(ego_speed_mps),
         )
+        if callable(observe_stage_duration):
+            observe_stage_duration(
+                "trajectory_admission.entry_evaluation",
+                time.monotonic() - stage_started,
+            )
+        stage_started = time.monotonic()
         control_context = self.mpc_entry.prepare_control_context(
             behavior=behavior,
             reference_source=str(
@@ -1331,6 +1374,11 @@ class PlanningPipeline:
             ego_yaw_rad=float(ego_yaw_rad),
             mode_transition_reason=str(mode_transition_reason),
         )
+        if callable(observe_stage_duration):
+            observe_stage_duration(
+                "trajectory_admission.control_context",
+                time.monotonic() - stage_started,
+            )
         return TrajectoryAdmission(
             publication=publication,
             entry=entry,

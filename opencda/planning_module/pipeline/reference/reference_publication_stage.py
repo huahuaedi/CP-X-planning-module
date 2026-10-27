@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import time
 from typing import Any, Mapping, Optional, Sequence
 
 from ..behavior.behavior_decision import BehaviorDecision
@@ -57,6 +58,7 @@ class ReferencePublicationStage:
         candidate_reason: str = "",
         heading_error_rad: float = float("nan"),
         committed_lane_change_tracking_active: bool = False,
+        observe_stage_duration: Any = None,
     ) -> ReferencePublicationStageResult:
         destination = list(destination_state)
         samples = [dict(sample) for sample in reference_samples]
@@ -109,6 +111,7 @@ class ReferencePublicationStage:
                     "boundary_recovery_reference_generation_failed:"
                     + str(generated.reason)
                 )
+        stage_started = time.monotonic()
         pipeline_result = self._pipeline.finalize(ReferencePipelineRequest(
             destination_state=destination,
             reference_samples=samples,
@@ -128,6 +131,11 @@ class ReferencePublicationStage:
                 committed_lane_change_tracking_active
             ),
         ))
+        if callable(observe_stage_duration):
+            observe_stage_duration(
+                "reference_publication.finalize_pipeline",
+                time.monotonic() - stage_started,
+            )
         destination = list(pipeline_result.destination_state)
         samples = [dict(sample) for sample in pipeline_result.reference_samples]
         gate = pipeline_result.gate
@@ -137,6 +145,7 @@ class ReferencePublicationStage:
         debug["committed_lane_change_tracking_active"] = bool(
             committed_lane_change_tracking_active
         )
+        stage_started = time.monotonic()
         publication = self._provider.publish(
             ReferenceLineRequest(
                 local_map=local_map,
@@ -152,6 +161,11 @@ class ReferencePublicationStage:
             validation_reason=str(gate.reason),
             build_reason=str(reference_source or "planning_reference"),
         )
+        if callable(observe_stage_duration):
+            observe_stage_duration(
+                "reference_publication.provider_publish",
+                time.monotonic() - stage_started,
+            )
         debug.update({
             "reference_provider_mode": str(publication.mode),
             "reference_provider_reason": str(publication.reason),
@@ -174,6 +188,7 @@ class ReferencePublicationStage:
         debug["final_reference_geometry_source"] = str(
             reference_source or "unknown"
         )
+        stage_started = time.monotonic()
         guard_reason = self._lateral_guard_reason(
             behavior=behavior,
             stop_goal_active=bool(stop_goal_active),
@@ -183,6 +198,11 @@ class ReferencePublicationStage:
             ego_yaw_rad=float(ego_yaw_rad),
             heading_error_rad=float(heading_error_rad),
         )
+        if callable(observe_stage_duration):
+            observe_stage_duration(
+                "reference_publication.lateral_guard",
+                time.monotonic() - stage_started,
+            )
         debug["reference_lateral_guard_reason"] = guard_reason
         if guard_reason:
             debug["lateral_guard_validation"] = "warning"

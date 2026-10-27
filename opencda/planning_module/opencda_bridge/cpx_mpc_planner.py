@@ -998,6 +998,7 @@ class CPXMPCPlannerBridge:
         cp_payload: Mapping[str, Any] | None = None,
     ):
         sim_time_s = self._sim_time_s()
+        coarse_started = time.perf_counter()
         route_update = self.pipeline.update_route_from_cp(
             RouteUpdateRequest(
                 route_manager=self.route_manager,
@@ -1010,6 +1011,10 @@ class CPXMPCPlannerBridge:
                 reset_for_route_revision=self._reset_pipeline_for_route_revision,
             )
         )
+        self._accum_stage_ms(
+            "behavior_reference.route_update",
+            time.perf_counter() - coarse_started,
+        )
         stop_goal_active = route_update.stop_goal_active
         local_map_snapshot = getattr(
             self, "_local_map_snapshot", LocalMapSnapshot()
@@ -1017,6 +1022,7 @@ class CPXMPCPlannerBridge:
         reset_lane_change = getattr(
             self.behavior_planner, "_reset_lane_change_state", None
         )
+        coarse_started = time.perf_counter()
         planning_context = self.pipeline.prepare_planning_context(
             PlanningContextRequest(
                 ego_location=ego_location,
@@ -1062,6 +1068,10 @@ class CPXMPCPlannerBridge:
             reset_lane_change=reset_lane_change,
             observe_stage_duration=self._accum_stage_ms,
         )
+        self._accum_stage_ms(
+            "behavior_reference.planning_context",
+            time.perf_counter() - coarse_started,
+        )
         adapter_output = planning_context.adapter_output
         planner_input_frame = planning_context.planner_input_frame
         object_snapshots = planning_context.mutable_object_snapshots()
@@ -1093,10 +1103,16 @@ class CPXMPCPlannerBridge:
         # cooperative arbitration must consume the same peer/claim snapshot;
         # collecting again later can observe a different peer sequence inside
         # one nominally immutable planning frame.
+        coarse_started = time.perf_counter()
         cav_intents = tuple(self._collect_cav_intents())
         cooperative_actor_ids = frozenset(
             str(intent.actor_id) for intent in cav_intents
         )
+        self._accum_stage_ms(
+            "behavior_reference.collect_cav_intents",
+            time.perf_counter() - coarse_started,
+        )
+        coarse_started = time.perf_counter()
         executable_behavior = self.pipeline.prepare_executable_behavior(
             ExecutableBehaviorPreparationRequest(
                 planning_context=planning_context,
@@ -1143,10 +1159,15 @@ class CPXMPCPlannerBridge:
             observe_stage_duration=self._accum_stage_ms,
             cooperative_actor_ids=cooperative_actor_ids,
         )
+        self._accum_stage_ms(
+            "behavior_reference.prepare_executable_behavior",
+            time.perf_counter() - coarse_started,
+        )
         stop_goal_active = executable_behavior.stop_goal_active
         turn_prepare_speed_suppressed_by_lane_change = bool(
             executable_behavior.turn_prepare_speed_suppressed
         )
+        coarse_started = time.perf_counter()
         speed_frame = self.pipeline.plan_speed_from_stages(
             SpeedPlanningPreparationRequest(
                 planning_context=planning_context,
@@ -1162,6 +1183,10 @@ class CPXMPCPlannerBridge:
                 config=self.config,
             )
         )
+        self._accum_stage_ms(
+            "behavior_reference.speed_planning",
+            time.perf_counter() - coarse_started,
+        )
         speed_plan = speed_frame.speed_plan
         front_gap_m = speed_frame.front_gap_m
         front_gap_actor_id = speed_frame.front_actor_id
@@ -1174,6 +1199,7 @@ class CPXMPCPlannerBridge:
         stop_goal_active = bool(stop_goal_active or speed_frame.stop_goal_active)
         planner_mode = "INTERSECTION" if bool(planner_input_frame.map_lane.in_junction) else "NORMAL"
 
+        coarse_started = time.perf_counter()
         prepared_reference = self.pipeline.prepare_behavior_reference(
             BehaviorReferencePreparationRequest(
                 map_planner=self.reference_map,
@@ -1198,6 +1224,10 @@ class CPXMPCPlannerBridge:
                 map_epoch=str(self.waypoint_backend or "admap"),
             )
         )
+        self._accum_stage_ms(
+            "behavior_reference.prepare_reference",
+            time.perf_counter() - coarse_started,
+        )
         built_reference = prepared_reference.built_reference
         local_lane_center_reference = built_reference.mutable_samples()
         # Stash the pre-publication reference (the one Stage C/D build corridor
@@ -1207,6 +1237,7 @@ class CPXMPCPlannerBridge:
             self._frame_capture_pre_reference = list(local_lane_center_reference)
         nominal_destination_state = built_reference.mutable_destination_state()
         nominal_freeze_count = int(built_reference.reference_freeze_count)
+        coarse_started = time.perf_counter()
         reference_debug = PlannerDiagnosticsStage.build_reference_debug_from_stages(
             ReferenceDebugDependencies(
                 route_manager=self.route_manager,
@@ -1224,11 +1255,16 @@ class CPXMPCPlannerBridge:
                 mpc_feedback=mpc_feedback,
             ),
         )
+        self._accum_stage_ms(
+            "behavior_reference.reference_diagnostics",
+            time.perf_counter() - coarse_started,
+        )
         # Cooperative arbitration precedes physical maneuver commitment.
         # The first proposal tick is deliberately deferred so both peers can
         # exchange the same proposed claims before either installs a locked
         # lane-change reference.  This is also the sole CAV resolution call
         # for the tick; its corridor rows are reused by MPC below.
+        coarse_started = time.perf_counter()
         cooperative_frame = self.pipeline.resolve_cooperative(
             self._build_cooperative_request(
                 cooperative_proposal=executable_behavior.cooperative_proposal,
@@ -1244,6 +1280,10 @@ class CPXMPCPlannerBridge:
                 sim_time_s=sim_time_s,
                 cav_intents=cav_intents,
             )
+        )
+        self._accum_stage_ms(
+            "behavior_reference.cooperative_arbitration",
+            time.perf_counter() - coarse_started,
         )
         route_reference_target_lane_id = int(
             planning_context.behavior_context.route_behavior.context
@@ -1265,6 +1305,7 @@ class CPXMPCPlannerBridge:
             if turn_target_lane_id:
                 route_reference_target_lane_id = int(turn_target_lane_id)
 
+        coarse_started = time.perf_counter()
         selected_reference = self.pipeline.select_candidate_reference(
             CandidatePlanningPreparationRequest(
                 enabled=bool(self.full_candidate_pipeline_enabled),
@@ -1309,7 +1350,12 @@ class CPXMPCPlannerBridge:
                 validate_contract=self._validate_candidate_reference_contract,
             )
         )
-        return self.pipeline.finalize_behavior_reference_from_stages(
+        self._accum_stage_ms(
+            "behavior_reference.candidate_selection",
+            time.perf_counter() - coarse_started,
+        )
+        coarse_started = time.perf_counter()
+        finalized = self.pipeline.finalize_behavior_reference_from_stages(
             BehaviorReferenceFinalizationPreparationRequest(
                 selected_reference=selected_reference,
                 cooperative_frame=cooperative_frame,
@@ -1330,6 +1376,11 @@ class CPXMPCPlannerBridge:
                 reference_freeze_count=int(nominal_freeze_count),
             )
         )
+        self._accum_stage_ms(
+            "behavior_reference.finalization",
+            time.perf_counter() - coarse_started,
+        )
+        return finalized
 
     def _build_cooperative_request(
         self, *, cooperative_proposal, current_state, ego_location,
