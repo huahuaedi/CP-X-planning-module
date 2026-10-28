@@ -6,7 +6,7 @@
   <version>0.1.0</version>
   <description>Unified TCP and ROS 2 bridge between OpenCDA and CP-X planning.</description>
 
-  <maintainer email="showmen.dey78@gmail.com">umd-user</maintainer>
+  <maintainer email="huam12140@gmail.com">Hua Min</maintainer>
   <license>Apache-2.0</license>
 
   <depend>rclpy</depend>

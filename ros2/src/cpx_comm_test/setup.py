@@ -18,8 +18,8 @@ setup(
     ],
     install_requires=["setuptools"],
     zip_safe=True,
-    maintainer="umd-user",
-    maintainer_email="showmen.dey78@gmail.com",
+    maintainer="Hua Min",
+    maintainer_email="huam12140@gmail.com",
     description="Unified TCP and ROS 2 bridge between OpenCDA and CP-X planning",
     license="Apache-2.0",
     extras_require={

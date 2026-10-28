@@ -4,7 +4,7 @@
   <name>cpx_planning</name>
   <version>0.1.0</version>
   <description>Session-isolated CP-X planning and MTR prediction integration for ROS 2.</description>
-  <maintainer email="showmen.dey78@gmail.com">umd-user</maintainer>
+  <maintainer email="huam12140@gmail.com">Hua Min</maintainer>
   <license>Apache-2.0</license>
 
   <depend>rclpy</depend>

@@ -5,7 +5,7 @@
   <name>cpx_interfaces</name>
   <version>0.1.0</version>
   <description>Custom CP-X cooperative lane-event and traffic-control messages.</description>
-  <maintainer email="showmen.dey78@gmail.com">umd-user</maintainer>
+  <maintainer email="huam12140@gmail.com">Hua Min</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>

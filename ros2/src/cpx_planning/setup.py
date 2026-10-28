@@ -28,8 +28,8 @@ setup(
 
     install_requires=['setuptools', 'numpy', 'scipy', 'osqp', 'PyYAML'],
     zip_safe=True,
-    maintainer='umd-user',
-    maintainer_email='showmen.dey78@gmail.com',
+    maintainer='Hua Min',
+    maintainer_email='huam12140@gmail.com',
     description='Session-isolated CP-X planning and MTR prediction integration for ROS 2',
     license='Apache-2.0',
     extras_require={
