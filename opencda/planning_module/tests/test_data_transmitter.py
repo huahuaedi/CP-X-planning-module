@@ -1,5 +1,5 @@
-"""opencda.data_transmitter.send() -- the OpenCDA-side half of the CP-ROS-WS
-TCP data bridge (github.com/showmen78/CP-ROS-WS). Its cooperative_message_
+"""opencda.data_transmitter.send() -- the OpenCDA-side half of the CP-X ROS 2
+TCP data bridge vendored under ``ros2/``. Its cooperative_message_
 publisher.py already parses traffic_controls/control into a typed
 TrafficControl ROS message, but send() only ever forwarded lane_events --
 this pins that it now also forwards the CP payload's "control" list.
