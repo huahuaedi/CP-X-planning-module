@@ -9,6 +9,13 @@ OpenCDA/CARLA 0.9.12 with Python 3.7.
 external runtime adapter and does not modify MDrive source files; see
 [mdrive_adapter/README.md](mdrive_adapter/README.md).
 
+The repository also owns its ROS 2 integration workspace under
+[`ros2/`](ros2/). It contains the `cpx_interfaces`, `cpx_comm_test`, and
+`cpx_planning` packages, reproducible dependency manifests, managed startup
+scripts, and health checks. This vendored workspace is the canonical ROS 2
+source for the `convert_to_ros` branch; the former standalone
+`showmen78/CP-ROS-WS` checkout is not a publication target.
+
 ## Frozen planner baseline
 
 The planner core is frozen at the behavior represented by commit `125c723`
@@ -193,7 +200,7 @@ interfaces.
 
 ### One-time configuration
 
-Copy `CP-ROS-WS/.env.example` to `CP-ROS-WS/.env` and update installation
+Copy `ros2/.env.example` to `ros2/.env` and update installation
 paths. CPU isolation is optional, but it is recommended when CARLA, MTR, and
 multiple Planner workers share one workstation. The validated 24-core layout
 is:
@@ -221,7 +228,7 @@ Start MTR, the Bridge, and all Planner shards inside the ROS container:
 
 ```bash
 docker exec -it ubuntu24-gpu-container /bin/bash
-cd /root/CP-ROS-WS
+cd /path/to/CP-X-planning-module/ros2
 ./scripts/cpx_ros_stack.sh build     # required after source changes
 ./scripts/cpx_ros_stack.sh start
 ./scripts/cpx_ros_stack.sh health
@@ -366,7 +373,7 @@ reports are stored locally at:
 | `opencda/planning_module/MPC/` | Vehicle model, SQP/QP, constraints, objective |
 | `opencda/planning_module/Global_Planner/` | OpenDRIVE/AD-map routing backend |
 | `mdrive_adapter/` | External MDrive runtime port |
-| `CP-ROS-WS/` | ROS 2 transport workspace; not planning-policy owner |
+| `ros2/` | ROS 2 transport workspace; not planning-policy owner |
 | `artifacts/` | Ignored local logs, plots, and videos |
 
 Detailed ownership and reference-contract rules are in

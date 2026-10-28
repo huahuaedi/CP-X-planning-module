@@ -1,0 +1,71 @@
+# ROS 2 generated directories
+/build/
+/install/
+/log/
+
+# Python generated files
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# Generated AD-map files
+/src/cpx_planning/cpx_planning/Global_Planner/map_repo/source/
+/src/cpx_planning/cpx_planning/Global_Planner/map_repo/build/
+/src/cpx_planning/cpx_planning/Global_Planner/map_repo/build_venv/
+/src/cpx_planning/cpx_planning/Global_Planner/map_repo/install/
+/src/cpx_planning/cpx_planning/Global_Planner/map_repo/log/
+
+# Generated global-planner map cache
+/src/cpx_planning/cpx_planning/Global_Planner/cache/
+
+# Editors and operating-system files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Planner runtime output
+/src/cpx_planning/cpx_planning/planner_core/debug/
+/src/cpx_planning/cpx_planning/behavior_planner/cp_message.json
+*.log
+*.jsonl
+
+# Local comparison output copied from OpenCDA
+/opencda/
+/ros_planner_input_adapter_output.jsonl
+
+# Local planning notes
+/PLANNER_NODE_SEPARATION_PLAN.md
+
+# Obsolete local test directory from the original ROS conversion. The package
+# test entry point is pinned to src/cpx_planning/tests/ by pytest.ini.
+/src/cpx_planning/test/
+
+# Local timing reports generated when debug_time is enabled
+/ros_planner_timing_summary.json
+/ros_timing_summary.json
+
+# One-command stack runtime state and locally captured manifests
+/.runtime/
+/runtime-manifest.txt
+
+# Patch/merge backup files must never be committed
+*.orig

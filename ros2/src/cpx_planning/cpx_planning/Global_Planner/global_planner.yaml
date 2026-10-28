@@ -1,0 +1,6 @@
+global_planner:
+  use_opencda_global_route: true
+  opencda_global_route_reference_allowed: true
+  global_planner_mode: dij
+  global_planner_xodr_path: Global_Planner/maps/Town06.xodr
+  global_planner_strict: true

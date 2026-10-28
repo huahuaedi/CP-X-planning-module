@@ -1,0 +1,9 @@
+# Snapshot of the validated container. Package mirrors may later replace these
+# builds; treat this as an audit baseline, not as a portable apt sources file.
+python3-colcon-common-extensions=0.3.0-100
+python3-rosdep=0.27.0-1
+ros-jazzy-autoware-control-msgs=1.13.0-1noble.20260902.021719
+ros-jazzy-autoware-perception-msgs=1.12.0-1noble.20260615.111546
+ros-jazzy-rclpy=7.1.11-1noble.20260615.133206
+ros-jazzy-ros-base=0.11.0-1noble.20260616.084325
+ros-jazzy-rosidl-default-generators=1.6.1-1noble.20260612.064900

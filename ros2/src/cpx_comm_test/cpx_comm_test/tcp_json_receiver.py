@@ -1,0 +1,133 @@
+"""Shared TCP receiver for newline-separated OpenCDA JSON messages."""
+
+import json
+import queue
+import socket
+import threading
+import time
+
+
+TCP_HOST = "127.0.0.1"
+
+
+class TcpJsonReceiver:
+    """Receive JSON on one TCP port and store it until a ROS node reads it."""
+
+    def __init__(self, tcp_port, logger, on_message=None):
+        self.tcp_port = tcp_port
+        self.logger = logger
+        self.on_message = on_message
+        self.messages = queue.Queue()
+        self.stop_event = threading.Event()
+        self.startup_event = threading.Event()
+        self.bind_error = None
+        self.server_socket = None
+        self.thread = threading.Thread(target=self._receive, daemon=True)
+        self.thread.start()
+
+    def _receive(self):
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+        try:
+            server.bind((TCP_HOST, self.tcp_port))
+            server.listen(1)
+            server.settimeout(1.0)
+            self.server_socket = server
+            self.startup_event.set()
+        except OSError as error:
+            self.bind_error = str(error)
+            self.startup_event.set()
+            self.logger.error(
+                "Could not open TCP port {}: {}".format(
+                    self.tcp_port,
+                    error,
+                )
+            )
+            server.close()
+            return
+
+        self.logger.info(
+            "Waiting for OpenCDA on {}:{}".format(
+                TCP_HOST,
+                self.tcp_port,
+            )
+        )
+
+        while not self.stop_event.is_set():
+            try:
+                connection, address = server.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+
+            connection.settimeout(1.0)
+            self.logger.info("OpenCDA connected on port {} from {}:{}".format(self.tcp_port, address[0], address[1]))
+            receive_buffer = b""
+
+            try:
+                while not self.stop_event.is_set():
+                    try:
+                        received = connection.recv(4096)
+                    except socket.timeout:
+                        continue
+
+                    if not received:
+                        break
+
+                    receive_buffer += received
+                    while b"\n" in receive_buffer:
+                        raw_message, receive_buffer = receive_buffer.split(
+                            b"\n",
+                            1,
+                        )
+                        if not raw_message.strip():
+                            continue
+
+                        try:
+                            message = json.loads(raw_message.decode("utf-8"))
+                            message["_timing"] = {"tcp_received_wall_time_ns": time.time_ns(), "tcp_received_perf_counter_ns": time.perf_counter_ns()}
+                            self.messages.put(message)
+                            if self.on_message is not None:
+                                self.on_message()
+                        except (ValueError, UnicodeDecodeError) as error:
+                            self.logger.warning(
+                                "Invalid JSON received: {}".format(error)
+                            )
+            except (ConnectionResetError, OSError):
+                pass
+            finally:
+                connection.close()
+
+        server.close()
+
+    def get_messages(self, max_messages=None):
+        """Return up to ``max_messages`` without blocking the ROS executor."""
+        messages = []
+        limit = None if max_messages is None else max(0, int(max_messages))
+        while limit is None or len(messages) < limit:
+            try:
+                messages.append(self.messages.get_nowait())
+            except queue.Empty:
+                return messages
+        return messages
+
+    def has_messages(self):
+        """Report whether another bounded drain callback is required."""
+        return not self.messages.empty()
+
+    def wait_until_ready(self, timeout_s=2.0):
+        """Wait for bind completion and report whether this port is owned."""
+        return self.startup_event.wait(float(timeout_s)) and self.server_socket is not None
+
+    def close(self):
+        """Stop the receiver thread and close the TCP socket."""
+        self.stop_event.set()
+        if self.server_socket is not None:
+            try:
+                self.server_socket.close()
+            except OSError:
+                pass
+        if self.thread.is_alive():
+            self.thread.join(timeout=2.0)

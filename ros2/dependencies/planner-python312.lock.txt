@@ -1,0 +1,8 @@
+# Verified Planner Python overlay for Ubuntu 24.04 / ROS 2 Jazzy / Python 3.12.3.
+# Install into CPX_PLANNER_DEPS rather than the ROS system prefix.
+numpy==1.26.4
+scipy==1.11.4
+osqp==0.6.7.post3
+qdldl==0.1.7.post5
+PyYAML==6.0.1
+setuptools==68.1.2
