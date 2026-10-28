@@ -38,7 +38,7 @@ that multiple MTR modes change the resulting plan.
 ## System architecture
 
 ```text
-OpenCDA / MDrive / future ROS adapter
+OpenCDA / MDrive / ROS 2 Bridge
         |
         | ego state, map/route, perceived objects, CP messages,
         | peer intents, prediction modes, safety state
@@ -114,16 +114,11 @@ currently close.
 ### Prediction integration
 
 ```text
-object history + ego state + AD-map polylines
-                 |
-                 v
-        MTR predictor (six modes)
-                 |
-                 v
-actor_id -> [{probability, trajectory[(t,x,y,v)]}, ...]
-                 |
-                 v
-PredictionContext / predicted_modes -> Stage A/C -> Stage D -> MPC
+CP-X Planner -- PredictionScene (history + map + session_id) --> MTR ROS node
+CP-X Planner <-- PredictionFrame (six modes per object) ------- MTR ROS node
+      |
+      v
+PredictionContext -> Stage A/C -> Stage D -> MPC
 ```
 
 Supported simulation transports are localhost HTTP, direct in-process import,
@@ -147,6 +142,210 @@ the ROS node does not copy planning policy.
 
 The MPC horizon is adaptive by behavior, normally bounded between 1 and 5 s,
 with a 0.1 s discretization. These are horizon samples, not simulator ticks.
+
+## ROS 2 closed-loop integration
+
+The current implementation is a working ROS 2 Jazzy closed loop, not only a
+message-definition prototype. OpenCDA, the Planner, and MTR intentionally run
+in separate Python environments:
+
+| Runtime | Python | Responsibility |
+|---|---:|---|
+| OpenCDA host environment | 3.7 | CARLA ticks, simulated perception, scenario actors, actuator application |
+| ROS 2 Jazzy container | 3.12 | TCP/ROS Bridge, exact-frame synchronization, per-CAV Planner workers, control return |
+| MTR virtual environment | 3.12 | CUDA inference and six-mode `PredictionFrame` publication |
+
+Python versions do not have to match across ROS nodes. ROS messages are the
+ABI boundary. The OpenCDA side never imports `rclpy`, and the Planner process
+never imports the CARLA Python 3.7 runtime.
+
+### Data flow and ownership
+
+```text
+OpenCDA/CARLA at 20 Hz
+  localization + perception + traffic light + V2X + cooperative messages
+             |
+             | TCP 5051-5055, one session-tagged simulation cycle
+             v
+Unified OpenCDA Bridge
+  independent TCP input worker -> typed ROS topics
+             |
+             v
+Planner shard selected by session_id
+  exact-frame buffer -> isolated route/behavior/reference/MPC state
+             |
+             +---- PredictionScene ----> MTR node at 5 Hz inference
+             |<--- PredictionFrame ----- six modes per tracked object
+             |
+             v
+PlannerOutput -> ROS control topic -> Bridge -> TCP 5060 -> OpenCDA actuator
+```
+
+Each CAV owns an independent Planner runtime. Route state, Behavior FSM,
+reference memory, prediction cache, MPC warm start, and control buffer are not
+shared between CAV sessions. The returned control keeps its `session_id`, so
+the Bridge sends it only to the matching vehicle.
+
+Simulator `SafetyManager` telemetry is deliberately not a Planner ROS input.
+It is evaluation data specific to OpenCDA. Deployment safety must instead be
+provided by the vehicle/platform safety supervisor and real sensor/status
+interfaces.
+
+### One-time configuration
+
+Copy `CP-ROS-WS/.env.example` to `CP-ROS-WS/.env` and update installation
+paths. CPU isolation is optional, but it is recommended when CARLA, MTR, and
+multiple Planner workers share one workstation. The validated 24-core layout
+is:
+
+```bash
+CPX_MTR_CPUSET=16-19
+CPX_PLANNER_CPUSETS="20;21"
+CPX_BRIDGE_CPUSET=22
+```
+
+CARLA and OpenCDA must then stay on the complementary cores `0-15`. Do not copy
+these core numbers to a machine with a different CPU layout without adapting
+them.
+
+### Complete startup and shutdown sequence
+
+Start CARLA on the host:
+
+```bash
+cd "$HOME/Downloads/MDrive/carla912"
+taskset -c 0-15 ./CarlaUE4.sh
+```
+
+Start MTR, the Bridge, and all Planner shards inside the ROS container:
+
+```bash
+docker exec -it ubuntu24-gpu-container /bin/bash
+cd /root/CP-ROS-WS
+./scripts/cpx_ros_stack.sh build     # required after source changes
+./scripts/cpx_ros_stack.sh start
+./scripts/cpx_ros_stack.sh health
+```
+
+Run one OpenCDA scenario on the host:
+
+```bash
+cd "$HOME/Downloads/CP-X-planning-module-convert_to_ros"
+conda activate opencda_planning
+taskset -c 0-15 python opencda.py \
+  -t cpx_two_cav_merge_conflict_mtr_multimodal \
+  -v 0.9.12
+```
+
+Inspect or stop the managed ROS stack:
+
+```bash
+./scripts/cpx_ros_stack.sh status
+./scripts/cpx_ros_stack.sh health-live  # run while OpenCDA is publishing
+./scripts/cpx_ros_stack.sh logs
+./scripts/cpx_ros_stack.sh stop
+```
+
+Do not start `planning.launch.py`, `communication.launch.py`, and
+`opencda_integration.launch.py` simultaneously. The integration launch already
+owns the Bridge ports and Planner processes; duplicate launches cause
+`Address already in use` and cross-session output.
+
+### Repeatable ROS regression commands
+
+The experiment runner keeps one ROS/MTR stack alive across scenarios so map
+switching and session leakage are visible:
+
+```bash
+# Diverse functional matrix
+taskset -c 0-15 python \
+  opencda/planning_module/tools/ros_integration_suite.py run \
+  --cases smoke_right_turn,mtr_cut_in,mtr_lead_braking,C_on,C_off \
+  --trials 1 \
+  --python "$CONDA_PREFIX/bin/python" \
+  --continue-on-failure
+
+# Repeated multi-session merge regression
+taskset -c 0-15 python \
+  opencda/planning_module/tools/ros_integration_suite.py run \
+  --cases mtr_merge_2cav \
+  --trials 3 \
+  --python "$CONDA_PREFIX/bin/python" \
+  --continue-on-failure
+```
+
+Individual commands used by the current validation are:
+
+```bash
+python opencda.py -t cpx_single_right_lane_turn -v 0.9.12
+python opencda.py -t cpx_two_vehicle_cut_in_mtr_six_modes -v 0.9.12
+python opencda.py -t cpx_two_cav_lead_braking_mtr_multimodal -v 0.9.12
+python opencda.py -t cpx_cp_vru_crossing -v 0.9.12
+python opencda.py -t cpx_cp_vru_crossing_off -v 0.9.12
+python opencda.py -t cpx_two_cav_merge_conflict_mtr_multimodal -v 0.9.12
+```
+
+### Validated results (October 27, 2026)
+
+With CPU isolation enabled, three consecutive two-CAV MTR merge runs produced:
+
+- 6/6 CAV completions, zero collisions, and zero stale-control frames;
+- six attached MTR modes per predicted object;
+- two distinct session IDs per run with no route, FSM, reference, or MPC-state leakage;
+- mean end-to-end input/output time of 22.6-23.1 ms;
+- maximum Planner cycle reduced from approximately 1.17 s without isolation
+  to 0.22-0.24 s with isolated workers.
+
+The diverse functional matrix also completed the right turn, MTR cut-in,
+two-CAV lead braking, and VRU CP ON/OFF scenarios. Cut-in, lead braking, and
+both VRU cases had zero stale control and zero collisions. Full machine-readable
+reports are stored locally at:
+
+- `artifacts/ros_integration_runs/20261027_155344/summary.md` — repeated merge;
+- `artifacts/ros_integration_runs/20261027_175342/summary.md` — right turn,
+  cut-in, lead braking, and VRU ON;
+- `artifacts/ros_integration_runs/20261027_201419/summary.md` — VRU OFF.
+
+### Problems already solved
+
+- The old seven-process OpenCDA input bridge was replaced by one unified
+  Bridge with one owner for TCP ports 5051-5055 and 5060.
+- High-rate TCP input publication was moved off the ROS executor, eliminating
+  observed Bridge scheduling stalls of about 1.5 s.
+- Inputs and outputs are session-tagged, and each CAV uses an isolated Planner
+  runtime and MTR request ownership.
+- MTR CUDA extensions were rebuilt for Python 3.12, PyTorch 2.11/CUDA 12.8,
+  and `sm_120`; Planner and MTR no longer need to share one Python environment.
+- MTR CPU thread count and Planner numerical threads are bounded.
+- Optional CPU affinity prevents CARLA/MTR load from starving the Bridge and
+  multi-session Planner workers.
+- Startup health checks detect missing packages, nodes, publishers, CUDA
+  imports, and occupied Bridge ports before a scenario starts.
+
+### Remaining limitations and required work
+
+1. **Cold map/session activation:** the first Town06 right-turn run observed a
+   roughly 2.0 s first-control delay. The overall stale rate was only 0.11%,
+   but map loading should be pre-warmed or readiness-gated before real-vehicle
+   operation.
+2. **Traffic-light evaluation:** the right-turn run reached its destination
+   without collision but OpenCDA printed `ran_light=True`. The current ROS
+   regression analyzer reports this run as safety PASS because its hard gate
+   currently checks collisions and road-boundary failures, not the
+   `ran_light` SafetyManager flag. This analyzer gap and the underlying signal
+   behavior both require correction.
+3. **Latency headroom:** the repeated isolated merge passed with zero stale
+   frames, but observed maximum end-to-end delays were 274-347 ms; the
+   lead-braking run reached 362.5 ms. These remain below the current 0.5 s
+   control expiry but need stricter worst-case testing for a real vehicle.
+4. **Coverage:** the latest diverse matrix is one trial per scenario. All A-F
+   cooperative-perception pairs, three/four-CAV scale cases, packet loss,
+   delayed prediction, node restart, and long-duration soak tests still need
+   repeated runs.
+5. **Deployment boundary:** these results validate CARLA/OpenCDA + localhost
+   ROS communication. Real sensors, vehicle CAN/control adapters, DDS network
+   QoS, clock synchronization, and platform emergency handling have not yet
+   been validated on the vehicle.
 
 ## Repository layout
 
